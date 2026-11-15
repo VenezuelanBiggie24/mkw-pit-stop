@@ -126,7 +126,9 @@ static void ov_nvn_bootstrap(Cpu *c) {
 
 // The NVN procs need their synthetic addresses before hostfn_seal; the loader seals at the end of rt_boot, so the
 // registration runs at start-up instead of through boot.c.
+#ifndef MKW_PS5_LOADER_ONLY
 __attribute__((constructor)) static void ov_nvn_procs_register(void) { nvn_procs_register(); }
+#endif
 
 HOST_OVERRIDE("_ZN2nv20SetGraphicsAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", ov_graphics_allocator);
 HOST_OVERRIDE("_ZN2nv18InitializeGraphicsEPvm", ov_initialize_graphics);

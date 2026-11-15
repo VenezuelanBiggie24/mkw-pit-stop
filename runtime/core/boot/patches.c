@@ -26,12 +26,12 @@
 #define SEED_HOST 0xfb0     // patch page offset of host_seed_tick (set seed)
                             // 0xfa0: game.c host_frame_update (MKW_FPS)
 #define SHADOW_POOL_HOST 0xf90   // patch page offset of host_shadow_pool (set shadow)
-#define GUEST_RENDERBUFFER_CREATE 0x7000233358ull   // MKW 1.0.0 main: gsys RenderBuffer creation
-#define GUEST_RB_ALLOCATOR_INIT 0x70008eb6b0ull     // render-buffer allocator setup (main+0x37b520 allocates from it)
-#define GUEST_RB_POOL_NEW 0x700067aa40ull           // operator new(size, heap, alignment), as the allocator calls it
-#define GUEST_RB_POOL_INIT 0x70008eb9dcull          // one pool of that allocator (object, added, slot, 7, ...)
-#define GUEST_RANDOM_CTOR_LR 0x7000922088ull        // sead::Random::Random, after its GetSystemTick call
-#define GUEST_RANDOM_CTOR2_LR 0x70015585a8ull       // another Random constructor, the same
+#define GUEST_RENDERBUFFER_CREATE (RT_MODULE_BASE + 0x233358ull)   // MKW 1.0.0 main: gsys RenderBuffer creation
+#define GUEST_RB_ALLOCATOR_INIT (RT_MODULE_BASE + 0x8eb6b0ull)     // render-buffer allocator setup (main+0x37b520 allocates from it)
+#define GUEST_RB_POOL_NEW (RT_MODULE_BASE + 0x67aa40ull)           // operator new(size, heap, alignment), as the allocator calls it
+#define GUEST_RB_POOL_INIT (RT_MODULE_BASE + 0x8eb9dcull)          // one pool of that allocator (object, added, slot, 7, ...)
+#define GUEST_RANDOM_CTOR_LR (RT_MODULE_BASE + 0x922088ull)        // sead::Random::Random, after its GetSystemTick call
+#define GUEST_RANDOM_CTOR2_LR (RT_MODULE_BASE + 0x15585a8ull)       // another Random constructor, the same
 
 // The shadow set: MKW_SHADOW_SIZE (Graphics tab) in place of the cascaded shadow map size the game picks (3072 docked,
 // 2048 handheld). Only a square buffer of 512 or more is resized: what the site's caller (main+0x22d45c) creates.

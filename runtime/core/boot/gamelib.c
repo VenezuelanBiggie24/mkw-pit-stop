@@ -14,10 +14,20 @@ static const RtGame *game;
 
 static const char *check(const RtGame *g) {
     if (g->abi != RT_GAME_ABI || !g->id || strcmp(g->id, RT_GAME_ID)) return "built for another version of the runtime";
-    if (g->nmodules < 1 || g->nmodules > RT_MAX_MODULES || g->npatch_sets > RT_MAX_PATCH_SETS) return "malformed";
+    if (!g->modules || g->nmodules < 1 || g->nmodules > RT_MAX_MODULES || g->npatch_sets > RT_MAX_PATCH_SETS)
+        return "malformed";
+    uint64_t base = RT_MODULE_BASE;
+    for (int i = 0; i < g->nmodules; i++) {
+        const RtGameModule *m = &g->modules[i];
+        if (m->base != base || base >= RT_KERNEL_BASE || !m->size || (m->size & 0xfffull) ||
+            m->size > RT_KERNEL_BASE - base)
+            return "module addresses do not match the runtime's guest layout";
+        base = (base + m->size + RT_MODULE_ALIGN - 1) & ~(RT_MODULE_ALIGN - 1);
+    }
     return NULL;
 }
 
+#ifndef MKW_PS5_NATIVE
 // The library next to the executable, its tables if they suit this runtime; why not in *why.
 static const RtGame *load_library(const char **why) {
     char path[PLAT_PATH_MAX * 2];
@@ -33,6 +43,7 @@ static const RtGame *load_library(const char **why) {
     *why = !lib ? "the game code library does not load" : !g ? "the game code library has no tables" : check(g);
     return *why ? NULL : g;
 }
+#endif
 
 static const RtGame *found;
 static const char *found_why;
@@ -43,7 +54,11 @@ static const RtGame *find(const char **why) {
         looked = 1;
         found = rt_game_builtin();
         found_why = found ? check(found) : NULL;
+#ifdef MKW_PS5_NATIVE
+        if (!found) found_why = "the PS5 build requires built-in game tables";
+#else
         if (!found) found = load_library(&found_why);
+#endif
         if (found_why) found = NULL;
     }
     if (why) *why = found_why;

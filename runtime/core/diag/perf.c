@@ -8,6 +8,7 @@
 #include "cfg.h"
 #include "flight.h"
 #include "gfx.h"
+#include "hangwatch.h"
 #include "host.h"
 #include "perfmon.h"
 #include "prof.h"
@@ -20,6 +21,11 @@ __attribute__((weak)) int prof_sampler_start(void) {
     return 0;
 }
 __attribute__((weak)) void prof_sampler_write(void) {}
+__attribute__((weak)) void prof_names_init(void) {}
+__attribute__((weak)) const char *prof_pc_describe(uint64_t pc, char *buf, int n) {
+    snprintf(buf, (size_t)n, "exe+%#llx", (unsigned long long)(pc - plat_exe_base()));
+    return buf;
+}
 __attribute__((weak)) void prof_sampler_frame(uint64_t frame, uint64_t now, uint64_t d) { (void)frame, (void)now, (void)d; }
 
 // MKW_TRACE=perf, MKW_FLIGHT=1 or the full performance overlay: event counts are taken. Wait times are always taken
@@ -80,13 +86,19 @@ void perf_end(int kind, uint64_t t0) {
 
 static volatile int64_t other_wait_ns;     // perf_gpu_wait on threads other than the render thread, over the window
 static volatile int64_t render_wait_ns;    // the same on the render thread
+static volatile int64_t other_replay_ns, render_replay_ns;   // part of each spent waiting for replay to submit
 void (*perf_gpu_stats)(PerfGpu *out);
 
-void perf_gpu_wait(uint64_t t0) {
+void perf_gpu_wait_split(uint64_t t0, uint64_t rep_ns) {
     if (!t0 || !__atomic_load_n(&perf_on, __ATOMIC_RELAXED)) return;
     int64_t d = (int64_t)(kern_now_ns() - t0);
-    plat_add64(plat_thread_id() == prof_render_tid ? &render_wait_ns : &other_wait_ns, d);
+    int64_t r = (int64_t)rep_ns > d ? d : (int64_t)rep_ns;
+    int is_render = plat_thread_id() == prof_render_tid;
+    plat_add64(is_render ? &render_wait_ns : &other_wait_ns, d);
+    if (r) plat_add64(is_render ? &render_replay_ns : &other_replay_ns, r);
 }
+
+void perf_gpu_wait(uint64_t t0) { perf_gpu_wait_split(t0, 0); }
 
 static volatile int64_t replay_ns;         // perf_replay: summed over the window, any thread
 static volatile int64_t frame_replay_ns;   // the same since the previous present (frame-time summary)
@@ -181,6 +193,85 @@ static uint64_t ft_frame(uint64_t frame, uint64_t now, uint64_t d) {
     return (uint64_t)rep;
 }
 
+enum { FENCE_SITE_SLOTS = 64 };
+typedef struct {
+    const char *site;
+    uint64_t pc;
+    int frame_rel;
+    int is_render;
+    uint64_t ns;
+    uint64_t count;
+} FenceSiteSlot;
+static FenceSiteSlot fence_sites[FENCE_SITE_SLOTS];
+
+void perf_fence_site(const char *site, uint64_t pc, int frame_rel, uint64_t ns) {
+    if (!site || !(rt_trace & RT_TRACE_PERF)) return;
+    int is_render = prof_render_tid && plat_thread_id() == prof_render_tid ? 1 : 0;
+    for (int i = 0; i < FENCE_SITE_SLOTS; i++) {
+        const char *cur = __atomic_load_n(&fence_sites[i].site, __ATOMIC_ACQUIRE);
+        if (!cur) {
+            FenceSiteSlot *s = &fence_sites[i];
+            if (__atomic_compare_exchange_n(&s->site, &cur, (const char *)1, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                s->pc = pc;
+                s->frame_rel = frame_rel;
+                s->is_render = is_render;
+                __atomic_store_n(&s->site, site, __ATOMIC_RELEASE);
+                __atomic_fetch_add(&s->ns, ns, __ATOMIC_RELAXED);
+                __atomic_fetch_add(&s->count, 1, __ATOMIC_RELAXED);
+                return;
+            }
+            cur = __atomic_load_n(&fence_sites[i].site, __ATOMIC_ACQUIRE);
+        }
+        if (cur == (const char *)1) continue;
+        if (cur == site && fence_sites[i].pc == pc && fence_sites[i].frame_rel == frame_rel &&
+            fence_sites[i].is_render == is_render) {
+            __atomic_fetch_add(&fence_sites[i].ns, ns, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&fence_sites[i].count, 1, __ATOMIC_RELAXED);
+            return;
+        }
+    }
+}
+
+static void perf_fence_sites_report(uint64_t frame, uint64_t n) {
+    typedef struct { const char *site; uint64_t pc; int frame_rel; int is_render; uint64_t ns, count; } Snap;
+    Snap list[FENCE_SITE_SLOTS];
+    int m = 0;
+    for (int i = 0; i < FENCE_SITE_SLOTS; i++) {
+        const char *site = __atomic_load_n(&fence_sites[i].site, __ATOMIC_ACQUIRE);
+        if (!site || site == (const char *)1) continue;
+        uint64_t ns = __atomic_exchange_n(&fence_sites[i].ns, 0, __ATOMIC_RELAXED);
+        uint64_t cnt = __atomic_exchange_n(&fence_sites[i].count, 0, __ATOMIC_RELAXED);
+        if (!cnt) continue;
+        list[m++] = (Snap){site, fence_sites[i].pc, fence_sites[i].frame_rel, fence_sites[i].is_render, ns, cnt};
+    }
+    if (!m || !n) return;
+    for (int i = 0; i < m - 1; i++) {
+        int best = i;
+        for (int j = i + 1; j < m; j++)
+            if (list[j].ns > list[best].ns) best = j;
+        if (best != i) { Snap t = list[i]; list[i] = list[best]; list[best] = t; }
+    }
+    char line[1024];
+    int pos = 0, show = m < 8 ? m : 8;
+    for (int i = 0; i < show; i++) {
+        char fbuf[8], pcbuf[96];
+        if (list[i].frame_rel < 0) snprintf(fbuf, sizeof fbuf, "f?");
+        else snprintf(fbuf, sizeof fbuf, "f%d", list[i].frame_rel);
+        if (list[i].pc) {
+            char d[80];
+            snprintf(pcbuf, sizeof pcbuf, "@%s", ldr_describe(list[i].pc, d, sizeof d));
+        } else {
+            pcbuf[0] = '\0';
+        }
+        int r = snprintf(line + pos, sizeof line - (size_t)pos, "%s%s[%s,%s]%s: %.2f ms/f (%.1f/f)",
+                         i ? "; " : "", list[i].site, list[i].is_render ? "render" : "other", fbuf, pcbuf,
+                         list[i].ns / 1e6 / n, (double)list[i].count / n);
+        if (r < 0 || pos + r >= (int)sizeof line) break;
+        pos += r;
+    }
+    rt_log("perf: frame %llu: fence sites (%d): %s", (unsigned long long)frame, m, line);
+}
+
 // The second line of the 60-frame window: GPU busy time (timestamps), the time threads waited for GPU fences, VRAM and
 // process memory, and which side holds the frame back. pace: the frame waited for pacing (vsync, the frame limiter) at
 // least 15% of the window; gpu: the GPU was busy for 80% of the frame interval or more (without timestamps: threads
@@ -190,6 +281,7 @@ static void perf_gpu_line(uint64_t frame, double interval_ms, double pace_share,
     memset(&g, 0, sizeof g);
     if (perf_gpu_stats) perf_gpu_stats(&g);
     double rw = plat_xchg64(&render_wait_ns, 0) / 1e6 / n, ow = plat_xchg64(&other_wait_ns, 0) / 1e6 / n;
+    double rr = plat_xchg64(&render_replay_ns, 0) / 1e6 / n, or_ = plat_xchg64(&other_replay_ns, 0) / 1e6 / n;
     double gpu_ms = g.have_gpu ? g.gpu_ns / 1e6 / n : 0;
     char gs[96], vs[96];
     if (g.have_gpu) snprintf(gs, sizeof gs, "gpu avg %.2f ms (%llu parts timed, %llu not)", gpu_ms,
@@ -204,9 +296,10 @@ static void perf_gpu_line(uint64_t frame, double interval_ms, double pace_share,
     const char *bound = pace_share >= 0.15 ? "pace"
                       : g.have_gpu ? (gpu_ms >= 0.8 * interval_ms ? "gpu" : "cpu")
                       : (rw + ow >= 0.5 * interval_ms ? "gpu" : "cpu");
-    rt_log("perf: frame %llu: %s; fence wait per frame: render thread %.2f ms, other threads %.2f ms; %s; ram working set "
+    rt_log("perf: frame %llu: %s; fence wait per frame: render thread %.2f ms (replay %.2f, gpu %.2f), other threads %.2f ms (replay %.2f, gpu %.2f); %s; ram working set "
            "%.0f MiB, private %.0f MiB; bound: %s",
-           (unsigned long long)frame, gs, rw, ow, vs, ws, priv, bound);
+           (unsigned long long)frame, gs, rw, rr, rw - rr, ow, or_, ow - or_, vs, ws, priv, bound);
+    perf_fence_sites_report(frame, n);
 }
 
 // MKW_AB_INVERT=1 swaps the blocks (B A A B): a race's stretches are not equally heavy (sl-ab1, 06/11/2026: texture
@@ -256,18 +349,125 @@ static void cpu_placement(void) {
     plat_process_affinity(on ? one : all);
 }
 
+// MKW_THREAD_PRIO=1: the runtime's threads run at the priorities they ask for (present and vsync highest, replay above
+// normal, shadow, headroom and pipeline builds below normal); 0, the default: all at the process's priority; "ab"
+// switches it with the A/B blocks. Only the PS5 can turn them off (plat_thread_priority_mode); elsewhere they always
+// apply and the switch does nothing. Off on the PS5 until a console A/B shows a gain: run 16, the first run with
+// them, had the replay at 31-33 ms against 22 ms in run 15 (14/11/2026).
+static void prio_placement(void) {
+    static int mode = -1, applied = -1;
+    if (mode < 0) {
+        mode = rt_knob("THREAD_PRIO", "0");
+        if (plat_thread_priority_mode(RT_KNOB_ON(mode)) < 0) mode = 0, applied = 0;
+        else if (mode) rt_log("cpu: runtime thread priorities on%s (MKW_THREAD_PRIO)", mode == 2 ? " in the B blocks" : "");
+    }
+    int on = RT_KNOB_ON(mode);
+    if (on == applied) return;
+    if (applied >= 0) plat_thread_priority_mode(on);
+    applied = on;
+}
+
+// MKW_PS5_TSC_CLOCK=1 (PS5 default, run 21: -1.0 ms/f) switches plat_now_ns to rdtsc + sceKernelGetTscFrequency.
+static void tsc_clock_placement(void) {
+    static int mode = -1, applied = -1;
+    if (mode < 0) {
+        mode = rt_knob("PS5_TSC_CLOCK", "1");
+        if (plat_tsc_clock_mode(RT_KNOB_ON(mode)) < 0) mode = 0, applied = 0;
+        else if (mode == 2) rt_log("time: PS5 TSC clock in the B blocks (MKW_PS5_TSC_CLOCK=ab)");
+        else if (!mode) rt_log("time: PS5 TSC clock off (MKW_PS5_TSC_CLOCK=0)");
+    }
+    int on = RT_KNOB_ON(mode);
+    if (on == applied) return;
+    if (applied >= 0) plat_tsc_clock_mode(on);
+    applied = on;
+}
+
+static void pw_batch_placement(void) {
+    static int mode = -1, applied = -1;
+    if (mode < 0) {
+        mode = rt_knob("PS5_PW_BATCH", "1");
+        if (plat_pw_batch_mode(RT_KNOB_ON(mode)) < 0) mode = 0, applied = 0;
+        else if (mode == 2) rt_log("mem: PS5 prot_watch mprotect batching in the B blocks (MKW_PS5_PW_BATCH=ab)");
+        else if (!mode) rt_log("mem: PS5 prot_watch mprotect batching off (MKW_PS5_PW_BATCH=0)");
+    }
+    int on = RT_KNOB_ON(mode);
+    if (on == applied) return;
+    if (applied >= 0) plat_pw_batch_mode(on);
+    applied = on;
+}
+
+// Page-protection calls by caller (platform/ps5_guest_memory.c), every 600 frames with MKW_TRACE=perf: the 60 fps work
+// found ~10 ms a frame of the game's threads in them (15/11/2026). exe+ offsets name with tools/run/sym.py --ps5.
+typedef struct { uintptr_t ra; uint64_t n, ns; } PStatRow;
+typedef struct { PStatRow r[64]; int n; } PStatTab;
+static void pstat_emit(uintptr_t ra, uint64_t n, uint64_t ns, void *ctx) {
+    PStatTab *t = ctx;
+    if (t->n < 64) t->r[t->n++] = (PStatRow){ra, n, ns};
+}
+static void pstat_report(uint64_t frame, uint64_t frames) {
+    PStatTab t = {0};
+    plat_mem_protect_stats(pstat_emit, &t);
+    if (!t.n || !frames) return;
+    for (int i = 1; i < t.n; i++)   // by time, longest first
+        for (int j = i; j > 0 && t.r[j].ns > t.r[j - 1].ns; j--) { PStatRow x = t.r[j]; t.r[j] = t.r[j - 1]; t.r[j - 1] = x; }
+    uint64_t tot = 0, totn = 0;
+    for (int i = 0; i < t.n; i++) tot += t.r[i].ns, totn += t.r[i].n;
+    rt_log("perf: frame %llu: page protection %.1f calls/f, %.3f ms/f (by caller, top 12):", (unsigned long long)frame,
+           (double)totn / frames, tot / 1e6 / frames);
+    uintptr_t base = plat_exe_base();
+    for (int i = 0; i < t.n && i < 12; i++) {
+        char who[48];
+        if (t.r[i].ra <= 2) snprintf(who, sizeof who, "%s", t.r[i].ra == 1 ? "write watch: fault unprotect" : "write watch: arm");
+        else snprintf(who, sizeof who, "exe+%#llx", (unsigned long long)(t.r[i].ra - base));
+        rt_log("perf:   %-32s %8.1f calls/f %8.3f ms/f (%.1f us each)", who, (double)t.r[i].n / frames,
+               t.r[i].ns / 1e6 / frames, t.r[i].ns / 1e3 / t.r[i].n);
+    }
+}
+
+// MKW_PW_HOT (default 1 on the PS5, "ab" to compare): pages the game writes every arm cycle stay writable instead of
+// being armed again to fault (prot_watch.c plat_pw_hot_mode). Linux's write watch is off unless MKW_PROT_WATCH.
+static void pw_hot_placement(void) {
+    static int mode = -1, applied = -1;
+    if (mode < 0) {
+#ifdef __PROSPERO__
+        mode = rt_knob("PW_HOT", "1");
+#else
+        mode = rt_knob("PW_HOT", "0");
+#endif
+        if (plat_pw_hot_mode(RT_KNOB_ON(mode)) < 0) mode = 0, applied = 0;
+        else rt_log("mem: write watch: hot pages stay writable %s (MKW_PW_HOT)", mode == 2 ? "in the B blocks" : mode ? "on" : "off");
+    }
+    int on = RT_KNOB_ON(mode);
+    if (on == applied) return;
+    if (applied >= 0) plat_pw_hot_mode(on);
+    applied = on;
+}
+
 void perf_present(uint64_t frame) {
     static uint64_t last, sum, max, n, win_start, ab_b;
     static int64_t win_prev[PERF_CNT_N];
     prof_render_tid = plat_thread_id();
     if (rt_trace & RT_TRACE_SCHED) kern_sched_report(frame);
     seqwatch_frame(frame);
+    hang_frame(frame);   // MKW_HANG_WATCH: the watchdog compares this frame
     if (!seqwatch_window()) hostfn_time_report(frame);
     uint64_t now = kern_now_ns(), d = last ? now - last : 0;
     prof_sampler_frame(frame, now, last ? d : 0);
+    if ((rt_trace & RT_TRACE_PERF) && frame && frame % 600 == 0) pstat_report(frame, 600);
     uint64_t rep = ft_frame(frame, now, d);   // d is 0 on the first present: it only starts the period
     ab_b += rt_ab();
+    static int cond_probed, lock_prof_init;
+    if (!cond_probed) { cond_probed = 1; plat_cond_probe(); }
+    if (!lock_prof_init) {
+        lock_prof_init = 1;
+        const char *lp = cfg_get("MKW_LOCK_PROF");
+        plat_lock_prof_mode(lp && atoi(lp) != 0);
+    }
     cpu_placement();
+    prio_placement();
+    tsc_clock_placement();
+    pw_batch_placement();
+    pw_hot_placement();
     if (__atomic_load_n(&overlay, __ATOMIC_RELAXED))   // the overlay's only cost while it is off: this branch
         perfmon_frame(now, d, frame_ns, rep, __atomic_load_n(&counts[PERF_CNT_TEX_UP], __ATOMIC_RELAXED));
     kern_core_diag_frame(frame, d);
@@ -307,6 +507,11 @@ void perf_present(uint64_t frame) {
     int64_t reup = win[PERF_CNT_TEX_REUP], waited = win[PERF_CNT_PIPE_WAIT];
     int64_t oneshot = win[PERF_CNT_ONESHOT_WAIT];
     uint64_t shader_keys = gfx_shader_count();
+    uint64_t pw_calls = 0, pw_pages = 0;
+    plat_mem_pw_stats(&pw_calls, &pw_pages, 1);
+    if (pw_calls && n)
+        rt_log("perf: frame %llu: prot_watch arm %.1f mprotect calls/f (%.1f pages/f, %.1f pages/call)",
+               (unsigned long long)frame, (double)pw_calls / n, (double)pw_pages / n, (double)pw_pages / pw_calls);
     if (n && span)
         rt_log("perf: frame %llu: interval avg %.2f ms max %.2f ms (%.1f fps); render thread blocked: pacing %.0f%% fence %.0f%% drain %.0f%% pipeline build %.0f%% texture %.0f%% (astc %.0f%%); pipelines built in background %lld, draws skipped pending %lld, waited %lld, one-shot waited %lld; textures uploaded %lld re-uploaded %lld; slowest frame: texture %.1f ms (astc %.1f) pipeline %.1f ms fence %.1f ms; shaders: %llu loaded; render busy avg %.2f ms; replay avg %.2f ms; ab %llu/%llu; world %.1f s",
                (unsigned long long)frame, sum / 1e6 / n, max / 1e6, n * 1e9 / sum, 100.0 * wait_ns[PERF_PACE] / span,
@@ -319,6 +524,12 @@ void perf_present(uint64_t frame) {
                (span > wait_ns[PERF_PACE] ? span - wait_ns[PERF_PACE] : 0) / 1e6 / n,
                plat_xchg64(&replay_ns, 0) / 1e6 / n, (unsigned long long)ab_b, (unsigned long long)n, frame_step_world_us() / 1e6);
     if (n && span) perf_gpu_line(frame, sum / 1e6 / n, (double)wait_ns[PERF_PACE] / span, n);
+    if (frame % 120 == 0) {
+        char lbuf[1024];
+        if (plat_lock_report(0, lbuf, sizeof lbuf)) rt_log("perf: lock waits since the last line (MKW_LOCK_PROF):%s", lbuf);
+        if (plat_lock_report(1, lbuf, sizeof lbuf))
+            rt_log("perf: lock holds while waited on since the last line (MKW_LOCK_PROF):%s", lbuf);
+    }
     sum = max = n = ab_b = 0;
     memset(wait_ns, 0, sizeof wait_ns);
     win_start = now;

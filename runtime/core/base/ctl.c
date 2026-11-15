@@ -79,6 +79,9 @@ void ctl_run(char *line) {
         freeze_set(1, *arg ? atoll(arg) : 1);
     } else if (!strcmp(cmd, "frame")) {
         rt_log("ctl: frame %llu", (unsigned long long)frame);
+    } else if (!strcmp(cmd, "residency")) {
+        extern void mem_log_residency(void);
+        mem_log_residency();
     } else {
         rt_log("ctl: unknown command: %s", line);
     }
@@ -98,6 +101,9 @@ static void ctl_main(void *arg) {
 }
 
 void ctl_init(void) {
+#ifdef MKW_PS5_NATIVE
+    return;
+#else
     const char *path = cfg_get("MKW_CTL");
     if (!path || !*path) return;
     struct stat st;
@@ -107,6 +113,7 @@ void ctl_init(void) {
     }
     if (!plat_thread_spawn(ctl_main, (void *)path, "ctl", 0)) rt_log("ctl: cannot start its thread");
     else rt_log("ctl: reading commands from %s", path);
+#endif
 }
 #else
 #include <windows.h>

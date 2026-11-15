@@ -18,7 +18,9 @@
 // once; guest code without either keeps the core until it reaches one. MKW_FREE_CORES=1 turns the gate off (the game
 // crashes); MKW_CORE_NUM_GATE keeps it only for threads that read their core number (core_take_num).
 RtThread *g_core_owner[NCORE], *g_core_wait;
-static int g_cores_on = -1, g_num_gate, g_held_max;
+uint32_t g_core_wait_mask;
+static int g_cores_on = -1, g_num_gate, g_handoff = -1, g_held_max;
+static uint32_t g_core_free_mask = APP_MASK;
 
 
 // Whether every guest thread needs a core to run guest code now (MKW_CORE_NUM_GATE: only those that use the number).
@@ -26,6 +28,7 @@ int cores_enabled(void) {
     if (g_cores_on < 0) {
         g_cores_on = !cfg_bool("MKW_FREE_CORES");   // "0" keeps the gate, like unset
         g_num_gate = g_cores_on ? rt_knob("CORE_NUM_GATE", "0") : 0;
+        g_handoff = g_cores_on ? rt_knob("CORE_HANDOFF", "0") : 0;
         diag_init();
         ap_init();
         if (g_num_gate)
@@ -40,8 +43,19 @@ int core_allowed(const RtThread *t, int c) { return (int)((t->mask >> c) & 1); }
 
 static void core_count(void) {
     int n = 0;
-    for (int i = 0; i < NCORE; i++) n += g_core_owner[i] != NULL;
+    uint32_t free_m = 0;
+    for (int i = 0; i < NCORE; i++) {
+        if (g_core_owner[i]) n++;
+        else free_m |= 1u << i;
+    }
+    __atomic_store_n(&g_core_free_mask, free_m, __ATOMIC_RELEASE);
     if (n > g_held_max) g_held_max = n;
+}
+
+static void core_wait_mask_update(void) {
+    uint32_t m = 0;
+    for (const RtThread *p = g_core_wait; p; p = p->cnext) m |= (uint32_t)(p->mask & APP_MASK);
+    __atomic_store_n(&g_core_wait_mask, m, __ATOMIC_RELEASE);
 }
 
 static struct DgRel g_dg_rel;   // MKW_CORE_DIAG: the owner core_put is releasing, for core_grant
@@ -61,12 +75,18 @@ static void core_grant(int c) {
     if (!b) return;
     *bp = b->cnext;
     b->cnext = NULL;
-    b->cur_core = c;
+    core_wait_mask_update();
+    __atomic_store_n(&b->cur_core, c, __ATOMIC_RELEASE);
     g_core_owner[c] = b;
     core_count();
     if (g_diag > 0) b->dg_rel = g_dg_rel;
-    if (rt_trace & RT_TRACE_SCHED) b->grant_at = kern_now_ns();
-    plat_cond_signal(&b->cv);
+    if (rt_trace & RT_TRACE_SCHED) {
+        uint64_t gn = kern_now_ns();
+        b->grant_at = gn;
+        b->ho_grant_at = gn;
+    }
+    // Skip signalling when b is actively polling cur_core in core_take_gated's first-spin loop.
+    if (!b->c_nosig) plat_cond_signal(&b->cv);
 }
 
 void core_put(RtThread *t) {
@@ -90,6 +110,7 @@ void core_put(RtThread *t) {
     t->preempt = 0;
     g_core_owner[c] = NULL;
     core_grant(c);
+    if (!g_core_owner[c]) core_count();
 }
 
 // Whether a waiter better than t may run on core c.
@@ -118,6 +139,7 @@ void core_kick(void) {
         wp[i] = pp;
     }
     for (int k = 0; k < n && claimed != (1 << NCORE) - 1; k++) {
+        w[k]->target = NULL;
         int v = -1;
         for (int i = 0; i < NCORE; i++) {
             RtThread *o = g_core_owner[i];
@@ -146,7 +168,10 @@ void core_kick(void) {
 static void core_take_gated(RtThread *t);
 
 void core_take(RtThread *t) {
-    if (t->cur_core >= 0) return;
+    if (t->cur_core >= 0) {
+        if ((rt_trace & RT_TRACE_SCHED) && t->st != S_RUN) acct(t, S_RUN);
+        return;
+    }
     if (!cores_enabled()) {
         acct(t, S_RUN);
         return;
@@ -177,22 +202,32 @@ static void core_take_gated(RtThread *t) {
         acct(t, S_RUN);
         return;
     }
+    uint64_t cw_t0 = (rt_trace & RT_TRACE_SCHED) ? kern_now_ns() : 0;
     acct(t, S_CORE);
     t->cseq = ++g_wseq;
     t->cnext = g_core_wait;
     g_core_wait = t;
+    core_wait_mask_update();
     t->target = NULL;
     if (g_diag > 0) {
         t->dg_since = kern_now_ns();
         memset(&t->dg_rel, 0, sizeof t->dg_rel);
     }
     core_kick();
-    if (g_diag > 0) t->dg_cls = dg_class0(t);
+    int cw_cls = ((rt_trace & RT_TRACE_SCHED) || g_diag > 0) ? dg_class0(t) : 0;
+    if (g_diag > 0) t->dg_cls = cw_cls;
+    if (rt_trace & RT_TRACE_SCHED) {
+        t->ho_gated = 1;
+        t->ho_pre = t->target != NULL;
+        t->ho_kind = t->ho_pre ? HO_PREEMPT : HO_GATE;
+    }
     if (g_ap_int && t->target && t->cur_core < 0) {   // most waits end within microseconds: spin before interrupting
         uint64_t end = kern_now_ns() + AP_FIRST_NS;
+        t->c_nosig = 1;
         unlock();
-        while (__atomic_load_n(&t->cur_core, __ATOMIC_RELAXED) < 0 && kern_now_ns() < end) plat_pause();
+        while (__atomic_load_n(&t->cur_core, __ATOMIC_ACQUIRE) < 0 && kern_now_ns() < end) plat_pause();
         lock();
+        t->c_nosig = 0;
         if (t->cur_core >= 0) g_ap_spin_ok++;
     }
     int sampled = 0;
@@ -208,6 +243,10 @@ static void core_take_gated(RtThread *t) {
             dg_sample(t);
         }
     }
+    if ((rt_trace & RT_TRACE_SCHED) && cw_t0) {
+        g_cw_ns[cw_cls] += kern_now_ns() - cw_t0;
+        g_cw_n[cw_cls]++;
+    }
     if (g_diag > 0) dg_done(t);
     if (t->grant_at) {
         uint64_t d = kern_now_ns() - t->grant_at;
@@ -218,6 +257,65 @@ static void core_take_gated(RtThread *t) {
     }
     t->target = NULL;
     acct(t, S_RUN);
+}
+
+// MKW_CORE_HANDOFF=1: when SignalToAddress wakes waiter w, place it onto an idle core immediately so it skips the
+// core gate on wakeup, or if w has strictly better priority than signaller s on s's core and no queued waiter beats w,
+// hand s's core straight to w (returns 1 so s retakes a core once it releases the address queue lock).
+int core_handoff_wake(RtThread *w, RtThread *s) {
+    if (!w || !cores_enabled() || !RT_KNOB_ON(g_handoff)) return 0;
+    if (__atomic_load_n(&w->cur_core, __ATOMIC_ACQUIRE) >= 0 || !(w->mask & APP_MASK)) return 0;
+    uint32_t free_m = __atomic_load_n(&g_core_free_mask, __ATOMIC_ACQUIRE);
+    int sc0 = s ? __atomic_load_n(&s->cur_core, __ATOMIC_ACQUIRE) : -1;
+    int may_direct = sc0 >= 0 && core_allowed(w, sc0) && w->prio < s->prio;
+    if (!((uint32_t)w->mask & free_m) && !may_direct) return 0;
+    lock();
+    if (w->cur_core >= 0 || !(w->mask & APP_MASK)) {
+        unlock();
+        return 0;
+    }
+    int fc = w->core >= 0 && w->core < NCORE && core_allowed(w, w->core) && !g_core_owner[w->core] ? w->core : -1;
+    for (int i = 0; fc < 0 && i < NCORE; i++)
+        if (core_allowed(w, i) && !g_core_owner[i]) fc = i;
+    if (fc >= 0) {
+        __atomic_store_n(&w->cur_core, fc, __ATOMIC_RELEASE);
+        g_core_owner[fc] = w;
+        core_count();
+        if (rt_trace & RT_TRACE_SCHED) w->ho_kind = HO_FREE;
+        unlock();
+        return 0;
+    }
+    int sc = s ? s->cur_core : -1;
+    // Keep a preemption-disabled signaller on its core. A queued waiter requests preemption normally,
+    // and the SDK synchronizes after dropping its disable count.
+    if (sc >= 0 && core_allowed(w, sc) && prio_of(w) < prio_of(s) && !ap_disabled(s)) {
+        int wp = prio_of(w), blocked_by_better = 0;
+        for (const RtThread *p = g_core_wait; p; p = p->cnext)
+            if (core_allowed(p, sc) && prio_of(p) < wp) {
+                blocked_by_better = 1;
+                break;
+            }
+        if (!blocked_by_better) {
+            if (s->preempt && s->pre_since && (rt_trace & RT_TRACE_SCHED)) {
+                uint64_t d = kern_now_ns() - s->pre_since;
+                g_pre_n++;
+                g_pre_ns += d;
+                if (d > g_pre_max) g_pre_max = d;
+                s->npre++;
+            }
+            s->pre_since = 0;
+            s->preempt = 0;
+            __atomic_store_n(&s->cur_core, -1, __ATOMIC_RELEASE);
+            __atomic_store_n(&w->cur_core, sc, __ATOMIC_RELEASE);
+            g_core_owner[sc] = w;
+            core_count();
+            if (rt_trace & RT_TRACE_SCHED) w->ho_kind = HO_DIRECT;
+            unlock();
+            return 1;
+        }
+    }
+    unlock();
+    return 0;
 }
 
 uint32_t block(RtThread *t, int kind, int64_t ns) {

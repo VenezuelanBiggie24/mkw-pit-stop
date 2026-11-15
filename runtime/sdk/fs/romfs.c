@@ -65,6 +65,7 @@ static double now_s(void) { return (double)plat_now_ns() / 1e9; }
 // Bytes read at off (0 at or past the end of the file), -1 on an I/O error.
 static int64_t read_at(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
     mem_thaw((uintptr_t)buf, n);   // the kernel's write would fail on a frozen page instead of faulting
+    if (!plat_mem_back((uintptr_t)buf, n)) return -1;
     int64_t got = plat_file_pread(f, buf, n, off);
     if (got == -2)   // a read-only page in the buffer: a frozen region missed its thaw
         rt_log("RomFS: read of %u bytes into %p refused: the buffer is not writable", n, buf);
@@ -277,12 +278,67 @@ static void overlay_init(void) {
 // ---- start
 #include <ftw.h>
 #include <sys/stat.h>
+#include <errno.h>
 
 static size_t loose_root_len;
 typedef struct { char *name; uint64_t size; } LooseFile;
 static LooseFile *loose_files;
 static size_t loose_n, loose_cap;
 
+#ifdef MKW_PS5_NATIVE
+typedef struct LooseArena {
+    struct LooseArena *next;
+    size_t used, cap;
+    char data[];
+} LooseArena;
+static LooseArena *loose_arena;
+
+static char *arena_strdup(const char *s) {
+    size_t n = strlen(s) + 1;
+    if (!loose_arena || loose_arena->used + n > loose_arena->cap) {
+        size_t cap = n > (2u << 20) ? n : (2u << 20);
+        LooseArena *a = malloc(sizeof *a + cap);
+        if (!a) return NULL;
+        a->used = 0;
+        a->cap = cap;
+        a->next = loose_arena;
+        loose_arena = a;
+    }
+    char *p = loose_arena->data + loose_arena->used;
+    memcpy(p, s, n);
+    loose_arena->used += n;
+    return p;
+}
+
+static int walk_loose_cb(const char *name, int kind, uint64_t size, void *ctx) {
+    const char *dir = ctx;
+    if (name[0] == '.') return 1;
+    char full[PLAT_PATH_MAX];
+    if (snprintf(full, sizeof full, "%s/%s", dir, name) >= (int)sizeof full) return 1;
+    if (kind == PLAT_FS_DIR) {
+        plat_fs_list(full, walk_loose_cb, full);
+        return 1;
+    }
+    if (kind != PLAT_FS_FILE) return 1;
+    const char *rel = full + loose_root_len;
+    while (*rel == '/') rel++;
+    if (*rel == '.') return 1;
+    if (loose_n == loose_cap) {
+        loose_cap = loose_cap ? loose_cap * 2 : 65536;
+        loose_files = realloc(loose_files, loose_cap * sizeof *loose_files);
+        if (!loose_files) rt_fatal("RomFS: realloc(%zu) failed at loose_n=%zu (errno=%d)", loose_cap * sizeof *loose_files, loose_n, errno);
+    }
+    loose_files[loose_n].name = arena_strdup(rel);
+    loose_files[loose_n].size = size;
+    if (!loose_files[loose_n].name) rt_fatal("RomFS: arena_strdup(%s) failed at loose_n=%zu (errno=%d)", rel, loose_n, errno);
+    loose_n++;
+    return 1;
+}
+
+static int walk_loose(const char *dir) {
+    return plat_fs_list(dir, walk_loose_cb, (void *)dir) == PLAT_FS_OK ? 0 : -1;
+}
+#else
 static int loose_visit(const char *path, const struct stat *st, int type, struct FTW *ftw) {
     (void)ftw;
     if (type != FTW_F) return 0;
@@ -300,6 +356,7 @@ static int loose_visit(const char *path, const struct stat *st, int type, struct
     loose_n++;
     return 0;
 }
+#endif
 
 static int loose_order(const void *a, const void *b) {
     return strcmp(((const LooseFile *)a)->name, ((const LooseFile *)b)->name);
@@ -314,7 +371,12 @@ static void load_loose_index(const char *dir) {
     if (realpath(dir, real) && strlen(real) < sizeof loose_root) strcpy(loose_root, real);
 #endif
     loose_root_len = strlen(loose_root);
+#ifdef MKW_PS5_NATIVE
+    rt_log("romfs: walking %s (from %s)", loose_root, dir);
+    if (walk_loose(loose_root) != 0 || !loose_n)
+#else
     if (nftw(loose_root, loose_visit, 64, FTW_PHYS) != 0 || !loose_n)
+#endif
         rt_fatal("RomFS directory %s missing or empty (set it with --romfs)", loose_root);
     qsort(loose_files, loose_n, sizeof *loose_files, loose_order);
     size_t strings = 0;
@@ -323,7 +385,7 @@ static void load_loose_index(const char *dir) {
     strings_offset = 24 + file_count * 24;
     index_size = (size_t)strings_offset + strings;
     index_bytes = malloc(index_size);
-    need(index_bytes != NULL, "loose index memory");
+    if (!index_bytes) rt_fatal("RomFS: malloc(%zu) failed for %zu files (errno=%d)", index_size, loose_n, errno);
     memcpy(index_bytes, "MKW_RFS1", 8);
     memcpy(index_bytes + 8, &file_count, 8);
     memcpy(index_bytes + 16, &strings_offset, 8);
@@ -334,8 +396,17 @@ static void load_loose_index(const char *dir) {
         memcpy(index_bytes + 24 + i * 24, &e, sizeof e);
         memcpy(index_bytes + strings_offset + at, loose_files[i].name, len);
         at += len;
+#ifndef MKW_PS5_NATIVE
         free(loose_files[i].name);
+#endif
     }
+#ifdef MKW_PS5_NATIVE
+    while (loose_arena) {
+        LooseArena *next = loose_arena->next;
+        free(loose_arena);
+        loose_arena = next;
+    }
+#endif
     free(loose_files);
     loose_files = NULL;
 }
@@ -473,7 +544,12 @@ uint32_t romfs_read(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uin
     while (done < n) {
         uint32_t chunk = n - done > READ_CHUNK ? READ_CHUNK : (uint32_t)(n - done);
         int64_t r = read_at(f, (uint8_t *)buffer + done, chunk, (uint64_t)offset + done);
-        if (r <= 0) rt_fatal("RomFS read failure at %#llx", (unsigned long long)(offset + done));
+        if (r <= 0) {
+            uint64_t idx = handles[h - ROMFS_HANDLE_BASE];
+            const char *name = (idx && idx - 1 < file_count) ? entry_name(entry(idx - 1)) : "?";
+            rt_fatal("RomFS read failure on %s at %#llx (r=%lld, fsize=%#llx)", name,
+                     (unsigned long long)(offset + done), (long long)r, (unsigned long long)fsize);
+        }
         done += (uint64_t)r;
     }
     *out = done;

@@ -5,6 +5,7 @@
 // Needs no game files.
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "gfx.h"
 #include "platform/platform.h"
@@ -38,11 +39,50 @@ _Static_assert(offsetof(cmd_t, inline_cur) == 0x20 && offsetof(cmd_t, inline_end
 _Static_assert(RT_GPU_VA_BASE >= RT_ADDRESS_LIMIT, "GPU address window overlaps the guest address space");
 
 // Write watch: a committed heap page and an alias page, written once, are reported once.
+#if defined(__linux__)
+typedef struct { uint64_t addr; PlatFile *f; int done, bad_rc, bad_data; } WwStressCtx;
+
+enum { WW_MT_THREADS = 3, WW_MT_PAGES = 64, WW_MT_ITERS = 4000 };
+typedef struct {
+    uint64_t base;
+    int tid;
+    uint64_t last[WW_MT_PAGES];
+    volatile int done;
+} WwMtCtx;
+
+static void ww_mt_fn(void *arg) {
+    WwMtCtx *c = arg;
+    uint32_t rng = 0x1234567u + (uint32_t)c->tid * 0x9e3779b9u;
+    for (int i = 1; i <= WW_MT_ITERS; i++) {
+        rng = rng * 1664525u + 1013904223u;
+        uint32_t pg = (rng >> 16) % WW_MT_PAGES;
+        volatile uint64_t *slot = (volatile uint64_t *)(uintptr_t)(c->base + (uint64_t)pg * 4096u + (uint64_t)c->tid * 8u);
+        __atomic_store_n(slot, (uint64_t)i, __ATOMIC_RELEASE);
+        c->last[pg] = (uint64_t)i;
+    }
+    __atomic_store_n(&c->done, 1, __ATOMIC_RELEASE);
+}
+static void ww_stress_fn(void *arg) {
+    WwStressCtx *c = arg;
+    uint8_t *b = (uint8_t *)(uintptr_t)c->addr;
+    for (int i = 0; i < 5000; i++) {
+        memset(b, 0xA5, 0x4000);
+        plat_mem_back(c->addr, 0x4000);
+        int64_t r = plat_file_pread(c->f, b, 0x4000, 0);
+        if (r != 0x4000) { c->bad_rc++; break; }
+        for (int j = 0; j < 0x4000; j++)
+            if (b[j] != 0) { c->bad_data++; break; }
+        if (c->bad_data) break;
+    }
+    __atomic_store_n(&c->done, 1, __ATOMIC_RELEASE);
+}
+#endif
+
 static void check_write_watch(void) {
     const RtGuestLayout *g = mem_layout();
     uint64_t heap = 0, pages[8], n;
     CHECK(mem_set_heap_size(0x200000, &heap) == 0 && heap == g->heap.base, "SetHeapSize 2 MiB");
-    mem_written_pages(heap, 0x200000, pages, 8);   // drop whatever the commit itself marked
+    while (mem_written_pages(heap, 0x200000, pages, 8) > 0) {}   // drop whatever the commit itself marked
     volatile uint8_t *p = (volatile uint8_t *)(uintptr_t)heap;
     p[0x5000] = 1;
     n = mem_written_pages(heap, 0x200000, pages, 8);
@@ -96,6 +136,85 @@ static void check_write_watch(void) {
     printf("write-watch: region with reserved holes frozen and thawed by a write\n");
     CHECK(mem_unmap_physical(a, 0x4000) == 0, "UnmapPhysicalMemory");
     CHECK(mem_written_pages(RT_KERNEL_BASE, 0x1000, pages, 8) == UINT64_MAX, "kernel region is not write-watched");
+
+#if defined(__linux__)
+    {
+        WwStressCtx ctx = { heap + 0x10000, plat_file_open("/dev/zero"), 0, 0, 0 };
+        if (ctx.f) {
+            int ok = plat_thread_spawn(ww_stress_fn, &ctx, "ww_stress", 0);
+            if (ok) {
+                while (!__atomic_load_n(&ctx.done, __ATOMIC_ACQUIRE))
+                    mem_written_pages(heap + 0x10000, 0x4000, pages, 8);
+            }
+            plat_file_close(ctx.f);
+            CHECK(ok, "ww_stress thread spawn");
+            CHECK(ctx.bad_rc == 0 && ctx.bad_data == 0,
+                  "write-watch pread race: bad_rc=%d bad_data=%d", ctx.bad_rc, ctx.bad_data);
+            printf("write-watch: 5000 concurrent pread + reset iterations ok\n");
+        }
+        {
+            uint64_t mt_base = heap + 0x20000;
+            uint64_t mt_size = (uint64_t)WW_MT_PAGES * 4096u;
+            WwMtCtx wctx[WW_MT_THREADS] = {0};
+            uint64_t obs[WW_MT_PAGES][WW_MT_THREADS] = {0};
+            // Arm all pages before starting writers.
+            for (uint64_t i = 0; i < WW_MT_PAGES; i++)
+                *(volatile uint64_t *)(uintptr_t)(mt_base + i * 4096u) = 0;
+            while (mem_written_pages(mt_base, mt_size, pages, 8) > 0) {}
+            for (int t = 0; t < WW_MT_THREADS; t++) {
+                wctx[t].base = mt_base;
+                wctx[t].tid = t;
+                CHECK(plat_thread_spawn(ww_mt_fn, &wctx[t], "ww_mt", 0), "ww_mt thread spawn");
+            }
+            for (;;) {
+                int all_done = 1;
+                for (int t = 0; t < WW_MT_THREADS; t++)
+                    if (!__atomic_load_n(&wctx[t].done, __ATOMIC_ACQUIRE)) all_done = 0;
+                uint64_t off = 0;
+                while (off < mt_size) {
+                    uint64_t chunk = mt_size - off;
+                    uint64_t qn = mem_written_pages(mt_base + off, chunk, pages, 8);
+                    for (uint64_t k = 0; k < qn; k++) {
+                        uint64_t pg = (pages[k] - mt_base) / 4096u;
+                        if (pg < WW_MT_PAGES) {
+                            for (int t = 0; t < WW_MT_THREADS; t++) {
+                                uint64_t v = __atomic_load_n((volatile uint64_t *)(uintptr_t)(pages[k] + (uint64_t)t * 8u), __ATOMIC_ACQUIRE);
+                                if (v > obs[pg][t]) obs[pg][t] = v;
+                            }
+                        }
+                    }
+                    if (qn < 8) break;
+                    off = (pages[qn - 1] - mt_base) + 4096u;
+                }
+                if (all_done) break;
+            }
+            // One final drain after all writers finished.
+            uint64_t off = 0;
+            while (off < mt_size) {
+                uint64_t qn = mem_written_pages(mt_base + off, mt_size - off, pages, 8);
+                for (uint64_t k = 0; k < qn; k++) {
+                    uint64_t pg = (pages[k] - mt_base) / 4096u;
+                    if (pg < WW_MT_PAGES) {
+                        for (int t = 0; t < WW_MT_THREADS; t++) {
+                            uint64_t v = __atomic_load_n((volatile uint64_t *)(uintptr_t)(pages[k] + (uint64_t)t * 8u), __ATOMIC_ACQUIRE);
+                            if (v > obs[pg][t]) obs[pg][t] = v;
+                        }
+                    }
+                }
+                if (qn < 8) break;
+                off = (pages[qn - 1] - mt_base) + 4096u;
+            }
+            int missed = 0;
+            for (int pg = 0; pg < WW_MT_PAGES; pg++)
+                for (int t = 0; t < WW_MT_THREADS; t++)
+                    if (obs[pg][t] != wctx[t].last[pg]) missed++;
+            CHECK(missed == 0, "write-watch mt stress: %d page/thread pairs missed a write", missed);
+            printf("write-watch: %d-thread random write + reset stress (%d iters each): missed=%d\n",
+                   WW_MT_THREADS, WW_MT_ITERS, missed);
+        }
+    }
+#endif
+
     CHECK(mem_set_heap_size(0, &heap) == 0, "SetHeapSize 0");
     printf("write-watch: alias page written once: reported once, then not\n");
 }

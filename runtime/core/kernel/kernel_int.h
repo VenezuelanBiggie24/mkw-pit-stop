@@ -27,7 +27,11 @@
 #define MAX_H 4096
 #define NCORE 6                          // Switch 2 gives applications cores 0-5 (main.npdm core mask 0x3f)
 #define APP_MASK ((1ull << NCORE) - 1)
+#ifdef MKW_PS5_NATIVE
+#define HOST_STACK (1ull << 20)
+#else
 #define HOST_STACK (256ull << 20)        // reserved, committed on demand
+#endif
 #define TLR_SIZE 0x200
 #define THREAD_OBJ_SIZE 0x400            // "current thread object" at TLR+0x1F8 (d2r-mobile thread.c)
 #define TLS_SIZE 0x2000
@@ -61,14 +65,14 @@ struct RtThread {
     int started, exited, closed, cancel, is_main;
     PlatCond cv;
     // current wait
-    int wkind, woke;
+    int wkind, woke, w_nosig;
     uint64_t waddr, wkey;
     uint32_t wtag, wres;
     uint64_t wseq;             // registration order: equal priority wakes first come first
     RtThread *next;            // wait list
     RtThread *all;             // every thread
     // virtual core
-    int cur_core;              // core held while running guest code, -1 while blocked
+    int cur_core, c_nosig;     // core held while running guest code, -1 while blocked; c_nosig: spinning in gate
     uint64_t cseq;
     RtThread *cnext;
     uint8_t *tlr, *tls;
@@ -81,13 +85,21 @@ struct RtThread {
     // MKW_TRACE=sched accounting (holding G)
     uint32_t tid;              // host thread id
     int st;                    // S_* state since st_since
-    uint64_t st_since, st_ns[S_N], nblk, npre, pre_since, cpu_last;
+    uint64_t st_since, st_ns[S_N], nblk, npre, pre_since, cpu_last, cpu_last_at, cpu_last_frame;
     uint64_t wobj;             // what the current wait is on: owner handle, key, address or first handle
     uint32_t waker;            // the thread whose signal ended the last wait (0: a host thread or a timeout)
     uint64_t wake_at, grant_at;   // when a wait was signalled and a core granted, until the thread runs again
     uint64_t lw_ns, lw_n, lw_max, lg_ns, lg_n, lg_max, sl_n, sl_req, sl_act;   // those latencies; SleepThread asked/took
     uint64_t sp_n, sp_ho, sp_site;   // spin wait passes and core handoffs, the last loop head (the thread writes them)
     RtThread *target;          // as a core waiter: the owner core_kick asked to give its core up for it (holding G)
+    // WaitForAddress -> running-guest handoff breakdown (written by owner/signal under trace)
+    uint64_t ho_wake_at, ho_grant_at;
+    int ho_kind, ho_gated, ho_pre;
+    struct AddrHoRec {
+        uint64_t addr, n, to_n, tot_ns, host_ns, glock_ns, cwait_ns, cgrant_ns, post_ns, max_ns;
+        uint64_t k[6];
+        uint32_t waker;
+    } ho_tot, ho_slots[16];
     // MKW_ASYNC_PREEMPT (holding G)
     PlatIntr *hthr;            // the host thread, for plat_intr_stop / resume; open while it may own a core
     uint64_t ap_rip;           // the interrupted host rip kern_ap_stub returns to
@@ -124,6 +136,8 @@ enum { CRIT_STATE, CRIT_WAKE, CRIT_FRAME };   // a: thread; b: its waker (STATE)
 #define AP_FIRST_NS 250000ull   // the waiter spins this long before the first interruption (most waits end sooner)
 enum { AP_NONE, AP_RETRY, AP_SENT };
 enum { DG_GAME, DG_HOST, DG_EQ, DG_NOCORE, DG_N };
+enum { HO_UNCONT, HO_FREE, HO_DIRECT, HO_SPIN, HO_GATE, HO_PREEMPT, HO_KIND_N };
+#define HO_SLOTS 16
 
 // Small helpers, inline in every kernel file.
 static inline void st32(uint64_t a, uint32_t v) { __atomic_store_n((uint32_t *)(uintptr_t)a, v, __ATOMIC_SEQ_CST); }
@@ -144,9 +158,11 @@ void *h_get(uint32_t h, int type);   // kernel.c
 RtThread *pick(int kind, uint64_t a);   // kernel.c
 RtThread *pick_in(RtThread *list, int kind, uint64_t a);   // kernel.c
 void wake_in(RtThread **list, RtThread *t, uint32_t res);   // kernel.c
+void wake_addr_prepare(RtThread **list, RtThread *t, uint32_t res);   // kernel.c, holding q.m
+void wake_addr_commit(RtThread *t);   // kernel.c, holding q.m
 typedef struct { PlatMutex *m; RtThread **list; } AddrQueue;   // the lock and wait list of one address
 AddrQueue addr_queue(uint64_t addr);   // kernel.c
-uint32_t addr_block(RtThread *t, AddrQueue q, int64_t ns);   // kernel.c, holding q.m
+uint32_t addr_block(RtThread *t, AddrQueue q, int64_t ns);   // kernel.c, enters holding q.m, returns unlocked
 void wake(RtThread *t, uint32_t res);   // kernel.c
 void wake_sync_waiters(void);   // kernel.c
 uint32_t block_inner(RtThread *t, int kind, int64_t ns);   // kernel.c
@@ -159,19 +175,25 @@ __attribute__((noreturn)) void exit_now(RtThread *t);   // kernel.c
 void thread_main(void *p);   // kernel.c
 void sleep_ns(RtThread *t, int64_t ns);   // kernel.c
 extern RtThread *g_core_owner[NCORE], *g_core_wait;   // kernel_cores.c
+extern uint32_t g_core_wait_mask;   // kernel_cores.c: mask of cores needed by waiting threads
 int cores_enabled(void);   // kernel_cores.c
 void core_take_num(RtThread *t);
 int core_allowed(const RtThread *t, int c);   // kernel_cores.c
 void core_put(RtThread *t);   // kernel_cores.c
 void core_kick(void);   // kernel_cores.c
 void core_take(RtThread *t);   // kernel_cores.c
+int core_handoff_wake(RtThread *w, RtThread *s);   // kernel_cores.c: 1 if s gave its core to w
 uint32_t block(RtThread *t, int kind, int64_t ns);   // kernel_cores.c
 void ap_sync(RtThread *t);   // kernel_cores.c
 extern int g_crit_on;   // kernel_diag.c
 void crit_add(int kind, uint32_t a, uint32_t b, int st, uint64_t obj, uint64_t ts);   // kernel_diag.c
 extern uint64_t g_pre_req, g_pre_n, g_pre_ns, g_pre_max, g_pre_stale;   // kernel_diag.c
 extern uint64_t g_sync_calls, g_sync_blocks;   // kernel_diag.c
+extern uint64_t g_cw_ns[DG_N], g_cw_n[DG_N];   // kernel_diag.c: core wait breakdown under MKW_TRACE=sched
 void acct(RtThread *t, int st);   // kernel_diag.c
+void ho_note_addr(RtThread *t, uint64_t addr, uint32_t waker, uint64_t host_ns, uint64_t glock_ns,
+                  uint64_t cwait_ns, uint64_t cgrant_ns, uint64_t post_ns, uint64_t tot_ns,
+                  int kind, int timed_out);   // kernel_diag.c
 extern int g_diag;   // kernel_diag.c
 extern uint64_t g_dg_samples, g_dg_lines, g_sync36, g_sync36_flag;   // kernel_diag.c
 void diag_init(void);   // kernel_diag.c
@@ -182,6 +204,7 @@ void dg_sample(RtThread *t);   // kernel_diag.c
 extern int g_ap, g_ap_int;   // kernel_preempt.c
 extern uint64_t g_ap_sent, g_ap_taken, g_ap_host, g_ap_pc, g_ap_deferred, g_ap_fail, g_ap_spin_ok;   // kernel_preempt.c
 void ap_init(void);   // kernel_preempt.c
+int kern_fault_in_game(uint64_t rip);   // kernel_preempt.c: may a fault at rip on this thread wait (MKW_EARLY_READ)
 int prio_of(const RtThread *t);   // kernel_preempt.c
 volatile uint16_t *ap_tlr(const RtThread *t);   // kernel_preempt.c
 int ap_disabled(const RtThread *t);   // kernel_preempt.c

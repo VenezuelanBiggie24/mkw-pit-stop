@@ -37,6 +37,12 @@ extern const RtHostEntry __start_mkw_fns[] __attribute__((weak)), __stop_mkw_fns
 #define obs_stop __stop_mkw_obs
 #define fns_start __start_mkw_fns
 #define fns_stop __stop_mkw_fns
+#ifdef MKW_PS5_NATIVE
+// PS5's post-link check rejects weak undefined __start_/__stop_ symbols when a section is empty.
+__attribute__((section("mkw_ovr"), used, retain)) static const RtHostEntry ovr_sentinel;
+__attribute__((section("mkw_obs"), used, retain)) static const RtHostEntry obs_sentinel;
+__attribute__((section("mkw_fns"), used, retain)) static const RtHostEntry fns_sentinel;
+#endif
 #endif
 
 typedef struct {
@@ -204,6 +210,11 @@ void hostfn_time_window(uint64_t frame) {
 }
 
 static void hostfn_entry(Cpu *c) {
+#ifdef MKW_PS5_LOADER_ONLY
+    // Relocations can assign these host addresses. This title ends before the
+    // guest scheduler or any registered callback can start.
+    rt_fatal("PS5 loader: execution reached host function %#llx", (unsigned long long)c->pc);
+#else
     uint64_t i = (c->pc - RT_HOSTFN_BASE) >> 4;
     if (__builtin_expect((c->pc & 15) || i >= (uint64_t)nslots, 0)) bad_entry(c);
     Slot *s = &slots[i];
@@ -232,6 +243,7 @@ static void hostfn_entry(Cpu *c) {
         return;
     }
     __attribute__((musttail)) return s->fn(c);
+#endif
 }
 
 // A guest jump to the rt_call return sentinel: guest code used x30 as data, which a lifted RET never does.

@@ -8,6 +8,7 @@
 #define KERN_R_OUT_OF_RESOURCE 0xCE01u
 #define KERN_R_INVALID_STATE_MEM 0xD401u
 #define KERN_R_BAD_HANDLE 0xE401u
+#define KERN_R_INVALID_POINTER 0xE601u
 #define KERN_R_TIMEOUT 0xEA01u
 #define KERN_R_CANCELLED 0xEC01u
 #define KERN_R_INVALID_ENUM 0xF001u
@@ -29,6 +30,7 @@ uint64_t kern_threads_created(void);
 
 // The guest frame-pointer chain from c->x[29] to stderr.
 void kern_backtrace(const Cpu *c);
+void svc_query_memory(uint64_t *x);   // SVC 0x06: x0 destination/result, x1 page info, x2 address
 
 // ---- probe support
 enum { KERN_WAIT_NONE, KERN_WAIT_LOCK, KERN_WAIT_CONDVAR, KERN_WAIT_ADDRESS, KERN_WAIT_SYNC };

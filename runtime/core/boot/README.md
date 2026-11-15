@@ -9,3 +9,6 @@ Boot: the program entry point, the game code tables, module loading, patches and
 | `loader.c` | Loads the modules at their addresses, relocations, import binding, constructor flag (with Switch 2's `PACIBSP`); `--probe-loader` compares against MKW 1.0.0's numbers |
 | `game.c` | MKW's own: the game clock (`frame_step_*`, counts presents; totk-pc-recomp takes it from `frame_rate.c` and its patches); the world clock of A/B runs (`MKW_AB`) counts from the `MKW_SEQ_UNTIL` event; the frame rate setting (`MKW_FPS` auto/30/60: the game's fixed present interval, through its frame object's vtable slot) and the `game: speed` line every 5 s |
 | `patches.c` | Patches by address |
+
+The native PS5 loader stage starts in `main.c`, initializes the template's console log, and loads the built-in
+game's verified ExeFS images from `/app0/exefs`. It stops after relocation and sealing, before guest execution.

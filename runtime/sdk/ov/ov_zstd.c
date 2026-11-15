@@ -22,7 +22,7 @@
 #include "host.h"
 #include "platform/platform.h"
 
-#define GUEST_MULTIFRAME 0x7000407e00ull   // MKW 1.0.0 main: ZSTD_decompressMultiFrame (recomp/patches-mkw.txt "zstd")
+#define GUEST_MULTIFRAME (RT_MODULE_BASE + 0x407e00ull)   // MKW 1.0.0 main: ZSTD_decompressMultiFrame (recomp/patches-mkw.txt "zstd")
 #define HOST_MULTIFRAME 0xff0   // offsets in the patch page
 #define AWAY_BYTES (64u << 10)
 #define MAX_DICT (64u << 20)
@@ -240,7 +240,7 @@ static void host_multiframe(Cpu *c) { decode(c, c->x[5], c->x[6], c->x[7], GUEST
 // +0x2c i32 staged bytes, +0x30 guest DCtx. The guest DCtx keeps only its next input size (+0x7068) up to date, the
 // one field the game reads. Streams the host could not take (a DDict it cannot copy, a full table) stay in the guest
 // decoder from their first chunk to the end; so does every stream in check mode.
-#define GUEST_STREAM 0x70006532b4ull   // MKW 1.0.0 main (recomp/patches-mkw.txt "zstd")
+#define GUEST_STREAM (RT_MODULE_BASE + 0x6532b4ull)   // MKW 1.0.0 main (recomp/patches-mkw.txt "zstd")
 #define HOST_STREAM 0xfe0
 #define NSTREAM 64
 #define DCTX_EXPECTED 0x7068

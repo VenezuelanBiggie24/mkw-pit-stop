@@ -51,6 +51,9 @@ void perf_present(uint64_t frame);
 void perf_summary_flush(void);                  // prints the frame-time summary of the running period (exit); the 60 s lines come from perf_present
 void gfx_exit_log(void);                        // back end's lines for the exit summary (weak no-op in prof_win.c)
 void perf_gpu_wait(uint64_t t0);                // a wait for a GPU fence ended (any thread; the render thread's also counts as PERF_FENCE)
+void perf_gpu_wait_split(uint64_t t0, uint64_t replay_ns);   // same, with the part spent waiting for replay to submit
+// Per-call-site fence wait map (MKW_TRACE=perf): frame_rel 0=current, 1=last presented, 2=one before, 3=older, -1=n/a.
+void perf_fence_site(const char *site, uint64_t pc, int frame_rel, uint64_t ns);
 // GPU side of the 60-frame perf line, filled by the graphics back end when it set perf_gpu_stats. gpu_ns: GPU busy time
 // since the previous call (timestamp queries, overlaps counted once), have_gpu 0 when the device has no timestamps.
 typedef struct {
@@ -69,11 +72,7 @@ uint64_t perf_gpu_busy_total(void);             // its running total (the overla
 void rt_sha256(const void *p, size_t n, uint8_t out[32]);   // BCrypt; fatal if the provider fails
 
 // ---- guest address map (fixed part)
-#define RT_ADDRESS_LIMIT (1ull << 39)
-#define RT_KERNEL_BASE 0x7010000000ull
-#define RT_KERNEL_SIZE 0x10000000ull
-#define RT_HOSTFN_BASE 0x7020000000ull
-#define RT_HOSTFN_SIZE 0x100000ull
+#include "guest_layout.h"   // emitted by the build from recomp/layout.py
 
 // ---- AAPCS64 argument access for host functions (section 2.2)
 static inline uint64_t arg_x(const Cpu *c, int i) { return i < 8 ? c->x[i] : LD64(c->sp + 8 * (uint64_t)(i - 8)); }
@@ -100,12 +99,17 @@ typedef struct { const char *name; GuestFn fn; } RtHostEntry;
 #else
 #define RT_HOST_SECTION(kind) section("mkw_" #kind)
 #endif
+#ifdef MKW_PS5_NATIVE
+#define RT_HOST_ATTRS used, retain
+#else
+#define RT_HOST_ATTRS used
+#endif
 #define HOST_OVERRIDE(sym, fn) /* replaces sym in every GOT/GLOB_DAT/ABS64 of every module */                  \
-    __attribute__((used, RT_HOST_SECTION(ovr))) static const RtHostEntry RT_CAT(rt_ovr_, __COUNTER__) = {sym, fn}
+    __attribute__((RT_HOST_ATTRS, RT_HOST_SECTION(ovr))) static const RtHostEntry RT_CAT(rt_ovr_, __COUNTER__) = {sym, fn}
 #define HOST_OBSERVER(sym, fn) /* JUMP_SLOT only; fn calls rt_original(c) */                                    \
-    __attribute__((used, RT_HOST_SECTION(obs))) static const RtHostEntry RT_CAT(rt_obs_, __COUNTER__) = {sym, fn}
+    __attribute__((RT_HOST_ATTRS, RT_HOST_SECTION(obs))) static const RtHostEntry RT_CAT(rt_obs_, __COUNTER__) = {sym, fn}
 #define HOST_FUNCTION(name, fn) /* no symbol: hostfn_seal registers it; hostfn_address(fn) after that */        \
-    __attribute__((used, RT_HOST_SECTION(fns))) static const RtHostEntry RT_CAT(rt_fns_, __COUNTER__) = {name, fn}
+    __attribute__((RT_HOST_ATTRS, RT_HOST_SECTION(fns))) static const RtHostEntry RT_CAT(rt_fns_, __COUNTER__) = {name, fn}
 uint64_t hostfn_address(GuestFn fn);                       // synthetic address of a HOST_FUNCTION; fatal if none.
                                                            // For the vtables of objects the host hands the guest
 uint64_t hostfn_register(const char *name, GuestFn fn);    // synthetic address; before hostfn_seal only. The same
@@ -128,12 +132,14 @@ uint64_t rt_call(Cpu *c, uint64_t fn, int n, ...);         // host -> guest, sec
                                                            // as uint64_t: cast every argument. Seals the dispatch
                                                            // table on first use. Sets x30 = RT_RET_HOST, restores
                                                            // x30 and pc, returns x0. Does not touch sp
-#define RT_RET_HOST 0x70200ff000ull                        // x30 sentinel inside the host-function window; a jump to
+#define RT_RET_HOST (RT_HOSTFN_BASE + RT_HOSTFN_SIZE - 0x1000ull) // x30 sentinel inside the host-function window; a jump to
                                                            // it is a named fatal
 
 // ---- guest memory (memory.c)
 typedef struct { uint64_t base, size; } RtRange;
-typedef struct { RtRange aslr, stack, heap, alias, kernel, hostfn; uint64_t pool; } RtGuestLayout;
+// ASLR starts at the lowest guest reservation. The stack and heap share a
+// reservation that may sit above the alias region.
+typedef struct { RtRange aslr, stack_heap, stack, heap, alias, kernel, hostfn; uint64_t pool; } RtGuestLayout;
 typedef struct { uint64_t base, size; uint32_t state, attr, perm, ipc, device, pad; } RtMemoryInfo;   // Horizon layout
 void mem_init(void);                                       // reserve every region; on a collision re-run the process
                                                            // (up to 20 times, MKW_REEXEC), then fatal
@@ -190,7 +196,8 @@ int mem_early_waits(void);   // an early read of what the GPU writes waits (MKW_
 extern int mem_fence_early;
 extern uint64_t mem_early_rel;
 void mem_early_set_done(uint64_t (*fence_done)(void), int (*fence_wait)(uint64_t value, uint64_t timeout_ns),
-                        uint64_t (*fence_queued)(void));
+                        uint64_t (*fence_queued)(void), int (*fence_issued_wait)(uint64_t value, uint64_t timeout_ns));
+int mem_early_wanted(void);   // MKW_EARLY_READ's setting alone (1 measure, 2-3 wait), before any trap is set up
 uint64_t mem_early_inflight(uint64_t a, uint64_t n, uint64_t after);   // a writer of [a, a+n) the GPU runs now, 0 none
 void mem_early_wb_check(uint64_t a, uint64_t n, uint64_t f);            // fence f's merged write-back of [a, a+n)
 void mem_early_watch(uint64_t a, uint64_t n, uint64_t fence, int kind);   // kind: 0 counter, 1 copy, 2 texture to

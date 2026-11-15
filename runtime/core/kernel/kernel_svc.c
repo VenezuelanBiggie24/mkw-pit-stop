@@ -322,13 +322,14 @@ int kern_svc(Cpu *c, uint32_t imm) {
                     ok = 0;
                     break;
                 }
-        if (!ok) r = R_BAD_STATE;
-        else {
+        if (!ok) {
+            plat_mutex_unlock(q.m);
+            r = R_BAD_STATE;
+        } else {
             t->waddr = addr;
             t->wobj = addr;
             r = addr_block(t, q, (int64_t)x[3]);
         }
-        plat_mutex_unlock(q.m);
         x[0] = r;
         return 1;
     }
@@ -355,13 +356,21 @@ int kern_svc(Cpu *c, uint32_t imm) {
             uint32_t e = (uint32_t)val;
             if (!cas32(addr, &e, (uint32_t)nv)) r = R_BAD_STATE;
         }
+        int retake = 0;
         if (!r)
             for (int n = 0; cnt <= 0 || n < cnt; n++) {
                 RtThread *w = pick_in(*q.list, W_ADDRESS, addr);
                 if (!w) break;
-                wake_in(q.list, w, 0);
+                wake_addr_prepare(q.list, w, 0);
+                if (!w->w_nosig && q.m != &G && core_handoff_wake(w, retake ? NULL : tcur)) retake = 1;
+                wake_addr_commit(w);
             }
         plat_mutex_unlock(q.m);
+        if (retake && tcur) {
+            lock();
+            core_take(tcur);
+            unlock();
+        }
         x[0] = r;
         return 1;
     }
@@ -410,7 +419,7 @@ int kern_svc(Cpu *c, uint32_t imm) {
         }
         uint64_t start = kern_now_ns();
         uint32_t r;
-        int idx = -1;
+        int idx = -1, core_released = 0;
         lock();
         g_sync_calls++;
         for (;;) {
@@ -439,13 +448,25 @@ int kern_svc(Cpu *c, uint32_t imm) {
                 }
                 left = ns - (int64_t)spent;
             }
+            if (left == 0) {
+                r = R_TIMEOUT;
+                break;
+            }
+            if (!core_released) {
+                core_put(t);
+                acct(t, S_SYNC);
+                t->nblk++;
+                core_released = 1;
+            }
             t->wobj = n ? hs[0] | (uint64_t)n << 32 : 0;
+            t->waker = 0;
             g_sync_blocks++;
-            if (block(t, W_SYNC, left) == R_TIMEOUT) {
+            if (block_inner(t, W_SYNC, left) == R_TIMEOUT) {
                 r = R_TIMEOUT;
                 break;
             }
         }
+        if (core_released) core_take(t);
         unlock();
         x[0] = r;
         x[1] = idx >= 0 ? (uint64_t)idx : 0;

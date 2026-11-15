@@ -9,7 +9,7 @@
 
 #include "cfg.h"
 #include "host.h"
-#include "kernel.h"
+#include "kernel_int.h"
 #include "platform/platform.h"
 
 #define STACK 0x10000
@@ -266,6 +266,88 @@ static uint32_t arb_spawn(Cpu *c, ArbJob *j) {
 
 static uint32_t sig(Cpu *c, int type, int value, int count) {
     return sv(c, 0x35, ga(&g_arb), (uint64_t)type, (uint64_t)(int64_t)value, (uint64_t)(int64_t)count);
+}
+
+static uint32_t spawn_pinned_waiter(Cpu *c, ArbJob *job, int core) {
+    uint32_t h = create(c, a_arb_waiter, job, 28, core);
+    CHECK(sv(c, 0x0F, h, core, 1ull << core, 0) == 0, "pin waiter");
+    start(c, h);
+    if (!wait_state(c, h, KERN_WAIT_ADDRESS)) rt_fatal("probe-kernel: pinned waiter did not block");
+    return h;
+}
+
+static int owns_core(RtThread *t, int core) {
+    lock();
+    int owns = t->cur_core == core && g_core_owner[core] == t;
+    unlock();
+    return owns;
+}
+
+static void wait_for_core_request(RtThread *owner, uint32_t waiter, int core) {
+    uint64_t until = kern_now_ns() + JOIN_NS;
+    for (;;) {
+        lock();
+        int queued = 0;
+        for (RtThread *t = g_core_wait; t; t = t->cnext)
+            if (t->handle == waiter && t->cur_core < 0 && t->mask == (1ull << core)) queued = 1;
+        int owner_holds = g_core_owner[core] == owner;
+        unlock();
+        if (!owner_holds || kern_now_ns() >= until)
+            rt_fatal("probe-kernel: signaller lost its core or the waiter failed to queue");
+        if (queued) return;
+        plat_pause();
+    }
+}
+
+static void test_core_handoff(Cpu *c) {
+    if (!cfg_get("MKW_CORE_HANDOFF") || !cfg_bool("MKW_CORE_HANDOFF") || !cores_enabled() || g_ap <= 0) return;
+    int before = failures;
+    RtThread *s = tcur;
+    int core = s->cur_core;
+    volatile uint16_t *tl = ap_tlr(s);
+    int ideal = s->core;
+    uint64_t mask = s->mask;
+    CHECK(sv(c, 0x0F, s->handle, core, 1ull << core, 0) == 0, "pin signaller");
+    g_arb = 0;
+
+    ArbJob deferred = {.type = 2, .timeout = -1, .r = UINT32_MAX};
+    uint32_t h = spawn_pinned_waiter(c, &deferred, core);
+    tl[0] = 1;
+    CHECK(sig(c, 0, 0, 1) == 0, "signal to pinned waiter with preemption disabled");
+    int still_held = owns_core(s, core) && deferred.r == UINT32_MAX;
+    CHECK(still_held, "disabled signaller handed off its core");
+    if (still_held) {
+        wait_for_core_request(s, h, core);
+        kern_checkpoint();
+        CHECK(owns_core(s, core) && tl[0] == 1 && tl[1] == 1,
+              "pending preemption must set the interrupt flag without transferring the core");
+        tl[0] = 0;
+        CHECK(sv(c, 0x36, 0, 0, 0, 0) == 0 && tl[1] == 0, "synchronize deferred preemption");
+        CHECK(deferred.r == 0 && owns_core(s, core), "waiter ran before signaller resumed from SVC 0x36");
+    } else {
+        tl[0] = 0;
+    }
+    join(c, h);
+
+    ArbJob direct = {.type = 2, .timeout = -1, .r = UINT32_MAX};
+    h = spawn_pinned_waiter(c, &direct, core);
+    CHECK(sig(c, 0, 0, 1) == 0 && direct.r == 0 && owns_core(s, core),
+          "enabled signaller must retake its core after the directly woken waiter");
+    join(c, h);
+
+    // Force timeout to win, then signal the same address before releasing the only eligible core.
+    ArbJob timeout = {.type = 2, .timeout = 100000000, .r = UINT32_MAX};
+    h = spawn_pinned_waiter(c, &timeout, core);
+    tl[0] = 1;
+    wait_for_core_request(s, h, core);
+    CHECK(sig(c, 0, 0, 1) == 0 && owns_core(s, core), "late signal disturbed core ownership after timeout");
+    tl[0] = 0;
+    CHECK(sv(c, 0x36, 0, 0, 0, 0) == 0, "synchronize after timeout");
+    join(c, h);
+    CHECK(timeout.r == KERN_R_TIMEOUT && owns_core(s, core), "late signal replaced timeout or leaked core");
+    CHECK(sv(c, 0x0F, s->handle, ideal, mask, 0) == 0, "restore signaller affinity");
+    printf("address handoff: only core %d, disable/defer/synchronize, enabled wake and timeout-before-signal: %s\n",
+           core, failures == before ? "ok" : "FAIL");
 }
 
 static void test_arbiter(Cpu *c) {
@@ -620,6 +702,7 @@ static void probe_main(Cpu *c) {
     test_cv_wake_order(c);
     test_cv_key_order(c);
     test_arbiter(c);
+    test_core_handoff(c);
     test_events(c);
     test_cores(c);
     test_fibers(c);

@@ -46,7 +46,6 @@
 #include "nvn_api.h"
 #include "platform/platform.h"
 
-#define MAIN_BASE 0x7000000000ull
 #define MAIN_SPAN 0x10000000ull
 #define MAX_NODES 512
 #define HSIZE 2048   // power of two, > 2 * watched functions
@@ -91,7 +90,7 @@ static int nfnw;
 static uint32_t h(uint64_t a) { return (uint32_t)((a >> 2) * 0x9E3779B1u) & (HSIZE - 1); }
 
 static void watch(uint64_t fn, int slot) {
-    if (fn < MAIN_BASE || fn >= MAIN_BASE + MAIN_SPAN) return;
+    if (fn < RT_MODULE_BASE || fn >= RT_MODULE_BASE + MAIN_SPAN) return;
     uint32_t i = h(fn);
     while (haddr[i] && haddr[i] != fn) i = (i + 1) & (HSIZE - 1);
     if (!haddr[i]) haddr[i] = fn, hval[i] = (int8_t)slot;
@@ -115,8 +114,19 @@ void seqwatch_init(void) {
     int quick_on = strcmp(quick, "off") != 0;
     if ((!on || !*on || *on == '0') && !quick_on) return;
     const char *path = cfg_get("MKW_SEQ_NODES");
-    if (!path || !*path) path = "build/seq_nodes.tsv";
-    FILE *f = fopen(path, "r");
+    FILE *f = NULL;
+    if (path && *path) {
+        f = fopen(path, "r");
+    } else {
+#ifdef __PROSPERO__
+        path = "/app0/seq_nodes.tsv";
+        f = fopen(path, "r");
+        if (!f) { path = "build/seq_nodes.tsv"; f = fopen(path, "r"); }
+#else
+        path = "build/seq_nodes.tsv";
+        f = fopen(path, "r");
+#endif
+    }
     if (!f) { rt_log("seq: no %s (uv run tools/analisis/seq_nodes.py): watch off", path); return; }
     char line[256];
     while (fgets(line, sizeof line, f) && nnodes < MAX_NODES) {
@@ -124,7 +134,7 @@ void seqwatch_init(void) {
         char name[48];
         if (line[0] == '#' || sscanf(line, "%llx %llx %47s", &getter, &slot, name) != 3) continue;
         Node *n = &nodes[nnodes++];
-        n->slot = MAIN_BASE + slot;
+        n->slot = RT_MODULE_BASE + slot;
         snprintf(n->name, sizeof n->name, "%s", name);
     }
     fclose(f);
@@ -170,12 +180,12 @@ void seqwatch_init(void) {
     for (const char *p = cfg_get("MKW_FN_WATCH"); p && *p && nfnw < FN_MAX;) {
         size_t n = strcspn(p, ",");
         unsigned long long off;
-        if (sscanf(p, "main+%llx", &off) == 1) watch(fnw[nfnw++].addr = MAIN_BASE + off, SLOT_FN);
+        if (sscanf(p, "main+%llx", &off) == 1) watch(fnw[nfnw++].addr = RT_MODULE_BASE + off, SLOT_FN);
         else rt_log("seq: MKW_FN_WATCH: %.*s is not main+<hex>", (int)n, p);
         p += n + (p[n] == ',');
     }
     const char *focus = cfg_get("MKW_UI_FOCUS");
-    if (focus && *focus && *focus != '0') watch(MAIN_BASE + UI_FOCUS_FN, SLOT_FOCUS);
+    if (focus && *focus && *focus != '0') watch(RT_MODULE_BASE + UI_FOCUS_FN, SLOT_FOCUS);
     rt_log("seq: watching %d sequence nodes and %d functions (MKW_SEQ_WATCH, MKW_FN_WATCH)", nnodes, nfnw);
     seq_on = 1;
     rt_fnprof_set(1);
@@ -183,7 +193,7 @@ void seqwatch_init(void) {
 
 // The node whose vtable is v: the name slot sits at the same offset from v in every node class (0x90 in MKW 1.0.0).
 static int node_of(uint64_t v) {
-    if (v < MAIN_BASE || v >= MAIN_BASE + MAIN_SPAN || (v & 7)) return -1;
+    if (v < RT_MODULE_BASE || v >= RT_MODULE_BASE + MAIN_SPAN || (v & 7)) return -1;
     for (int k = 0; k < nnodes; k++) {
         if (name_off >= 0 ? nodes[k].slot == v + (uint64_t)name_off : nodes[k].slot >= v && nodes[k].slot - v < 0x200) {
             if (name_off < 0) name_off = (int64_t)(nodes[k].slot - v);
@@ -257,8 +267,8 @@ void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) {
             int line = __atomic_fetch_add(&fnw[i].lines, 1, __ATOMIC_RELAXED);
             if (line > FN_LINES) return;
             uint64_t v = LD64(x0), fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
-            rt_log("fn: main+%llx obj %#llx vt main+%llx from main+%llx frame %llu%s", (unsigned long long)(addr - MAIN_BASE),
-                   (unsigned long long)x0, (unsigned long long)(v - MAIN_BASE), (unsigned long long)(lr - MAIN_BASE),
+            rt_log("fn: main+%llx obj %#llx vt main+%llx from main+%llx frame %llu%s", (unsigned long long)(addr - RT_MODULE_BASE),
+                   (unsigned long long)x0, (unsigned long long)(v - RT_MODULE_BASE), (unsigned long long)(lr - RT_MODULE_BASE),
                    (unsigned long long)fr, line == FN_LINES ? " (no more lines for it)" : "");
             return;
         }

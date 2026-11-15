@@ -251,6 +251,8 @@ static void crash_handler(const PlatCrash *x) {
         rt_logf("  not on a guest thread\n");
     }
     fflush(stderr);
+    fflush(stdout);
+    if (g_log_file) plat_append_sync(g_log_file);
     plat_exit(71);
 }
 
@@ -294,7 +296,10 @@ static void check_layout(void) {
            (unsigned long long)g->aslr.base, (unsigned long long)g->aslr.size, (unsigned long long)g->stack.base,
            (unsigned long long)g->heap.base, (unsigned long long)g->alias.base, (unsigned long long)g->alias.size,
            (unsigned long long)g->kernel.base, (unsigned long long)g->hostfn.base);
-    CHECK(g->alias.base + g->alias.size <= lay[0].base && g->heap.base + g->heap.size <= g->alias.base,
+    uint64_t stack_heap_end = g->stack_heap.base + g->stack_heap.size;
+    uint64_t alias_end = g->alias.base + g->alias.size;
+    CHECK(stack_heap_end <= lay[0].base && alias_end <= lay[0].base &&
+          (stack_heap_end <= g->alias.base || alias_end <= g->stack_heap.base),
           "guest regions overlap");
 }
 
@@ -348,6 +353,28 @@ static void check_memory(void) {
     RtMemoryInfo q;
     uint64_t heap = 0, v = 0;
     int before = failures;
+    RtRange first = g->stack_heap, second = g->alias;
+    if (first.base > second.base) { first = g->alias; second = g->stack_heap; }
+    CHECK(mem_info(12, &v) && v == first.base, "GetInfo 12 (ASLR base)");
+    CHECK(mem_info(13, &v) && v == RT_ADDRESS_LIMIT - first.base, "GetInfo 13 (ASLR size)");
+    CHECK(mem_info(2, &v) && v == g->alias.base, "GetInfo 2 (alias base)");
+    CHECK(mem_info(3, &v) && v == g->alias.size, "GetInfo 3 (alias size)");
+    CHECK(mem_info(14, &v) && v == g->stack.base, "GetInfo 14 (stack base)");
+    CHECK(mem_info(15, &v) && v == g->stack.size, "GetInfo 15 (stack size)");
+    mem_query(first.base - 0x1000, &q);
+    CHECK(q.state == 0 && q.base == 0 && q.size == first.base, "QueryMemory below ASLR");
+    uint64_t first_end = first.base + first.size;
+    if (first_end < second.base) {
+        mem_query(first_end, &q);
+        CHECK(q.state == 3 && q.perm == 5 && q.base == first_end && q.size == second.base - first_end,
+              "QueryMemory at the start of the gap between reservations");
+        mem_query(second.base - 0x1000, &q);
+        CHECK(q.state == 3 && q.perm == 5 && q.base == first_end && q.size == second.base - first_end,
+              "QueryMemory at the end of the gap between reservations");
+    }
+    mem_query(g->stack_heap.base, &q);
+    CHECK(q.state == 0 && q.base == g->stack_heap.base && q.size == g->heap.base - g->stack_heap.base,
+          "QueryMemory on the first stack/heap page");
     CHECK(mem_set_heap_size(0x400000, &heap) == 0 && heap == g->heap.base, "SetHeapSize 4 MiB");
     memset((void *)(uintptr_t)heap, 0xAB, 0x400000);
     mem_query(heap + 0x1000, &q);
@@ -376,7 +403,7 @@ static void check_memory(void) {
     CHECK(mem_unmap(stack, a, 0x4000) == 0 && LD64(a + 0x10) == 0x5678, "UnmapMemory did not copy the stack back");
 
     CHECK(mem_unmap_physical(a - 0x4000, 0x20000) == 0, "UnmapPhysicalMemory");
-    mem_query(a, &q);
+    mem_query(g->alias.base + g->alias.size - 0x1000, &q);
     CHECK(q.state == 0 && q.base == g->alias.base && q.size == g->alias.size, "QueryMemory on the free alias region");
     CHECK(mem_map_physical(a, 0x1000) == 0 && LD64(a + 0x10) == 0 && mem_unmap_physical(a, 0x1000) == 0,
           "remapped physical memory is not zeroed");
@@ -485,7 +512,31 @@ static void portable_paths(RtConfig *c) {
 // build/mkw with --launcher. --play, MKW_NO_LAUNCHER=1 or any other mode skip it; Play runs the process again with
 // MKW_LAUNCHED=1, so the game claims its address space in a fresh process (and on Windows the window's libraries are
 // gone).
+#ifdef MKW_PS5_LOADER_ONLY
+#include "platform/ps5_guest_memory.h"
+
+// From the pinned MIT PS5 Vulkan Template platform interface. The title
+// links the upstream implementation and starts with its console log sink.
+extern void platform_init(const char *title_name);
+
+int main(void) {
+    platform_init("Mario Kart World PS5");
+    cfg = (RtConfig){.exefs = rt_default_exefs, .romfs = rt_default_romfs};
+    mem_init();
+    ldr_load(cfg.exefs);
+    rt_log("PS5 loader: verified, relocated and sealed %d modules", ldr_count());
+    if (!ps5_guest_memory_shutdown()) {
+        rt_log("PS5 loader: guest memory cleanup failed");
+        return 1;
+    }
+    return 0;
+}
+#else
 static int want_launcher(int argc, char **argv) {
+#ifdef MKW_PS5_NATIVE
+    (void)argc; (void)argv;
+    return 0;
+#else
     const char *done = getenv("MKW_LAUNCHED"), *off = getenv("MKW_NO_LAUNCHER");
     if ((done && *done) || (off && !strcmp(off, "1"))) return 0;
     int asked = 0;
@@ -495,17 +546,26 @@ static int want_launcher(int argc, char **argv) {
         else return 0;   // --play, a mode, --seconds: straight in
     }
     return asked || !rt_game_builtin();
+#endif
 }
 
+#ifdef MKW_PS5_NATIVE
+extern void platform_init(const char *title_name);
+#else
 static int run_launcher(void) {
     cfg_init();   // mkw.ini: the settings pages read and write it
     if (launcher_run() != LAUNCHER_PLAY) return 0;
     plat_setenv("MKW_LAUNCHED", "1");
     plat_reexec();
 }
+#endif
 
 int main(int argc, char **argv) {
+#ifdef MKW_PS5_NATIVE
+    platform_init("Mario Kart World PS5");
+#else
     if (want_launcher(argc, argv)) return run_launcher();
+#endif
 #ifdef __linux__
     // MKW_ALLOW_PTRACE=1: let a debugger attach (tools/run/stacks.py) under yama ptrace_scope 1, without root.
     const char *pt = getenv("MKW_ALLOW_PTRACE");
@@ -584,3 +644,4 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--boot")) { cfg.boot = 1; rt_boot(); return 0; }
     return usage(argv[0]);
 }
+#endif

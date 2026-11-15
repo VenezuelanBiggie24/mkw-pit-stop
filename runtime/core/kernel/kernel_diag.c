@@ -35,6 +35,51 @@ typedef struct { int st; uint32_t waker; uint64_t obj, ns; } WaitRec;
 static WaitRec g_rw[RW_N], g_mw[RW_N];                   // the render and main thread's waits by object and waker
 uint64_t g_pre_req, g_pre_n, g_pre_ns, g_pre_max, g_pre_stale;  // preempt requests; releases after one and their latency
 uint64_t g_sync_calls, g_sync_blocks;              // WaitSynchronization calls and the blocks inside them
+uint64_t g_cw_ns[DG_N], g_cw_n[DG_N];              // core wait duration and count per DG_* class (MKW_TRACE=sched)
+
+static void ho_accum(struct AddrHoRec *s, uint64_t host_ns, uint64_t glock_ns, uint64_t cwait_ns,
+                     uint64_t cgrant_ns, uint64_t post_ns, uint64_t tot_ns, int kind, int timed_out) {
+    if (timed_out) {
+        __atomic_fetch_add(&s->to_n, 1, __ATOMIC_RELAXED);
+        return;
+    }
+    __atomic_fetch_add(&s->n, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&s->host_ns, host_ns, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&s->glock_ns, glock_ns, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&s->cwait_ns, cwait_ns, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&s->cgrant_ns, cgrant_ns, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&s->post_ns, post_ns, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&s->tot_ns, tot_ns, __ATOMIC_RELAXED);
+    if ((unsigned)kind < HO_KIND_N) __atomic_fetch_add(&s->k[kind], 1, __ATOMIC_RELAXED);
+    uint64_t mx = __atomic_load_n(&s->max_ns, __ATOMIC_RELAXED);
+    while (tot_ns > mx &&
+           !__atomic_compare_exchange_n(&s->max_ns, &mx, tot_ns, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        ;
+}
+
+void ho_note_addr(RtThread *t, uint64_t addr, uint32_t waker, uint64_t host_ns, uint64_t glock_ns,
+                  uint64_t cwait_ns, uint64_t cgrant_ns, uint64_t post_ns, uint64_t tot_ns,
+                  int kind, int timed_out) {
+    ho_accum(&t->ho_tot, host_ns, glock_ns, cwait_ns, cgrant_ns, post_ns, tot_ns, kind, timed_out);
+    struct AddrHoRec *slot = NULL;
+    for (int i = 0; i < HO_SLOTS; i++) {
+        uint64_t sa = __atomic_load_n(&t->ho_slots[i].addr, __ATOMIC_ACQUIRE);
+        if (!sa) {
+            __atomic_store_n(&t->ho_slots[i].waker, waker, __ATOMIC_RELAXED);
+            __atomic_store_n(&t->ho_slots[i].addr, addr, __ATOMIC_RELEASE);
+            slot = &t->ho_slots[i];
+            break;
+        }
+        if (sa == addr && (!waker || !t->ho_slots[i].waker || t->ho_slots[i].waker == waker)) {
+            if (waker && !t->ho_slots[i].waker)
+                __atomic_store_n(&t->ho_slots[i].waker, waker, __ATOMIC_RELAXED);
+            slot = &t->ho_slots[i];
+            break;
+        }
+    }
+    if (!slot) slot = &t->ho_slots[HO_SLOTS - 1];
+    ho_accum(slot, host_ns, glock_ns, cwait_ns, cgrant_ns, post_ns, tot_ns, kind, timed_out);
+}
 
 static void wait_add(WaitRec *w, int st, uint64_t obj, uint32_t waker, uint64_t ns) {
     for (int i = 0; i < RW_N; i++)
@@ -317,16 +362,87 @@ static void crit_frame(RtThread *self, uint64_t frame) {
            (unsigned long long)g_crit_hi, g_crit_n >= CRIT_N ? " (buffer full: the last frames are incomplete)" : "");
 }
 
+static void ho_take(struct AddrHoRec *dst, struct AddrHoRec *src) {
+    memset(dst, 0, sizeof *dst);
+    dst->addr = __atomic_load_n(&src->addr, __ATOMIC_ACQUIRE);
+    dst->waker = __atomic_load_n(&src->waker, __ATOMIC_RELAXED);
+    dst->n = __atomic_exchange_n(&src->n, 0, __ATOMIC_RELAXED);
+    dst->to_n = __atomic_exchange_n(&src->to_n, 0, __ATOMIC_RELAXED);
+    dst->tot_ns = __atomic_exchange_n(&src->tot_ns, 0, __ATOMIC_RELAXED);
+    dst->host_ns = __atomic_exchange_n(&src->host_ns, 0, __ATOMIC_RELAXED);
+    dst->glock_ns = __atomic_exchange_n(&src->glock_ns, 0, __ATOMIC_RELAXED);
+    dst->cwait_ns = __atomic_exchange_n(&src->cwait_ns, 0, __ATOMIC_RELAXED);
+    dst->cgrant_ns = __atomic_exchange_n(&src->cgrant_ns, 0, __ATOMIC_RELAXED);
+    dst->post_ns = __atomic_exchange_n(&src->post_ns, 0, __ATOMIC_RELAXED);
+    dst->max_ns = __atomic_exchange_n(&src->max_ns, 0, __ATOMIC_RELAXED);
+    for (int i = 0; i < HO_KIND_N; i++) dst->k[i] = __atomic_exchange_n(&src->k[i], 0, __ATOMIC_RELAXED);
+}
+
+static void ho_add(struct AddrHoRec *dst, const struct AddrHoRec *src) {
+    dst->n += src->n;
+    dst->to_n += src->to_n;
+    dst->tot_ns += src->tot_ns;
+    dst->host_ns += src->host_ns;
+    dst->glock_ns += src->glock_ns;
+    dst->cwait_ns += src->cwait_ns;
+    dst->cgrant_ns += src->cgrant_ns;
+    dst->post_ns += src->post_ns;
+    if (src->max_ns > dst->max_ns) dst->max_ns = src->max_ns;
+    for (int i = 0; i < HO_KIND_N; i++) dst->k[i] += src->k[i];
+}
+
+static void ho_fmt(char *b, size_t sz, const struct AddrHoRec *h) {
+    double n = h->n ? (double)h->n : 1.0;
+    snprintf(b, sz,
+             "addr handoff %llu (max %.0f us, to %llu): host %.1f + glock %.1f + cwait %.1f + cgrant %.1f + post %.1f = "
+             "%.1f us [uncont %llu free %llu direct %llu spin %llu gate %llu pre %llu]",
+             (unsigned long long)h->n, h->max_ns / 1e3, (unsigned long long)h->to_n,
+             h->host_ns / 1e3 / n, h->glock_ns / 1e3 / n, h->cwait_ns / 1e3 / n,
+             h->cgrant_ns / 1e3 / n, h->post_ns / 1e3 / n, h->tot_ns / 1e3 / n,
+             (unsigned long long)h->k[HO_UNCONT], (unsigned long long)h->k[HO_FREE],
+             (unsigned long long)h->k[HO_DIRECT], (unsigned long long)h->k[HO_SPIN],
+             (unsigned long long)h->k[HO_GATE], (unsigned long long)h->k[HO_PREEMPT]);
+}
+
+static void sched_reset_win(RtThread *self, int clear_ho) {
+    memset(g_cw_ns, 0, sizeof g_cw_ns);
+    memset(g_cw_n, 0, sizeof g_cw_n);
+    for (RtThread *t = g_all; t; t = t->all) {
+        memset(t->st_ns, 0, sizeof t->st_ns);
+        t->nblk = t->npre = 0;
+        t->lw_ns = t->lw_n = t->lw_max = t->lg_ns = t->lg_n = t->lg_max = t->sl_n = t->sl_req = t->sl_act = 0;
+        t->sp_n = t->sp_ho = 0;   // racy against the thread's own increments: a few passes may be lost
+        if (clear_ho || (t != self && t != g_main)) {
+            struct AddrHoRec sink;
+            if (t->ho_tot.n || t->ho_tot.to_n) ho_take(&sink, &t->ho_tot);
+            for (int s = 0; s < HO_SLOTS && t->ho_slots[s].addr; s++)
+                if (t->ho_slots[s].n || t->ho_slots[s].to_n) ho_take(&sink, &t->ho_slots[s]);
+        }
+    }
+    memset(g_rw, 0, sizeof g_rw);
+    memset(g_mw, 0, sizeof g_mw);
+    g_pre_req = g_pre_n = g_pre_ns = g_pre_max = g_pre_stale = 0;
+    g_sync_calls = g_sync_blocks = 0;
+}
+
+static void sched_emit_line(const char *line) { rt_log("sched: os-thread: %s", line); }
+
 void kern_sched_report(uint64_t frame) {
     static uint64_t last;
+    static int os_logged;
     typedef struct {
-        uint32_t h;
-        int prio, render;
-        uint64_t mask, entry, ns[S_N], nblk, npre, cpu, lw_ns, lw_n, lw_max, lg_ns, lg_n, lg_max, sl_n, sl_req, sl_act;
+        RtThread *thr;
+        uint32_t h, tid;
+        int prio, render, is_main;
+        uint64_t mask, entry, ns[S_N], nblk, npre, lw_ns, lw_n, lw_max, lg_ns, lg_n, lg_max, sl_n, sl_req, sl_act;
         uint64_t sp_n, sp_ho, sp_site;
+        uint64_t cpu, cpu_last, cpu_last_at, cpu_last_frame, cpu_cur, cpu_dt, cpu_df;
+        struct AddrHoRec ho;
     } Row;
-    Row rows[REP_N + 1];
+    Row rows[REP_N + 1] = {0};
     WaitRec rw[2][4] = {0};   // the render and the main thread's longest waits
+    struct AddrHoRec rwh[2][4] = {0};
+    uint64_t waker_entry[2][4] = {0};
     int nr = 0;
     RtThread *self = tcur;
     lock();
@@ -335,6 +451,11 @@ void kern_sched_report(uint64_t frame) {
         memset(g_rw, 0, sizeof g_rw);
     }
     crit_frame(self, frame);
+    if (!last) {
+        last = kern_now_ns();
+        for (RtThread *t = g_all; t; t = t->all) acct(t, t->st);
+        sched_reset_win(self, 1);
+    }
     if (frame % 120) {
         unlock();
         return;
@@ -365,9 +486,12 @@ void kern_sched_report(uint64_t frame) {
     for (int i = 0; i <= REP_N && top[i]; i++) {
         RtThread *t = top[i];
         Row *r = &rows[nr++];
+        r->thr = t;
         r->h = t->handle;
+        r->tid = t->tid;
         r->prio = t->prio;
         r->render = t == self;
+        r->is_main = t->is_main;
         r->mask = t->mask;
         r->entry = t->entry;
         memcpy(r->ns, t->st_ns, sizeof r->ns);
@@ -377,12 +501,10 @@ void kern_sched_report(uint64_t frame) {
         r->lg_ns = t->lg_ns, r->lg_n = t->lg_n, r->lg_max = t->lg_max;
         r->sl_n = t->sl_n, r->sl_req = t->sl_req, r->sl_act = t->sl_act;
         r->sp_n = t->sp_n, r->sp_ho = t->sp_ho, r->sp_site = t->sp_site;
-        r->cpu = 0;
-        uint64_t c = t->tid ? plat_thread_cpu_ns(t->tid) : 0;
-        if (c) {
-            r->cpu = t->cpu_last ? c - t->cpu_last : 0;
-            t->cpu_last = c;
-        }
+        r->cpu_last = t->cpu_last;
+        r->cpu_last_at = t->cpu_last_at;
+        r->cpu_last_frame = t->cpu_last_frame;
+        ho_take(&r->ho, &t->ho_tot);
     }
     for (int k = 0; k < 2; k++) {
         const WaitRec *src = k ? g_mw : g_rw;
@@ -393,24 +515,72 @@ void kern_sched_report(uint64_t frame) {
                     rw[k][j] = src[i];
                     break;
                 }
+        for (int j = 0; j < 4 && rw[k][j].ns; j++)
+            if (rw[k][j].waker)
+                for (RtThread *t = g_all; t; t = t->all)
+                    if (t->handle == rw[k][j].waker) { waker_entry[k][j] = t->entry; break; }
     }
+    for (int k = 0; k < 2; k++) {
+        RtThread *wt = k ? g_main : self;
+        if (!wt) continue;
+        for (int s = 0; s < HO_SLOTS; s++) {
+            uint64_t sa = __atomic_load_n(&wt->ho_slots[s].addr, __ATOMIC_ACQUIRE);
+            if (!sa) break;
+            struct AddrHoRec tmp;
+            ho_take(&tmp, &wt->ho_slots[s]);
+            for (int j = 0; j < 4 && rw[k][j].ns; j++) {
+                if (rw[k][j].st == S_ADDR && rw[k][j].obj == sa &&
+                    (!rw[k][j].waker || !tmp.waker || tmp.waker == rw[k][j].waker)) {
+                    ho_add(&rwh[k][j], &tmp);
+                    break;
+                }
+            }
+        }
+    }
+    uint64_t cw_ns[DG_N], cw_n[DG_N];
+    memcpy(cw_ns, g_cw_ns, sizeof cw_ns);
+    memcpy(cw_n, g_cw_n, sizeof cw_n);
     uint64_t pre_stale = g_pre_stale, pre_req = g_pre_req, pre_n = g_pre_n, pre_ns = g_pre_ns, pre_max = g_pre_max;
     uint64_t sc = g_sync_calls, sb = g_sync_blocks;
-    for (RtThread *t = g_all; t; t = t->all) {
-        memset(t->st_ns, 0, sizeof t->st_ns);
-        t->nblk = t->npre = 0;
-        t->lw_ns = t->lw_n = t->lw_max = t->lg_ns = t->lg_n = t->lg_max = t->sl_n = t->sl_req = t->sl_act = 0;
-        t->sp_n = t->sp_ho = 0;   // racy against the thread's own increments: a few passes may be lost
+    sched_reset_win(self, 0);
+    unlock();
+    // Sample host per-thread CPU time outside G (on PS5 sigsample waits for SIGPROF handler).
+    for (int i = 0; i < nr; i++) {
+        Row *r = &rows[i];
+        if (!r->tid) continue;
+        uint64_t sample_at = kern_now_ns();
+        uint64_t c = plat_thread_cpu_ns(r->tid);
+        if (c) {
+            r->cpu_dt = r->cpu_last_at && sample_at > r->cpu_last_at ? sample_at - r->cpu_last_at : 0;
+            r->cpu_df = r->cpu_last_at && frame > r->cpu_last_frame ? frame - r->cpu_last_frame : 0;
+            r->cpu = (r->cpu_last_at && c >= r->cpu_last) ? c - r->cpu_last : 0;
+            r->cpu_cur = c;
+            r->cpu_last_at = sample_at;
+        }
     }
-    memset(g_rw, 0, sizeof g_rw);
-    memset(g_mw, 0, sizeof g_mw);
-    g_pre_req = g_pre_n = g_pre_ns = g_pre_max = g_pre_stale = 0;
-    g_sync_calls = g_sync_blocks = 0;
+    lock();
+    for (int i = 0; i < nr; i++) {
+        if (!rows[i].cpu_cur) continue;
+        for (RtThread *t = g_all; t; t = t->all)
+            if (t == rows[i].thr && t->handle == rows[i].h) {
+                t->cpu_last = rows[i].cpu_cur;
+                t->cpu_last_at = rows[i].cpu_last_at;
+                t->cpu_last_frame = frame;
+                break;
+            }
+    }
     unlock();
     if (!span) return;
-    rt_log("sched: frame %llu: %.2f s, cores busy %.2f of %d, core wait %.2f thread-s, preempt req %llu released %llu "
+    uint64_t cw_tot_n = cw_n[0] + cw_n[1] + cw_n[2] + cw_n[3];
+    char cwb[160] = "";
+    if (cw_tot_n)
+        snprintf(cwb, sizeof cwb, "; core wait by game %.2f (%llu) host %.2f (%llu) eq %.2f (%llu) nocore %.2f (%llu) s",
+                 cw_ns[DG_GAME] / 1e9, (unsigned long long)cw_n[DG_GAME], cw_ns[DG_HOST] / 1e9,
+                 (unsigned long long)cw_n[DG_HOST], cw_ns[DG_EQ] / 1e9, (unsigned long long)cw_n[DG_EQ],
+                 cw_ns[DG_NOCORE] / 1e9, (unsigned long long)cw_n[DG_NOCORE]);
+    rt_log("sched: frame %llu: %.2f s, cores busy %.2f of %d, core wait %.2f thread-s%s, preempt req %llu released %llu "
            "avg %.2f ms max %.2f ms, WaitSynchronization %llu calls %llu blocks, stale preempt %llu%s",
-           (unsigned long long)frame, span / 1e9, (double)all_run / span, NCORE, all_core / 1e9,
+           (unsigned long long)frame, span / 1e9, (double)all_run / span, NCORE, all_core / 1e9, cwb,
            (unsigned long long)pre_req, (unsigned long long)pre_n, pre_n ? pre_ns / 1e6 / pre_n : 0.0, pre_max / 1e6,
            (unsigned long long)sc, (unsigned long long)sb, (unsigned long long)pre_stale, self ? "" : " (render thread is not a guest thread)");
     for (int i = 0; i < nr; i++) {
@@ -420,14 +590,22 @@ void kern_sched_report(uint64_t frame) {
         for (int k = S_RUN; k < S_N; k++)
             o += snprintf(s + o, sizeof s - o, " %s %.0f%%", s_name[k], 100.0 * r->ns[k] / span);
         ldr_describe(r->entry, d, sizeof d);
-        rt_log("sched: %s%#x p%d m%llx%s cpu %.0f%% blocks %llu preempted %llu (%s)", r->render ? "render " : "",
-               r->h, r->prio, (unsigned long long)r->mask, s, 100.0 * r->cpu / span, (unsigned long long)r->nblk,
-               (unsigned long long)r->npre, r->entry ? d : "main");
+        double cpu_pct = r->cpu_dt ? 100.0 * r->cpu / r->cpu_dt : 0.0;
+        double cpu_msf = r->cpu_df ? r->cpu / 1e6 / r->cpu_df : 0.0;
+        rt_log("sched: %s%s%#x p%d m%llx%s cpu %.0f%% (%.2f ms/f) blocks %llu preempted %llu (%s)",
+               r->render ? "render " : "", r->is_main ? "main " : "",
+               r->h, r->prio, (unsigned long long)r->mask, s, cpu_pct, cpu_msf,
+               (unsigned long long)r->nblk, (unsigned long long)r->npre, r->entry ? d : "main");
         rt_log("sched:   %#x wake to run avg %.1f us max %.0f us (%llu), core grant to run avg %.1f us max %.0f us "
                "(%llu), sleep %llu asked avg %.1f us took avg %.1f us", r->h, r->lw_n ? r->lw_ns / 1e3 / r->lw_n : 0.0,
                r->lw_max / 1e3, (unsigned long long)r->lw_n, r->lg_n ? r->lg_ns / 1e3 / r->lg_n : 0.0, r->lg_max / 1e3,
                (unsigned long long)r->lg_n, (unsigned long long)r->sl_n, r->sl_n ? r->sl_req / 1e3 / r->sl_n : 0.0,
                r->sl_n ? r->sl_act / 1e3 / r->sl_n : 0.0);
+        if (r->ho.n || r->ho.to_n) {
+            char hb[256];
+            ho_fmt(hb, sizeof hb, &r->ho);
+            rt_log("sched:   %#x %s", r->h, hb);
+        }
         if (r->sp_n) {
             ldr_describe(r->sp_site, d, sizeof d);
             rt_log("sched:   %#x spin wait passes %llu, core handoffs %llu, last at %s", r->h,
@@ -436,9 +614,74 @@ void kern_sched_report(uint64_t frame) {
     }
     for (int k = 0; k < 2; k++)
         for (int j = 0; j < 4 && rw[k][j].ns; j++) {
-            char by[32] = "";
-            if (rw[k][j].waker) snprintf(by, sizeof by, ", woken by %#x", rw[k][j].waker);
-            rt_log("sched: %s wait %d: %s on %s%#llx%s: %.1f%%", k ? "main" : "render", j + 1, s_name[rw[k][j].st],
-                   rw[k][j].st == S_HOST ? "exe+" : "", (unsigned long long)rw[k][j].obj, by, 100.0 * rw[k][j].ns / span);
+            char by[160] = "", wd[128];
+            if (rw[k][j].waker) {
+                if (waker_entry[k][j]) {
+                    ldr_describe(waker_entry[k][j], wd, sizeof wd);
+                    snprintf(by, sizeof by, ", woken by %#x (%s)", rw[k][j].waker, wd);
+                } else {
+                    snprintf(by, sizeof by, ", woken by %#x", rw[k][j].waker);
+                }
+            }
+            rt_log("sched: %s wait %d: %s on %s%#llx%s: %.1f%% (%.2f ms/f)", k ? "main" : "render", j + 1, s_name[rw[k][j].st],
+                   rw[k][j].st == S_HOST ? "exe+" : "", (unsigned long long)rw[k][j].obj, by,
+                   100.0 * rw[k][j].ns / span, rw[k][j].ns / 1e6 / 120.0);
+            if (rwh[k][j].n || rwh[k][j].to_n) {
+                char hb[256];
+                ho_fmt(hb, sizeof hb, &rwh[k][j]);
+                rt_log("sched:   %s wait %d %s", k ? "main" : "render", j + 1, hb);
+            }
         }
+    static const char *const host_names[] = {
+        "vk replay", "vk present", "vk shadow", "vk chunks", "vk headroom", "vk tex pool", "pipe lib", "pipe autosave",
+    };
+    enum { NH = sizeof host_names / sizeof *host_names };
+    static int64_t host_prev[NH];
+    char hbuf[384];
+    int ho = 0;
+    for (int i = 0; i < (int)NH; i++) {
+        int64_t c = plat_threads_cpu_ns_named(host_names[i]);
+        if (c >= 0) {
+            int64_t d = host_prev[i] ? c - host_prev[i] : 0;
+            host_prev[i] = c;
+            ho += snprintf(hbuf + ho, sizeof hbuf - ho, "%s%s %.2f ms/f", ho ? ", " : "", host_names[i], d / 1e6 / 120.0);
+        }
+    }
+    if (ho) rt_log("sched: host threads: %s", hbuf);
+    // MKW_THREAD_CPU_CHECK=1: the same times read on each thread through a signal (sigsample.c, the PS5's way), next
+    // to the OS's own (Linux: /proc), to check that way where both exist.
+    static int check = -1;
+    if (check < 0) check = cfg_get("MKW_THREAD_CPU_CHECK") != NULL;
+    if (check) {
+        static int64_t sig_prev[NH];
+        ho = 0;
+        for (int i = 0; i < (int)NH; i++) {
+            int64_t c = plat_sample_cpu_named(host_names[i]);
+            if (c >= 0) {
+                int64_t d = sig_prev[i] ? c - sig_prev[i] : 0;
+                sig_prev[i] = c;
+                ho += snprintf(hbuf + ho, sizeof hbuf - ho, "%s%s %.2f ms/f", ho ? ", " : "", host_names[i], d / 1e6 / 120.0);
+            }
+        }
+        if (ho) rt_log("sched: host threads (signal): %s", hbuf);
+    }
+    if (!os_logged) {
+        os_logged = 1;
+        plat_threads_log(sched_emit_line);
+        // The guest's threads on the OS's (join on tid with the os-thread lines): guest priority and core mask.
+        enum { GT = 96 };
+        struct { uint32_t h, tid; int prio; uint64_t mask, entry; } gt[GT];
+        int ng = 0;
+        lock();
+        for (RtThread *t = g_all; t && ng < GT; t = t->all)
+            gt[ng].h = t->handle, gt[ng].tid = t->tid, gt[ng].prio = t->prio, gt[ng].mask = t->mask,
+            gt[ng].entry = t->entry, ng++;
+        unlock();
+        for (int i = 0; i < ng; i++) {
+            char d[128];
+            ldr_describe(gt[i].entry, d, sizeof d);
+            rt_log("sched: guest-thread: handle %#x tid=%u guest prio %d guest mask %#llx (%s)", gt[i].h, gt[i].tid,
+                   gt[i].prio, (unsigned long long)gt[i].mask, gt[i].entry ? d : "main");
+        }
+    }
 }

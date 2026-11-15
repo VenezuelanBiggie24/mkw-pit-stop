@@ -10,3 +10,8 @@ extern volatile uint32_t prof_replay_tid;   // the asynchronous replay (perf_rep
 int prof_sampler_start(void);               // MKW_PROFILE: starts sampling; 1 when it runs
 void prof_sampler_write(void);              // writes the profile once (prof_write)
 void prof_sampler_frame(uint64_t frame, uint64_t now, uint64_t d);   // every present; d: the interval, 0 on the first
+// Names of host code addresses (prof_posix.c; perf.c's weak versions print exe+0x...): a lifted function as the guest's
+// main+0x... (symbol+off), a host function by its symbol. prof_names_init builds the tables once (not in a signal
+// handler); prof_pc_describe only reads them.
+void prof_names_init(void);
+const char *prof_pc_describe(uint64_t pc, char *buf, int n);

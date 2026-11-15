@@ -20,15 +20,11 @@
 
 #define PAGE 0x1000ull
 #define GiB (1ull << 30)
-#define LOW_SEARCH_FROM 0x100000000ull
-#define LOW_SIZE (14 * GiB)        // stack + heap block: the heap of a Switch 2 title nears 8 GiB
 #define STACK_OFF 0x10000000ull
 #define STACK_SIZE 0x10000000ull
 #define HEAP_OFF (STACK_OFF + STACK_SIZE + 0x10000000ull)
 #define HEAP_CAP (12 * GiB)
-#define ALIAS_SIZE (64 * GiB)
-#define ALIAS_ALIGN (4 * GiB)
-#define ALIAS_PAGES (ALIAS_SIZE / PAGE)
+#define ALIAS_PAGES (RT_ALIAS_SIZE / PAGE)
 // Application pool of a 12 GB Switch 2: 9809 MiB, as eden-nx2 sets it (k_system_control.cpp, MemoryArrangement_12GB;
 // not measured on a console). MKW's nninitStartup sizes its heap as pool - used - 0x60400000 (main+0xc388c8).
 #define DEFAULT_POOL (9809ull << 20)
@@ -77,12 +73,14 @@ static volatile uint8_t frz[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
 static uint32_t thaw_ms[RT_ADDRESS_LIMIT >> FRZ_SHIFT];   // frz_lock: GetTickCount of the last thaw request, 0 never
 static volatile int32_t nfrz;
 PlatMutex frz_lock = PLAT_MUTEX_INIT;   // memory_int.h
+_Thread_local int frz_held;           // memory_int.h
 static volatile int64_t frz_count[4];   // freezes; thaws by a write fault, by mem_thaw, by a mapping change
 
 int watched(uint64_t addr, uint64_t size) {   // memory_int.h
     const RtGuestLayout *g = &L;
-    return (addr >= g->aslr.base && size <= LOW_SIZE && addr - g->aslr.base <= LOW_SIZE - size) ||
-           (addr >= g->alias.base && size <= ALIAS_SIZE && addr - g->alias.base <= ALIAS_SIZE - size);
+    return (addr >= g->stack_heap.base && size <= g->stack_heap.size &&
+            addr - g->stack_heap.base <= g->stack_heap.size - size) ||
+           (addr >= g->alias.base && size <= g->alias.size && addr - g->alias.base <= g->alias.size - size);
 }
 
 // frz_lock held exclusively. why: 1 a write fault, 2 mem_thaw (holds the region thawed), 3 a mapping change here.
@@ -116,10 +114,12 @@ static void thaw_range_locked(uint64_t a, uint64_t n, int why) {
 }
 
 void mem_thaw(uint64_t a, uint64_t n) {
-    plat_mutex_lock(&frz_lock);   // also when nothing is frozen: the hold keeps a read's buffer writable
+    frz_take();   // also when nothing is frozen: the hold keeps a read's buffer writable
     thaw_range_locked(a, n, 2);
-    plat_mutex_unlock(&frz_lock);
+    frz_drop();
 }
+
+static void thaw_for_kernel(uint64_t a, size_t n) { if (watched(a, n)) mem_thaw(a, n); }   // plat_mem_thaw_hook
 
 // frz_lock held exclusively. Makes the committed pages of region r read-only when every one of them is read-write;
 // reserved holes (heap pages given back) stay as they are, and thaw_locked finds the read-only runs again.
@@ -145,7 +145,7 @@ int mem_freeze(uint64_t a) {
     if ((a & (FRZ_SIZE - 1)) || !watched(a, FRZ_SIZE)) return 0;
     uint64_t r = a >> FRZ_SHIFT;
     int ok = 0;
-    plat_mutex_lock(&frz_lock);
+    frz_take();
     if (frz[r]) ok = 1;
     else if (thaw_ms[r] && (int32_t)((uint32_t)plat_now_ms() - thaw_ms[r]) < (int32_t)FRZ_HOLD_MS) ok = 0;   // |1 may be ahead
     else if (freeze_locked(r)) {
@@ -154,7 +154,7 @@ int mem_freeze(uint64_t a) {
         plat_inc64(&frz_count[0]);
         ok = 1;
     }
-    plat_mutex_unlock(&frz_lock);
+    frz_drop();
     return ok;
 }
 
@@ -199,18 +199,34 @@ static void fill_locked(uint64_t a, int why) {
 
 static void untrap_range_locked(uint64_t a, uint64_t n) {
     if (!ntrapped && !mem_early_pages && !mem_base_pages()) return;
+    if (mem_early_pages) {
+        size_t ep = plat_mem_early_page_size();
+        uint64_t elo = a & ~(uint64_t)(ep - 1);
+        uint64_t ehi = (a + n + ep - 1) & ~(uint64_t)(ep - 1);
+        if (ehi > RT_ADDRESS_LIMIT) ehi = RT_ADDRESS_LIMIT;
+        for (uint64_t p = elo; p < ehi && mem_early_pages; p += PAGE)
+            if (trapped[p / PAGE] == 2) mem_early_release_locked(p, 0);
+    }
     uint64_t end = a + n < RT_ADDRESS_LIMIT ? a + n : RT_ADDRESS_LIMIT;
-    for (uint64_t p = a & ~(PAGE - 1); p < end && (ntrapped || mem_early_pages || mem_base_pages()); p += PAGE)
-        if (trapped[p / PAGE] == 2) mem_early_release_locked(p, 0);
-        else if (trapped[p / PAGE] == 3) mem_base_fill_locked(p);
-        else if (trapped[p / PAGE]) fill_locked(p, 2);
+    for (uint64_t p = a & ~(PAGE - 1); p < end && (ntrapped || mem_base_pages()); p += PAGE)
+        if (trapped[p / PAGE] == 3) mem_base_fill_locked(p);
+        else if (trapped[p / PAGE] == 1) fill_locked(p, 2);
+}
+
+int mem_trapped_init(void) {
+    if (!trapped) {
+        uint8_t *t = plat_mem_alloc(RT_ADDRESS_LIMIT / PAGE);
+        uint8_t *expected = NULL;
+        if (t && !__atomic_compare_exchange_n(&trapped, &expected, t, 0, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+            ; // another thread set it
+    }
+    return trapped != NULL;
 }
 
 int mem_trap_init(void) {   // memory_int.h
     if (trap_ok < 0) {
         uint8_t probe;
-        trapped = plat_mem_alloc(RT_ADDRESS_LIMIT / PAGE);
-        trap_ok = trapped && plat_mem_poke((uint64_t)(uintptr_t)&probe, &probe, 1);
+        trap_ok = mem_trapped_init() && plat_mem_poke((uint64_t)(uintptr_t)&probe, &probe, 1);
         rt_log("mem: read traps %s", trap_ok ? "on: GPU writes reach guest memory when the game touches them"
                                              : "unavailable: GPU writes are copied back at the fence");
     }
@@ -222,7 +238,7 @@ int mem_trap(uint64_t a, uint64_t n, const void *src) {
     if (!mem_trap_init()) return 0;
     const uint8_t *s = src;
     uint64_t lo = (a + PAGE - 1) & ~(PAGE - 1), hi = (a + n) & ~(PAGE - 1);
-    plat_mutex_lock(&frz_lock);
+    frz_take();
     // No region over the range stays frozen. Pages still trapped from an earlier fence stay so: their source is the same
     // shadow bytes (one live shadow per guest page), and filling them again at each fence copied it all back anyway
     // (rt-a1: 1 727 of 1 739 MiB trapped were filled that way).
@@ -279,19 +295,19 @@ int mem_trap(uint64_t a, uint64_t n, const void *src) {
             tsrc[ntsrc++] = (TrapSrc){lo, hi, s + (lo - a)};
         }
     }
-    plat_mutex_unlock(&frz_lock);
+    frz_drop();
     if (!ok) rt_fatal("memory: copying %#llx+%#llx back failed", (unsigned long long)a, (unsigned long long)n);
     return 1;
 }
 
 void mem_untrap(uint64_t a, uint64_t n) {
     if (trap_ok <= 0 || !n) return;
-    plat_mutex_lock(&frz_lock);
+    frz_take();
     untrap_range_locked(a, n);
     for (int i = 0; i < ntsrc;)   // sources inside the range go, and those no trapped page needs any more
         if (tsrc[i].lo >= a && tsrc[i].hi <= a + n) tsrc[i] = tsrc[--ntsrc];
         else i++;
-    plat_mutex_unlock(&frz_lock);
+    frz_drop();
 }
 
 int mem_trapped(uint64_t a) { return trapped && a < RT_ADDRESS_LIMIT && __atomic_load_n(&trapped[a / PAGE], __ATOMIC_RELAXED) == 1; }
@@ -306,59 +322,93 @@ void mem_trap_stats(uint64_t *now, uint64_t *trapped_pages, uint64_t *access_fil
 // The first write into a frozen region thaws it and retries. A fault in a region another thread thawed meanwhile
 // retries too; an access to a trapped page fills it and retries; any other fault goes on to the crash handler.
 // The platform's fault hook (plat_mem_fault_hook): 1 retries the access.
+#ifndef MKW_PS5_LOADER_ONLY
 static int thaw_fault(uint64_t a) {
     if (a >= RT_ADDRESS_LIMIT || !watched(a, 1)) return 0;
-    if (trapped && __atomic_load_n(&trapped[a / PAGE], __ATOMIC_RELAXED)) {
-        uint64_t wait = 0;   // MKW_EARLY_READ=2: the submit an early read waits for
-        plat_mutex_lock(&frz_lock);
-        if (trapped[a / PAGE] == 2) wait = mem_early_release_locked(a, 1);   // the byte touched
-        else if (trapped[a / PAGE] == 3) mem_base_fill_locked(a);            // a write into a base's page
-        else if (trapped[a / PAGE]) fill_locked(a, 1);
-        plat_mutex_unlock(&frz_lock);
-        if (wait) mem_early_wait(wait);
-        return 1;
+    // The same access faulting again and again (the hook said retry but left the page as it was) would spin for ever:
+    // stop with its address and code instead.
+    static _Thread_local uint64_t last_a, last_pc, repeats;
+    if (a == last_a && plat_fault_pc == last_pc) {
+        if (++repeats == 100000)
+            rt_fatal("memory: a %s of %#llx at exe+%#llx faults again after every retry (state %d, trap %d)",
+                     plat_fault_write ? "write" : "read", (unsigned long long)a,
+                     (unsigned long long)(plat_fault_pc - plat_exe_base()), plat_mem_state(a & ~(PAGE - 1), a + 1, &(uint64_t){0}),
+                     trapped ? trapped[a / PAGE] : -1);
+    } else {
+        last_a = a, last_pc = plat_fault_pc, repeats = 0;
     }
-    plat_mutex_lock(&frz_lock);
+    if (frz_held)   // the code that faulted holds frz_lock: every path below takes it, so this thread would hang
+        rt_fatal("memory: a %s of %#llx at exe+%#llx faulted with frz_lock held (trap %d)", plat_fault_write ? "write" : "read",
+                 (unsigned long long)a, (unsigned long long)(plat_fault_pc - plat_exe_base()),
+                 trapped ? trapped[a / PAGE] : -1);
+    if (trapped) {
+        size_t ep = plat_mem_early_page_size();
+        uint64_t np = a & ~(uint64_t)(ep - 1);
+        int has_early = 0;
+        for (uint64_t q = np; q < np + ep && q < RT_ADDRESS_LIMIT; q += PAGE) {
+            if (__atomic_load_n(&trapped[q / PAGE], __ATOMIC_RELAXED) == 2) { has_early = 1; break; }
+        }
+        uint8_t t = __atomic_load_n(&trapped[a / PAGE], __ATOMIC_RELAXED);
+        if (has_early || t == 1 || t == 3) {
+            uint64_t wait = 0;   // MKW_EARLY_READ=2/3: the submit an early read waits for
+            frz_take();
+            int early_now = 0;
+            for (uint64_t q = np; q < np + ep && q < RT_ADDRESS_LIMIT; q += PAGE)
+                if (trapped[q / PAGE] == 2) { early_now = 1; break; }
+            if (early_now) wait = mem_early_release_locked(a, 1);   // the byte touched
+            else if (trapped[a / PAGE] == 3) mem_base_fill_locked(a);
+            else if (trapped[a / PAGE] == 1) fill_locked(a, 1);
+            frz_drop();
+            if (wait) mem_early_wait(wait);
+            return 1;
+        }
+    }
+    frz_take();
     int was = frz[a >> FRZ_SHIFT];
     thaw_locked(a >> FRZ_SHIFT, 1);
-    plat_mutex_unlock(&frz_lock);
+    frz_drop();
     if (was) return 1;
     uint64_t end;
     int st = plat_mem_state(a & ~(PAGE - 1), (a & ~(PAGE - 1)) + PAGE, &end);
-    if (st != PLAT_PROT_RW && trap_ok > 0)   // the crash report follows: say whether a trap was involved
+    int ok = plat_fault_write ? (st == PLAT_PROT_RW) : (st >= PLAT_PROT_READ);
+    if (!ok && trap_ok > 0)   // the crash report follows: say whether a trap was involved
         rt_log("memory: fault at %#llx: page state %d, not trapped (%lld trapped now)", (unsigned long long)a, st,
                (long long)ntrapped);
-    return st == PLAT_PROT_RW;
+    return ok;
 }
+#endif
 
 // Mapping changes thaw the regions they touch and run under frz_lock, so no freeze sees them half done.
 static void commit(uint64_t a, uint64_t n, const char *what) {
-    plat_mutex_lock(&frz_lock);
+    frz_take();
     thaw_range_locked(a, n, 3);
     int ok = !n || plat_mem_commit(a, n);
-    plat_mutex_unlock(&frz_lock);
+    frz_drop();
     if (!ok) rt_fatal("memory: commit %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
 }
 
 static void decommit(uint64_t a, uint64_t n, const char *what) {
-    plat_mutex_lock(&frz_lock);
+    frz_take();
     thaw_range_locked(a, n, 3);
     int ok = !n || plat_mem_decommit(a, n);
-    plat_mutex_unlock(&frz_lock);
+    frz_drop();
     if (!ok) rt_fatal("memory: decommit %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
 }
 
 static void protect(uint64_t a, uint64_t n, int prot, const char *what) {
-    plat_mutex_lock(&frz_lock);
+    frz_take();
     thaw_range_locked(a, n, 3);
     int ok = !n || plat_mem_protect(a, n, prot);
-    plat_mutex_unlock(&frz_lock);
+    frz_drop();
     if (!ok) rt_fatal("memory: protect %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
 }
 
 // The process is re-run when a region is taken: Windows places DLLs, heaps and thread stacks at random addresses,
 // and a fresh process gets a fresh layout.
 static void reexec_or_fail(const char *what) {
+#ifdef MKW_PS5_NATIVE
+    rt_fatal("memory: %s is not free on PS5", what);
+#else
     const char *e = cfg_get("MKW_REEXEC");
     int n = e ? atoi(e) : 0;
     if (n >= REEXEC_LIMIT) rt_fatal("memory: %s is not free after %d attempts", what, n);
@@ -366,6 +416,7 @@ static void reexec_or_fail(const char *what) {
     snprintf(buf, sizeof buf, "%d", n + 1);
     plat_setenv("MKW_REEXEC", buf);
     plat_reexec();
+#endif
 }
 
 void mem_init(void) {
@@ -380,27 +431,42 @@ void mem_init(void) {
     if (!reserve_at(RT_KERNEL_BASE, RT_KERNEL_SIZE, 0)) reexec_or_fail("the kernel region");
     if (!reserve_at(RT_HOSTFN_BASE, RT_HOSTFN_SIZE, 0)) reexec_or_fail("the host-function window");
 
-    // Stack and heap block, then the alias region above it, both searched below the module window.
-    uint64_t low = 0, alias = 0;
-    for (uint64_t at = LOW_SEARCH_FROM; at + LOW_SIZE <= mods_lo && !low; at += GiB)
-        if (reserve_at(at, LOW_SIZE, 1)) low = at;
-    if (!low) reexec_or_fail("a 6 GiB stack and heap block below 2^39");
-    for (uint64_t at = align_up(low + LOW_SIZE, ALIAS_ALIGN); at + ALIAS_SIZE <= mods_lo && !alias; at += ALIAS_ALIGN)
-        if (reserve_at(at, ALIAS_SIZE, 1)) alias = at;
-    if (!alias) reexec_or_fail("a 64 GiB alias region below 2^39");
+    uint64_t low = RT_LOW_BASE, alias = RT_ALIAS_BASE;
+    if (low) {
+        int alias_first = alias < low;
+        if (alias_first && !reserve_at(alias, RT_ALIAS_SIZE, 1)) reexec_or_fail("the fixed alias region");
+        if (!reserve_at(low, RT_LOW_SIZE, 1)) reexec_or_fail("the fixed stack and heap block");
+        if (!alias_first && !reserve_at(alias, RT_ALIAS_SIZE, 1)) reexec_or_fail("the fixed alias region");
+    } else {
+        // On desktop, search below the module window because ASLR may already occupy some addresses.
+        for (uint64_t at = RT_LOW_SEARCH_FROM; at + RT_LOW_SIZE <= mods_lo && !low; at += GiB)
+            if (reserve_at(at, RT_LOW_SIZE, 1)) low = at;
+        if (!low) reexec_or_fail("a 14 GiB stack and heap block below the module window");
+        for (uint64_t at = align_up(low + RT_LOW_SIZE, RT_ALIAS_ALIGN); at + RT_ALIAS_SIZE <= mods_lo && !alias;
+             at += RT_ALIAS_ALIGN)
+            if (reserve_at(at, RT_ALIAS_SIZE, 1)) alias = at;
+        if (!alias) reexec_or_fail("a 64 GiB alias region below the module window");
+    }
 
+#ifndef MKW_PS5_LOADER_ONLY
     plat_mem_fault_hook(thaw_fault);   // before the crash handler
+    plat_mem_early_hold_hook(mem_early_resolve_hold);
+    plat_mem_thaw_hook(thaw_for_kernel);
+    plat_mem_frozen_hook(mem_frozen);
+#endif
     alias_pages = calloc(ALIAS_PAGES, 1);
     if (!alias_pages) rt_fatal("memory: cannot allocate the alias page map");
     // mkw.ini is read here, once the address space is claimed and before the first setting: the pool size below
     // depends on MKW_APP_POOL.
     cfg_init();
     const char *pool = cfg_get("MKW_APP_POOL");
+    uint64_t aslr = low < alias ? low : alias;
     L = (RtGuestLayout){
-        .aslr = {low, RT_ADDRESS_LIMIT - low},
+        .aslr = {aslr, RT_ADDRESS_LIMIT - aslr},
+        .stack_heap = {low, RT_LOW_SIZE},
         .stack = {low + STACK_OFF, STACK_SIZE},
         .heap = {low + HEAP_OFF, HEAP_CAP},
-        .alias = {alias, ALIAS_SIZE},
+        .alias = {alias, RT_ALIAS_SIZE},
         .kernel = {RT_KERNEL_BASE, RT_KERNEL_SIZE},
         .hostfn = {RT_HOSTFN_BASE, RT_HOSTFN_SIZE},
         .pool = pool ? strtoull(pool, NULL, 0) : DEFAULT_POOL,
@@ -434,6 +500,15 @@ static uint64_t image_bytes(void) {
 static int overlaps(uint64_t a, uint64_t n, uint64_t b, uint64_t m) { return a < b + m && b < a + n; }
 static int inside(uint64_t a, uint64_t n, RtRange r) { return a >= r.base && n <= r.size && a - r.base <= r.size - n; }
 
+static int heap_shrink_release_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = cfg_get("MKW_HEAP_SHRINK_RELEASE");
+        v = !e || !*e || strcmp(e, "0") != 0;   // default on: decommit returns PS5 direct memory
+    }
+    return v;
+}
+
 // ---- 0x01 SetHeapSize
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
     plat_mutex_lock(&lock);
@@ -442,8 +517,10 @@ uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
         return R_INVALID_STATE;
     }
     if (size > heap_size) commit(L.heap.base + heap_size, size - heap_size, "heap");
-    if (size < heap_size) decommit(L.heap.base + size, heap_size - size, "heap");
-    if (size != heap_size) rt_log("mem: heap %#llx bytes at %#llx", (unsigned long long)size, (unsigned long long)L.heap.base);
+    if (size < heap_size && heap_shrink_release_on()) decommit(L.heap.base + size, heap_size - size, "heap");
+    if (size != heap_size)
+        rt_log("mem: heap %#llx bytes at %#llx%s", (unsigned long long)size, (unsigned long long)L.heap.base,
+               size < heap_size && heap_shrink_release_on() ? " (shrunk, decommitted)" : "");
     heap_size = size;
     plat_mutex_unlock(&lock);
     if (addr) *addr = L.heap.base;
@@ -639,7 +716,7 @@ static void taken_gap(uint64_t a, uint64_t *base, uint64_t *size) {
     uint64_t lo = 0, hi = RT_ADDRESS_LIMIT;
     RtRange known[3 + RT_MAX_MODULES + 2];
     int n = 0;
-    known[n++] = (RtRange){L.aslr.base, LOW_SIZE};
+    known[n++] = L.stack_heap;
     known[n++] = L.alias;
     known[n++] = L.kernel;
     known[n++] = L.hostfn;
@@ -671,25 +748,26 @@ static uint64_t run_start(const uint8_t *p, uint64_t i, uint8_t v) {   // first 
 
 uint32_t mem_query(uint64_t a, RtMemoryInfo *out) {
     RtMemoryInfo r = {.base = a & ~(PAGE - 1), .size = PAGE};
-    uint64_t low = L.aslr.base;
+    uint64_t low = L.stack_heap.base;
     plat_mutex_lock_shared(&lock);
     int mi;
     if (a >= RT_ADDRESS_LIMIT) {
         r.base = RT_ADDRESS_LIMIT;
         r.size = 0 - RT_ADDRESS_LIMIT;
         r.state = ST_INACCESSIBLE;
-    } else if (a < low) {
+    } else if (a < L.aslr.base) {
         r.base = 0;
-        r.size = low;
+        r.size = L.aslr.base;
         r.state = ST_FREE;
-    } else if (a < low + LOW_SIZE) {
+    } else if (a - low < L.stack_heap.size) {
         uint64_t heap = L.heap.base;
         if (a >= heap && a < heap + heap_size) {
             r = (RtMemoryInfo){.base = heap, .size = heap_size, .state = ST_NORMAL, .perm = PERM_RW};
         } else if (a < heap) {
             r = (RtMemoryInfo){.base = low, .size = heap - low, .state = ST_FREE};
         } else {
-            r = (RtMemoryInfo){.base = heap + heap_size, .size = low + LOW_SIZE - heap - heap_size, .state = ST_FREE};
+            r = (RtMemoryInfo){.base = heap + heap_size, .size = low + L.stack_heap.size - heap - heap_size,
+                               .state = ST_FREE};
         }
     } else if (a - L.alias.base < L.alias.size) {
         uint64_t p = (a - L.alias.base) / PAGE;
@@ -764,8 +842,8 @@ int mem_info(uint32_t id, uint64_t *out) {
     case 16: v = SYSTEM_RESOURCE_BUDGET; break;
     case 17: v = sizeof stack_maps + ALIAS_PAGES; break;   // system resource in use: our bookkeeping
     case 28: v = 0; break;   // AliasRegionExtraSize: no kernel-owned extension
-    // Switch 2 ids (eden-nx2 NX2_NOTES.md rows 7, 8, 16): 29/30 a region between the alias region and ASLR, left
-    // empty right after the alias region; 31/32 remote memory for the graphics server, none here; 33 the page
+    // Switch 2 ids (eden-nx2 NX2_NOTES.md rows 7, 8, 16): 29/30 the additional region, left empty right after the
+    // alias region; 31/32 remote memory for the graphics server, none here; 33 the page
     // granule nn::os's VAMM manager checks module ranges against.
     case 29: v = L.alias.base + L.alias.size; break;
     case 30: v = 0; break;
@@ -836,3 +914,33 @@ void mem_kernel_free(void *p, uint64_t size) {
     kfree_list[k] = f;
     plat_mutex_unlock(&klock);
 }
+
+#if defined(__linux__) && !defined(MKW_PS5_NATIVE)
+#include <sys/mman.h>
+
+static uint64_t resident_bytes(uint64_t base, uint64_t size) {
+    enum { CHUNK = 16u << 20 };
+    static unsigned char vec[CHUNK >> 12];
+    uint64_t total = 0;
+    for (uint64_t off = 0; off < size; off += CHUNK) {
+        uint64_t n = size - off < CHUNK ? size - off : CHUNK;
+        if (mincore((void *)(uintptr_t)(base + off), (size_t)n, vec) != 0) continue;
+        size_t pages = (size_t)(n >> 12);
+        for (size_t i = 0; i < pages; i++) total += (vec[i] & 1) ? 4096u : 0u;
+    }
+    return total;
+}
+
+void mem_log_residency(void) {
+    uint64_t h_comm = heap_size;
+    uint64_t h_res = h_comm ? resident_bytes(L.heap.base, h_comm) : 0;
+    uint64_t a_comm = alias_bytes;
+    uint64_t a_res = L.alias.size ? resident_bytes(L.alias.base, L.alias.size) : 0;
+    rt_log("mem: residency heap %.1f / %.1f MiB, alias %.1f / %.1f MiB (reserved %.1f GiB)",
+           h_res / 1048576.0, h_comm / 1048576.0,
+           a_res / 1048576.0, a_comm / 1048576.0,
+           L.alias.size / 1073741824.0);
+}
+#else
+void mem_log_residency(void) { rt_log("mem: residency only supported on Linux"); }
+#endif

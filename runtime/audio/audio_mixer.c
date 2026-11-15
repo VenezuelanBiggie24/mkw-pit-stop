@@ -15,7 +15,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef MKW_PS5_NATIVE
+#include <stdbool.h>
+#include <stdint.h>
+typedef void (*Ps5AudioPullFn)(int16_t *out_lr, uint32_t frames, void *userdata);
+extern bool audio_start(Ps5AudioPullFn pull, void *userdata);
+extern void audio_stop(void);
+#else
 #include <SDL3/SDL.h>
+#endif
 
 #include "cfg.h"
 #include "audio_effects.h"
@@ -40,7 +48,10 @@ typedef struct Mixer {
     float *buf; int nbuf, frame;
     int *offset;                                   // first mix buffer of each mix id
     SplitInfo *split; int nsplit; SplitDest *dest; int ndest;
-    SDL_AudioStream *stream; int device_ok, rate;
+#ifndef MKW_PS5_NATIVE
+    SDL_AudioStream *stream;
+#endif
+    int device_ok, rate;
     float ring[RING_FRAMES * 2];
     _Atomic uint64_t wr, rd, underruns, overruns, missing_frames, callback_frames, callback_nonzero;
     _Atomic int playing; int ready;                // ready: the callback's own state
@@ -136,6 +147,39 @@ static void ring_pull(Mixer *m, float *out, uint32_t frames) {
     atomic_store_explicit(&m->rd, rd + n, memory_order_release);
 }
 
+#ifdef MKW_PS5_NATIVE
+static void ps5_pull(int16_t *out_lr, uint32_t frames, void *userdata) {
+    float tmp[2 * 512];
+    uint32_t off = 0;
+    while (off < frames) {
+        uint32_t n = frames - off;
+        if (n > 512) n = 512;
+        ring_pull((Mixer *)userdata, tmp, n);
+        for (uint32_t i = 0; i < n * 2; i++) {
+            float s = tmp[i];
+            if (s > 1.0f) s = 1.0f;
+            else if (s < -1.0f) s = -1.0f;
+            out_lr[off * 2 + i] = (int16_t)(s * 32767.0f);
+        }
+        off += n;
+    }
+}
+
+static void output_open(Mixer *m, int rate) {
+    const char *mode = cfg_get("MKW_AUDIO");
+    if ((mode && !strcmp(mode, "none")) || cfg_get("MKW_AUDIO_OFF")) {
+        rt_log("audio: MKW_AUDIO=none: mixing without a device");
+        return;
+    }
+    if (rate != 48000) rt_log("audio: PS5 output is 48000 Hz (mixer requested %d Hz)", rate);
+    if (!audio_start(ps5_pull, m)) {
+        rt_log("audio: PS5 audio_start failed: mixing without sound");
+        return;
+    }
+    m->device_ok = 1;
+    rt_log("audio: PS5 AudioOut opened, 48000 Hz stereo s16, prefill %d ms", m->prefill * 5);
+}
+#else
 static void SDLCALL sdl_pull(void *user, SDL_AudioStream *stream, int additional, int total) {
     (void)total;
     Mixer *m = user;
@@ -176,6 +220,7 @@ static void output_open(Mixer *m, int rate) {
     const char *name = SDL_GetAudioDeviceName(SDL_GetAudioStreamDevice(m->stream));
     rt_log("audio: SDL device '%s' opened, %d Hz stereo float, prefill %d ms", name ? name : "?", rate, m->prefill * 5);
 }
+#endif
 
 // Render thread only.
 static void output_push(Mixer *m, const float *lr, int frames) {
@@ -298,10 +343,14 @@ void audio_mixer_set_running(AudioRenderer *r, int running) {
 void audio_mixer_close(AudioRenderer *r) {
     Mixer *m = r->mixer;
     if (!m) return;
+#ifdef MKW_PS5_NATIVE
+    if (m->device_ok) audio_stop();
+#else
     if (m->stream) {   // destroying the stream closes the device and waits for the callback to finish
         SDL_DestroyAudioStream(m->stream);
         SDL_QuitSubSystem(SDL_INIT_AUDIO);
     }
+#endif
     for (int i = 0; i < m->nsplit; i++) free(m->split[i].ids);
     for (int i = 0; i < r->param.effect_count; i++) {
         audio_reverb_free(m->effect[i].reverb);

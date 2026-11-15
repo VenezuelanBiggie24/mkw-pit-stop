@@ -79,15 +79,25 @@ RtThread *pick_in(RtThread *list, int kind, uint64_t a) {
 
 RtThread *pick(int kind, uint64_t a) { return pick_in(g_wait, kind, a); }
 
-void wake_in(RtThread **list, RtThread *t, uint32_t res) {
+void wake_addr_prepare(RtThread **list, RtThread *t, uint32_t res) {
     wait_unlink(list, t);
     t->wkind = W_NONE;
-    t->woke = 1;
     t->wres = res;
     t->waker = tcur ? tcur->handle : 0;
     if (rt_trace & RT_TRACE_SCHED) t->wake_at = kern_now_ns();
     if (g_crit_on) crit_add(CRIT_WAKE, t->handle, t->waker, 0, 0, t->wake_at);
-    plat_cond_signal(&t->cv);
+}
+
+void wake_addr_commit(RtThread *t) {
+    // Signal cv BEFORE setting woke=1 (release), while holding the queue lock, so a spinning waiter seeing
+    // woke=1 cannot continue before plat_cond_signal finishes with t->cv.
+    if (!t->w_nosig) plat_cond_signal(&t->cv);
+    __atomic_store_n(&t->woke, 1, __ATOMIC_RELEASE);
+}
+
+void wake_in(RtThread **list, RtThread *t, uint32_t res) {
+    wake_addr_prepare(list, t, res);
+    wake_addr_commit(t);
 }
 
 void wake(RtThread *t, uint32_t res) { wake_in(&g_wait, t, res); }
@@ -129,6 +139,7 @@ static uint32_t wait_woken(RtThread *t, int64_t ns, PlatMutex *m, RtThread **lis
         if (now >= deadline) {
             wait_unlink(list, t);
             t->wkind = W_NONE;
+            if (rt_trace & RT_TRACE_SCHED) t->ho_wake_at = 0;
             return R_TIMEOUT;
         }
         if (g_wait_ns < 0) g_wait_ns = rt_knob("WAIT_NS", "0");
@@ -137,11 +148,14 @@ static uint32_t wait_woken(RtThread *t, int64_t ns, PlatMutex *m, RtThread **lis
         plat_cond_wait_ns(&t->cv, m, left);
     }
     if (t->wake_at) {
+        if (rt_trace & RT_TRACE_SCHED) t->ho_wake_at = t->wake_at;
         uint64_t d = kern_now_ns() - t->wake_at;
         t->lw_ns += d;
         t->lw_n++;
         if (d > t->lw_max) t->lw_max = d;
         t->wake_at = 0;
+    } else if (rt_trace & RT_TRACE_SCHED) {
+        t->ho_wake_at = 0;
     }
     return t->wres;
 }
@@ -151,6 +165,7 @@ uint32_t block_inner(RtThread *t, int kind, int64_t ns) {   // holding G
     if (ns == 0) {
         wait_unlink(&g_wait, t);
         t->wkind = W_NONE;
+        if (rt_trace & RT_TRACE_SCHED) t->ho_wake_at = 0;
         return R_TIMEOUT;
     }
     return wait_woken(t, ns, &G, &g_wait);
@@ -166,20 +181,89 @@ uint32_t block_inner(RtThread *t, int kind, int64_t ns) {   // holding G
 static struct { PlatMutex m; RtThread *head; } g_aq[ADDR_QUEUES];
 static int g_aq_on = -1;
 static volatile uint64_t g_aseq;
+static int g_addr_spin = -1;
+static uint64_t g_addr_spin_ns;
 
 AddrQueue addr_queue(uint64_t addr) {
-    if (g_aq_on < 0) g_aq_on = rt_knob("ADDR_QUEUES", "1") == 1;
+    if (__atomic_load_n(&g_addr_spin, __ATOMIC_ACQUIRE) < 0) {
+        lock();
+        if (g_aq_on < 0) g_aq_on = rt_knob("ADDR_QUEUES", "1") == 1;
+        if (g_addr_spin < 0) {
+            const char *us = cfg_get("MKW_ADDR_SPIN_US");
+            g_addr_spin_ns = (us && *us ? strtoull(us, NULL, 0) : 20ull) * 1000ull;
+            __atomic_store_n(&g_addr_spin, rt_knob("ADDR_SPIN", "0"), __ATOMIC_RELEASE);
+        }
+        unlock();
+    }
     if (!g_aq_on) return (AddrQueue){&G, &g_wait};
     unsigned i = (unsigned)(((addr >> 2) * 0x9E3779B97F4A7C15ull) >> 56) % ADDR_QUEUES;
     return (AddrQueue){&g_aq[i].m, &g_aq[i].head};
 }
 
-// WaitForAddress's wait, holding q.m (and returning holding it).
+// WaitForAddress's wait: enters holding q.m, returns with q.m unlocked.
 uint32_t addr_block(RtThread *t, AddrQueue q, int64_t ns) {
-    if (q.m == &G) return block(t, W_ADDRESS, ns);
-    if (ns == 0) return R_TIMEOUT;
+    if (q.m == &G) {
+        uint32_t r = block(t, W_ADDRESS, ns);
+        unlock();
+        return r;
+    }
+    if (ns == 0) {
+        plat_mutex_unlock(q.m);
+        return R_TIMEOUT;
+    }
+    uint64_t addr = t->waddr;
     t->waker = 0;
+    if (rt_trace & RT_TRACE_SCHED) {
+        t->wake_at = 0;
+        t->ho_wake_at = 0;
+        t->ho_grant_at = 0;
+        t->ho_kind = HO_UNCONT;
+        t->ho_gated = 0;
+        t->ho_pre = 0;
+    }
     wait_enqueue(q.list, t, W_ADDRESS, __atomic_add_fetch(&g_aseq, 1, __ATOMIC_RELAXED));
+    if (RT_KNOB_ON(g_addr_spin) && g_addr_spin_ns > 0 && t->cur_core >= 0 && !t->preempt) {
+        uint64_t enter_ns = ns > 0 ? kern_now_ns() : 0;
+        uint64_t lim = (ns > 0 && (uint64_t)ns < g_addr_spin_ns) ? (uint64_t)ns : g_addr_spin_ns;
+        uint64_t end = (enter_ns ? enter_ns : kern_now_ns()) + lim;
+        t->w_nosig = 1;
+        plat_mutex_unlock(q.m);
+        while (!__atomic_load_n(&t->woke, __ATOMIC_ACQUIRE)) {
+            if (kern_now_ns() >= end || __atomic_load_n(&t->preempt, __ATOMIC_RELAXED) ||
+                ((__atomic_load_n(&g_core_wait_mask, __ATOMIC_ACQUIRE) >> t->cur_core) & 1u))
+                break;
+            plat_pause();
+        }
+        plat_mutex_lock(q.m);
+        t->w_nosig = 0;
+        if (__atomic_load_n(&t->woke, __ATOMIC_ACQUIRE)) {
+            uint32_t res = t->wres;
+            uint32_t wk = t->waker;
+            uint64_t wake_ts = t->wake_at;
+            t->wake_at = 0;
+            plat_mutex_unlock(q.m);
+            if ((rt_trace & RT_TRACE_SCHED) && wake_ts) {
+                uint64_t now = kern_now_ns();
+                uint64_t tot = now > wake_ts ? now - wake_ts : 0;
+                t->lw_ns += tot;
+                t->lw_n++;
+                if (tot > t->lw_max) t->lw_max = tot;
+                ho_note_addr(t, addr, wk, tot, 0, 0, 0, 0, tot, HO_SPIN, 0);
+            }
+            return res;
+        }
+        if (ns > 0) {
+            uint64_t spent = kern_now_ns() - enter_ns;
+            if (spent >= (uint64_t)ns) {
+                wait_unlink(q.list, t);
+                t->wkind = W_NONE;
+                plat_mutex_unlock(q.m);
+                if (rt_trace & RT_TRACE_SCHED) ho_note_addr(t, addr, 0, 0, 0, 0, 0, 0, 0, HO_SPIN, 1);
+                return R_TIMEOUT;
+            }
+            ns -= (int64_t)spent;
+        }
+    }
     plat_mutex_unlock(q.m);
     lock();
     core_put(t);
@@ -188,11 +272,39 @@ uint32_t addr_block(RtThread *t, AddrQueue q, int64_t ns) {
     unlock();
     plat_mutex_lock(q.m);
     uint32_t r = wait_woken(t, ns, q.m, q.list);
+    uint64_t t_woke = (rt_trace & RT_TRACE_SCHED) ? kern_now_ns() : 0;
+    uint64_t wake_ts = t->ho_wake_at;
+    uint32_t wk = t->waker;
     plat_mutex_unlock(q.m);
-    lock();
-    core_take(t);
-    unlock();
-    plat_mutex_lock(q.m);
+    if ((rt_trace & RT_TRACE_SCHED) || __atomic_load_n(&t->cur_core, __ATOMIC_ACQUIRE) < 0) {
+        lock();
+        uint64_t t_glock = (rt_trace & RT_TRACE_SCHED) ? kern_now_ns() : 0;
+        core_take(t);
+        uint64_t t_core = (rt_trace & RT_TRACE_SCHED) ? kern_now_ns() : 0;
+        uint64_t grant_ts = t->ho_grant_at;
+        int ho_kind = t->ho_kind;
+        int ho_gated = t->ho_gated;
+        unlock();
+        if (rt_trace & RT_TRACE_SCHED) {
+            uint64_t t_done = kern_now_ns();
+            if (wake_ts) {
+                uint64_t host_ns = t_woke > wake_ts ? t_woke - wake_ts : 0;
+                uint64_t glock_ns = t_glock > t_woke ? t_glock - t_woke : 0;
+                uint64_t cwait_ns = 0, cgrant_ns = 0;
+                if (ho_gated && grant_ts && grant_ts >= t_glock && grant_ts <= t_core) {
+                    cwait_ns = grant_ts - t_glock;
+                    cgrant_ns = t_core - grant_ts;
+                } else {
+                    cgrant_ns = t_core > t_glock ? t_core - t_glock : 0;
+                }
+                uint64_t post_ns = t_done > t_core ? t_done - t_core : 0;
+                uint64_t tot_ns = host_ns + glock_ns + cwait_ns + cgrant_ns + post_ns;
+                ho_note_addr(t, addr, wk, host_ns, glock_ns, cwait_ns, cgrant_ns, post_ns, tot_ns, ho_kind, 0);
+            } else if (r == R_TIMEOUT) {
+                ho_note_addr(t, addr, 0, 0, 0, 0, 0, 0, 0, ho_kind, 1);
+            }
+        }
+    }
     return r;
 }
 

@@ -15,9 +15,6 @@
 #include "platform/platform.h"
 
 #define RC_OK 0u
-#define ST_FREE 0u
-#define ST_STACK 0xBu
-#define PERM_RW 3u
 #define PROGRAM_ID 0x0400c3f00006e000ull   // Mario Kart World (main.npdm ACI0)
 
 static uint64_t g_svcs;
@@ -62,25 +59,6 @@ static __attribute__((noreturn)) void svc_fatal(Cpu *c, uint32_t imm, uint64_t p
             (unsigned long long)c->x[2], (unsigned long long)c->x[3]);
     kern_backtrace(c);
     rt_fatal("svc #%#x %s is not implemented", imm, name);
-}
-
-// QueryMemory sees the guest main thread's stack, which memory.c does not know: Stack inside it, free ranges
-// around it clipped (the way memory.c clips moved stacks).
-static void main_stack_query(uint64_t a, RtMemoryInfo *r) {
-    uint64_t mb, ms;
-    kern_main_stack(&mb, &ms);
-    if (!ms) return;
-    uint64_t me = mb + ms;
-    if (a >= mb && a < me) {
-        *r = (RtMemoryInfo){.base = mb, .size = ms, .state = ST_STACK, .perm = PERM_RW};
-        return;
-    }
-    if (r->state != ST_FREE) return;
-    uint64_t lo = r->base, hi = r->base + r->size;
-    if (me <= a && me > lo) lo = me;
-    if (mb > a && mb < hi) hi = mb;
-    r->base = lo;
-    r->size = hi - lo;
 }
 
 static int on_main_stack(uint64_t a, uint64_t n) {
@@ -196,15 +174,7 @@ static void svc_body(Cpu *c, uint32_t imm, uint64_t pc) {
         x[0] = on_main_stack(x[0], x[2]) ? KERN_R_INVALID_STATE_MEM : mem_map(x[0], x[1], x[2]);
         return;
     case 0x05: x[0] = mem_unmap(x[0], x[1], x[2]); return;
-    case 0x06: {   // QueryMemory(x0 MemoryInfo*, x2 address -> w1 page info)
-        RtMemoryInfo mi;
-        uint32_t r = mem_query(x[2], &mi);
-        main_stack_query(x[2], &mi);
-        if (!r && x[0]) memcpy((void *)(uintptr_t)x[0], &mi, sizeof mi);
-        x[0] = r;
-        x[1] = 0;
-        return;
-    }
+    case 0x06: svc_query_memory(x); return;
     case 0x2C: x[0] = mem_map_physical(x[0], x[1]); return;
     case 0x2D: x[0] = mem_unmap_physical(x[0], x[1]); return;
     case 0x26: {   // Break(x0 reason, x1 info, x2 info size); bit 31 of the reason: notification only

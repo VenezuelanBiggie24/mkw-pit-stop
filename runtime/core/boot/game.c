@@ -15,9 +15,9 @@
 #include "cfg.h"
 #include "host.h"
 
-#define GUEST_FRAME_UPDATE 0x70003a9e28ull        // MKW 1.0.0 main: the frame object's per-frame virtual
-#define GUEST_FRAME_UPDATE_SLOT 0x700329fd50ull   // its vtable slot (main's data segment, writable)
-#define GUEST_GAME_CLOCK 0x70033e6ae8ull          // u32, += the present interval every frame
+#define GUEST_FRAME_UPDATE (RT_MODULE_BASE + 0x3a9e28ull)        // MKW 1.0.0 main: the frame object's per-frame virtual
+#define GUEST_FRAME_UPDATE_SLOT (RT_MODULE_BASE + 0x329fd50ull)   // its vtable slot (main's data segment, writable)
+#define GUEST_GAME_CLOCK (RT_MODULE_BASE + 0x33e6ae8ull)          // u32, += the present interval every frame
 #define FRAME_FIXED 0x210                         // frame object: fixed interval, 0 = the game picks
 #define FRAME_HOST 0xfa0                          // patch page offset of host_frame_update (patches.c)
 #define SPEED_WINDOW_NS 5000000000ull
