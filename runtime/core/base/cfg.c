@@ -38,7 +38,7 @@ static const char *const known[] = {
     "BIND_ZL", "BIND_ZR", "BUTTON_ICONS", "CORE_DIAG", "CORE_HANDOFF", "CRIT", "CRIT_OUT", "CTL", "DESC_TEMPLATE", "DETAIL_DISTANCE", "DEVICE_PROFILE", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG",
     "EARLY_BATCH", "EARLY_SIBLING_WAIT", "EARLY_WAIT_AWAY", "EXEFS", "FEEDBACK", "FIX_C0", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
     "FLIGHT_THUMBS", "FPS", "FREEZE_IDLE", "GLYPH_DUMP", "FREE_CORES", "FULLSCREEN", "GPL", "GPL_DRAW_BUILD", "GPU",
-    "GPU_CRUMBS", "GPU_CRUMBS_DRAW", "GPU_INDEX", "GPU_MEM_LIMIT", "GPU_NAME", "GPU_ONLY_RELEASE", "HEADLESS", "HEAP_SHRINK_RELEASE", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LANG",
+    "GPU_CRUMBS", "GPU_CRUMBS_DRAW", "GPU_INDEX", "GPU_MEM_LIMIT", "GPU_NAME", "GPU_ONLY_RELEASE", "HEADLESS", "HEAP_SHRINK_RELEASE", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LANG", "LIST_WATCH",
     "LOCALE", "MEMORY", "MESH_COMPUTE", "MENU_LANG", "MENU_TEST",
     "MENU_TEST_DIR", "MENU_TEST_SET", "MINIMAL_LAYOUT", "MIRROR_GAP", "MOTION", "MOUSE_SENS",
     "ONE_PER_CORE", "OPERATION_MODE", "PAD_LAYOUT", "PERF_OVERLAY", "PERF_SLOW_MS", "PICTURE_FIT", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SKIP", "PIPE_STALL", "PIPE_SYNC", "PIPE_WAIT", "POOL_RELEASE",
@@ -275,7 +275,9 @@ static const char *raw_get(const char *name) {
 
 const char *cfg_get(const char *name) {
     const char *v = raw_get(name);
-    int p = v || strncmp(name, PREFIX, PREFIX_LEN) ? 0 : profile_of();
+    // A set key (environment, mkw.ini, the menu) wins over the profile.
+    if (v || strncmp(name, PREFIX, PREFIX_LEN)) return v;
+    int p = profile_of();
     if (p == 1)
         for (size_t i = 0; i < sizeof DECK / sizeof *DECK; i++)
             if (!strcasecmp(DECK[i].key, name + PREFIX_LEN)) return DECK[i].value;
