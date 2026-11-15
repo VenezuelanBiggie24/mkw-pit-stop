@@ -38,6 +38,9 @@ Radeon 660M APU (Ryzen 5 7535HS), Linux, 720p internal resolution.
 A race frame takes ~24 ms on the console (15/11/2026): GPU ~7 ms and replay ~14 ms run beside the game, so the game's
 own threads are the critical path (~72 ms a frame of CPU among them, measured with `MKW_PROFILE_FN`; docs/ps5.md).
 
+For now the PS5 runs races at 30 fps by default (its device profile; docs/ps5.md, "Frame rate"): it holds 33.3 ms with
+the race at full speed on a busier course. The items below are what 60, heavier courses and split screen still need.
+
 - **Done: the synchronization calls' own cost.** `MKW_SVC_STATS` (15/11/2026, a race): ~590 yields a frame
   (`nn::os::YieldThread`, the job system's spin loops at `main+0x4520` and `main+0x5660`) at 8.3 us each, 4.9 ms a frame;
   SignalToAddress ~510 a frame at 3.95 us. `MKW_YIELD_NOLOCK` skips the kernel lock when no waiter may take the core

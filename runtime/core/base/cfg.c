@@ -93,7 +93,7 @@ static const CfgMeta metas[] = {
     {"PERF_OVERLAY", "off", "off|fps|full", LIVE}, {"FPS", "auto", "auto|30|60", LIVE},
     {"UPSCALER", "fsr", "fsr|bilinear", LIVE}, {"SHARPNESS", "80", "0..100", LIVE},
     {"PICTURE_FIT", "keep", "keep|stretch", LIVE},
-    {"DEVICE_PROFILE", "auto", "auto|desktop|deck", RESTART},
+    {"DEVICE_PROFILE", "auto", "auto|desktop|deck|ps5", RESTART},
     {"RESOLUTION", "original", "original|540|720|900|1080|1440|2160", RESTART},
     // Game
     {"LANG", "", "ja|en-US|fr|de|it|es|zh-CN|ko|nl|pt|ru|zh-TW|en-GB|fr-CA|es-419|zh-Hans|zh-Hant|pt-BR", RESTART},
@@ -210,7 +210,7 @@ int cfg_load(const char *path) {
 
 // ---- device profiles: defaults for a known machine, below the environment and mkw.ini and above the table, so any
 // key the player sets wins and resetting a key in the menu returns to the profile's value. MKW_DEVICE_PROFILE = auto
-// (default: the Steam Deck when the firmware says so), desktop (none) or deck.
+// (default: the PS5 on the PS5 build, the Steam Deck when the firmware says so), desktop (none), deck or ps5.
 //
 // The Steam Deck (LCD Jupiter, OLED Galileo; 1280x800, 16:10, 4 Zen 2 cores, RDNA 2 with 8 CUs sharing 16 GB): a
 // window at the screen's 1280x800, fullscreen and vsync, as gamescope composes Game Mode.
@@ -218,7 +218,14 @@ int cfg_load(const char *path) {
 static const struct { const char *key, *value; } DECK[] = {
     {"FULLSCREEN", "1"}, {"WINDOW_SIZE", "1280x800"}, {"VK_PRESENT", "fifo"},
 };
-static int profile = -1;   // 0 none, 1 Steam Deck
+// The PS5: the game's 30 fps (MKW_FPS 30: two game ticks a frame, the race at full speed). The race's work is ~26-27
+// ms a frame on the first course and does not reach 16.7 ms (docs/roadmap.md); with auto the game swapped 60 and 30 Hz
+// ~1,400 times a minute (36-41 fps). At 30, a busier course (16/11/2026, fps30-20261116-063832) held 33.3 ms in every
+// window, speed 1.00x, 27 slow frames in 5,300. A weaker machine's setting, so a profile, not the table's default.
+static const struct { const char *key, *value; } PS5[] = {
+    {"FPS", "30"},
+};
+static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 
 static int read_line(const char *path, char *out, size_t n) {
     FILE *f = fopen(path, "r");
@@ -246,8 +253,13 @@ static int profile_of(void) {
     if (p >= 0) return p;
     const char *set = raw_get(PREFIX "DEVICE_PROFILE");
     if (set && !strcmp(set, "deck")) p = 1;
+    else if (set && !strcmp(set, "ps5")) p = 2;
     else if (set && *set && strcmp(set, "auto")) p = 0;
+#ifdef MKW_PS5_NATIVE
+    else p = 2;
+#else
     else p = on_steam_deck();
+#endif
     __atomic_store_n(&profile, p, __ATOMIC_RELEASE);
     return p;
 }
@@ -263,9 +275,13 @@ static const char *raw_get(const char *name) {
 
 const char *cfg_get(const char *name) {
     const char *v = raw_get(name);
-    if (v || strncmp(name, PREFIX, PREFIX_LEN) || !profile_of()) return v;
-    for (size_t i = 0; i < sizeof DECK / sizeof *DECK; i++)
-        if (!strcasecmp(DECK[i].key, name + PREFIX_LEN)) return DECK[i].value;
+    int p = v || strncmp(name, PREFIX, PREFIX_LEN) ? 0 : profile_of();
+    if (p == 1)
+        for (size_t i = 0; i < sizeof DECK / sizeof *DECK; i++)
+            if (!strcasecmp(DECK[i].key, name + PREFIX_LEN)) return DECK[i].value;
+    if (p == 2)
+        for (size_t i = 0; i < sizeof PS5 / sizeof *PS5; i++)
+            if (!strcasecmp(PS5[i].key, name + PREFIX_LEN)) return PS5[i].value;
     return NULL;
 }
 
@@ -687,6 +703,6 @@ void cfg_save_drain(void) {
 void cfg_init(void) {
     load_ini();
     if (profile_of())
-        rt_log("cfg: device profile Steam Deck: defaults for the keys mkw.ini does not set (MKW_DEVICE_PROFILE=desktop "
-               "turns it off)");
+        rt_log("cfg: device profile %s: defaults for the keys mkw.ini does not set (MKW_DEVICE_PROFILE=desktop "
+               "turns it off)", profile_of() == 2 ? "PS5" : "Steam Deck");
 }

@@ -181,6 +181,18 @@ Page protection then took 4.3-5.4 ms a frame; the race ran at a median of 26-28 
 Out of staging memory after relieving it, a texture upload is deferred (it streams in a later frame) instead of ending
 the title (run 31). The same goes for `vk_texture_astc_copy` and ReadTexels/WriteTexels.
 
+## Frame rate
+
+The PS5 build runs races at the game's own 30 fps: its device profile (`runtime/core/base/cfg.c`, `MKW_DEVICE_PROFILE`
+auto or `ps5`) sets `MKW_FPS` to 30, below `mkw.ini` and Pit Stop, so `FPS = auto` or `60` still applies. At 30 the
+game advances two ticks a frame and the race keeps full speed. A race frame's work is ~26-27 ms on the first course
+(docs/roadmap.md, "On the PS5"), so 60 is out of reach for now; with `auto` the game swapped its 60 and 30 Hz present
+interval ~1,400 times a minute (36-41 fps, uneven). Measured at 30 on a busier course (16/11/2026,
+`fps30-20261116-063832`): every 600-frame window at 33.3 ms, speed 1.00x, 27 slow frames in 5,300 (single hitches up to
+236 ms, some blocked on texture uploads), replay 15-18 ms a frame against ~14 on the first course. The slack under
+33.3 ms is not in that log: `FRAME_TRACE = 1` logs the game's own frame time. Local split screen multiplies the draws
+and is untested.
+
 ## Threads, priorities and profiling
 
 A title's threads run on CPUs 0-12 (mask 0x1fff: six full cores and half of the seventh, whose sibling, CPU 13, is
