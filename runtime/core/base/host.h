@@ -168,7 +168,7 @@ int mem_freeze(uint64_t a);                                // makes the 2 MiB re
                                                            // committed PAGE_READWRITE) read-only until a write or
                                                            // mem_thaw thaws it; 1 frozen (or already), 0 refused
 int mem_frozen(uint64_t a);                                // the 2 MiB region of a is frozen: no page in it changed
-                                                           // since its freeze
+                                                           // since its freeze; nonzero is that freeze's number
 void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen regions over [a, a+n) writable again;
                                                            // before a kernel write (file read) into guest memory
 void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws);

@@ -69,7 +69,10 @@ static int reserve_at(uint64_t at, uint64_t size, int watch) { return plat_mem_r
 #define FRZ_SHIFT 21
 #define FRZ_SIZE (1ull << FRZ_SHIFT)
 #define FRZ_HOLD_MS 5000u
-static volatile uint8_t frz[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
+// 0 thawed; while frozen, the freeze's number (frz_epoch, never 0 or negative as an int): a reader that saw the same
+// number twice knows the region stayed frozen in between (plat_mem_reclaim_zeros' cache of units not all zero).
+static volatile uint32_t frz[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
+static uint32_t frz_epoch;   // frz_lock
 static uint32_t thaw_ms[RT_ADDRESS_LIMIT >> FRZ_SHIFT];   // frz_lock: GetTickCount of the last thaw request, 0 never
 static volatile int32_t nfrz;
 PlatMutex frz_lock = PLAT_MUTEX_INIT;   // memory_int.h
@@ -149,7 +152,8 @@ int mem_freeze(uint64_t a) {
     if (frz[r]) ok = 1;
     else if (thaw_ms[r] && (int32_t)((uint32_t)plat_now_ms() - thaw_ms[r]) < (int32_t)FRZ_HOLD_MS) ok = 0;   // |1 may be ahead
     else if (freeze_locked(r)) {
-        __atomic_store_n(&frz[r], 1, __ATOMIC_RELEASE);
+        frz_epoch = frz_epoch >= 0x7fffffffu ? 1 : frz_epoch + 1;
+        __atomic_store_n(&frz[r], frz_epoch, __ATOMIC_RELEASE);
         plat_inc32(&nfrz);
         plat_inc64(&frz_count[0]);
         ok = 1;
@@ -158,7 +162,7 @@ int mem_freeze(uint64_t a) {
     return ok;
 }
 
-int mem_frozen(uint64_t a) { return a < RT_ADDRESS_LIMIT && __atomic_load_n(&frz[a >> FRZ_SHIFT], __ATOMIC_ACQUIRE); }
+int mem_frozen(uint64_t a) { return a < RT_ADDRESS_LIMIT ? (int)__atomic_load_n(&frz[a >> FRZ_SHIFT], __ATOMIC_ACQUIRE) : 0; }
 
 void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws) {
     *frozen = (uint64_t)__atomic_load_n(&nfrz, __ATOMIC_RELAXED);
@@ -364,7 +368,7 @@ static int thaw_fault(uint64_t a) {
         }
     }
     frz_take();
-    int was = frz[a >> FRZ_SHIFT];
+    int was = frz[a >> FRZ_SHIFT] != 0;
     thaw_locked(a >> FRZ_SHIFT, 1);
     frz_drop();
     if (was) return 1;

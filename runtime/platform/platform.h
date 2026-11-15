@@ -266,7 +266,9 @@ typedef enum {
 PlatEarlyResult plat_mem_early_protect(uint64_t addr, size_t n, int on, int restore_prot);
 void plat_mem_early_hold_hook(void (*fn)(uint64_t addr, size_t n));
 void plat_mem_frozen_hook(int (*fn)(uint64_t addr));
-uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uint64_t *scanned_bytes);
+// Frees frozen units that are all zero, up to target_bytes (0 no limit). cache: skip units found not all zero earlier
+// in the same freeze (mem_frozen's number), which cannot have changed since.
+uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uint64_t *scanned_bytes, int cache);
 int plat_mem_replace_anon(uint64_t addr, uint64_t n);      // fresh read-write pages over a range (Linux); 1 on success
 // Writes n bytes at addr through the page protection (committed pages of a reservation, even inaccessible ones), as the
 // kernel would; no fault reaches the hooks. 1 on success; 0 where the platform cannot (Windows).

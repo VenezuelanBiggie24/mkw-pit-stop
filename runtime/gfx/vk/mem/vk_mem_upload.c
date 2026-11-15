@@ -321,6 +321,8 @@ void vk_mem_governor(int force) {
     uint64_t rel_freed = 0, hr_freed = 0, trim_freed = 0, sp_freed = 0, sh_freed = 0, h0_freed = 0, zero_freed = 0,
              zero_scanned = 0;
     const char *level;
+    uint64_t t0 = plat_now_ns(), zero_ns = 0;
+    int ab_side = rt_ab();
     if (avail < DMEM_HARD_BYTES) {
         level = "hard";
         vk_mem_shadow_shed(1);
@@ -331,7 +333,14 @@ void vk_mem_governor(int force) {
         sh_freed = shadow_trim(GOV_TRIM_HARD);
         h0_freed = vk_usnap_trim(8ull << 20) + (uint64_t)vk_exec_cb_trim_spare(2) * (4ull << 20);
         vk_mem_collect();
-        zero_freed = plat_mem_reclaim_zeros(256ull << 20, &zero_scanned);
+        // MKW_ZERO_SCAN_CACHE (default 1, "ab" to compare): skip the units found not all zero earlier in the same
+        // freeze. Without it a race's hard level, every ~4 frames, read ~1.4 GB of frozen units and freed 0 MiB
+        // (wake-20261115-185222: 2,221 passes), memory bandwidth and L3 the game's threads share.
+        static int zcache = -1;
+        if (zcache < 0) zcache = rt_knob("ZERO_SCAN_CACHE", "1");
+        uint64_t z0 = plat_now_ns();
+        zero_freed = plat_mem_reclaim_zeros(256ull << 20, &zero_scanned, RT_KNOB_ON(zcache));
+        zero_ns = plat_now_ns() - z0;
     } else {
         level = "soft";
         rel_freed = vk_texture_trim_released(GOV_REL_SOFT);
@@ -341,11 +350,12 @@ void vk_mem_governor(int force) {
     uint64_t after = plat_mem_dmem_avail();
     if (rel_freed || hr_freed || trim_freed || sp_freed || sh_freed || h0_freed || zero_freed ||
         (__atomic_add_fetch(&idle_logs, 1, __ATOMIC_RELAXED) % 60) == 1)
-        rt_log("vk: memory governor (%s): dmem=%llu->%llu MiB, freed rel=%.1f headroom=%.1f trim=%.1f sparse=%.1f shadow=%.1f heap0=%.1f zero=%.1f (scanned=%.1f) MiB",
+        rt_log("vk: memory governor (%s): dmem=%llu->%llu MiB, freed rel=%.1f headroom=%.1f trim=%.1f sparse=%.1f shadow=%.1f heap0=%.1f zero=%.1f (scanned=%.1f) MiB; %.2f ms (zero scan %.2f) ab=%c",
                level, (unsigned long long)(avail >> 20), (unsigned long long)(after >> 20),
                rel_freed / 1048576.0, hr_freed / 1048576.0, trim_freed / 1048576.0,
                sp_freed / 1048576.0, sh_freed / 1048576.0, h0_freed / 1048576.0,
-               zero_freed / 1048576.0, zero_scanned / 1048576.0);
+               zero_freed / 1048576.0, zero_scanned / 1048576.0, (plat_now_ns() - t0) / 1e6, zero_ns / 1e6,
+               ab_side ? 'B' : 'A');
 }
 
 void vk_mem_relieve(uint64_t bytes, const char *what) {

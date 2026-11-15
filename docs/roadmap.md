@@ -56,6 +56,11 @@ own threads are the critical path (~72 ms a frame of CPU among them, measured wi
   memory. Lower levels (soft 768 / hard 512 MiB, an A/B on 15/11/2026) let memory fall to 470-560 MiB: textures came
   out corrupted and the frame was slower (27.9 against 23.9 ms). The hard level holds memory where it is; the lever
   is using less (finalized pool storage kept backed since task 32, ~550-680 MiB; textures; shadows), not doing less.
+- **Done, no frame gain: the zero scan skips what it already read.** Each hard pass read every frozen unit for zero
+  pages (~1.5 GB, 9.3 ms a pass on the governor's thread, freeing almost nothing). `MKW_ZERO_SCAN_CACHE` (default 1)
+  skips a unit found not all zero earlier in the same freeze (`mem_frozen` now returns the freeze's number). A/B on
+  16/11/2026 (`zscan-ab`): 0.1 MiB scanned and 1.7 ms a pass, the same free memory (610 against 616 MiB) and zero
+  pages freed, busy +0.5 ms (noise): the scan was off the critical path. The pass still walks every unit (~1.2 ms).
 - **Measured and set aside (16/11/2026; `tools/run/ab.py` now also gives "busy", the frame less the pacing wait):**
   the early-read watch's waits for another 4 KiB page of a watched 16 KiB page (~1 a frame of ~8 ms on job threads,
   every one such a sibling, no real early read): skipping them (`MKW_EARLY_SIBLING_WAIT=0`) did not shorten the work

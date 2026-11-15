@@ -994,7 +994,7 @@ void plat_mem_frozen_hook(int (*fn)(uint64_t addr)) {
     __atomic_store_n(&g_frozen_hook, fn, __ATOMIC_RELEASE);
 }
 
-uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uint64_t *scanned_bytes) {
+uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uint64_t *scanned_bytes, int cache) {
     int (*frozen_fn)(uint64_t) = __atomic_load_n(&g_frozen_hook, __ATOMIC_ACQUIRE);
     if (!frozen_fn) {
         if (scanned_bytes) *scanned_bytes = 0;
@@ -1011,7 +1011,12 @@ uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uint64_t *scanned_bytes) 
                 Ps5MixedBlock *u = &chunk[i];
                 if (!__atomic_load_n(&u->backing.committed, __ATOMIC_ACQUIRE)) continue;
                 uint64_t uaddr = u->backing.address;
-                if (!frozen_fn(uaddr) || prot_watch_has_gpu(uaddr, PS5_MEM_UNIT)) continue;
+                uint32_t fz = (uint32_t)frozen_fn(uaddr);
+                // A unit found not all zero in this same freeze is still so: frozen, nothing wrote it (a write thaws
+                // first, and a new freeze has a new number). A stale or racy number only skips a unit, never frees one.
+                if (!fz || (cache && __atomic_load_n(&u->nz_freeze, __ATOMIC_RELAXED) == fz) ||
+                    prot_watch_has_gpu(uaddr, PS5_MEM_UNIT))
+                    continue;
                 unit_lock(u);
                 bool can_scan = u->backing.committed && u->live_pages &&
                                 !prot_watch_has_gpu(uaddr, PS5_MEM_UNIT) && frozen_fn(uaddr);
@@ -1024,6 +1029,9 @@ uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uint64_t *scanned_bytes) 
                     for (size_t k = 0; k < PS5_MEM_UNIT / sizeof(uint64_t); ++k) {
                         if (q[k]) { zero = false; break; }
                     }
+                    // The number read after the scan: a thaw and refreeze during it leaves a different number, and
+                    // the unit is scanned again next time.
+                    if (!zero && (uint32_t)frozen_fn(uaddr) == fz) __atomic_store_n(&u->nz_freeze, fz, __ATOMIC_RELAXED);
                     if (zero && ps5_mem_decommit(&u->backing) == 0) {
                         __atomic_sub_fetch(&backed_units[r->kind], 1, __ATOMIC_RELAXED);
                         reclaimed += PS5_MEM_UNIT;

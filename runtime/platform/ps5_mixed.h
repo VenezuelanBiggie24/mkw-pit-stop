@@ -13,6 +13,8 @@ typedef struct {
     uint8_t pages[PS5_MEM_UNIT / PS5_GUEST_PAGE];
     unsigned live_pages;
     volatile int lock;   // per-unit spinlock; never take vm_lock while holding this
+    uint32_t nz_freeze;  // plat_mem_reclaim_zeros: the freeze (mem_frozen's number) in which it found this unit not
+                         // all zero; 0 none. Read-only for that whole freeze, so no need to scan it again.
 } Ps5MixedBlock;
 
 int ps5_mixed_reserve(Ps5MixedBlock *block, uintptr_t address);
