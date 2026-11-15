@@ -51,6 +51,11 @@ own threads are the critical path (~72 ms a frame of CPU among them, measured wi
   functions, so the generated code stays at -O1; PGO is next. Measured on the console (15/11/2026): no hang, every
   hot function within noise, the game threads' total 74.7 -> 74.0 ms a frame. Next on this line: `frinta` lifted to a
   libm `round()` call (1.3 ms a frame, from `sinf`), and the `--reg-loop-weight 8` build.
+- **Tried and dropped: a gentler memory governor.** A race sits at ~836 MiB of direct memory, so the governor runs its
+  hard level every ~3 frames (textures evicted, shadows trimmed, ~1 GB scanned for zero pages) without raising free
+  memory. Lower levels (soft 768 / hard 512 MiB, an A/B on 15/11/2026) let memory fall to 470-560 MiB: textures came
+  out corrupted and the frame was slower (27.9 against 23.9 ms). The hard level holds memory where it is; the lever
+  is using less (finalized pool storage kept backed since task 32, ~550-680 MiB; textures; shadows), not doing less.
 - **To do: `main+0x154e14`.** A list walk under a mutex (nodes 0x140 bytes apart, flags at +0x138, removal through a
   virtual call), 6.3-6.95 ms a frame through one race and 1.65 ms in another, steady within a race: why the list is
   that long, and whether it should be.
