@@ -531,10 +531,22 @@ static bool change(uint64_t address, uint64_t bytes, Change action, int protecti
     if ((action == DECOMMIT || (action == PROTECT && protection == PLAT_PROT_NONE)) &&
         prot_watch_has_gpu(address, bytes))
         return false;
+    // Each page's state under its unit's lock: a release of the unit's backing (plat_mem_reclaim_zeros, of frozen
+    // units only, or plat_mem_release_*) unmaps it and reserves it again under that lock, and in between the page
+    // reads FREE. Read without it, a frozen region's thaw found such a page and was refused ("memory: thawing ...
+    // failed", 15/11/2026, the governor's zero reclaim running).
     for (uint64_t at = address; at < end; at += PAGE) {
         Ps5MixedBlock *unit = find_unit(range, at, false);
+        if (unit) unit_lock(unit);
         Ps5GuestPage state = unit ? ps5_mixed_state(unit, at) : PS5_GUEST_RESERVED;
-        if (state == PS5_GUEST_FREE || (action == PROTECT && state == PS5_GUEST_RESERVED)) return false;
+        if (unit) unit_unlock(unit);
+        if (state == PS5_GUEST_FREE || (action == PROTECT && state == PS5_GUEST_RESERVED)) {
+            fprintf(stderr, "PS5 memory %s %#llx+%#llx refused: page %#llx is %s\n",
+                    action == COMMIT ? "commit" : action == DECOMMIT ? "decommit" : "protect",
+                    (unsigned long long)address, (unsigned long long)bytes, (unsigned long long)at,
+                    state == PS5_GUEST_FREE ? "free (no reservation)" : "reserved (not committed)");
+            return false;
+        }
     }
 
     // Commits stay lazy per 64 KiB unit regardless of span size: MKW's
