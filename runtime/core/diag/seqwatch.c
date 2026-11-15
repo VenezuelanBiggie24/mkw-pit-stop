@@ -216,7 +216,7 @@ static void set_active(int k, uint8_t on, uint64_t frame, const char *why) {
         if (until_at < nuntil && k == until_node[until_at] && on == until_on[until_at] && ++until_at == nuntil &&
             seq_on) {
             seq_on = 0;
-            rt_fnprof_set(impcensus_on);   // the import census keeps the hook on
+            rt_fnprof_set(impcensus_on || g_fn_sampling);   // the import census and MKW_PROFILE_FN keep the hook on
             __atomic_store_n(&window_t0, kern_now_ns(), __ATOMIC_RELEASE);
             hostfn_time_window(frame);   // the census starts here
             __atomic_store_n(&window_frame, frame + 1, __ATOMIC_RELEASE);
@@ -249,6 +249,7 @@ static void ui_name(const char *o, char *out, size_t cap) {
 }
 
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) {
+    if (g_fn_sampling) kern_fn_note(addr, lr);
     if (impcensus_on) impcensus_hit(addr, lr);
     if (!seq_on) return;
     int slot = lookup(addr);

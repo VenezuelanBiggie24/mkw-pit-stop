@@ -225,6 +225,13 @@ fall in waits and the CPU before them goes to `wait_cond`. Code sampled while ru
 is reliable. `MKW_TRACE=sched` gives each game thread's CPU and where it waits. Its `render busy` in the perf line is
 the interval less pacing, not the render thread's CPU (2.6 ms a frame in a race; the job workers 8-11 ms each).
 
+Signals reach a PS5 thread only when it enters the kernel, so the running samples above land at system calls (~17 of
+~70 ms a frame). `MKW_PROFILE_FN=1` (with `MKW_PROFILE_FROM`, `MKW_PROFILE_US`) profiles without signals: the lifted
+code's function-entry hook notes each game thread's last function and its return address, and a sampler thread counts
+those of the threads holding a virtual core; every 600 frames the log lists the top functions and call sites
+(`prof: ... by last lifted function`, `by call site`). A short function is also credited with its caller's code after
+it returns, until the next call. It costs a call per guest call while on.
+
 The hang watch's stacks (`plat_sample_stacks`) come from a stack scan on the PS5: `backtrace` stops at the signal
 trampoline there, so the handler lists the values on the interrupted stack that point into the executable, between the
 stack pointer and the thread's registration frame (stale values among the callers).

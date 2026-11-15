@@ -33,6 +33,22 @@ with the game (−2.4 ms), submits on their own thread (−1.2 to −1.6 ms), th
 \* Our numbers (not the ones said to come from totk-pc-recomp) were measured on 07-09/11/2026 on our test machine:
 Radeon 660M APU (Ryzen 5 7535HS), Linux, 720p internal resolution.
 
+### On the PS5
+
+A race frame takes ~24 ms on the console (15/11/2026): GPU ~7 ms and replay ~14 ms run beside the game, so the game's
+own threads are the critical path (~72 ms a frame of CPU among them, measured with `MKW_PROFILE_FN`; docs/ps5.md).
+
+- **Now: the synchronization calls.** ~16-20 ms a frame of the game threads' time goes to `nn::os::YieldThread`
+  (`svc 0x0B`, from the job system's spin loops at `main+0x4520` and `main+0x5660`), `WaitForAddress` and
+  `SignalToAddress` (light events and message queues), and the SDK's critical sections. Cheaper SVC paths first.
+- **To do: the CPU translator's loops.** The generated C keeps only some guest registers in locals (the rest in
+  `c->x[]`) and puts a compiler barrier on every loop's back edge, so a loop reloads its state from memory each turn;
+  the barrier is needed only where a loop waits on memory another thread writes. Broadest lever (all game code),
+  largest change: the whole game regenerated, `tools/cpu/lift_diff.py` before any run.
+- **To do: `main+0x154e14`.** A list walk under a mutex (nodes 0x140 bytes apart, flags at +0x138, removal through a
+  virtual call), 6.3-6.95 ms a frame through one race and 1.65 ms in another, steady within a race: why the list is
+  that long, and whether it should be.
+
 ## 2. The picture as on the console
 
 - Shader translator bugs found by comparing with another Switch 2 port: three of six fixed, three to go, each

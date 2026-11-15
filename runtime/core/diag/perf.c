@@ -454,6 +454,22 @@ void perf_present(uint64_t frame) {
     uint64_t now = kern_now_ns(), d = last ? now - last : 0;
     prof_sampler_frame(frame, now, last ? d : 0);
     if ((rt_trace & RT_TRACE_PERF) && frame && frame % 600 == 0) pstat_report(frame, 600);
+    {   // MKW_PROFILE_FN=1 (kernel_diag.c), from MKW_PROFILE_FROM's frame: a report every 600 frames
+        static int fn_mode = -1, fn_started;
+        static uint64_t fn_from, fn_last;
+        if (fn_mode < 0) {
+            const char *e = cfg_get("MKW_PROFILE_FN"), *f = cfg_get("MKW_PROFILE_FROM");
+            fn_mode = e && *e && strcmp(e, "0");
+            fn_from = f ? strtoull(f, NULL, 10) : 0;
+        }
+        if (fn_mode == 1 && !fn_started && frame >= fn_from) {
+            const char *u = cfg_get("MKW_PROFILE_US");
+            fn_started = kern_fn_profile_start(u ? (uint32_t)atoi(u) : 1000);
+            fn_last = frame;
+            if (!fn_started) fn_mode = 0;
+        }
+        if (fn_started && frame >= fn_last + 600) kern_fn_profile_report(frame, frame - fn_last), fn_last = frame;
+    }
     uint64_t rep = ft_frame(frame, now, d);   // d is 0 on the first present: it only starts the period
     ab_b += rt_ab();
     static int cond_probed, lock_prof_init;

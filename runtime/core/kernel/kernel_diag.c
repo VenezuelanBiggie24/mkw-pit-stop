@@ -6,6 +6,8 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "gamelib.h"
+#include "host.h"
 #include "kernel_int.h"
 #include "platform/platform.h"
 
@@ -683,5 +685,129 @@ void kern_sched_report(uint64_t frame) {
             rt_log("sched: guest-thread: handle %#x tid=%u guest prio %d guest mask %#llx (%s)", gt[i].h, gt[i].tid,
                    gt[i].prio, (unsigned long long)gt[i].mask, gt[i].entry ? d : "main");
         }
+    }
+}
+
+// ---- MKW_PROFILE_FN: where the game's threads run, without signals
+// On the PS5 a SIGPROF reaches a thread only when it enters the kernel, so signal sampling lands at system calls and
+// finds ~17 of the ~70 ms a frame the game's threads run (15/11/2026). Here the function-entry hook of the lifted code
+// (fnprof_hit, g_fnprof) stores each thread's last lifted function in its record, and a sampler thread counts, every
+// period, those of the threads that hold a virtual core (running game code or a host call it made; -1 while blocked).
+// A function's samples x period is the time its thread spent there or in what it called that is not lifted (host
+// calls, leaf code without an entry hook). It costs one call and a store per guest call while on.
+volatile int g_fn_sampling;
+static uint32_t fns_period_us = 1000;
+#define FNS_N 16384
+static struct { uint64_t addr, n; } fns[FNS_N];
+// By call site (the return address of the last call): who called the hot function. A stub a wrapper tail-calls
+// (nn::os::YieldThread -> svc 0x0B) keeps its caller's return address, so the site is the game's own code.
+static struct { uint64_t fn, lr, n; } fsites[FNS_N];
+static uint64_t fns_dropped, fns_run, fns_ticks, fns_threads;
+static PlatMutex fns_lock = PLAT_MUTEX_INIT;
+
+void kern_fn_note(uint64_t addr, uint64_t lr) {
+    RtThread *t = tcur;
+    if (!t) return;
+    __atomic_store_n(&t->prof_fn, addr, __ATOMIC_RELAXED);
+    __atomic_store_n(&t->prof_lr, lr, __ATOMIC_RELAXED);
+}
+
+static void fns_add(uint64_t a) {   // fns_lock held
+    for (uint32_t i = (uint32_t)((a >> 2) * 0x9E3779B1u) % FNS_N, k = 0; k < 64; k++, i = (i + 1) % FNS_N) {
+        if (fns[i].addr == a) { fns[i].n++; return; }
+        if (!fns[i].addr) { fns[i].addr = a, fns[i].n = 1; return; }
+    }
+    fns_dropped++;
+}
+
+static void fsites_add(uint64_t fn, uint64_t lr) {   // fns_lock held
+    uint64_t h = (fn ^ (lr * 0x9E3779B97F4A7C15ull)) >> 7;
+    for (uint32_t i = (uint32_t)h % FNS_N, k = 0; k < 64; k++, i = (i + 1) % FNS_N) {
+        if (fsites[i].fn == fn && fsites[i].lr == lr) { fsites[i].n++; return; }
+        if (!fsites[i].fn) { fsites[i].fn = fn, fsites[i].lr = lr, fsites[i].n = 1; return; }
+    }
+}
+
+static void fn_sampler_main(void *arg) {
+    (void)arg;
+    for (;;) {
+        plat_sleep_ns((uint64_t)fns_period_us * 1000ull);
+        lock();   // the thread list; held for a few microseconds
+        plat_mutex_lock(&fns_lock);
+        for (RtThread *t = g_all; t; t = t->all) {
+            fns_threads++;
+            if (t->cur_core < 0) continue;
+            uint64_t a = __atomic_load_n(&t->prof_fn, __ATOMIC_RELAXED);
+            if (!a) continue;
+            fns_add(a);
+            fsites_add(a, __atomic_load_n(&t->prof_lr, __ATOMIC_RELAXED));
+            fns_run++;
+        }
+        fns_ticks++;
+        plat_mutex_unlock(&fns_lock);
+        unlock();
+    }
+}
+
+int kern_fn_profile_start(uint32_t period_us) {
+    if (period_us >= 100) fns_period_us = period_us;
+    g_fn_sampling = 1;
+    rt_fnprof_set(1);
+    if (!plat_thread_new(fn_sampler_main, NULL, "fn sampler")) {
+        g_fn_sampling = 0;
+        rt_log("prof: MKW_PROFILE_FN: the sampler thread did not start");
+        return 0;
+    }
+    rt_log("prof: MKW_PROFILE_FN: the game threads' last lifted function, those holding a virtual core, every %u us",
+           fns_period_us);
+    return 1;
+}
+
+void kern_fn_profile_report(uint64_t frame, uint64_t frames) {
+    enum { TOP = 30 };
+    struct { uint64_t addr, n; } top[TOP] = {{0}};
+    plat_mutex_lock(&fns_lock);
+    uint64_t run = fns_run, ticks = fns_ticks, dropped = fns_dropped;
+    for (int i = 0; i < FNS_N; i++) {
+        if (!fns[i].n) continue;
+        for (int j = 0; j < TOP; j++)
+            if (fns[i].n > top[j].n) {
+                memmove(top + j + 1, top + j, (size_t)(TOP - 1 - j) * sizeof *top);
+                top[j].addr = fns[i].addr, top[j].n = fns[i].n;
+                break;
+            }
+    }
+    enum { TOPS = 30 };
+    struct { uint64_t fn, lr, n; } tops[TOPS] = {{0}};
+    for (int i = 0; i < FNS_N; i++) {
+        if (!fsites[i].n) continue;
+        for (int j = 0; j < TOPS; j++)
+            if (fsites[i].n > tops[j].n) {
+                memmove(tops + j + 1, tops + j, (size_t)(TOPS - 1 - j) * sizeof *tops);
+                tops[j].fn = fsites[i].fn, tops[j].lr = fsites[i].lr, tops[j].n = fsites[i].n;
+                break;
+            }
+    }
+    memset(fns, 0, sizeof fns);
+    memset(fsites, 0, sizeof fsites);
+    fns_run = fns_ticks = fns_dropped = fns_threads = 0;
+    plat_mutex_unlock(&fns_lock);
+    if (!frames || !ticks) return;
+    double per = (double)fns_period_us / 1e3 / (double)frames;   // ms a frame per sample
+    rt_log("prof: frame %llu: game threads running %.2f ms/frame (%llu samples in %llu ticks of %u us, %llu not "
+           "counted: table full), by last lifted function:",
+           (unsigned long long)frame, run * per, (unsigned long long)run, (unsigned long long)ticks, fns_period_us,
+           (unsigned long long)dropped);
+    for (int j = 0; j < TOP && top[j].n; j++) {
+        char d[160];
+        ldr_describe(top[j].addr, d, sizeof d);
+        rt_log("prof:   f%-2d %5.1f%% %6.2f ms/f  %s", j + 1, 100.0 * top[j].n / run, top[j].n * per, d);
+    }
+    rt_log("prof: frame %llu: by call site (function <- the return address of its call):", (unsigned long long)frame);
+    for (int j = 0; j < TOPS && tops[j].n; j++) {
+        char d[160], l[160];
+        ldr_describe(tops[j].fn, d, sizeof d);
+        ldr_describe(tops[j].lr, l, sizeof l);
+        rt_log("prof:   s%-2d %5.1f%% %6.2f ms/f  %s <- %s", j + 1, 100.0 * tops[j].n / run, tops[j].n * per, d, l);
     }
 }

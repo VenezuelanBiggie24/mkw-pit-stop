@@ -73,6 +73,7 @@ struct RtThread {
     RtThread *all;             // every thread
     // virtual core
     int cur_core, c_nosig;     // core held while running guest code, -1 while blocked; c_nosig: spinning in gate
+    uint64_t prof_fn, prof_lr; // MKW_PROFILE_FN: the lifted function the thread entered last, and its return address
     uint64_t cseq;
     RtThread *cnext;
     uint8_t *tlr, *tls;

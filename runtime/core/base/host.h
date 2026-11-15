@@ -221,6 +221,12 @@ const RtLoaded *ldr_module(int i);                         // order: main, subsd
 void seqwatch_init(void);                                  // MKW_SEQ_WATCH=1: log the game's sequence nodes (seqwatch.c)
 void impcensus_init(void);                                 // MKW_IMPORT_CENSUS=<file>: SDK functions main calls
 void impcensus_hit(uint64_t addr, uint64_t lr);            // from fnprof_hit, while impcensus_on
+// MKW_PROFILE_FN (kernel_diag.c): the function-entry hook notes each game thread's last lifted function, and a sampler
+// thread counts those of the threads that hold a virtual core. Signal sampling cannot profile lifted code on the PS5.
+extern volatile int g_fn_sampling;
+void kern_fn_note(uint64_t addr, uint64_t lr);                // from fnprof_hit, while g_fn_sampling
+int kern_fn_profile_start(uint32_t period_us);                // 1 when the sampler runs
+void kern_fn_profile_report(uint64_t frame, uint64_t frames); // every 600 frames: the top functions
 void impcensus_write(void);                                // the census file, at exit (prof_write)
 extern volatile int impcensus_on;
 void hostfn_time_report(uint64_t frame);                   // MKW_HOST_TIME=1: host functions by time, every 600 presents
