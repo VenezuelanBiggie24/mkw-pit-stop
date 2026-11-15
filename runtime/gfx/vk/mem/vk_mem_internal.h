@@ -66,7 +66,9 @@ typedef struct PoolRec {
     uint32_t cgen;                     // gen_lock: every page stamped up to this generation is captured
     uint8_t cap_on;                    // shadow_lock: on the capture list (vk_mem_capture.c)
     uint8_t placed;                    // POOL_IMPORT as driver memory mapped at the guest range (placed_pool): mem
+    uint8_t gpu_imported;              // POOL_IMPORT via host-pointer import: GPU access granted on [import_lo, import_hi)
     uint8_t lazy;                      // POOL_IMPORT whose GPU storage is made at its first resolve (lazy_back)
+    uint64_t lazy_retry;               // lazy_back failed: tried again from this submission on (vk_replay_submit)
 } PoolRec;
 
 // vk_memory.c: the pool index
@@ -125,6 +127,7 @@ int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size);
 void shadow_touch(PoolRec *r);
 void shadow_forget(PoolRec *r);
 void shadow_log(uint64_t frame);
+uint64_t shadow_trim(uint64_t bytes);
 void shadow_reset(void);
 
 // vk_mem_merge.c: the shadow merged by bytes (MKW_SHADOW_MERGE), with a base copy of each written range up to MERGE_MAX
@@ -218,6 +221,14 @@ void mirror_reset(VkCtx *c);
 // vk_mem_log.c: census, VRAM summary and the memory mode
 void flag_names(uint32_t f, char *buf, size_t n);
 void vram_log(uint64_t frame);
+void vk_mem_census_now(void);
+
+// vk_memory.c: pool finalize & GPU-only init release stats
+void vk_pool_fini_stats(uint64_t *n, uint64_t *bytes, uint64_t *backed, uint64_t *released, uint64_t *overlap,
+                        uint64_t *win_bytes, uint64_t *win_backed, int reset);
+void vk_mem_cna_stats(uint64_t *n, uint64_t *bytes, uint64_t *released);
+void vk_mem_cna_copy(uint8_t *dst, uint64_t lo, uint64_t hi);   // guest bytes, released ranges as zeros (vk_memory.c)
+int vk_mem_cna_has_released(uint64_t lo, uint64_t hi);
 
 // vk_mem_upload.c: upload batches and deferred destruction
 void vk_mem_grow(void **arr, int *cap, size_t elem);

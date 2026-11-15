@@ -24,16 +24,29 @@
 // ASTC textures and got no image: a black race (run-race4, 31/10/2026).
 #define EVICT_IDLE 64
 static uint64_t n_evicted, evicted_bytes;
+
+uint32_t tex_evict_idle(void) {
+    static int32_t v = -1;
+    int32_t val = __atomic_load_n(&v, __ATOMIC_RELAXED);
+    if (val < 0) {
+        const char *e = cfg_get("MKW_TEX_EVICT_IDLE");
+        val = e && *e && atoi(e) > 0 ? atoi(e) : EVICT_IDLE;
+        __atomic_store_n(&v, val, __ATOMIC_RELAXED);
+    }
+    return (uint32_t)val;
+}
+
 VkResult evict_idle(VkCtx *c, const VkImageCreateInfo *ci, const VmaAllocationCreateInfo *ai, VkImage *img,
                     VmaAllocation *alloc) {
     VkResult r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    uint32_t idle = tex_evict_idle();
     for (int round = 0; r == VK_ERROR_OUT_OF_DEVICE_MEMORY && round < 4; round++) {
         Tex *cand[64];
         int n = 0;
         for (uint32_t i = 0; i < by_key.cap && n < 64; i++) {
             Tex *e = by_key.vals ? by_key.vals[i] : NULL;
             if (e && e->alloc && e->pub.mirrored && !e->pub.gpu_owned && !e->gpu_dirty && !e->released &&
-                (uint32_t)(submit_epoch - e->seen) > EVICT_IDLE)
+                (uint32_t)(submit_epoch - e->seen) > idle)
                 cand[n++] = e;
         }
         if (!n) break;
@@ -56,21 +69,21 @@ VkResult evict_idle(VkCtx *c, const VkImageCreateInfo *ci, const VmaAllocationCr
 // rule), worth at least bytes, when the texture lock is free or this thread's (a thread holding it may wait for the
 // upload lock the caller holds). 1 if any went. tt4 (09/11/2026) died on a staging buffer with 1 249 released entries
 // holding 946 MiB: the idle ones alone were looked at.
-int vk_texture_trim(uint64_t bytes) {
+uint64_t vk_texture_trim(uint64_t bytes) {
     VkCtx *c = vk_ctx();
     if (!c || !plat_rmutex_trylock(&tex_lock)) return 0;
     uint64_t freed = 0;
-    int dropped = 0;
     while (rel_head && freed < bytes) {
         VmaAllocationInfo vi = {0};
         if (rel_head->alloc) vmaGetAllocationInfo(c->vma, rel_head->alloc, &vi);
-        freed += vi.size, dropped++;
+        freed += vi.size;
         destroy_idle(rel_head);
     }
+    uint32_t idle = tex_evict_idle();
     for (uint32_t i = 0; i < by_key.cap && freed < bytes; i++) {
         Tex *e = by_key.vals ? by_key.vals[i] : NULL;
         if (!e || !e->alloc || !e->pub.mirrored || e->pub.gpu_owned || e->gpu_dirty || e->released ||
-            (uint32_t)(submit_epoch - e->seen) <= EVICT_IDLE)
+            (uint32_t)(submit_epoch - e->seen) <= idle)
             continue;
         VmaAllocationInfo vi = {0};
         vmaGetAllocationInfo(c->vma, e->alloc, &vi);
@@ -79,7 +92,29 @@ int vk_texture_trim(uint64_t bytes) {
         i--;   // the table shifted an entry into this slot
     }
     unlock();
-    return freed > 0 || dropped;
+    return freed;
+}
+
+static uint64_t released_bytes;
+
+static uint64_t tex_alloc_bytes(Tex *e) {
+    if (!e->alloc) return 0;
+    VkCtx *c = vk_ctx();
+    if (!c) return 0;
+    VmaAllocationInfo vi = {0};
+    vmaGetAllocationInfo(c->vma, e->alloc, &vi);
+    return vi.size;
+}
+
+uint64_t vk_texture_trim_released(uint64_t keep_bytes) {
+    VkCtx *c = vk_ctx();
+    if (!c || !plat_rmutex_trylock(&tex_lock)) return 0;
+    uint64_t before = released_bytes;
+    while (released_bytes > keep_bytes && rel_head)
+        destroy_idle(rel_head);
+    uint64_t freed = before > released_bytes ? before - released_bytes : 0;
+    unlock();
+    return freed;
 }
 
 int owned_lower(uint64_t a) {
@@ -127,9 +162,12 @@ void rel_append(Tex *e) {
     if (rel_tail) rel_tail->rel_next = e;
     else rel_head = e;
     rel_tail = e;
+    released_bytes += tex_alloc_bytes(e);
 }
 
 void rel_unlink(Tex *e) {
+    uint64_t b = tex_alloc_bytes(e);
+    released_bytes = released_bytes > b ? released_bytes - b : 0;
     if (e->rel_prev) e->rel_prev->rel_next = e->rel_next;
     else rel_head = e->rel_next;
     if (e->rel_next) e->rel_next->rel_prev = e->rel_prev;
@@ -183,8 +221,10 @@ void destroy_idle(Tex *e) {
 // finalizes and initializes transient textures every frame, so a released entry is mostly taken back within frames.
 // Dropping all of them at once when the count passed 4096 destroyed thousands of images in one frame: 333-422 ms
 // frames every 40-50 s on a GTX 1050 Ti, then the textures still in use were created and uploaded again.
-#define RELEASED_MAX 2048
+#define RELEASED_MAX       2048
+#define RELEASED_MAX_BYTES (256ull << 20)
 void sweep_released(void) {
-    while (nreleased > RELEASED_MAX && rel_head) destroy_idle(rel_head);
+    while ((nreleased > RELEASED_MAX || released_bytes > RELEASED_MAX_BYTES) && rel_head)
+        destroy_idle(rel_head);
 }
 

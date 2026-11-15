@@ -479,11 +479,16 @@ void nvn_present_fence_note(void) {
                      __ATOMIC_RELAXED);
 }
 
-static void sync_wait_note(uint64_t fence, uint64_t ns) {
-    static uint64_t n[4], t[4], total;
+int nvn_fence_frame_rel(uint64_t fence) {
     uint32_t at = __atomic_load_n(&present_at, __ATOMIC_RELAXED);
     int k = 0;
     while (k < 3 && at > (uint32_t)k && fence <= __atomic_load_n(&present_fence[(at - 1 - (uint32_t)k) % 4], __ATOMIC_RELAXED)) k++;
+    return k;
+}
+
+static void sync_wait_note(uint64_t fence, uint64_t ns) {
+    static uint64_t n[4], t[4], total;
+    int k = nvn_fence_frame_rel(fence);
     __atomic_fetch_add(&n[k], 1, __ATOMIC_RELAXED), __atomic_fetch_add(&t[k], ns, __ATOMIC_RELAXED);
     if (__atomic_add_fetch(&total, 1, __ATOMIC_RELAXED) % 600) return;
     rt_log("nvn: blocking SyncWaits by the frame of the fence: not presented yet %llu (%.1f ms), last presented %llu "
@@ -498,7 +503,7 @@ static void sync_wait_note(uint64_t fence, uint64_t ns) {
 // instead. One line every 3,000 polls: how many found the fence not done, by stride.
 static uint64_t poll_n, poll_late, poll_waited;
 
-static int poll_wait(uint64_t fence) {
+static int poll_wait(uint64_t fence, uint64_t pc) {
     static int mode = -1;
     if (mode < 0) {
         mode = rt_knob("SYNC_POLL_WAIT", "0");
@@ -508,8 +513,14 @@ static int poll_wait(uint64_t fence) {
     __atomic_fetch_add(&poll_late, 1, __ATOMIC_RELAXED);
     if (!RT_KNOB_ON(mode)) return 0;
     __atomic_fetch_add(&poll_waited, 1, __ATOMIC_RELAXED);
-    NVN_BLOCKING();
-    return gfx_backend()->fence_wait(fence, 200000000ull);
+    uint64_t t0 = (rt_trace & RT_TRACE_PERF) ? kern_now_ns() : 0;
+    int ok;
+    {
+        NVN_BLOCKING();
+        ok = gfx_backend()->fence_wait(fence, 200000000ull);
+    }
+    if (t0) perf_fence_site("nvnSyncWait_poll", pc, nvn_fence_frame_rel(fence), kern_now_ns() - t0);
+    return ok;
 }
 
 static void poll_note(void) {
@@ -525,13 +536,22 @@ static void poll_note(void) {
 // recording only starts after it: the frame is the game, the recording and the GPU's tail in a row. What the game may
 // then read early waits on its own (memory_early.c, mem_early_rel), and what it may rewrite waits before the shadow copy
 // (vk_sync.c prologue).
+static int ps5_overlap(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        mode = rt_knob("PS5_OVERLAP", "0");
+        if (mode) rt_log("nvn: PS5 submit/GPU overlap%s (MKW_PS5_OVERLAP)", mode == 2 ? " in the B blocks" : "");
+    }
+    return RT_KNOB_ON(mode);
+}
+
 static int fence_early(const GfxBackend *b) {
     static int mode = -1;
     if (mode < 0) {
         mode = b->fence_wait_issued && mem_early_waits() ? rt_knob("FENCE_EARLY", "0") : 0;
         if (mode) rt_log("nvn: fence waits end once the submit is recorded%s (MKW_FENCE_EARLY)", mode == 2 ? " in the B blocks" : "");
     }
-    int on = RT_KNOB_ON(mode);
+    int on = RT_KNOB_ON(mode) || (b->fence_wait_issued && ps5_overlap());
     if (on != mem_fence_early) __atomic_store_n(&mem_fence_early, on, __ATOMIC_RELEASE);
     return on;
 }
@@ -543,10 +563,12 @@ NVN_API(nvnSyncWait) {
     const GfxBackend *b = gfx_backend();
     if (fence_early(b) && b->fence_done() < s->fence) {
         int ok;
+        uint64_t t0 = (rt_trace & RT_TRACE_PERF) ? kern_now_ns() : 0;
         {
             NVN_BLOCKING();
             ok = b->fence_wait_issued(s->fence, timeout);
         }
+        if (t0) perf_fence_site("nvnSyncWait_early", c->x[30], nvn_fence_frame_rel(s->fence), kern_now_ns() - t0);
         if (ok) {
             uint64_t prev = __atomic_load_n(&mem_early_rel, __ATOMIC_RELAXED);
             while (s->fence > prev && !__atomic_compare_exchange_n(&mem_early_rel, &prev, s->fence, 1, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}
@@ -559,14 +581,18 @@ NVN_API(nvnSyncWait) {
     int poll = timeout < 1000000ull;
     if (poll) poll_note();
     if (b->fence_done() >= s->fence) { b->cpu_synced(s->fence); ret_x(c, NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED); return; }
-    if (poll && poll_wait(s->fence)) { b->cpu_synced(s->fence); ret_x(c, NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED); return; }
+    if (poll && poll_wait(s->fence, c->x[30])) { b->cpu_synced(s->fence); ret_x(c, NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED); return; }
     int ok;
     uint64_t t0 = (rt_trace & RT_TRACE_PERF) ? kern_now_ns() : 0;
     {
         NVN_BLOCKING();
         ok = b->fence_wait(s->fence, timeout);
     }
-    if (t0) sync_wait_note(s->fence, kern_now_ns() - t0);
+    if (t0) {
+        uint64_t dt = kern_now_ns() - t0;
+        sync_wait_note(s->fence, dt);
+        perf_fence_site("nvnSyncWait", c->x[30], nvn_fence_frame_rel(s->fence), dt);
+    }
     if (ok) b->cpu_synced(s->fence);
     ret_x(c, ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
 }
@@ -631,8 +657,12 @@ NVN_API(nvnEventGetValue) {
     if (f && b->fence_done() < f) {
         __atomic_fetch_add(&ev_pending, 1, __ATOMIC_RELAXED);
         if (RT_KNOB_ON(wait)) {
-            NVN_BLOCKING();
-            b->fence_wait(f, 200000000ull);
+            uint64_t t0 = (rt_trace & RT_TRACE_PERF) ? kern_now_ns() : 0;
+            {
+                NVN_BLOCKING();
+                b->fence_wait(f, 200000000ull);
+            }
+            if (t0) perf_fence_site("nvnEventGetValue", c->x[30], nvn_fence_frame_rel(f), kern_now_ns() - t0);
             __atomic_fetch_add(&ev_waited, 1, __ATOMIC_RELAXED);
         }
     }
@@ -703,10 +733,12 @@ NVN_API(nvnQueueGetError) {
 NVN_API(nvnQueueFlush) { (void)c; }
 // void nvnQueueFinish(NVNqueue *q)
 NVN_API(nvnQueueFinish) {
+    uint64_t t0 = (rt_trace & RT_TRACE_PERF) ? kern_now_ns() : 0;
     {
         NVN_BLOCKING();
         gfx_backend()->finish();
     }
+    if (t0) perf_fence_site("nvnQueueFinish", c->x[30], 0, kern_now_ns() - t0);
     gfx_backend()->cpu_synced(gfx_backend()->fence_done());
 }
 static uint64_t early_done(void) { return gfx_backend()->fence_done(); }   // MKW_EARLY_READ: the GPU's progress
@@ -715,7 +747,7 @@ static uint64_t early_done(void) { return gfx_backend()->fence_done(); }   // MK
 // list nvn_submit_prepare filled.
 static void early_watch_submit(uint64_t f) {
     if (!nvn_sub_ndst) return;
-    mem_early_set_done(early_done, gfx_backend()->fence_wait, gfx_backend()->fence_queued);
+    mem_early_set_done(early_done, gfx_backend()->fence_wait, gfx_backend()->fence_queued, gfx_backend()->fence_wait_issued);
     for (int i = 0; i < nvn_sub_ndst; i++) mem_early_watch(nvn_sub_dst[i].addr, nvn_sub_dst[i].size, f, nvn_sub_dst[i].kind);
     nvn_sub_ndst = 0;
 }
@@ -786,8 +818,12 @@ NVN_API(nvnQueueSubmitCommands) {
                                            last ? "on" : "off");
     ev_note_submit(f);
     // (not a held one: the console's GPU stops at its wait too, until the other queue's submit; that one waits for both)
-    if (catchup && RT_KNOB_ON(catchup) && gfx_replay_async() && !held && (!only_reports || nvn_sub_sp_reports))
+    if (catchup && RT_KNOB_ON(catchup) && gfx_replay_async() && !held && (!only_reports || nvn_sub_sp_reports) &&
+        (!ps5_overlap() || nvn_sub_sp_reports)) {
+        uint64_t t0 = (rt_trace & RT_TRACE_PERF) ? kern_now_ns() : 0;
         gfx_backend()->fence_wait(f, 500000000ull);
+        if (t0) perf_fence_site("nvnSubmit_catchup", c->x[30], nvn_fence_frame_rel(f), kern_now_ns() - t0);
+    }
     uint64_t prev = __atomic_load_n(&last_fence, __ATOMIC_RELAXED);
     while (f > prev && !__atomic_compare_exchange_n(&last_fence, &prev, f, 1, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {}
 }

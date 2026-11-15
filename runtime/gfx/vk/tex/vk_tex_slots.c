@@ -194,7 +194,10 @@ const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view) {
     }
     if (view) *view = has_view ? s->cview : s->v;
     if (has_view) *has_view = view ? s->chas_view : s->has_view;
-    if (e) e->seen = submit_epoch;
+    if (e) {
+        if (e->sparse && e->seen != submit_epoch) vk_sparse_touch(e->pub.image);
+        e->seen = submit_epoch;
+    }
     if (!e) unresolved_note(id, s);
     else if (vk_guard_on()) {
         vk_guard_note(&e->use);
@@ -242,6 +245,7 @@ void vk_texture_new_submit(void) {
                (unsigned long long)f * 60, (unsigned long long)n_alias_copied, (unsigned long long)n_alias_upload,
                (unsigned long long)n_alias_uninit);
         n_alias_copied = n_alias_upload = n_alias_uninit = 0;
+        tex_zero_tail_recheck(f * 60);
         rt_log("perf: frame %llu: texture re-uploads %llu (%.1f MiB, %.2f ms), after WriteTexels %llu (%.1f MiB, %.2f ms)",
                (unsigned long long)f * 60, (unsigned long long)ru_n, ru_bytes / 1048576.0, ru_ns / 1e6,
                (unsigned long long)ru_wt_n, ru_wt_bytes / 1048576.0, ru_wt_ns / 1e6);

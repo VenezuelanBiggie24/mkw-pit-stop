@@ -54,6 +54,14 @@ static PlatMutex spare_lock = PLAT_MUTEX_INIT;
 static VkDescriptorPool spare_pool[SPARE_POOLS];
 static Chunk spare_chunk[SPARE_CHUNKS];
 static int nspare_pool, nspare_chunk;
+static int cb_live_pools, cb_live_chunks;
+
+void vk_exec_cb_dpool_stats(int *live_pools, int *spare_pools, int *live_chunks, int *spare_chunks) {
+    if (live_pools) *live_pools = __atomic_load_n(&cb_live_pools, __ATOMIC_RELAXED);
+    if (spare_pools) *spare_pools = __atomic_load_n(&nspare_pool, __ATOMIC_RELAXED);
+    if (live_chunks) *live_chunks = __atomic_load_n(&cb_live_chunks, __ATOMIC_RELAXED);
+    if (spare_chunks) *spare_chunks = __atomic_load_n(&nspare_chunk, __ATOMIC_RELAXED);
+}
 
 static void cb_done(void *arg) {   // completion thread
     CbRes *r = arg;
@@ -65,14 +73,14 @@ static void cb_done(void *arg) {   // completion thread
         int kept = nspare_pool < SPARE_POOLS;
         if (kept) spare_pool[nspare_pool++] = r->pools[i];
         plat_mutex_unlock(&spare_lock);
-        if (!kept) vkDestroyDescriptorPool(c->device, r->pools[i], NULL);
+        if (!kept) vkDestroyDescriptorPool(c->device, r->pools[i], NULL), __atomic_sub_fetch(&cb_live_pools, 1, __ATOMIC_RELAXED);
     }
     for (int i = 0; i < r->nchunks; i++) {
         plat_mutex_lock(&spare_lock);
         int kept = r->chunks[i].size == CHUNK_BYTES && nspare_chunk < SPARE_CHUNKS;
         if (kept) spare_chunk[nspare_chunk++] = r->chunks[i];
         plat_mutex_unlock(&spare_lock);
-        if (!kept) vmaDestroyBuffer(c->vma, r->chunks[i].buf, r->chunks[i].alloc);
+        if (!kept) vmaDestroyBuffer(c->vma, r->chunks[i].buf, r->chunks[i].alloc), __atomic_sub_fetch(&cb_live_chunks, 1, __ATOMIC_RELAXED);
     }
     free(r->written), free(r->wslot), free(r->pools), free(r->chunks), free(r);
 }
@@ -120,7 +128,11 @@ uint8_t *scratch(VkExec *ex, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
             vk_mem_relieve(2 * n + (8ull << 20), "a transient buffer");
             res = vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &c->buf, &c->alloc, &info);
         }
-        if (res != VK_SUCCESS) rt_fatal("vk: transient buffer of %llu bytes failed (%d)", (unsigned long long)n, (int)res);
+        if (res != VK_SUCCESS) {
+            vk_oom_census("transient buffer");
+            rt_fatal("vk: transient buffer of %llu bytes failed (%d)", (unsigned long long)n, (int)res);
+        }
+        __atomic_add_fetch(&cb_live_chunks, 1, __ATOMIC_RELAXED);
         c->map = info.pMappedData, c->size = n, c->used = 0;
         r->nchunks++;
     }
@@ -208,18 +220,44 @@ VkDescriptorSet alloc_set(VkExec *ex, VkDescriptorSetLayout layout) {
         plat_mutex_lock(&spare_lock);
         if (nspare_pool) pool = spare_pool[--nspare_pool];
         plat_mutex_unlock(&spare_lock);
-        if (!pool && vkCreateDescriptorPool(c->device, &pi, NULL, &pool) != VK_SUCCESS) rt_fatal("vk: descriptor pool failed");
+        if (!pool) {
+            if (vkCreateDescriptorPool(c->device, &pi, NULL, &pool) != VK_SUCCESS) {
+                // out of memory: textures trimmed and the GPU waited for (what finished frees its pools), then again
+                vk_mem_relieve(4ull << 20, "a descriptor pool");
+                if (vkCreateDescriptorPool(c->device, &pi, NULL, &pool) != VK_SUCCESS) {
+                    vk_oom_census("cb descriptor pool");
+                    rt_fatal("vk: descriptor pool failed");
+                }
+            }
+            __atomic_add_fetch(&cb_live_pools, 1, __ATOMIC_RELAXED);
+        }
         r->pools[r->npools++] = pool;
     }
     rt_fatal("vk: descriptor set allocation failed twice");
     return VK_NULL_HANDLE;
 }
 
+int vk_exec_cb_trim_spare(int keep) {
+    VkCtx *c = vk_ctx();
+    if (!c) return 0;
+    if (keep < 0) keep = 0;
+    typeof(spare_chunk[0]) drop[32];
+    int ndrop = 0;
+    plat_mutex_lock(&spare_lock);
+    while (nspare_chunk > keep && ndrop < 32) drop[ndrop++] = spare_chunk[--nspare_chunk];
+    plat_mutex_unlock(&spare_lock);
+    for (int i = 0; i < ndrop; i++) {
+        vmaDestroyBuffer(c->vma, drop[i].buf, drop[i].alloc);
+        __atomic_sub_fetch(&cb_live_chunks, 1, __ATOMIC_RELAXED);
+    }
+    return ndrop;
+}
+
 // Releases the spare pools and chunks (vk_exec_draw_shutdown).
 void vk_exec_cb_shutdown(void) {
     VkCtx *c = vk_ctx();
-    for (int i = 0; i < nspare_pool; i++) vkDestroyDescriptorPool(c->device, spare_pool[i], NULL);
-    for (int i = 0; i < nspare_chunk; i++) vmaDestroyBuffer(c->vma, spare_chunk[i].buf, spare_chunk[i].alloc);
+    for (int i = 0; i < nspare_pool; i++) vkDestroyDescriptorPool(c->device, spare_pool[i], NULL), __atomic_sub_fetch(&cb_live_pools, 1, __ATOMIC_RELAXED);
+    for (int i = 0; i < nspare_chunk; i++) vmaDestroyBuffer(c->vma, spare_chunk[i].buf, spare_chunk[i].alloc), __atomic_sub_fetch(&cb_live_chunks, 1, __ATOMIC_RELAXED);
     nspare_pool = nspare_chunk = 0;
 }
 

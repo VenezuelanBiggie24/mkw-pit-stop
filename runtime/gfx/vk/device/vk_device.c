@@ -12,6 +12,11 @@
 #include "vk_defaults.h"
 #include "platform/platform.h"
 
+#ifdef MKW_PS5_NATIVE
+#include "gfx_wsys.h"
+extern VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *name);
+#endif
+
 static VkCtx g_vk;
 static int g_ready;
 static PlatMutex g_lock = PLAT_MUTEX_INIT;
@@ -59,9 +64,21 @@ static int layer_present(const char *name) {
     return found;
 }
 
+static int is_headless(void) {
+    const char *v = cfg_get("MKW_HEADLESS");
+    return v && *v && strcmp(v, "0");
+}
+
 static int create_instance(void) {
+#ifdef MKW_PS5_NATIVE
+    volkInitializeCustom(vk_icdGetInstanceProcAddr);
+    if (!vkCreateInstance) {
+        rt_log("vk: PS5 RADV instance entry point unavailable");
+        return 0;
+    }
+#endif
     const char *ext[8];
-    uint32_t n_ext = (uint32_t)gfx_window_vk_extensions(ext, 7);
+    uint32_t n_ext = is_headless() ? 0 : (uint32_t)gfx_window_vk_extensions(ext, 7);
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     int validate = cfg_bool("MKW_VK_VALIDATION");
     if (validate && !layer_present(layers[0])) {
@@ -77,6 +94,9 @@ static int create_instance(void) {
     rdoc_init();
     VkResult r = vkCreateInstance(&ci, NULL, &g_vk.instance);
     if (r != VK_SUCCESS) { rt_log("vk: vkCreateInstance failed (%d); is a Vulkan 1.3 driver installed?", (int)r); return 0; }
+#ifdef MKW_PS5_NATIVE
+    volkLoadInstance(g_vk.instance);
+#endif
     g_vk.validation = validate;
     if (validate) {
         PFN_vkCreateDebugUtilsMessengerEXT f =
@@ -104,17 +124,19 @@ static const char *missing_required(VkPhysicalDevice pd) {
     VkExtensionProperties *e = calloc(n ? n : 1, sizeof *e);
     vkEnumerateDeviceExtensionProperties(pd, NULL, &n, e);
     const char *miss = NULL;
-    for (size_t i = 0; i < sizeof k_required_ext / sizeof *k_required_ext && !miss; i++)
+    size_t start = is_headless() ? 1 : 0;   // index 0 is VK_KHR_swapchain
+    for (size_t i = start; i < sizeof k_required_ext / sizeof *k_required_ext && !miss; i++)
         if (!has_ext(e, n, k_required_ext[i])) miss = k_required_ext[i];
     free(e);
     return miss;
 }
 
-// Graphics+compute family that can present to the window.
+// Graphics+compute family that can present to the window (or any graphics+compute family when MKW_HEADLESS).
 static uint32_t find_gfx_family(VkPhysicalDevice pd, const VkQueueFamilyProperties *qp, uint32_t nq) {
+    int headless = is_headless();
     for (uint32_t i = 0; i < nq; i++)
         if ((qp[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) && (qp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) &&
-            gfx_window_vk_presentable(g_vk.instance, pd, i))
+            (headless || gfx_window_vk_presentable(g_vk.instance, pd, i)))
             return i;
     return UINT32_MAX;
 }
@@ -220,7 +242,8 @@ static int create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
     const char *ext[48];   // every optional extension at once nears 32
     uint32_t n_ext = 0;
-    for (size_t i = 0; i < sizeof k_required_ext / sizeof *k_required_ext; i++) ext[n_ext++] = k_required_ext[i];
+    size_t req_start = is_headless() ? 1 : 0;   // index 0 is VK_KHR_swapchain
+    for (size_t i = req_start; i < sizeof k_required_ext / sizeof *k_required_ext; i++) ext[n_ext++] = k_required_ext[i];
 
     FeatureChain *c = calloc(1, sizeof *c);
     void **tail = &c->f2.pNext;
@@ -365,6 +388,9 @@ static int create_device(void) {
     VkResult r = vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.device);
     free(c);
     if (r != VK_SUCCESS) { rt_log("vk: vkCreateDevice failed (%d)", (int)r); return 0; }
+#ifdef MKW_PS5_NATIVE
+    volkLoadDevice(g_vk.device);
+#endif
     vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 0, &g_vk.gfx_queue);
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }
@@ -377,6 +403,9 @@ static int create_device(void) {
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.device, .instance = g_vk.instance,
                                  .vulkanApiVersion = VK_API_VERSION_1_3,
+#ifdef MKW_PS5_NATIVE
+                                 .preferredLargeHeapBlockSize = 16ull << 20,
+#endif
                                  .flags = (g_vk.has_buffer_device_address ? VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT : 0) |
                                           (g_vk.has_memory_budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0),
                                  .pDeviceMemoryCallbacks = vk_headroom_callbacks()};
@@ -391,6 +420,7 @@ static int create_device(void) {
     vkGetPhysicalDeviceProperties(g_vk.phys, &dp);
     const char *lim = cfg_get("MKW_GPU_MEM_LIMIT");
     char lim_ram[24];
+#ifndef __PROSPERO__
     if (!lim && dp.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
         float used, total = 0, proc;
         plat_mem_info(&used, &total, &proc);
@@ -398,6 +428,7 @@ static int create_device(void) {
                  (unsigned long long)vk_default_mem_limit_mib(total > 0 ? (uint64_t)total : 0));
         lim = lim_ram;
     }
+#endif
     if (lim && atoll(lim) > 0) {
         VkDeviceSize total = 0, cap = (VkDeviceSize)atoll(lim) << 20;
         int discrete = dp.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
@@ -469,7 +500,12 @@ static void destroy_all(void) {
             (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.instance, "vkDestroyDebugUtilsMessengerEXT");
         if (f) f(g_vk.instance, g_vk.messenger, NULL);
     }
-    if (g_vk.instance) vkDestroyInstance(g_vk.instance, NULL);
+    if (g_vk.instance) {
+#ifdef MKW_PS5_NATIVE
+        ps5_window_discard_candidate(g_vk.instance);
+#endif
+        vkDestroyInstance(g_vk.instance, NULL);
+    }
     g_errors_total += g_vk.validation_errors;
     memset(&g_vk, 0, sizeof g_vk);
 }

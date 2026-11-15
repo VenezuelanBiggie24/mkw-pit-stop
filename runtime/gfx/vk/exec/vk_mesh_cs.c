@@ -64,7 +64,10 @@ static int new_chunk(VkDeviceSize size, MeshChunk *out) {
                                       VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     VmaAllocationInfo info;
-    if (vmaCreateBuffer(c->vma, &bi, &ai, &out->buf, &out->alloc, &info) != VK_SUCCESS) return 0;
+    if (vmaCreateBuffer(c->vma, &bi, &ai, &out->buf, &out->alloc, &info) != VK_SUCCESS) {
+        vk_mem_relieve(n + (8ull << 20), "a mesh scratch buffer");
+        if (vmaCreateBuffer(c->vma, &bi, &ai, &out->buf, &out->alloc, &info) != VK_SUCCESS) return 0;
+    }
     // Where the chunk landed: with VRAM full AUTO_PREFER_DEVICE may give host memory (wbc1 on a GTX 1050 Ti: the mesh
     // draws 0.2 -> 5-6 ms of GPU a frame with ASTC as BC1, not on the 660M; 08/11/2026).
     static volatile int32_t n_chunks, n_host;
@@ -76,6 +79,11 @@ static int new_chunk(VkDeviceSize size, MeshChunk *out) {
     else if ((k & (k - 1)) == 0) rt_log("vk: mesh scratch: %d chunks, %d in host memory", k, h);
     VkBufferDeviceAddressInfo di = {.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = out->buf};
     out->addr = vkGetBufferDeviceAddress(c->device, &di);
+    if (!out->addr) {
+        vmaDestroyBuffer(c->vma, out->buf, out->alloc);
+        *out = (MeshChunk){0};
+        return 0;
+    }
     out->size = n, out->used = 0;
     return 1;
 }
@@ -103,11 +111,21 @@ int vk_mesh_cs_alloc(uint64_t fence, VkDeviceSize size, VkBuffer *buf, VkDeviceS
 
 // Task/mesh draws go through the compute passes on a device without VK_EXT_mesh_shader, and with MKW_MESH_COMPUTE=1
 // on one with it (to compare both forms of the same frame); MKW_MESH_COMPUTE=0 leaves them undrawn there.
+//
+// On PS5 (__PROSPERO__), RADV's VK_EXT_mesh_shader task shaders use ACE (AMD_IP_COMPUTE) gang submissions
+// (radv_update_gang_preambles), which radv_ps5_cs_submit() rejects with VK_ERROR_FEATURE_NOT_PRESENT
+// (radv_ps5_cs.c:540: submit->ip_type != AMD_IP_GFX). Run 1 hung the GPU right after the first task+mesh
+// pipeline at ~frame 150 with GPU_FAULT_SUSPENDPOINT_TIMEOUT_IN_RUN_ASYNC; Run 2 with MESH_COMPUTE=1 passed
+// frame 150 and reached frame 229. Default PS5 to the compute path when MKW_MESH_COMPUTE is unset.
 int vk_mesh_cs_on(void) {
     static int on = -1;
     if (on < 0) {
         const char *e = cfg_get("MKW_MESH_COMPUTE");
+#ifdef __PROSPERO__
+        on = e && *e ? atoi(e) != 0 : 1;
+#else
         on = e && *e ? atoi(e) != 0 : !vk_ctx()->has_mesh;
+#endif
         on = on && vk_ctx()->has_buffer_device_address;
         rt_log("vk: task/mesh draws %s", on ? "as compute passes and an indexed draw (MKW_MESH_COMPUTE)"
                                              : vk_ctx()->has_mesh ? "as mesh shaders" : "not drawn (no mesh shaders, no buffer addresses)");

@@ -343,7 +343,47 @@ void nvn_pool_flushed(const pool_t *p, uint64_t off, uint64_t size) {
 }
 
 
+static int snap_bg = -1;
+static PlatMutex snap_lock = PLAT_MUTEX_INIT;
+static PlatCond snap_cv;
+static struct { uint64_t a, b; } *bg_runs;
+static int bg_n, bg_cap;
+static uint32_t bg_epoch, bg_gen, bg_seen;
+
+static void snap_main(void *arg) {
+    (void)arg;
+    plat_thread_priority(PLAT_PRIO_ABOVE_NORMAL);
+    plat_mutex_lock(&snap_lock);
+    for (;;) {
+        while (bg_gen == bg_seen) plat_cond_wait(&snap_cv, &snap_lock);
+        bg_seen = bg_gen;
+        int n = bg_n;
+        uint32_t ep = bg_epoch;
+        uint64_t a0[64], b0[64];
+        if (n > 64) n = 64;
+        for (int i = 0; i < n; i++) a0[i] = bg_runs[i].a, b0[i] = bg_runs[i].b;
+        plat_mutex_unlock(&snap_lock);
+        gen_lock_x();
+        ww_ep++;
+        uint64_t q = 0, bytes0 = ww_bytes;
+        for (int i = 0; i < n; i++) q += snap_regions(a0[i], b0[i], ep);
+        mrep.presnap_bytes += ww_bytes - bytes0;
+        mrep.presnap_queries += q;
+        if (freeze_idle) freeze_pass();
+        plat_mutex_unlock(&gen_lock);
+        plat_mutex_lock(&snap_lock);
+    }
+}
+
 void vk_mem_mirror_begin(void) {
+    if (snap_bg < 0) {
+        snap_bg = rt_knob("SNAP_BG", "0");
+        if (snap_bg) {
+            plat_cond_init(&snap_cv);
+            if (!plat_thread_spawn(snap_main, NULL, "vk snap", 0)) snap_bg = 0;
+            else rt_log("mem: background write-watch snapshot%s (MKW_SNAP_BG)", snap_bg == 2 ? " in the B blocks" : "");
+        }
+    }
     if (!vk_mirror_on) {   // import mode: the texture checks' snapshots still skip frozen regions
         if (!freeze_idle) return;
         gen_lock_x();
@@ -360,6 +400,36 @@ void vk_mem_mirror_begin(void) {
     uint64_t q = 0, run0 = 0, run1 = 0;
     int have = 0;
     plat_mutex_lock_shared(&pool_lock);
+    if (snap_bg && RT_KNOB_ON(snap_bg)) {
+        plat_mutex_lock(&snap_lock);
+        bg_n = 0;
+        bg_epoch = mepoch;
+        for (int i = 0; i < nm; i++) {
+            const PoolRec *r = mlist[i];
+            if (r->acc_sub != prev) continue;
+            uint64_t a = r->import_lo >> SNAP_SHIFT, b = (r->import_hi - 1) >> SNAP_SHIFT;
+            if (have && a <= run1 + 1 + (uint64_t)mirror_gap) {
+                if (b > run1) run1 = b;
+                continue;
+            }
+            if (have) {
+                if (bg_n == bg_cap) vk_mem_grow((void **)&bg_runs, &bg_cap, sizeof *bg_runs);
+                bg_runs[bg_n++] = (typeof(bg_runs[0])){run0, run1};
+            }
+            run0 = a, run1 = b, have = 1;
+        }
+        if (have) {
+            if (bg_n == bg_cap) vk_mem_grow((void **)&bg_runs, &bg_cap, sizeof *bg_runs);
+            bg_runs[bg_n++] = (typeof(bg_runs[0])){run0, run1};
+        }
+        bg_gen++;
+        plat_cond_signal(&snap_cv);
+        plat_mutex_unlock(&snap_lock);
+        plat_mutex_unlock_shared(&pool_lock);
+        mrep.subs++;
+        mrep.presnap_t += qpc() - t0;
+        return;
+    }
     gen_lock_x();
     ww_ep++;
     uint64_t b0 = ww_bytes;

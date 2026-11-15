@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "hangwatch.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "vk.h"
@@ -68,7 +69,8 @@ typedef struct {
 enum { WHY_REPORT, WHY_RESET, WHY_COND, WHY_QUEUE, WHY_FEW, WHY_BUSY, WHY_N };
 
 static struct {
-    int mode, walk_diag, threads, chunk_draws, first_draws, reverse, warm, depth_off;
+    int mode, walk_diag, threads, base_threads, more_count, active_threads, more_threads, small_first;
+    int chunk_draws, first_draws, reverse, warm, depth_off;
     int order[MAX_CHUNKS], norder;   // MKW_REPLAY_PAR_ORDER=a,b,c...: the first chunks taken in that order
     int cut, cut_op;                 // MKW_REPLAY_PAR_CUT, MKW_REPLAY_PAR_CUT_OP
     int oplog[2];                    // MKW_REPLAY_PAR_OPLOG
@@ -164,8 +166,9 @@ static void chunk_add(const Pos *p, const VkExec *st) {
 // early as with the serial replay's 64-draw parts. With C draws from the first chunk the GPU waited for the whole
 // first chunk, ~3-4 ms with every thread recording (pab2/pab2i: fence wait +3.5 ms, GPU busy +0.8).
 static int chunk_size(int k, int C) {
-    if (P.first_draws <= 0) return C;
-    int s = P.first_draws << (k < 16 ? k : 16);
+    int fd = (P.small_first && RT_KNOB_ON(P.small_first) && P.first_draws == 64) ? 32 : P.first_draws;
+    if (fd <= 0) return C;
+    int s = fd << (k < 16 ? k : 16);
     return s < C ? s : C;
 }
 
@@ -336,12 +339,18 @@ static void send_ready(int wait);
 
 // A thread late from the previous job takes nothing of the next one: its generation no longer matches.
 static void take_chunks(int t, uint32_t gen) {
+    if (t > __atomic_load_n(&P.active_threads, __ATOMIC_ACQUIRE)) return;
     for (;;) {
         uint64_t v = __atomic_fetch_add(&P.next, 1, __ATOMIC_ACQ_REL);
         int k = (int)(uint32_t)v;
         if ((uint32_t)(v >> 32) != gen || k >= P.nch) return;
         k = P.reverse ? P.nch - 1 - k : k < P.norder && P.order[k] < P.nch ? P.order[k] : k;
+        // Hang watch: the replay hung "in a submission" with every thread waiting (runs 25, t26-peek1, and 15/11/2026
+        // at the title menu), and the chunks' waits named nothing. Which chunk each thread records, and which the
+        // replay waits for, tell a chunk blocked inside its recording from a lost wake-up.
+        const char *prev = hang_mark_val("chunks: recording chunk", (uint64_t)k);
         chunk_record(k, t, 0);
+        hang_mark(prev);
         plat_mutex_lock(&P.lock);   // the replay thread may wait for this chunk to send it (send_ready)
         __atomic_store_n(&P.ready[k], 1, __ATOMIC_RELEASE);
         plat_cond_broadcast(&P.finished);
@@ -352,9 +361,12 @@ static void take_chunks(int t, uint32_t gen) {
 
 static void worker_main(void *arg) {
     int t = (int)(intptr_t)arg;
+    plat_thread_priority(PLAT_PRIO_ABOVE_NORMAL);
+    vk_mem_chunk_thread_mark();
     uint32_t seen = 0;
     for (;;) {
         plat_mutex_lock(&P.lock);
+        hang_mark("chunks: idle");
         while (P.gen == seen) plat_cond_wait(&P.work, &P.lock);
         seen = P.gen;
         plat_mutex_unlock(&P.lock);
@@ -363,11 +375,17 @@ static void worker_main(void *arg) {
 }
 
 static void setup(void) {
+#ifdef __PROSPERO__
+    P.mode = rt_knob("REPLAY_PAR", "1");
+#else
     P.mode = rt_knob("REPLAY_PAR", "0");
+#endif
     const char *e = cfg_get("MKW_REPLAY_WALK");
     P.walk_diag = e && atoi(e) > 0;
     e = cfg_get("MKW_REPLAY_PAR_DRAWS");
     P.chunk_draws = e && atoi(e) > 0 ? atoi(e) : 384;
+    // MKW_REPLAY_PAR_SMALL=1/"ab": smaller first chunks (32 draws) and 256-draw cap to feed more recorders earlier.
+    P.small_first = e ? 0 : rt_knob("REPLAY_PAR_SMALL", "0");
     // MKW_REPLAY_PAR_WARM (120): submissions replayed serially first, so the lazily set up switches and caches settle.
     // mkw --replay sets 0: a capture holds 12-16 submissions, and with 120 none was ever recorded in chunks.
     e = cfg_get("MKW_REPLAY_PAR_WARM");
@@ -380,8 +398,15 @@ static void setup(void) {
     P.inpass = rt_knob("REPLAY_PAR_INPASS", "1") != 0;
     e = cfg_get("MKW_REPLAY_PAR_THREADS");   // threads besides the replay thread
     uint32_t cpus = plat_cpu_count();
-    P.threads = e ? atoi(e) : cpus >= 8 ? 3 : cpus >= 4 ? 2 : 1;
-    if (P.threads < 0) P.threads = 0;   // 0: the chunks in order on the replay thread (a check of the chunking alone)
+    P.base_threads = e ? atoi(e) : cpus >= 8 ? 3 : cpus >= 4 ? 2 : 1;
+    if (P.base_threads < 0) P.base_threads = 0;   // 0: the chunks in order on the replay thread (a check of the chunking alone)
+    if (P.base_threads > MAX_THREADS) P.base_threads = MAX_THREADS;
+    // MKW_REPLAY_PAR_MORE=1/"ab": 5 chunk threads (+ replay = 6 recorders) on >=10-CPU hosts such as PS5.
+    P.more_threads = e ? 0 : rt_knob("REPLAY_PAR_MORE", "0");
+    P.more_count = e ? P.base_threads : (cpus >= 10 ? 5 : cpus >= 6 ? 4 : P.base_threads);
+    if (P.more_count > MAX_THREADS) P.more_count = MAX_THREADS;
+    P.threads = P.more_threads ? P.more_count : P.base_threads;
+    P.active_threads = P.base_threads;
     // MKW_REPLAY_PAR_DEPTH=0 (a measurement): as before 07/11/2026, chunks after the first clear depth layer by layer
     // and are cut between the layers of one depth image.
     e = cfg_get("MKW_REPLAY_PAR_DEPTH");
@@ -413,8 +438,9 @@ static void setup(void) {
     plat_cond_init(&P.work), plat_cond_init(&P.finished);
     for (int t = 1; t <= P.threads; t++)
         if (!plat_thread_spawn(worker_main, (void *)(intptr_t)t, "vk chunks", 0)) rt_fatal("vk: cannot start a replay chunk thread");
-    rt_log("vk: replay in chunks of %d draws on %d threads besides the replay thread%s (MKW_REPLAY_PAR)", P.chunk_draws,
-           P.threads, P.mode == 2 ? ", in the B blocks" : "");
+    rt_log("vk: replay in chunks of %d draws on %d threads besides the replay thread%s (MKW_REPLAY_PAR%s%s)", P.chunk_draws,
+           P.threads, P.mode == 2 ? ", in the B blocks" : "",
+           P.more_threads ? ", MORE" : "", P.small_first ? ", SMALL" : "");
 }
 
 // A chunk that bound a uniform snapshot copy at a position after a GPU write into that region (made by an earlier
@@ -435,9 +461,11 @@ static void send_ready(int wait) {
         for (int k = from; k < P.nch; k++) {
             if (!__atomic_load_n(&P.ready[k], __ATOMIC_ACQUIRE)) {
                 if (!wait || k > from) break;
+                const char *prev = hang_mark_val("replay: waiting for chunk", (uint64_t)k);
                 plat_mutex_lock(&P.lock);
                 while (!__atomic_load_n(&P.ready[k], __ATOMIC_ACQUIRE)) plat_cond_wait(&P.finished, &P.lock);
                 plat_mutex_unlock(&P.lock);
+                hang_mark(prev);
             }
             Chunk *c = &P.ch[k];
             if (vk_usnap_regions() && wrong_hits(c)) vkEndCommandBuffer(c->cb), chunk_record(k, 0, 1), P.n_again++;
@@ -472,7 +500,10 @@ int vk_exec_par(VkExec *ex, const uint64_t *handles, int n, int diag) {
     if (!P.mode || !RT_KNOB_ON(P.mode) || diag || (vk_dump_armed && P.threads) || P.subs <= (uint64_t)P.warm) return 0;
     if (vk_exec_oq_busy()) return P.n_serial[WHY_BUSY]++, 0;
     uint64_t t0 = kern_now_ns();
-    if (!plan(ex, handles, n, P.chunk_draws)) return 0;
+    int act = (P.more_threads && RT_KNOB_ON(P.more_threads)) ? P.more_count : P.base_threads;
+    __atomic_store_n(&P.active_threads, act, __ATOMIC_RELEASE);
+    int cd = (P.small_first && RT_KNOB_ON(P.small_first)) ? 256 : P.chunk_draws;
+    if (!plan(ex, handles, n, cd)) return 0;
     if (P.nch < 2) return P.n_serial[WHY_FEW]++, 0;
     uint64_t t1 = kern_now_ns();
     P.handles = handles, P.n = n, P.fence = ex->fence, P.ex = ex, P.sent = 0, P.t_job = t1;

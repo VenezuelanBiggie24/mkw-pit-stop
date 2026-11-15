@@ -8,6 +8,7 @@
 
 #include "cap.h"
 #include "gfx.h"
+#include "hangwatch.h"
 #include "host.h"
 #include "nvn_api.h"
 
@@ -126,7 +127,9 @@ static uint64_t null_fence_done(void) { return __atomic_load_n(&fence, __ATOMIC_
 
 static void null_present(const tex_t *t, const int crop[4], uint64_t at_ns) {
     (void)t, (void)crop, (void)at_ns;
-    __atomic_fetch_add(&gfx_counters.frames, 1, __ATOMIC_RELAXED);
+    uint64_t frame = __atomic_add_fetch(&gfx_counters.frames, 1, __ATOMIC_RELAXED);
+    hang_frame(frame);
+    perf_present(frame);
 }
 
 static void null_finish(void) {}

@@ -276,8 +276,45 @@ static uint32_t feedback_scan(VkExec *ex, const GfxShader *fs) {
     if (ex->fb_fs == fs && ex->fb_serial == ex->tex_serial && ex->fb_pass == ex->pass_serial) return ex->fb_sampled;
     const GfxShaderRes *res;
     int n = gfx_shader_resources(fs, GFX_RES_TEX, &res);
+    if (!n) {
+        ex->fb_fs = fs, ex->fb_serial = ex->tex_serial, ex->fb_pass = ex->pass_serial, ex->fb_sampled = 0;
+        return 0;
+    }
     uint32_t m = 0, gen = vk_texture_slots_gen();   // before any lookup
     int memo = td_mode();
+    enum { FB_N = 256, FB_MAX = 16 };
+    typedef struct {
+        const GfxShader *fs;
+        uint32_t pass_serial, gen, sampled;
+        uint8_t cnt, valid;
+        uint64_t h[FB_MAX];
+    } FbBindMemo;
+    static _Thread_local FbBindMemo fb_tab[FB_N];
+    FbBindMemo *fbm = NULL;
+    uint64_t fbh[FB_MAX];
+    uint32_t fbc = 0;
+    if (memo == 1) {
+        uint64_t kh = (uintptr_t)fs * 0x9E3779B97F4A7C15ull;
+        int ok = 1;
+        for (int r = 0; r < n && ok; r++) {
+            int cnt = res[r].count ? res[r].count : 1;
+            for (int k = 0; k < cnt; k++) {
+                if (fbc >= FB_MAX) { ok = 0; break; }
+                int slot = res[r].slot + k;
+                uint64_t h = slot >= 0 && slot < 128 ? ex->tex[NVN_STAGE_FS][slot] : 0;
+                fbh[fbc++] = h;
+                kh = (kh ^ h) * 0x9E3779B97F4A7C15ull;
+            }
+        }
+        if (ok) {
+            fbm = &fb_tab[(kh >> 56) & (FB_N - 1)];
+            if (fbm->valid && fbm->fs == fs && fbm->pass_serial == ex->pass_serial && fbm->gen == gen &&
+                fbm->cnt == fbc && !memcmp(fbm->h, fbh, fbc * sizeof(uint64_t))) {
+                ex->fb_fs = fs, ex->fb_serial = ex->tex_serial, ex->fb_pass = ex->pass_serial, ex->fb_sampled = fbm->sampled;
+                return fbm->sampled;
+            }
+        }
+    }
     for (int r = 0; r < n; r++)
         for (int k = 0; k < (res[r].count ? res[r].count : 1); k++) {
             int slot = res[r].slot + k;
@@ -299,6 +336,10 @@ static uint32_t feedback_scan(VkExec *ex, const GfxShader *fs) {
             if (tok) *f = (typeof(*f)){.h = h, .tok = tok, .gen = gen, .r = sr};
             else f->h = 0;
         }
+    if (fbm) {
+        fbm->fs = fs, fbm->pass_serial = ex->pass_serial, fbm->gen = gen, fbm->sampled = m, fbm->cnt = (uint8_t)fbc, fbm->valid = 1;
+        memcpy(fbm->h, fbh, fbc * sizeof(uint64_t));
+    }
     ex->fb_fs = fs, ex->fb_serial = ex->tex_serial, ex->fb_pass = ex->pass_serial, ex->fb_sampled = m;
     return m;
 }

@@ -55,10 +55,15 @@ const VmaDeviceMemoryCallbacks *vk_headroom_callbacks(void) {
 
 static VkDeviceSize block_size(const VkCtx *c, uint32_t type) {
     VkDeviceSize heap = c->mem_props.memoryHeaps[c->mem_props.memoryTypes[type].heapIndex].size;
+#ifdef MKW_PS5_NATIVE
+    return heap <= HR_SMALL_HEAP ? heap / 8 : 16ull << 20;
+#else
     return heap <= HR_SMALL_HEAP ? heap / 8 : 256ull << 20;   // VMA's default preferredLargeHeapBlockSize
+#endif
 }
 
 static int room(const VkCtx *c, uint32_t type, VkDeviceSize block) {
+    if (plat_mem_dmem_avail() < (1536ull << 20)) return 0;
     VmaBudget b[VK_MAX_MEMORY_HEAPS];
     vmaGetHeapBudgets(c->vma, b);
     const VmaBudget *h = &b[c->mem_props.memoryTypes[type].heapIndex];
@@ -88,9 +93,11 @@ static void top_up(const VkCtx *c, uint32_t type) {
     drop_anchor(c, type);
     H.anchor[type] = a;
     static volatile int32_t logged;
-    if (plat_inc32(&logged) <= 32)
+    int32_t n = plat_inc32(&logged);
+    if (n <= 32)
         rt_log("vk: headroom: a %.0f MiB block of memory type %u allocated ahead (%lld so far; %lld allocations of 32 MiB "
                "or more on other threads)", (double)block / 1048576.0, type, (long long)H.made, (long long)H.other);
+    if (n <= 8) plat_mem_census_log("vma-headroom-block");
 }
 
 static void headroom_main(void *arg) {
@@ -111,7 +118,25 @@ static void headroom_main(void *arg) {
             for (uint32_t t = 0; t < 64; t++) drop_anchor(c, t);
         plat_mutex_unlock(&H.lock);
         if (stop) return;
+        vk_mem_governor(0);
     }
+}
+
+uint64_t vk_headroom_shed(void) {
+    if (!H.started) return 0;
+    if (!plat_mutex_trylock(&H.lock)) return 0;
+    const VkCtx *c = vk_ctx();
+    uint64_t freed = 0;
+    for (uint32_t t = 0; c && t < 64; t++) {
+        if (H.anchor[t]) {
+            VmaAllocationInfo vi = {0};
+            vmaGetAllocationInfo(c->vma, H.anchor[t], &vi);
+            freed += vi.size;
+        }
+        drop_anchor(c, t);
+    }
+    plat_mutex_unlock(&H.lock);
+    return freed;
 }
 
 // Before the allocator is destroyed: waits for a running top-up, frees the anchors, and the thread allocates no more.

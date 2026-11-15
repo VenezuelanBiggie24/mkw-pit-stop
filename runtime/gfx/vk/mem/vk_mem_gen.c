@@ -7,6 +7,7 @@
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_pool_index.h"
+#include "prof.h"
 #include "vk.h"
 #include "vk_exec.h"
 #include "vk_mem_internal.h"
@@ -26,7 +27,10 @@ uint32_t reg_max[RT_ADDRESS_LIMIT >> REG_SHIFT];
 // Every write-watch query of the generation table (gen_lock held exclusively): calls, bytes and time since the last
 // mirror summary, all consumers together; the queries that found written pages (they also flush TLBs) apart.
 uint64_t ww_bytes, ww_pages;
-static uint64_t ww_calls, ww_ticks, ww_dirty_calls, ww_dirty_ticks;
+static uint64_t ww_calls, ww_ticks, ww_replay_ticks, ww_chunk_ticks, ww_dirty_calls, ww_dirty_ticks;
+static _Thread_local int is_chunk_thread;
+
+void vk_mem_chunk_thread_mark(void) { is_chunk_thread = 1; }
 
 int ww_peek;   // gen_lock: ww_query leaves the written pages unprotected (a hot shadow pool, MKW_SHADOW_HOT)
 
@@ -35,6 +39,8 @@ static uint64_t ww_query(uint64_t addr, uint64_t size) {
     uint64_t n = (ww_peek ? mem_written_peek : mem_written_pages)(addr, size, gen_pages, sizeof gen_pages / sizeof *gen_pages);
     uint64_t dt = qpc() - t0;
     ww_ticks += dt, ww_calls++, ww_bytes += size;
+    if (plat_thread_id() == prof_replay_tid) ww_replay_ticks += dt;
+    else if (is_chunk_thread) ww_chunk_ticks += dt;
     if (n && n != UINT64_MAX) ww_dirty_calls++, ww_dirty_ticks += dt, ww_pages += n;
     return n;
 }
@@ -266,21 +272,25 @@ void freeze_pass(void) {
 void ww_log(uint64_t frame) {
     static uint64_t ww_last;
     gen_lock_x();
-    uint64_t wc = ww_calls, wb = ww_bytes, wt = ww_ticks, dc = ww_dirty_calls, dt = ww_dirty_ticks, wp = ww_pages;
+    uint64_t wc = ww_calls, wb = ww_bytes, wt = ww_ticks, wrt = ww_replay_ticks, wct = ww_chunk_ticks, dc = ww_dirty_calls, dt = ww_dirty_ticks, wp = ww_pages;
     ww_pages = 0;
     uint64_t nr = n_frz_refused;
-    ww_calls = ww_bytes = ww_ticks = ww_dirty_calls = ww_dirty_ticks = n_frz_refused = 0;
+    ww_calls = ww_bytes = ww_ticks = ww_replay_ticks = ww_chunk_ticks = ww_dirty_calls = ww_dirty_ticks = n_frz_refused = 0;
     plat_mutex_unlock(&gen_lock);
     double wf = frame > ww_last ? (double)(frame - ww_last) : 1.0;
     ww_last = frame;
     uint64_t fz, ff, ft, fo;
     mem_freeze_stats(&fz, &ff, &ft, &fo);
+    uint64_t ww_faults = plat_mem_write_watch_faults(1), ww_rep = plat_mem_write_watch_repeats(1),
+             ww_hot = plat_mem_write_watch_hot_skips(1);
     if (rt_trace & RT_TRACE_PERF)
-        rt_log("mem: write-watch frame %llu: per frame, every consumer: %.1f queries over %.1f MiB, %.3f ms (%.1f found "
+        rt_log("mem: write-watch frame %llu: per frame, every consumer: %.1f queries over %.1f MiB, %.3f ms (replay %.3f, chunks %.3f, %.1f found "
                "%.0f written pages, %.3f ms); frozen %.0f MiB; since the last line: freezes %llu, thaws by a write %llu, by a file read "
-               "or mapping change %llu, refused %llu",
-               (unsigned long long)frame, wc / wf, wb / wf / 1048576.0, qpc_ms(wt) / wf, dc / wf, wp / wf, qpc_ms(dt) / wf,
-               fz * 2.0, (unsigned long long)ff, (unsigned long long)ft, (unsigned long long)fo, (unsigned long long)nr);
+               "or mapping change %llu, refused %llu; write-watch faults %llu (%llu on pages that faulted in their previous cycle too), arms skipped for hot pages %llu",
+               (unsigned long long)frame, wc / wf, wb / wf / 1048576.0, qpc_ms(wt) / wf, qpc_ms(wrt) / wf, qpc_ms(wct) / wf, dc / wf, wp / wf, qpc_ms(dt) / wf,
+               fz * 2.0, (unsigned long long)ff, (unsigned long long)ft, (unsigned long long)fo, (unsigned long long)nr,
+               (unsigned long long)ww_faults, (unsigned long long)ww_rep,
+               (unsigned long long)ww_hot);
 }
 
 // vk_mem_shutdown, after every pool went.

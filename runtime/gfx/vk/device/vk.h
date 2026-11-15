@@ -98,6 +98,8 @@ void vk_present_flip(void);
 // rebuild do. Recursive.
 void vk_queue_lock(void);
 void vk_queue_unlock(void);
+int vk_queue_trylock(void);       // 1 when taken (vk_upload_flush, which holds cmd_lock: see the lock order there)
+uint32_t vk_queue_owner(void);    // the thread holding it, 0 if none (hang watch; read with no lock)
 void vk_sync_parts_flush(void);   // queue lock held: the parts waiting for the submit thread to the queue (vk_sync.c)
 // Copy of the last presented swapchain image, for probes: on, the next presents read the image back into a host buffer
 // and wait for the GPU. *px stays valid until the next present; the format is the swapchain's. Returns 0 with no frame.
@@ -130,7 +132,8 @@ void vk_texture_register(int id, const tex_t *t, const view_t *v);  // texture d
 uint32_t vk_texture_reg_serial(void);
 extern uint32_t vk_tex_reg_limit;
 void vk_sampler_register(int id, const samp_par *s);                // sampler descriptor slot (copied)
-int  vk_texture_trim(uint64_t bytes);      // out of memory: released and idle mirrored textures go (vk_staging)
+uint64_t vk_texture_trim(uint64_t bytes);      // out of memory: released and idle mirrored textures go (vk_staging)
+uint64_t vk_texture_trim_released(uint64_t keep_bytes); // shed released-texture cache down to keep_bytes
 // ASTC kept as RGBA8 copied into a BC7 image: decodes the source's blocks into dst (vk_texture.c); 0 when it cannot
 int  vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers, uint32_t x, uint32_t y,
                           uint32_t w, uint32_t h, VkImage dst, VkImageAspectFlags aspect, uint32_t dlevel, uint32_t dlayer,
@@ -221,6 +224,7 @@ const GfxShader *vk_spec_pick(const GfxShader *s, uint64_t frame, VkSpecRead rea
 void vk_usnap_shutdown(void);                     // vk_exec_draw_shutdown: frees the arenas
 void vk_usnap_summary(void);                      // the summary line now (a capture replay's end)
 void vk_mem_mirror_begin(void);
+void vk_mem_chunk_thread_mark(void);
 int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence);
 int vk_mem_mirror_pending(void);
 void vk_mem_mirror_prologue(VkCommandBuffer cb);
@@ -251,6 +255,9 @@ void vk_mem_census(uint64_t frame);               // at each present: pool censu
 // 0: this allocator's own allocations against the heap sizes. 0 when unknown.
 int vk_mem_vram(uint64_t *used, uint64_t *budget, int *exact);
 void vram_log_now(void);                                  // the "mem: vram" report now (vk_texture.c on image failures)
+void vk_oom_census(const char *what);                     // one-time full memory census on the first allocation failure
+void vk_exec_cb_dpool_stats(int *live_pools, int *spare_pools, int *live_chunks, int *spare_chunks);
+void vk_dcache_dpool_stats(int *live_pools, int *retiring_pools);
 // VRAM headroom (vk_headroom.c): the VMA callbacks that see new device memory, and the thread that allocates the next
 // block of each memory type in use ahead of the render thread.
 const VmaDeviceMemoryCallbacks *vk_headroom_callbacks(void);
@@ -274,6 +281,10 @@ void vk_sparse_written(VkImage img, uint32_t level, uint32_t layer0, uint32_t la
                        uint32_t h);
 typedef struct { VkSemaphore wsem, ssem; uint64_t wait, signal; } VkSparseOrder;   // a NULL semaphore: no wait / signal
 VkSparseOrder vk_sparse_order(uint64_t fence, int binds);
+void vk_sparse_order_submitted(uint64_t signal);
+void vk_sparse_touch(VkImage img);                // a draw or copy touched img in the current frame
+void vk_sparse_vram_log(uint64_t frame);          // active/idle/never-sampled slot census
+uint64_t vk_sparse_trim(uint64_t bytes);          // MKW_SPARSE_EVICT: unbind cold sparse blocks under pressure
 // Changes whenever vk_mem_resolve plus VK_MEM_USE may give another span for an address: a pool added, finalized or
 // mapped, a mirror created, refused or forgotten, a submission started.
 uint64_t vk_mem_gen(void);
@@ -297,12 +308,28 @@ int vk_fix_zero(void);
 VkCommandBuffer vk_upload_begin(void);
 void vk_upload_end(void);
 void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc);
+void *vk_staging_try(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc);   // NULL when out of memory
+// MKW_GPU_ONLY_RELEASE (vk_memory.c): a GPU-owned texture's storage in a CPU_NO_ACCESS pool released; whether a
+// packaged texture's storage overlaps such a release (its bytes lost: counted)
+void vk_mem_cna_gpu_texture(uint64_t lo, uint64_t size);
+int vk_mem_cna_lost(uint64_t lo, uint64_t size);
+int vk_pool_release_find(uint64_t lo, uint64_t size, uint64_t *rlo, uint64_t *rhi, uint64_t *freed, uint64_t *frame,
+                         uint32_t *flags);   // task 32: the latest pool-finalize release over a range (vk_memory.c)
 // Out of memory for what (a log name): textures trimmed, the open batch sent when no vk_upload_begin is open, the GPU
 // waited for and what it held freed; the caller tries once more
 void vk_mem_relieve(uint64_t bytes, const char *what);
-// vk_upload_begin plus vk_staging(size, buf, NULL) into *map, sending the open batch first when out of memory
+void vk_mem_governor(int force);
+uint64_t vk_headroom_shed(void);
+void vk_mem_shadow_shed(int on);
+uint64_t vk_upload_stg_bytes(void);               // staging pool bytes reserved in VMA
+void vk_usnap_stats(uint64_t *n, uint64_t *bytes);   // live uniform snapshot arenas
+uint64_t vk_usnap_trim(uint64_t keep_bytes);      // free idle spare snapshot arenas under pressure
+int vk_exec_cb_trim_spare(int keep);              // free excess spare command-buffer scratch chunks
+// vk_upload_begin plus vk_staging(size, buf, NULL) into *map, sending the open batch first when out of memory; still
+// out of memory: VK_NULL_HANDLE, *map NULL and no batch held (the caller defers its upload; no vk_upload_end)
 VkCommandBuffer vk_upload_begin_staging(VkDeviceSize size, VkBuffer *buf, void **map);
 uint64_t vk_upload_flush(int wait);
+uint32_t vk_upload_owner(void);                 // the thread holding the upload lock, 0 if none (hang watch)
 void vk_upload_flush_over(VkDeviceSize limit);   // sends the open batch once it holds that much staging or ASTC work
 void vk_upload_work(uint64_t texels);            // ASTC texels the open batch decodes (vk_upload_flush_over)
 // Deferred destruction: freed once the upload batches recorded so far and the timeline value last noted have completed.
@@ -454,6 +481,12 @@ typedef struct {
     uint64_t live, released, own_live, own_released, bytes_live, bytes_released;
     uint64_t astc_bytes, target_bytes, big_bytes, astc_n, target_n, astc_rgba_bytes;   // astc_rgba: decoded to RGBA8, not BC7   // live own memory: ASTC decoded, render targets
                                                                       // (attachment usage), single images over 64 MiB
+    uint64_t gpu_owned_n, gpu_owned_bytes;
+    uint64_t mirrored_ro_n, mirrored_ro_bytes;
+    uint64_t other_gpu_n, other_gpu_bytes;
+    uint64_t astc_rgba_arr_bytes;
+    uint64_t dup_swz_n, dup_swz_bytes, dup_other_n, dup_other_bytes;
+    uint64_t idle_evict_n, idle_evict_bytes;
 } VkTexCensus;
 void vk_texture_census(VkTexCensus *s);
 void vk_texture_shutdown(void);                     // vk_mem_shutdown calls it
@@ -493,7 +526,7 @@ int vk_sync_issued_wait(uint64_t value, uint64_t timeout_ns);   // 1 once value 
 // destroyed while a submission is still being recorded can wait for the parts already sent (vk_mem_note_submit).
 uint64_t vk_sync_part_done(void);          // newest part value the GPU reached
 void vk_sync_part_wait(uint64_t value);    // blocks until the GPU reached part value (submitted already)
-void vk_sync_finish(void);                 // every submitted value done
+void vk_sync_finish_submissions(void);     // every submitted value done
 void vk_sync_shutdown(void);               // finish, stop the completion thread, free the command buffers
 // The op-stream replay (vk_exec.c): records the command handles of one submission into cb, which the caller has
 // begun and ends. fence is the value this submission will signal. Returns the number of commands recorded into the

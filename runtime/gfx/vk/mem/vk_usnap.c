@@ -66,6 +66,36 @@ static void log_add(int **a, int *n, int *cap, int v);
 
 static Arena *free_arenas;
 static PlatMutex free_lock = PLAT_MUTEX_INIT;
+static uint64_t usnap_n, usnap_bytes;
+
+void vk_usnap_stats(uint64_t *n, uint64_t *bytes) {
+    if (n) *n = __atomic_load_n(&usnap_n, __ATOMIC_RELAXED);
+    if (bytes) *bytes = __atomic_load_n(&usnap_bytes, __ATOMIC_RELAXED);
+}
+
+uint64_t vk_usnap_trim(uint64_t keep_bytes) {
+    VkCtx *c = vk_ctx();
+    if (!c) return 0;
+    Arena *drop = NULL;
+    uint64_t freed = 0;
+    plat_mutex_lock(&free_lock);
+    uint64_t total = __atomic_load_n(&usnap_bytes, __ATOMIC_RELAXED);
+    while (free_arenas && total - freed > keep_bytes) {
+        Arena *a = free_arenas;
+        free_arenas = a->next;
+        a->next = drop, drop = a;
+        freed += a->size;
+    }
+    plat_mutex_unlock(&free_lock);
+    for (Arena *a = drop, *nx; a; a = nx) {
+        nx = a->next;
+        vmaDestroyBuffer(c->vma, a->buf, a->alloc);
+        __atomic_sub_fetch(&usnap_n, 1, __ATOMIC_RELAXED);
+        __atomic_sub_fetch(&usnap_bytes, a->size, __ATOMIC_RELAXED);
+        free(a);
+    }
+    return freed;
+}
 
 static void *grow(void *p, int *cap, size_t elem) {
     int n = *cap ? *cap * 2 : 1024;
@@ -97,12 +127,18 @@ static Arena *arena_get(uint64_t need) {
     VmaAllocationInfo info;
     VkResult res = vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &a->buf, &a->alloc, &info);
     if (res != VK_SUCCESS) {
+        vk_mem_relieve(a->size + (8ull << 20), "a uniform snapshot arena");
+        res = vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &a->buf, &a->alloc, &info);
+    }
+    if (res != VK_SUCCESS) {
         rt_log("vk_usnap: arena of %llu bytes failed (%d): this submission binds live memory",
                (unsigned long long)a->size, (int)res);
         free(a);
         return NULL;
     }
     a->map = info.pMappedData;
+    __atomic_add_fetch(&usnap_n, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&usnap_bytes, a->size, __ATOMIC_RELAXED);
     rt_log("vk_usnap: new arena of %.1f MiB", a->size / 1048576.0);
     return a;
 }
@@ -414,7 +450,13 @@ void vk_usnap_summary(void) { summary(1); }
 
 void vk_usnap_shutdown(void) {
     plat_mutex_lock(&free_lock);
-    for (Arena *a = free_arenas, *next; a; a = next) next = a->next, vmaDestroyBuffer(vk_ctx()->vma, a->buf, a->alloc), free(a);
+    for (Arena *a = free_arenas, *next; a; a = next) {
+        next = a->next;
+        vmaDestroyBuffer(vk_ctx()->vma, a->buf, a->alloc);
+        __atomic_sub_fetch(&usnap_n, 1, __ATOMIC_RELAXED);
+        __atomic_sub_fetch(&usnap_bytes, a->size, __ATOMIC_RELAXED);
+        free(a);
+    }
     free_arenas = NULL;
     plat_mutex_unlock(&free_lock);
 }

@@ -24,6 +24,7 @@
 #include "cfg.h"
 #include "flight.h"
 #include "gfx.h"
+#include "hangwatch.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "vk.h"
@@ -48,10 +49,13 @@ static void wait_until(uint64_t at) {
 
 static void present_main(void *arg) {
     (void)arg;
+    plat_thread_priority(PLAT_PRIO_HIGHEST);
     uint64_t last = 0, last_queued = 0;
     plat_mutex_lock(&pl);
     for (;;) {
+        hang_mark(NULL);
         while (!pending) plat_cond_wait(&pcv, &pl);
+        hang_mark("present thread: blit and its submission");
         PresentJob j = job;
         pending = 0;
         busy = 1;
@@ -237,16 +241,28 @@ static void held_wait(Held *h) {
 // wrc1/wrc1i (i5-8400, 6 cores without SMT, GTX 1050 Ti): +4.8 ms, a whole core taken from the game's threads. Fewer
 // cores were not measured. Assumes the last core's logical processors are the
 // highest-numbered ones (Linux and Windows number SMT siblings together). Applied at each present, on the replay thread.
+// PS5: off by default until a console A/B (MKW_AB with MKW_REPLAY_CORE=ab) shows a gain. Before 14/11/2026 the pin
+// never applied there (the affinity calls failed, ps5_threads.c). A title runs on CPUs 0-12, siblings numbered 2k and
+// 2k+1, and CPU 12's sibling is the system's: the replay takes CPU 10, and CPUs 10 and 11 leave the others' mask.
 static void replay_core(void) {
     static int mode = -1, applied = 0;
     static uint64_t all, own, others;
     if (mode < 0) {
         uint64_t first;
         int cores = plat_cpu_cores(&all, &first);
+#ifdef __PROSPERO__
+        mode = rt_knob("REPLAY_CORE", "0");
+        int c = -1;
+        for (int k = 31; k >= 0 && c < 0; k--)
+            if ((all >> (2 * k) & 3) == 3) c = 2 * k;
+        if (mode && cores >= 2 && c >= 0) {
+            own = 1ull << c, others = all & ~(3ull << c);
+#else
         mode = rt_knob("REPLAY_CORE", cores >= 6 && __builtin_popcountll(all) > cores ? "1" : "0");
         if (mode && cores >= 2) {
             int c = 63 - __builtin_clzll(first);
             own = 1ull << c, others = all & ((1ull << c) - 1);
+#endif
             rt_log("vk: the replay thread alone on processor %d, the others on %#llx%s (MKW_REPLAY_CORE)", c,
                    (unsigned long long)others, mode == 2 ? " in the B blocks" : "");
         } else {
@@ -265,6 +281,7 @@ static void replay_core(void) {
 // while that submit is still to be recorded, as the game's threads do in a run.
 static void replay_main(void *arg) {
     (void)arg;
+    plat_thread_priority(PLAT_PRIO_ABOVE_NORMAL);
     perf_replay_thread();
     const char *de = cfg_get("MKW_REPLAY_DELAY_US");
     uint64_t delay_ns = de ? strtoull(de, NULL, 10) * 1000 : 0;
@@ -272,6 +289,7 @@ static void replay_main(void *arg) {
     plat_mutex_lock(&rl);
     for (;;) {
         int64_t w0 = vk_tl_on() > 0 ? (int64_t)plat_now_ns() : 0;
+        hang_mark(NULL);   // waiting for work: idle, not hung
         while (!rq_n) plat_cond_wait(&rcv, &rl);
         int64_t w1 = w0 ? (int64_t)plat_now_ns() : 0;
         if (w0) vk_tl_replay_time(VK_TL_IDLE, w1 - w0);
@@ -281,6 +299,8 @@ static void replay_main(void *arg) {
         r_busy = 1;
         plat_cond_broadcast(&rcv);
         plat_mutex_unlock(&rl);
+        hang_mark(it.kind == RI_SUBMIT ? "replay: a submission" : it.kind == RI_PRESENT ? "replay: a present"
+                  : it.kind == RI_RELEASE ? "replay: a texture release" : "replay: a registration");
         if (it.kind == RI_SUBMIT && it.held) {
             held_wait(it.held);
             it.h = it.held->h, it.n = it.held->n;
@@ -605,7 +625,7 @@ static void vk_be_held_fill(void *slot, const uint64_t *handles, int n) {
     plat_cond_broadcast(&rcv);
     plat_mutex_unlock(&rl);
 }
-static void vk_be_finish(void) { vk_sync_start(); replay_drain(DR_FINISH); vk_present_drain(); vk_sync_finish(); }
+static void vk_be_finish(void) { vk_sync_start(); replay_drain(DR_FINISH); vk_present_drain(); vk_sync_finish_submissions(); }
 static int replay_check(void) {
     static int on = -1;
     if (on < 0) {
@@ -637,6 +657,7 @@ static void vk_be_read_texels(const tex_t *t, const view_t *v, const NVNcopyRegi
         uint64_t t0 = kern_now_ns();
         vk_sync_fence_wait(f, UINT64_MAX);   // counts as a fence wait in perf
         uint64_t d = kern_now_ns() - t0;
+        if (rt_trace & RT_TRACE_PERF) perf_fence_site("vk_be_read_texels", 0, -1, d);
         plat_mutex_lock(&rl);
         dr_waits[DR_READ_TEXELS]++, dr_twaits[DR_READ_TEXELS]++;
         dr_ns[DR_READ_TEXELS] += d, dr_tns[DR_READ_TEXELS] += d;

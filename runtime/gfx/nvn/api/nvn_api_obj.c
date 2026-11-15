@@ -710,7 +710,8 @@ static void release_note(const win_t *w, int idx) {   // QueuePresentTexture of 
     plat_mutex_unlock(&rel_lock);
 }
 
-static void acquire_wait(const win_t *w, int idx) {
+static void acquire_wait(const win_t *w, int idx, uint64_t pc) {
+    extern int nvn_fence_frame_rel(uint64_t fence);
     if (acq_mode < 0) {
         acq_mode = rt_knob("ACQUIRE_GPU", "1");
         rt_log("nvn: an acquired image waits for the GPU to finish the frame that replaced it %s (MKW_ACQUIRE_GPU)",
@@ -725,7 +726,9 @@ static void acquire_wait(const win_t *w, int idx) {
     if (f && gfx_backend()->fence_done() < f) {
         uint64_t t0 = kern_now_ns();
         gfx_backend()->fence_wait(f, 1000000000ull);
-        acq_waits++, acq_ns += kern_now_ns() - t0;
+        uint64_t dt = kern_now_ns() - t0;
+        acq_waits++, acq_ns += dt;
+        if (rt_trace & RT_TRACE_PERF) perf_fence_site("nvnAcquireTexture", pc, nvn_fence_frame_rel(f), dt);
     }
     if (acq_n % 1800 == 0) {   // ~1 min at 30 fps
         rt_log("nvn: acquires since the last line: %llu, %llu waited for the GPU, %.1f ms waited per acquire",
@@ -750,7 +753,7 @@ NVN_API(nvnWindowAcquireTexture) {
         sleep_until(at);
         perf_end(PERF_PACE, p0);
     }
-    acquire_wait(o, idx);
+    acquire_wait(o, idx, c->x[30]);
     // The sync means "the display no longer reads this image". Presents are copies queued in submit order, so it is
     // already satisfied: fenced = 3 with fence 0.
     if (s) {

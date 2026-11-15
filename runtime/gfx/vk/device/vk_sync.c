@@ -18,6 +18,7 @@
 
 #include "gfx.h"
 #include "cfg.h"
+#include "hangwatch.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "vk.h"
@@ -64,15 +65,24 @@ static void wb_wait(uint64_t fence) {   // sub_lock held, before the queue lock
     uint64_t t0 = kern_now_ns();
     // Submitted already (values reach the queue in order); the cap is against a lock the completion thread's write-backs
     // would need being held here.
-    if (!vk_sync_fence_wait(need, 500000000ull))
+    const char *prev = hang_mark_val("replay: wb_wait", need);
+    int ok = vk_sync_fence_wait(need, 500000000ull);
+    hang_mark(prev);
+    if (!ok) {
         rt_log("vk: MKW_WB_ORDER: the write-back of %llu did not come in 500 ms; part of %llu sent without it",
                (unsigned long long)need, (unsigned long long)fence);
-    wb_ns += kern_now_ns() - t0;
+    }
+    uint64_t dt = kern_now_ns() - t0;
+    wb_ns += dt;
     wb_waits++;
+    if (rt_trace & RT_TRACE_PERF) perf_fence_site("vk_sync_wb", 0, -1, dt);
 }
 
 // Shared with the completion thread (st_lock).
 static PlatMutex st_lock = PLAT_MUTEX_INIT;
+// Each submission's fence value and time, a 1024-entry ring (st_lock): fence waits split into time waiting for
+// the replay to submit and time waiting for the GPU (perf_gpu_line).
+static uint64_t sub_val[1024], sub_ns[1024];
 static PlatCond cv_work = PLAT_COND_INIT;   // a submission, a callback or stop
 static PlatCond cv_done = PLAT_COND_INIT;   // done advanced
 static uint64_t issued, done;     // newest submitted value; newest value whose side effects ran
@@ -93,7 +103,7 @@ typedef struct {
     VkCommandBufferSubmitInfo cbi[2 + VK_SPLIT_EXTRA];
     VkSemaphoreSubmitInfo wait, sig[2];
     VkSubmitInfo2 si;
-    uint64_t fence;
+    uint64_t fence, order_sig;
 } PendPart;
 #define PEND_CAP 32
 static PendPart parts[PEND_CAP];   // queue lock
@@ -120,7 +130,10 @@ void vk_sync_parts_flush(void) {
     while (pend_n) {
         PendPart *p = &parts[pend_head];
         uint64_t t0 = kern_now_ns();
+        const char *prev = hang_mark_val("parts flush: vkQueueSubmit2", p->fence);
         VkResult r = vkQueueSubmit2(q, 1, &p->si, VK_NULL_HANDLE);
+        hang_mark(prev);
+        if (r == VK_SUCCESS && p->order_sig) vk_sparse_order_submitted(p->order_sig);
         pend_ns += kern_now_ns() - t0;
         if (is_submitter) pend_by_thread++;
         else pend_by_other++;
@@ -146,7 +159,7 @@ static void submit_main(void *arg) {
 
 // Queue lock held, the part's order taken: parts[] gets it, or the queue now when it is full.
 static void part_defer(const VkSubmitInfo2 *si, const VkCommandBufferSubmitInfo *cbi, int ncbi,
-                       const VkSemaphoreSubmitInfo *sig, uint64_t fence) {
+                       const VkSemaphoreSubmitInfo *sig, uint64_t fence, uint64_t order_sig) {
     if (!submit_thread && !(submit_thread = plat_thread_new(submit_main, NULL, "vk submit")))
         rt_fatal("vk: cannot start the submit thread");
     if (pend_n == PEND_CAP) vk_sync_parts_flush();
@@ -158,6 +171,7 @@ static void part_defer(const VkSubmitInfo2 *si, const VkCommandBufferSubmitInfo 
     memcpy(p->sig, sig, sizeof *sig * si->signalSemaphoreInfoCount);
     p->si.pSignalSemaphoreInfos = p->sig;
     p->fence = fence;
+    p->order_sig = order_sig;
     __atomic_store_n(&pend_n, pend_n + 1, __ATOMIC_RELEASE);
     plat_mutex_lock(&pend_mx);
     plat_cond_signal(&pend_cv);
@@ -214,7 +228,9 @@ static void completion_main(void *arg) {
             plat_mutex_unlock(&st_lock);
             VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
                                       .pSemaphores = &c->timeline, .pValues = &want};
+            hang_mark_val("completion: waiting for the GPU", want);
             VkResult r = vkWaitSemaphores(c->device, &wi, 100000000ull);   // 100 ms: stop is checked between waits
+            hang_mark(NULL);
             if (r == VK_ERROR_DEVICE_LOST) vk_exec_recent_log();
             if (r != VK_SUCCESS && r != VK_TIMEOUT) rt_fatal("vk: vkWaitSemaphores failed (%d; device lost?)", (int)r);
             vkGetSemaphoreCounterValue(c->device, c->timeline, &reached);
@@ -226,6 +242,7 @@ static void completion_main(void *arg) {
             Pending p = queue[qhead++];
             qn--;
             plat_mutex_unlock(&st_lock);
+            hang_mark("completion: running a side effect (slot_reap takes sp_lock)");
             if (vk_tl_on() > 0) {
                 uint64_t t0 = kern_now_ns();
                 p.fn(p.arg);
@@ -233,6 +250,7 @@ static void completion_main(void *arg) {
             } else {
                 p.fn(p.arg);
             }
+            hang_mark(NULL);
             plat_mutex_lock(&st_lock);
         }
         if (reached > done) {
@@ -336,7 +354,9 @@ static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) {
     if (mem_fence_early && guard == 1 && rel > vk_sync_fence_done()) {
         uint64_t t0 = kern_now_ns();
         vk_sync_fence_wait(rel, 2000000000ull);
-        fe_waits++, fe_ns += kern_now_ns() - t0;
+        uint64_t dt = kern_now_ns() - t0;
+        fe_waits++, fe_ns += dt;
+        if (rt_trace & RT_TRACE_PERF) perf_fence_site("vk_sync_split", 0, -1, dt);
     }
     vk_mem_shadow_sync(fence);   // shadow storage: the CPU's writes go in before the part is submitted
     if (!vk_mem_mirror_pending()) return VK_NULL_HANDLE;
@@ -349,7 +369,11 @@ static VkCommandBuffer prologue(VkCtx *c, uint64_t fence) {
     int pair = vk_ts_open(cb);
     vk_mem_mirror_prologue(cb);
     vk_ts_close(cb, pair, fence);
-    vkEndCommandBuffer(cb);
+    if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
+        static int warned;
+        if (!warned++) rt_log("vk: prologue command buffer recording failed: skipped");
+        return VK_NULL_HANDLE;
+    }
     return cb;
 }
 
@@ -404,8 +428,15 @@ VkCommandBuffer vk_sync_split_with(const VkCommandBuffer *extra, int nextra) {
     uint64_t q0 = ss ? kern_now_ns() : 0, q1;
     rec_end();   // every command of the part is in cb
     vk_ts_end(nextra ? extra[nextra - 1] : cb, cur_fence);   // the part's GPU time spans the chunks after it
-    vkEndCommandBuffer(cb);
-    for (int i = 0; i < nextra; i++) vkEndCommandBuffer(extra[i]);
+    int cb_bad = vkEndCommandBuffer(cb) != VK_SUCCESS;
+    for (int i = 0; i < nextra; i++)
+        if (vkEndCommandBuffer(extra[i]) != VK_SUCCESS) cb_bad = 1;
+    if (cb_bad) {
+        static int warned;
+        if (!warned++) rt_log("vk: split command buffer recording failed: part skipped");
+        if (ss) q1 = kern_now_ns(), ss_ns[SS_SPLIT_END] += q1 - q0, q0 = q1;
+        goto split_next;
+    }
     if (ss) q1 = kern_now_ns(), ss_ns[SS_SPLIT_END] += q1 - q0, q0 = q1;
     vk_queue_lock();
     vk_sparse_order(cur_fence, 2);   // its sparse binds first: the uploads may copy into the levels they bind
@@ -436,13 +467,18 @@ VkCommandBuffer vk_sync_split_with(const VkCommandBuffer *extra, int nextra) {
     uint64_t k0 = ss ? kern_now_ns() : 0;
     if (submit_on < 0) submit_on = rt_knob("SUBMIT_THREAD", "1");
     if (RT_KNOB_ON(submit_on)) {
-        part_defer(&si, pro ? cbi : cbi + 1, (int)si.commandBufferInfoCount, sig, cur_fence);
+        part_defer(&si, pro ? cbi : cbi + 1, (int)si.commandBufferInfoCount, sig, cur_fence,
+                   so.ssem ? so.signal : 0);
     } else {
+        const char *prev = hang_mark_val("replay part: vkQueueSubmit2", cur_fence);
         VkResult r = vkQueueSubmit2(c->gfx_queue, 1, &si, VK_NULL_HANDLE);
+        hang_mark(prev);
+        if (r == VK_SUCCESS && so.ssem) vk_sparse_order_submitted(so.signal);
         part_sent(cur_fence, r);
     }
     if (ss) ss_ns[SS_SPLIT_SUBMIT2] += kern_now_ns() - k0, ss_splits++;
     vk_queue_unlock();
+split_next:;
     vk_mem_note_submit(++part_val);   // objects destroyed from here on may be in use by the part just submitted
     if (ss) k0 = kern_now_ns();
     CmdSlot *s = take_slot(c, cur_fence);   // the submitted part keeps its slot until the value is reached
@@ -495,7 +531,11 @@ uint64_t vk_sync_submit(const uint64_t *handles, int n) {
     rec_end();
     if (recorded) vk_ts_end(s->cb, fence);
     else vk_ts_drop();
-    vkEndCommandBuffer(s->cb);
+    if (vkEndCommandBuffer(s->cb) != VK_SUCCESS) {
+        static int warned;
+        if (!warned++) rt_log("vk: submission command buffer recording failed: draws skipped");
+        recorded = 0;
+    }
     perf_replay(t0);
     if (ss) q1 = kern_now_ns(), ss_ns[SS_RECORD] += q1 - q0, q0 = q1, ss_ns[SS_RECORD_CPU] += thread_cpu_ns() - c0;
     // After the recording: the uploads it asked for (and every earlier one) precede it in queue order, behind the
@@ -527,7 +567,10 @@ uint64_t vk_sync_submit(const uint64_t *handles, int n) {
                                      .value = so.signal, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
     if (!so.ssem) si.signalSemaphoreInfoCount = 2;
     if (so.wsem && (so.wait || so.wsem != so.ssem)) si.waitSemaphoreInfoCount = 1, si.pWaitSemaphoreInfos = &bw;
+    const char *prev = hang_mark_val("replay submission: vkQueueSubmit2", fence);
     VkResult r = vkQueueSubmit2(c->gfx_queue, 1, &si, VK_NULL_HANDLE);
+    hang_mark(prev);
+    if (r == VK_SUCCESS && so.ssem) vk_sparse_order_submitted(so.signal);
     vk_queue_unlock();
     vk_tl_queue_submit(fence);
     __atomic_store_n(&queued, fence, __ATOMIC_RELEASE);
@@ -538,6 +581,8 @@ uint64_t vk_sync_submit(const uint64_t *handles, int n) {
     vk_mem_recording(0);
     plat_mutex_lock(&st_lock);
     issued_part = part_val;
+    sub_val[fence & 1023] = fence;
+    sub_ns[fence & 1023] = kern_now_ns();
     __atomic_store_n(&issued, fence, __ATOMIC_RELEASE);
     plat_cond_broadcast(&cv_work);
     plat_mutex_unlock(&st_lock);
@@ -594,26 +639,33 @@ void vk_completion_add(uint64_t fence, void (*fn)(void *), void *arg) {
     plat_mutex_unlock(&st_lock);
 }
 
-static int fence_wait_impl(uint64_t value, uint64_t timeout_ns);
+// st_lock: ring of recent submission timestamps so fence_wait_impl can split waiting on replay vs GPU.
+
+static int fence_wait_impl(uint64_t value, uint64_t timeout_ns, uint64_t *replay_ns);
 
 int vk_sync_fence_wait(uint64_t value, uint64_t timeout_ns) {
     uint64_t p0 = perf_begin();
     int64_t w0 = vk_tl_on() > 0 && vk_sync_fence_done() < value ? (int64_t)plat_now_ns() : 0;
-    int ok = fence_wait_impl(value, timeout_ns);
+    const char *prev = hang_mark("fence wait (the completion thread's done)");
+    uint64_t rep_ns = 0;
+    int ok = fence_wait_impl(value, timeout_ns, &rep_ns);
+    hang_mark(prev);
     if (w0) vk_tl_wait(value, w0, (int64_t)plat_now_ns());
     perf_end(PERF_FENCE, p0);
-    perf_gpu_wait(p0);
+    perf_gpu_wait_split(p0, rep_ns);
     return ok;
 }
 
-static int fence_wait_impl(uint64_t value, uint64_t timeout_ns) {
+static int fence_wait_impl(uint64_t value, uint64_t timeout_ns, uint64_t *replay_ns) {
     vk_sync_start();
     plat_mutex_lock(&st_lock);
     int ok;
+    *replay_ns = 0;
     if (value > issued && value > reserved) {
         ok = 0;   // never submitted nor queued: never reached (as in the null back end)
     } else {
         uint64_t t0 = kern_now_ns();
+        int waited_replay = issued < value;
         while (done < value) {
             if (timeout_ns < (1ull << 62)) {
                 uint64_t el = kern_now_ns() - t0;
@@ -622,6 +674,12 @@ static int fence_wait_impl(uint64_t value, uint64_t timeout_ns) {
             } else {
                 plat_cond_wait(&cv_done, &st_lock);
             }
+        }
+        uint64_t t1 = kern_now_ns();
+        if (waited_replay) {
+            if (issued < value) *replay_ns = t1 - t0;
+            else if (sub_val[value & 1023] == value && sub_ns[value & 1023] > t0)
+                *replay_ns = sub_ns[value & 1023] - t0;
         }
         ok = done >= value;
     }
@@ -673,10 +731,12 @@ void vk_sync_part_wait(uint64_t value) {
     if (!c || !part_sem) return;
     VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
                               .pSemaphores = &part_sem, .pValues = &value};
+    const char *prev = hang_mark_val("part wait (vkWaitSemaphores)", value);
     if (vkWaitSemaphores(c->device, &wi, UINT64_MAX) != VK_SUCCESS) rt_fatal("vk: wait for part %llu failed", (unsigned long long)value);
+    hang_mark(prev);
 }
 
-void vk_sync_finish(void) {
+void vk_sync_finish_submissions(void) {
     vk_sync_start();
     vk_sync_fence_wait(__atomic_load_n(&issued, __ATOMIC_ACQUIRE), UINT64_MAX);
     vk_upload_flush(1);
@@ -685,7 +745,7 @@ void vk_sync_finish(void) {
 void vk_sync_shutdown(void) {
     plat_mutex_lock(&start_lock);
     if (started) {
-        vk_sync_finish();
+        vk_sync_finish_submissions();
         plat_mutex_lock(&st_lock);
         stop = 1;
         plat_cond_broadcast(&cv_work);

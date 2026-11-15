@@ -124,6 +124,13 @@ static void placed_release(VkCtx *c, PoolRec *r) {
     __atomic_sub_fetch(&placed_n, 1, __ATOMIC_RELAXED), __atomic_sub_fetch(&placed_bytes, (int64_t)n, __ATOMIC_RELAXED);
 }
 
+static int g_shadow_shed;
+
+void vk_mem_shadow_shed(int on) {
+    int prev = __atomic_exchange_n(&g_shadow_shed, on ? 1 : 0, __ATOMIC_ACQ_REL);
+    if (on && !prev) rt_log("vk: memory governor: new pools will import instead of allocating shadow VRAM");
+}
+
 // CPU-visible storage: the guest pages themselves become the buffer's memory (VK_EXT_external_memory_host).
 int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     if (c->has_placed && placed_pool(c, r, addr, size)) return 1;
@@ -131,19 +138,30 @@ int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     // is imported instead: the other paths check each pool's smap, so imported and shadowed pools mix.
     // (Importing every CPU_NO_ACCESS pool too was tried, run82-run86: the pinned pages count in the process's memory
     // and it died sooner, frame 97-103 against 130.)
-    if (shadow_on && shadow_pool(c, r, addr, size)) return 1;
-    if (shadow_on) rt_log("vk: pool %#llx+%#llx: imported instead", (unsigned long long)addr, (unsigned long long)size);
+    if (shadow_on && !__atomic_load_n(&g_shadow_shed, __ATOMIC_ACQUIRE)) {
+        if (shadow_pool(c, r, addr, size)) return 1;
+        vk_mem_relieve(size + (16ull << 20), "a shadow pool");
+        if (shadow_pool(c, r, addr, size)) return 1;
+        rt_log("vk: pool %#llx+%#llx: imported instead", (unsigned long long)addr, (unsigned long long)size);
+    }
     if (!p_host_props)
         p_host_props = (PFN_vkGetMemoryHostPointerPropertiesEXT)vkGetDeviceProcAddr(c->device, "vkGetMemoryHostPointerPropertiesEXT");
     uint64_t al = c->min_imported_host_alignment ? c->min_imported_host_alignment : 0x1000;
     r->import_lo = addr & ~(al - 1);
     r->import_hi = (addr + size + al - 1) & ~(al - 1);
     uint64_t n = r->import_hi - r->import_lo;
+    // Vulkan host-pointer import pins pages in the driver/kernel instead of faulting; ensure PS5 demand-backed
+    // guest units in the pool have physical direct memory mapped first and hold them writable across the import.
+    if (!plat_mem_back_hold_as(r->import_lo, n, PLAT_BACK_IMPORT)) {
+        rt_log("vk: pool %#llx+%#llx: backing guest pages failed", (unsigned long long)addr, (unsigned long long)size);
+        return 0;
+    }
     VkMemoryHostPointerPropertiesEXT hp = {.sType = VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT};
     VkResult res = p_host_props ? p_host_props(c->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
                                                (void *)(uintptr_t)r->import_lo, &hp)
                                 : VK_ERROR_EXTENSION_NOT_PRESENT;
     if (res != VK_SUCCESS || !hp.memoryTypeBits) {
+        plat_mem_back_release(r->import_lo, n);
         rt_log("vk: pool %#llx+%#llx: host pointer not importable (%d)", (unsigned long long)addr, (unsigned long long)size, (int)res);
         return 0;
     }
@@ -152,6 +170,7 @@ int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = n,
                              .usage = pool_usage(c), .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
     if ((res = vkCreateBuffer(c->device, &bi, NULL, &r->buf)) != VK_SUCCESS) {
+        plat_mem_back_release(r->import_lo, n);
         rt_log("vk: pool %#llx: vkCreateBuffer for the import failed (%d)", (unsigned long long)addr, (int)res);
         return 0;
     }
@@ -160,6 +179,7 @@ int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     int type = memory_type(c, req.memoryTypeBits & hp.memoryTypeBits,
                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (type < 0 || req.size > n) {
+        plat_mem_back_release(r->import_lo, n);
         rt_log("vk: pool %#llx: no memory type for the import (buffer %#x, host %#x, size %#llx of %#llx)",
                (unsigned long long)addr, req.memoryTypeBits, hp.memoryTypeBits, (unsigned long long)req.size,
                (unsigned long long)n);
@@ -174,6 +194,7 @@ int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
                                .memoryTypeIndex = (uint32_t)type};
     if ((res = vkAllocateMemory(c->device, &ai, NULL, &r->mem)) != VK_SUCCESS ||
         (res = vkBindBufferMemory(c->device, r->buf, r->mem, 0)) != VK_SUCCESS) {
+        plat_mem_back_release(r->import_lo, n);
         rt_log("vk: pool %#llx+%#llx: host memory import failed (%d)", (unsigned long long)addr, (unsigned long long)size, (int)res);
         if (r->mem) vkFreeMemory(c->device, r->mem, NULL);
         vkDestroyBuffer(c->device, r->buf, NULL);
@@ -181,6 +202,9 @@ int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
         r->mem = VK_NULL_HANDLE;
         return 0;
     }
+    r->gpu_imported = 1;
+    plat_mem_gpu_import(r->import_lo, n, 1);
+    plat_mem_back_release(r->import_lo, n);
     plat_inc32(&n_imports);
     return 1;
 }
@@ -246,8 +270,12 @@ static int alloc_chunk(VkCtx *c, uint64_t size, PhysChunk *out) {
     // Chunks share VMA blocks; a pool taken whole (MKW_PHYS_CHUNK=0) gets memory of its own as before.
     VmaAllocationCreateInfo aci = {.flags = size > (64ull << 20) ? VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT : 0,
                                    .requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
-    if ((res = vmaAllocateMemory(c->vma, &req, &aci, &out->alloc, NULL)) != VK_SUCCESS ||
-        (res = vmaBindBufferMemory(c->vma, out->alloc, out->buf)) != VK_SUCCESS) {
+    res = vmaAllocateMemory(c->vma, &req, &aci, &out->alloc, NULL);
+    if (res != VK_SUCCESS) {
+        vk_mem_relieve(size + (16ull << 20), "a physical pool chunk");
+        res = vmaAllocateMemory(c->vma, &req, &aci, &out->alloc, NULL);
+    }
+    if (res != VK_SUCCESS || (res = vmaBindBufferMemory(c->vma, out->alloc, out->buf)) != VK_SUCCESS) {
         rt_log("vk: physical pool chunk of %#llx bytes: device-local allocation failed (%d)", (unsigned long long)size,
                (int)res);
         if (out->alloc) vmaFreeMemory(c->vma, out->alloc);
@@ -277,6 +305,7 @@ void phys_back(PoolRec *r, uint32_t first, uint32_t last) {
         if (r->chunks[i].alloc) continue;
         PhysChunk ch = {0};   // use 0: no part names it yet (MKW_GPU_GUARD read garbage there: --probe-vkmem stopped)
         if (!alloc_chunk(c, chunk_len(r, i), &ch)) {
+            vk_oom_census("physical pool chunk");
             if (++phys_failed_n <= 8) vram_log(0);
             continue;
         }
@@ -315,6 +344,7 @@ void destroy_rec(VkCtx *c, PoolRec *r) {
     if (r->placed) placed_release(c, r);
     if (r->buf) vkDestroyBuffer(c->device, r->buf, NULL);
     if (r->mem) vkFreeMemory(c->device, r->mem, NULL);
+    if (r->gpu_imported) plat_mem_gpu_import(r->import_lo, r->import_hi - r->import_lo, 0);
     for (uint32_t i = 0; i < r->nchunks; i++) {
         if (r->chunks[i].buf) vkDestroyBuffer(c->device, r->chunks[i].buf, NULL);
         if (r->chunks[i].alloc) vmaFreeMemory(c->vma, r->chunks[i].alloc);
@@ -354,8 +384,14 @@ void lazy_back(PoolRec *r) {
             rt_log("vk: %ld lazy pools backed, %.0f MiB (last %#llx+%#llx flags %#x)", n, lazy_backed_bytes / 1048576.0,
                    (unsigned long long)r->lo, (unsigned long long)r->size, r->flags);
     } else {
-        r->lazy = 0;   // no storage: as a pool whose import failed at init (its addresses resolve as unbacked)
-        rt_log("vk: lazy pool %#llx+%#llx flags %#x: no GPU storage", (unsigned long long)r->lo,
-               (unsigned long long)r->size, r->flags);
+        // No storage now (out of memory): its addresses resolve as unbacked for this submission, and the next one tries
+        // again. It was left unbacked for good (lazy = 0), and a pool the governor's shadow trim had dropped (lazy
+        // again) then read zeros for the rest of the session (run 29's magenta course cards, 14/11/2026).
+        r->lazy_retry = __atomic_load_n(&vk_replay_submit, __ATOMIC_RELAXED) + 1;
+        static volatile int32_t n_failed;
+        long n = plat_inc32(&n_failed);
+        if (n <= 16 || !(n & (n - 1)))
+            rt_log("vk: lazy pool %#llx+%#llx flags %#x: no GPU storage now, tried again next submission (%ld so far)",
+                   (unsigned long long)r->lo, (unsigned long long)r->size, r->flags, n);
     }
 }

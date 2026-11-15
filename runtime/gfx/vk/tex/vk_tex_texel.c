@@ -87,7 +87,8 @@ int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, 
     uint8_t *stg;
     VkCommandBuffer cb = VK_NULL_HANDLE;
     if (write) cb = vk_upload_begin_staging(slice * (size_t)g->nz, &sb, (void **)&stg);
-    else stg = vk_staging(slice * (size_t)g->nz, &sb, &sa);
+    else stg = vk_staging_try(slice * (size_t)g->nz, &sb, &sa);
+    if (!stg) return 0;   // no staging memory even after relieving it: the write is lost, a read returns zeros
     VkBufferImageCopy *rg = calloc((size_t)g->nz, sizeof *rg);
     for (int z = 0; z < g->nz; z++) {
         uint8_t *s = stg + slice * (size_t)z;

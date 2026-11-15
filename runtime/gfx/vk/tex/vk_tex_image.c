@@ -285,6 +285,17 @@ VkResult vma_image(VkCtx *c, const VkImageCreateInfo *ci, const VmaAllocationCre
         pa.pool = pool;
         if (vmaCreateImage(c->vma, ci, &pa, img, alloc, NULL) == VK_SUCCESS) return VK_SUCCESS;
     }
+#ifdef MKW_PS5_NATIVE
+    if (!ai->pool && !(ai->flags & VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT)) {
+        uint64_t texels = (uint64_t)ci->extent.width * ci->extent.height * ci->extent.depth * ci->arrayLayers;
+        int is_rt = (ci->usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) != 0;
+        if (texels >= (1ull << 20) || (is_rt && texels >= (512ull * 512))) {
+            VmaAllocationCreateInfo da = *ai;
+            da.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+            if (vmaCreateImage(c->vma, ci, &da, img, alloc, NULL) == VK_SUCCESS) return VK_SUCCESS;
+        }
+    }
+#endif
     return vmaCreateImage(c->vma, ci, ai, img, alloc, NULL);
 }
 
@@ -313,6 +324,8 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     // Small ASTC textures stay RGBA8: they are mostly data (noise, distortion, lookup tables) that a lossy BC7 mode 6
     // turns into visible noise (run116: two 32x32 repeat-wrapped inputs of the world map background), and they hold
     // little memory. Over 256x256 at level 0 they are re-encoded (vk_astc_bc7).
+    // Per slice only (coordinator, run 30, 14/11/2026): counting array layers in sent small ASTC arrays (menu cards,
+    // course thumbnails) through the BC re-encode, and they came out magenta on the console.
     if (f.astc_bc7 && (uint64_t)d->width * d->height < 256u * 256u) {
         f.astc_bc7 = 0;
         f.vk = f.astc_srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
@@ -436,11 +449,18 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     if (!img) {
         VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
         VkResult r = vma_image(c, &ci, &ai, &img, &e->alloc);
+        uint64_t vram_used = 0, vram_budget = 0;
+        int vram_exact = 0;
+        VkDeviceSize need = image_bytes(c, &ci);
+        // Skip relief/eviction retries when the image alone exceeds the device-local heap budget:
+        // freeing existing textures cannot make a >budget non-sparse image fit (e.g. 11.35 GiB arrays).
+        int can_fit = r != VK_ERROR_OUT_OF_DEVICE_MEMORY ||
+                      !vk_mem_vram(&vram_used, &vram_budget, &vram_exact) || need < vram_budget;
         // Out of memory: released entries kept for a re-use go first, oldest first, then the retry (run115: 1 230
         // released entries held 596 MiB while new textures failed). Their images go to the deferred list; what the
         // GPU finished with is freed by vk_mem_collect.
-        for (int round = 0; r == VK_ERROR_OUT_OF_DEVICE_MEMORY && rel_head && round < 8; round++) {
-            VkDeviceSize need = image_bytes(c, &ci), freed = 0;
+        for (int round = 0; can_fit && r == VK_ERROR_OUT_OF_DEVICE_MEMORY && rel_head && round < 8; round++) {
+            VkDeviceSize freed = 0;
             while (rel_head && freed < 2 * need + (16ull << 20)) {
                 VmaAllocationInfo vi = {0};
                 if (rel_head->alloc) vmaGetAllocationInfo(c->vma, rel_head->alloc, &vi);
@@ -450,11 +470,11 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
             vk_mem_collect();
             r = vma_image(c, &ci, &ai, &img, &e->alloc);
         }
-        if (r == VK_ERROR_OUT_OF_DEVICE_MEMORY) r = evict_idle(c, &ci, &ai, &img, &e->alloc);
+        if (can_fit && r == VK_ERROR_OUT_OF_DEVICE_MEMORY) r = evict_idle(c, &ci, &ai, &img, &e->alloc);
         // Last: what the releases and evictions above left waiting for the open upload batch or the GPU (tt6a,
         // 09/11/2026: 23 images not made at the time trial's load right after 256 evictions).
-        if (r == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
-            vk_mem_relieve(2 * image_bytes(c, &ci) + (16ull << 20), "an image");
+        if (can_fit && r == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            vk_mem_relieve(2 * need + (16ull << 20), "an image");
             r = vma_image(c, &ci, &ai, &img, &e->alloc);
         }
         if (r != VK_SUCCESS) {
@@ -468,6 +488,7 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
                 seen[nseen++] = (typeof(seen[0])){d->format, w, h, layers};
                 rt_log("vk: image creation failed (%d): nvn fmt %#x %ux%ux%u target %d levels %u layers %u", (int)r,
                        d->format, w, h, depth, d->target, levels, layers);
+                vk_oom_census("image");
                 if (nseen <= 4) vram_log_now();
             }
             plat_inc32(&n_failed);
@@ -505,6 +526,19 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         p->swz[3] = NVN_TEXTURE_SWIZZLE_A;
     p->mirrored = (uint8_t)tex_mirrored(t);
     p->bound = e->bound_to != NULL;
+    // MKW_GPU_ONLY_RELEASE: a render target's (depth, multisample, compressible or display) storage in a CPU_NO_ACCESS
+    // pool is never read from guest memory: its guest backing goes. A packaged texture over such storage is reported.
+    if (t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) && t->mem && !p->bound) {
+        int gpu_owned = !p->mirrored && !t->has_layout &&
+                        ((d->flags & (NVN_TEXTURE_FLAGS_DISPLAY | NVN_TEXTURE_FLAGS_COMPRESSIBLE)) || d->samples > 1 ||
+                         (d->format >= 0x31 && d->format <= 0x36));
+        static volatile int32_t n_lost;
+        if (gpu_owned) vk_mem_cna_gpu_texture((uintptr_t)t->mem, t->L.size);
+        else if (p->mirrored && vk_mem_cna_lost((uintptr_t)t->mem, t->L.size))
+            log_limited(&n_lost, "packaged texture %#llx (fmt %#x %ux%u) lies over released GPU-only storage: its "
+                        "bytes are lost (MKW_GPU_ONLY_RELEASE)", (unsigned long long)(uintptr_t)t->mem, d->format,
+                        d->width, d->height);
+    }
     p->block_views = (uint8_t)block_views;
     p->listed = (uint8_t)list, p->twin = listed[1];
     p->fb_usage = (uint8_t)fb_usage;

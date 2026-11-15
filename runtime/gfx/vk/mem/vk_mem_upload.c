@@ -4,6 +4,7 @@
 
 #include "cfg.h"
 #include "gfx.h"
+#include "hangwatch.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_pool_index.h"
@@ -32,7 +33,27 @@ enum { DEAD_IMAGE = 1, DEAD_IMAGE_VMA, DEAD_VIEW, DEAD_BUFFER_VMA, DEAD_CALL };
 // still use it; vma: NULL = the runtime's; use: MKW_GPU_GUARD, the newest part that named it (vk_mem_defer_use)
 typedef struct { int kind; uint64_t handle; VmaAllocation alloc; uint64_t seq, tl, fence; VmaAllocator vma; uint64_t use; } Dead;
 
+// Lock order: the queue lock, then sp_lock (vk_sparse.c: vk_sparse_order takes it under the queue lock), then cmd_lock
+// (slot_get records each new slot's zero fill here under sp_lock). vk_upload_flush, the one place that submits under
+// cmd_lock, takes the queue lock first. Taking it under cmd_lock made a cycle, the likeliest cause of the PS5's stop
+// after "sparse bind 2" (run 5, 13/11/2026; MKW_HANG_WATCH names the threads if it comes back): the replay thread
+// holds the queue lock and waits for sp_lock (vk_sparse_order, after its memory census, which on the PS5 makes several
+// kernel calls with the queue lock held), a game thread holds sp_lock and waits for cmd_lock (vk_sparse_remap ->
+// slot_get -> vk_upload_begin), and a thread sending an upload batch holds cmd_lock and waits for the queue lock.
 static PlatRMutex cmd_lock;
+static uint32_t cmd_owner;               // the thread holding cmd_lock, for the hang watch (read with no lock)
+static _Thread_local int cmd_depth;
+static inline __attribute__((always_inline)) void cmd_take(void) {
+    const char *prev = hang_mark("upload: cmd_lock waiting");
+    plat_rmutex_lock(&cmd_lock);
+    hang_mark(prev);
+    if (!cmd_depth++) __atomic_store_n(&cmd_owner, hang_tid(), __ATOMIC_RELAXED);
+}
+static inline __attribute__((always_inline)) void cmd_give(void) {
+    if (!--cmd_depth) __atomic_store_n(&cmd_owner, 0, __ATOMIC_RELAXED);
+    plat_rmutex_unlock(&cmd_lock);
+}
+uint32_t vk_upload_owner(void) { return __atomic_load_n(&cmd_owner, __ATOMIC_RELAXED); }
 static int depth;                     // vk_upload_begin calls not yet ended: a flush inside one would end its cb
 static PlatOnce cmd_once = PLAT_ONCE_INIT;
 static VkCommandPool cmd_pool;
@@ -69,7 +90,11 @@ static void retire(VkCtx *c, int wait_all) {
     int k = 0;
     for (; k < ninflight; k++) {
         Batch *b = &inflight[k];
-        if (wait_all) vkWaitForFences(c->device, 1, &b->fence, VK_TRUE, UINT64_MAX);
+        if (wait_all) {
+            const char *prev = hang_mark_val("upload retire: vkWaitForFences", b->seq);
+            vkWaitForFences(c->device, 1, &b->fence, VK_TRUE, UINT64_MAX);
+            hang_mark(prev);
+        }
         else if (vkGetFenceStatus(c->device, b->fence) != VK_SUCCESS) break;
         free_staging(c, b);
         vk_uptime_done(b->ut, b->seq, b->stg_bytes, b->texels, b->calls);
@@ -105,7 +130,7 @@ static void collect_locked(VkCtx *c) {
 
 VkCommandBuffer vk_upload_begin(void) {
     plat_once(&cmd_once, cmd_init, NULL);
-    plat_rmutex_lock(&cmd_lock);
+    cmd_take();
     VkCtx *c = vk_ctx();
     if (!c) rt_fatal("vk: upload before vk_init");
     depth++;
@@ -149,13 +174,13 @@ VkCommandBuffer vk_upload_begin(void) {
 
 void vk_upload_end(void) {
     depth--;
-    plat_rmutex_unlock(&cmd_lock);
+    cmd_give();
 }
 
 void vk_upload_work(uint64_t texels) {
-    plat_rmutex_lock(&cmd_lock);
+    cmd_take();
     if (open_active) open_b.texels += texels;
-    plat_rmutex_unlock(&cmd_lock);
+    cmd_give();
 }
 
 // Staging memory comes from a pool of its own that keeps STG_MIN_BLOCKS blocks from its first use (at boot). In the
@@ -163,8 +188,13 @@ void vk_upload_work(uint64_t texels) {
 // the headroom thread (vk_headroom.c) or a burst of uploads held every staging allocation of the render thread: one
 // took 47-50 ms, for a few bytes, in the first frame after a save load. Larger buffers than a block go to the default
 // pool.
+#ifdef MKW_PS5_NATIVE
+#define STG_BLOCK (32ull << 20)
+#define STG_MIN_BLOCKS 1
+#else
 #define STG_BLOCK (64ull << 20)
 #define STG_MIN_BLOCKS 2
+#endif
 static VmaPool stg_pool;
 static int stg_pool_tried;
 
@@ -172,14 +202,14 @@ static int stg_pool_tried;
 // in flight, then frees what they held.
 static void wait_and_collect(VkCtx *c) {
     vk_sync_fence_wait(vk_sync_issued(), UINT64_MAX);
-    plat_rmutex_lock(&cmd_lock);
+    cmd_take();
     uint64_t parts = tl_noted;
-    plat_rmutex_unlock(&cmd_lock);
+    cmd_give();
     vk_sync_part_wait(parts);
-    plat_rmutex_lock(&cmd_lock);
+    cmd_take();
     retire(c, 1);
     collect_locked(c);
-    plat_rmutex_unlock(&cmd_lock);
+    cmd_give();
 }
 
 // NULL when out of memory and fatal is 0.
@@ -191,7 +221,7 @@ static void *staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc, int
                                    .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
     if (!__atomic_load_n(&stg_pool_tried, __ATOMIC_ACQUIRE)) {
         plat_once(&cmd_once, cmd_init, NULL);
-        plat_rmutex_lock(&cmd_lock);
+        cmd_take();
         if (!stg_pool_tried) {
             uint32_t type;
             VmaPoolCreateInfo pi = {.blockSize = STG_BLOCK, .minBlockCount = STG_MIN_BLOCKS};
@@ -203,7 +233,7 @@ static void *staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc, int
                    STG_MIN_BLOCKS, (unsigned long long)(STG_BLOCK >> 20));
             __atomic_store_n(&stg_pool_tried, 1, __ATOMIC_RELEASE);
         }
-        plat_rmutex_unlock(&cmd_lock);
+        cmd_give();
     }
     if (stg_pool && bi.size <= STG_BLOCK / 2) aci.pool = stg_pool;
     VmaAllocationInfo info;
@@ -231,6 +261,7 @@ static void *staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc, int
     // the preferred one fails (heap1's host-visible types on the Radeon 660M; h0b, 07/11/2026: heap0 at 200 MiB
     // replays the race without failing). cap-race1, cap-race6 and img-par4 died with both heaps at their caps.
     if (r != VK_SUCCESS) {
+        vk_oom_census("staging buffer");
         vram_log(0);
         if (!fatal) return NULL;
         rt_fatal("vk: staging buffer of %llu bytes failed (%d)", (unsigned long long)size, (int)r);
@@ -246,22 +277,89 @@ static void *staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc, int
 }
 
 void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc) { return staging(size, buf, alloc, 1); }
+// The same, NULL when out of memory even after waiting for the GPU (the caller gives up on what it was doing).
+void *vk_staging_try(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc) { return staging(size, buf, alloc, 0); }
 
 // Out of memory: released and idle textures go (vk_texture_trim), and, with no vk_upload_begin open (this thread's or
 // another's: the lock waits for it), the open batch is sent and waited for; then the GPU and the batches in flight are
 // waited for and what they held is freed. What was released or evicted while the batch was open waits for it (defer),
 // and nothing inside the batch can send it (tt4, 09/11/2026: 978 releases still pending after waiting for the GPU).
+#define DMEM_SOFT_BYTES (1536ull << 20)
+#define DMEM_HARD_BYTES (1024ull << 20)
+#define GOV_REL_SOFT    (64ull << 20)
+#define GOV_TRIM_HARD   (512ull << 20)
+
+uint64_t vk_upload_stg_bytes(void) {
+    VkCtx *c = vk_ctx();
+    VmaPool p = __atomic_load_n(&stg_pool, __ATOMIC_ACQUIRE);
+    if (!c || !p) return 0;
+    VmaStatistics st = {0};
+    vmaGetPoolStatistics(c->vma, p, &st);
+    return st.blockBytes;
+}
+
+void vk_mem_governor(int force) {
+    static uint32_t idle_logs;
+    (void)force;
+    // MKW_SHADOW_TRIM_TEST=1 (a test; with MKW_SHADOW_TRIM=1): every tick trims the cold shadows whatever the memory, so
+    // Linux, whose dmem never runs low, drops and rebuilds them as the PS5's governor does (task 28's magenta check).
+    static int trim_test = -1;
+    if (trim_test < 0) trim_test = cfg_get("MKW_SHADOW_TRIM_TEST") != NULL;
+    if (trim_test) {
+        static uint64_t trimmed;
+        static uint32_t n_trims;
+        uint64_t f = shadow_trim(512ull << 20);
+        trimmed += f;
+        if (f && (++n_trims <= 8 || !(n_trims & (n_trims - 1))))
+            rt_log("vk: shadow trim test: %.1f MiB dropped (%.1f MiB in %u trims)", f / 1048576.0, trimmed / 1048576.0, n_trims);
+    }
+    uint64_t avail = plat_mem_dmem_avail();
+    if (avail >= DMEM_SOFT_BYTES) {
+        vk_mem_shadow_shed(0);
+        return;
+    }
+    uint64_t rel_freed = 0, hr_freed = 0, trim_freed = 0, sp_freed = 0, sh_freed = 0, h0_freed = 0, zero_freed = 0,
+             zero_scanned = 0;
+    const char *level;
+    if (avail < DMEM_HARD_BYTES) {
+        level = "hard";
+        vk_mem_shadow_shed(1);
+        rel_freed = vk_texture_trim_released(0);
+        hr_freed = vk_headroom_shed();
+        trim_freed = vk_texture_trim(GOV_TRIM_HARD);
+        sp_freed = vk_sparse_trim(GOV_TRIM_HARD);
+        sh_freed = shadow_trim(GOV_TRIM_HARD);
+        h0_freed = vk_usnap_trim(8ull << 20) + (uint64_t)vk_exec_cb_trim_spare(2) * (4ull << 20);
+        vk_mem_collect();
+        zero_freed = plat_mem_reclaim_zeros(256ull << 20, &zero_scanned);
+    } else {
+        level = "soft";
+        rel_freed = vk_texture_trim_released(GOV_REL_SOFT);
+        hr_freed = vk_headroom_shed();
+        sh_freed = shadow_trim(128ull << 20);
+    }
+    uint64_t after = plat_mem_dmem_avail();
+    if (rel_freed || hr_freed || trim_freed || sp_freed || sh_freed || h0_freed || zero_freed ||
+        (__atomic_add_fetch(&idle_logs, 1, __ATOMIC_RELAXED) % 60) == 1)
+        rt_log("vk: memory governor (%s): dmem=%llu->%llu MiB, freed rel=%.1f headroom=%.1f trim=%.1f sparse=%.1f shadow=%.1f heap0=%.1f zero=%.1f (scanned=%.1f) MiB",
+               level, (unsigned long long)(avail >> 20), (unsigned long long)(after >> 20),
+               rel_freed / 1048576.0, hr_freed / 1048576.0, trim_freed / 1048576.0,
+               sp_freed / 1048576.0, sh_freed / 1048576.0, h0_freed / 1048576.0,
+               zero_freed / 1048576.0, zero_scanned / 1048576.0);
+}
+
 void vk_mem_relieve(uint64_t bytes, const char *what) {
     static volatile int32_t n_logged;
     VkCtx *c = vk_ctx();
     if (!c) return;
     uint64_t t0 = plat_now_ns();
+    vk_mem_governor(1);
     vk_texture_trim(bytes);
     plat_once(&cmd_once, cmd_init, NULL);
-    plat_rmutex_lock(&cmd_lock);
+    cmd_take();
     int outside = !depth;
     if (outside) vk_upload_flush(1);
-    plat_rmutex_unlock(&cmd_lock);
+    cmd_give();
     wait_and_collect(c);
     if (plat_inc32(&n_logged) <= 32)
         rt_log("vk: out of memory for %s of %llu bytes: textures trimmed, %s, GPU waited for (%.1f ms)", what,
@@ -270,19 +368,32 @@ void vk_mem_relieve(uint64_t bytes, const char *what) {
 }
 
 // vk_upload_begin and the caller's staging buffer, before it records anything; out of memory with no other
-// vk_upload_begin of this thread open, vk_mem_relieve outside the batch and both are tried again.
+// vk_upload_begin of this thread open, vk_mem_relieve outside the batch and both are tried again. Still out of memory:
+// VK_NULL_HANDLE with *map NULL and no vk_upload_begin held (the caller does not call vk_upload_end), so the caller
+// defers its upload to a later frame. It was fatal: run 31 ended on a 22 MB staging buffer with dmem at 292 MiB
+// (14/11/2026), where the texture could have streamed in a frame later.
+static volatile int32_t n_stg_deferred;
+static VkCommandBuffer staging_failed(VkDeviceSize size) {
+    vk_upload_end();
+    long n = plat_inc32(&n_stg_deferred);
+    if (n <= 16 || !(n & (n - 1)))
+        rt_log("vk: no staging for %llu bytes even after relieving memory: the upload is deferred (%ld so far)",
+               (unsigned long long)size, n);
+    return VK_NULL_HANDLE;
+}
+
 VkCommandBuffer vk_upload_begin_staging(VkDeviceSize size, VkBuffer *buf, void **map) {
     VkCommandBuffer cb = vk_upload_begin();
-    if (depth > 1) {
-        *map = vk_staging(size, buf, NULL);
-        return cb;
+    if (depth > 1) {   // inside another batch of this thread: nothing can be relieved here
+        if ((*map = staging(size, buf, NULL, 0))) return cb;
+        return staging_failed(size);
     }
     if ((*map = staging(size, buf, NULL, 0))) return cb;
     vk_upload_end();
     vk_mem_relieve(size * 2 + (8ull << 20), "staging");
     cb = vk_upload_begin();
-    *map = vk_staging(size, buf, NULL);
-    return cb;
+    if ((*map = staging(size, buf, NULL, 0))) return cb;
+    return staging_failed(size);
 }
 
 // A caller that adds to the batch without waiting (vk_tex_texel.c writes, vk_tex_upload.c) sends it once it holds
@@ -295,48 +406,71 @@ VkCommandBuffer vk_upload_begin_staging(VkDeviceSize size, VkBuffer *buf, void *
 #define UPLOAD_CALLS 128
 void vk_upload_flush_over(VkDeviceSize limit) {
     plat_once(&cmd_once, cmd_init, NULL);
-    plat_rmutex_lock(&cmd_lock);
+    cmd_take();
     int over = open_active && !depth &&
                (open_b.stg_bytes >= limit || open_b.texels >= UPLOAD_TEXELS || open_b.calls >= UPLOAD_CALLS);
-    plat_rmutex_unlock(&cmd_lock);
+    cmd_give();
     if (over) vk_upload_flush(0);
 }
 
 uint64_t vk_upload_flush(int wait) {
     plat_once(&cmd_once, cmd_init, NULL);
-    plat_rmutex_lock(&cmd_lock);
+    cmd_take();
     VkCtx *c = vk_ctx();
+    // The queue lock comes before cmd_lock (see cmd_lock): when another thread holds it, cmd_lock is let go while this
+    // one waits for it. Only one batch is ever open and it is sent under both locks, so batches keep their order; a
+    // caller already inside cmd_lock (vk_mem_relieve) still holds it through the wait, as before.
+    int ql = 0;
+    if (c && open_active && !(ql = vk_queue_trylock())) {
+        cmd_give();
+        vk_queue_lock();
+        cmd_take();
+        ql = 1;
+    }
     uint64_t seq = next_seq;
     if (c && open_active) {
         for (int i = 0; i < open_b.nstg; i++) vmaFlushAllocation(c->vma, open_b.stg[i].alloc, 0, VK_WHOLE_SIZE);
         vk_uptime_end(open_b.cb, open_b.ut);
         vk_crumb_end(open_b.cb, VK_CRUMB_UPLOAD, open_b.crumb);
-        vkEndCommandBuffer(open_b.cb);
-        VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &open_b.cb};
-        vk_queue_lock();
-        VkSparseOrder so = vk_sparse_order(0, 0);   // ordered with the sparse binds like every graphics-queue submission
-        VkPipelineStageFlags ws = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-        VkTimelineSemaphoreSubmitInfo tl = {.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
-                                            .waitSemaphoreValueCount = so.wait ? 1u : 0u, .pWaitSemaphoreValues = &so.wait,
-                                            .signalSemaphoreValueCount = 1, .pSignalSemaphoreValues = &so.signal};
-        if (so.ssem) si.pNext = &tl, si.signalSemaphoreCount = 1, si.pSignalSemaphores = &so.ssem;
-        if (so.ssem && so.wait) si.waitSemaphoreCount = 1, si.pWaitSemaphores = &so.wsem, si.pWaitDstStageMask = &ws;
-        VkResult r = vkQueueSubmit(c->gfx_queue, 1, &si, open_b.fence);
-        vk_queue_unlock();
-        if (r == VK_ERROR_DEVICE_LOST) vk_exec_recent_log();
-        if (r != VK_SUCCESS) rt_fatal("vk: upload submit failed (%d)", (int)r);
-        if (ninflight == cap_inflight) vk_mem_grow((void **)&inflight, &cap_inflight, sizeof *inflight);
-        inflight[ninflight++] = open_b;
-        open_active = 0;
+        if (vkEndCommandBuffer(open_b.cb) != VK_SUCCESS) {
+            static int warned;
+            if (!warned++) rt_log("vk: upload command buffer recording failed: batch skipped");
+            for (int i = 0; i < open_b.nstg; i++) vmaDestroyBuffer(c->vma, open_b.stg[i].buf, open_b.stg[i].alloc);
+            if (open_b.fence) vkDestroyFence(c->device, open_b.fence, NULL);
+            free(open_b.stg);
+            memset(&open_b, 0, sizeof open_b);
+            open_active = 0;
+        } else {
+            VkSubmitInfo si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &open_b.cb};
+            VkSparseOrder so = vk_sparse_order(0, 0);   // ordered with the sparse binds like every graphics-queue submission
+            VkPipelineStageFlags ws = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            VkTimelineSemaphoreSubmitInfo tl = {.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO,
+                                                .waitSemaphoreValueCount = so.wait ? 1u : 0u, .pWaitSemaphoreValues = &so.wait,
+                                                .signalSemaphoreValueCount = 1, .pSignalSemaphoreValues = &so.signal};
+            if (so.ssem) si.pNext = &tl, si.signalSemaphoreCount = 1, si.pSignalSemaphores = &so.ssem;
+            if (so.ssem && so.wait) si.waitSemaphoreCount = 1, si.pWaitSemaphores = &so.wsem, si.pWaitDstStageMask = &ws;
+            const char *prev = hang_mark_val("upload flush: vkQueueSubmit", seq);
+            VkResult r = vkQueueSubmit(c->gfx_queue, 1, &si, open_b.fence);
+            hang_mark(prev);
+            if (r == VK_SUCCESS && so.ssem) vk_sparse_order_submitted(so.signal);
+            if (r == VK_ERROR_DEVICE_LOST) vk_exec_recent_log();
+            if (r != VK_SUCCESS) rt_fatal("vk: upload submit failed (%d)", (int)r);
+            if (ninflight == cap_inflight) vk_mem_grow((void **)&inflight, &cap_inflight, sizeof *inflight);
+            inflight[ninflight++] = open_b;
+            open_active = 0;
+        }
     }
+    if (ql) vk_queue_unlock();   // before the fence waits: they need no order, and the present thread needs the lock
     if (c && wait) {
         while (ninflight && done_seq < seq) {
+            const char *prev = hang_mark_val("upload flush: vkWaitForFences", inflight[0].seq);
             vkWaitForFences(c->device, 1, &inflight[0].fence, VK_TRUE, UINT64_MAX);
+            hang_mark(prev);
             retire(c, 0);
         }
     }
     if (c) collect_locked(c);
-    plat_rmutex_unlock(&cmd_lock);
+    cmd_give();
     return seq;
 }
 
@@ -361,7 +495,7 @@ uint64_t vk_mem_defer_fence(uint64_t fence) {
 
 static void defer(int kind, uint64_t handle, VmaAllocation alloc) {
     plat_once(&cmd_once, cmd_init, NULL);
-    plat_rmutex_lock(&cmd_lock);
+    cmd_take();
     // MKW_GPU_GUARD: tied to the submission being recorded, every part of it is covered; otherwise only the parts sent.
     uint64_t fence = defer_fence ? defer_fence : idle_defer ? 0 : rec_fence;
     if (defer_use && !fence)
@@ -371,14 +505,14 @@ static void defer(int kind, uint64_t handle, VmaAllocation alloc) {
     // The open batch may record into the object: it counts as the newest user.
     dead[ndead++] = (Dead){kind, handle, alloc, open_active ? open_b.seq : next_seq, tl_noted,
                            fence, defer_vma, defer_use};
-    plat_rmutex_unlock(&cmd_lock);
+    cmd_give();
 }
 
 int dead_pending(void) {
     plat_once(&cmd_once, cmd_init, NULL);
-    plat_rmutex_lock(&cmd_lock);
+    cmd_take();
     int n = ndead;
-    plat_rmutex_unlock(&cmd_lock);
+    cmd_give();
     return n;
 }
 
@@ -400,25 +534,25 @@ void vk_defer_buffer_in(VmaAllocator vma, VkBuffer buf, VmaAllocation alloc) {
 
 void vk_mem_note_submit(uint64_t part_value) {
     plat_once(&cmd_once, cmd_init, NULL);
-    plat_rmutex_lock(&cmd_lock);
+    cmd_take();
     if (part_value > tl_noted) tl_noted = part_value;
-    plat_rmutex_unlock(&cmd_lock);
+    cmd_give();
 }
 
 void vk_mem_collect(void) {
     VkCtx *c = vk_ctx();
     if (!c) return;
     plat_once(&cmd_once, cmd_init, NULL);
-    plat_rmutex_lock(&cmd_lock);
+    cmd_take();
     collect_locked(c);
-    plat_rmutex_unlock(&cmd_lock);
+    cmd_give();
 }
 
 uint64_t upload_batches(void) { return next_seq; }
 
 // vk_mem_shutdown, the device idle: every batch and dead object goes, and the staging pool.
 void upload_shutdown(VkCtx *c) {
-    plat_rmutex_lock(&cmd_lock);
+    cmd_take();
     retire(c, 1);
     uint64_t keep = tl_noted;
     tl_noted = 0;
@@ -435,5 +569,5 @@ void upload_shutdown(VkCtx *c) {
     if (stg_pool) vmaDestroyPool(c->vma, stg_pool);   // after retire: no staging buffer is left in it
     stg_pool = NULL;
     stg_pool_tried = 0;
-    plat_rmutex_unlock(&cmd_lock);
+    cmd_give();
 }

@@ -5,4 +5,9 @@
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
 #include <vulkan/vulkan.h>
 #include "vk_destroy_count.h"   // VMA's buffer destructions count for MKW_DRAW_CACHE
+// Use the counted global dispatch above even when those globals come from
+// Volk. Its optional VMA table importer cannot use our counted member name.
+#ifdef VOLK_HEADER_VERSION
+#undef VOLK_HEADER_VERSION
+#endif
 #include "vk_mem_alloc.h"

@@ -315,8 +315,8 @@ static void tex_lock_once(int *locked) {
 }
 
 // locked: whether this thread holds the texture lock; taken here when a lookup needs it, released by the caller.
-static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage, int separate, VkDescriptorImageInfo *out,
-                     int *locked) {
+static VkImage tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage, int separate, VkDescriptorImageInfo *out,
+                        int *locked) {
     int td_on = td_mode();
     VkImage image;
     if (!h || storage || !td_on) {
@@ -324,7 +324,7 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
         td_stat[3]++, tex_info_full(ex, r, h, storage, separate, out, &image);
         vk_exec_dc_read(image);
         if (ru_cap) ru_note_tex(h, image, storage);
-        return;
+        return image;
     }
     uint64_t th = pd_on ? __rdtsc() : 0;
     uint32_t gen = vk_texture_slots_gen(), ep = vk_texture_epoch(), sg = vk_sampler_gen();   // before any lookup
@@ -358,7 +358,7 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
                          (unsigned long long)h, r->type);
         }
         if (pd_on) td_stat[5] += __rdtsc() - th;
-        return;
+        return m->image;
     }
     uint64_t tok = token_of(h);   // before the lookup
     td_stat[2]++;
@@ -370,7 +370,20 @@ static void tex_info(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage,
     if (pd_on) td_stat[4] += __rdtsc() - t0;
     *m = (typeof(*m)){.h = h, .tok = tok, .gen = gen, .epoch = ep, .sgen = sg, .type = r->type,
                       .separate = (uint8_t)separate, .valid = 1, .image = image, .out = *out};
+    return image;
 }
+
+#define TB_N 1024
+#define TB_MAX 16
+typedef struct {
+    const VkPipeBinding *b;
+    uint32_t gen, epoch, sgen;
+    uint8_t cnt, valid;
+    uint64_t h[TB_MAX];
+    VkImage image[TB_MAX];
+    VkDescSlot out[TB_MAX];
+} TexBindMemo;
+static _Thread_local TexBindMemo *TB;
 
 static void support_in(const VkExec *ex, float in[3]) {   // what support_fill reads: viewport size, point size
     in[0] = ex->in_pass && ex->has_vp ? ex->vp[0][2] : (float)ex->pass_w;
@@ -880,15 +893,61 @@ void bind_resources(VkExec *ex, const VkPipeInfo *info) {
                 kind = 1;
                 if (xkey) memset(xkeep + nd, 1, cnt);
                 int locked = 0;   // tex_info takes the texture lock for the lookups that need it
+                int td_on = td_mode();
+                TexBindMemo *tbm = NULL;
+                uint32_t tgen = 0, tep = 0, tsg = 0;
+                if (!img && td_on == 1 && cnt <= TB_MAX && r->slot >= 0 && r->slot + (int)cnt <= 128) {
+                    if (!TB && !(TB = calloc(TB_N, sizeof *TB))) rt_fatal("vk: out of memory (TexBindMemo)");
+                    const uint64_t *hp = &ex->tex[st][r->slot];
+                    uint64_t kh = (uintptr_t)b * 0x9E3779B97F4A7C15ull;
+                    for (uint32_t k = 0; k < cnt; k++) kh = (kh ^ hp[k]) * 0x9E3779B97F4A7C15ull;
+                    tbm = &TB[(kh >> 54) & (TB_N - 1)];
+                    tgen = vk_texture_slots_gen(), tep = vk_texture_epoch(), tsg = vk_sampler_gen();
+                    if (tbm->valid && tbm->b == b && tbm->cnt == cnt && tbm->gen == tgen && tbm->sgen == tsg &&
+                        !memcmp(tbm->h, hp, cnt * sizeof(uint64_t))) {
+                        if (tbm->epoch != tep) {
+                            for (uint32_t k = 0; k < cnt; k++) {
+                                uint64_t hk = tbm->h[k];
+                                if (hk && !vk_texture_checked((int)(hk & 0xfffff), tep)) {
+                                    tex_lock_once(&locked);
+                                    vk_texture_by_id_locked((int)(hk & 0xfffff), NULL, NULL);
+                                }
+                            }
+                            tbm->epoch = tep;
+                        }
+                        if (locked) vk_texture_unlock(), locked = 0;
+                        memcpy(o, tbm->out, cnt * sizeof(VkDescSlot));
+                        for (uint32_t k = 0; k < cnt; k++) {
+                            if (ex->nfbl && tbm->image[k] && in_fbl(ex, tbm->image[k])) {
+                                o[k].image.imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT;
+                                o[k].w[2] = (uint32_t)VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT;
+                            }
+                            vk_exec_dc_read(tbm->image[k]);
+                            if (ru_cap) ru_note_tex(tbm->h[k], tbm->image[k], 0), ru_note_slot(0, st, r->slot + (int)k);
+                        }
+                        td_stat[0] += cnt;
+                        tbm = NULL;
+                        goto tex_bound;
+                    }
+                }
                 for (uint32_t k = 0; k < cnt; k++) {
                     int slot = r->slot + (int)k;
                     uint64_t h = 0;
                     if (img) h = slot >= 0 && slot < 32 ? ex->img[st][slot] : 0;
                     else h = slot >= 0 && slot < 128 ? ex->tex[st][slot] : 0;
-                    tex_info(ex, r, h, img, r->separate, &o[k].image, &locked);
+                    VkImage timg = tex_info(ex, r, h, img, r->separate, &o[k].image, &locked);
                     if (ru_cap && !img && slot >= 0 && slot < 128) ru_note_slot(0, st, slot);   // others read 0
                     o[k].w[2] = (uint32_t)o[k].image.imageLayout;   // zero the tail padding
+                    if (tbm) {
+                        tbm->h[k] = h;
+                        tbm->image[k] = timg;
+                        tbm->out[k] = o[k];
+                        tbm->out[k].image.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                        tbm->out[k].w[2] = (uint32_t)VK_IMAGE_LAYOUT_GENERAL;
+                    }
                 }
+                if (tbm) tbm->b = b, tbm->gen = tgen, tbm->epoch = tep, tbm->sgen = tsg, tbm->cnt = (uint8_t)cnt, tbm->valid = 1;
+            tex_bound:
                 if (locked) vk_texture_unlock();
             }
             BR_MARK(BR_TEX);

@@ -39,6 +39,8 @@ typedef struct Tex {
                                   // storage binding); ReadTexels waits for it instead of draining the replay queue
     uint8_t listed;               // in owned[]
     uint32_t wt_n;                // WriteTexels into the storage since the last upload
+    uint8_t up_pending;           // an upload deferred for want of staging memory: the storage counts as changed
+    uint64_t up_fail_frame;       // the frame of that failure: tried again from the next frame on
     struct Tex *rel_prev, *rel_next;   // while released: the list of released entries, oldest first
     uint8_t sparse;               // a Vulkan sparse image whose tiles follow the game's MapVirtual (vk_sparse.c)
     uint64_t use;                 // MKW_GPU_GUARD: newest submission part that looked it up (vk_guard_note)
@@ -86,7 +88,9 @@ uint32_t agen_idx(uint64_t addr);
 void tex_gen_bump(uint64_t addr);
 void make_key(const tex_t *t, TexKey *k);
 int same_but_swizzle(const TexKey *a, const TexKey *b);
+uint32_t tex_evict_idle(void);
 int tex_mirrored(const tex_t *t);
+void tex_zero_tail_recheck(uint64_t frame);   // MKW_TEX_UP_LOG's zero tails read again (vk_tex_upload.c)
 void log_limited(volatile int32_t *n, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 void barrier(VkCommandBuffer cb, VkPipelineStageFlags2 src, VkAccessFlags2 sa, VkPipelineStageFlags2 dst,
              VkAccessFlags2 da);

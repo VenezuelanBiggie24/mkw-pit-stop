@@ -4,6 +4,7 @@
 
 #include "cfg.h"
 #include "gfx.h"
+#include "hangwatch.h"
 #include "host.h"
 #include "nvn_api.h"
 #include "nvn_pool_index.h"
@@ -11,6 +12,74 @@
 #include "vk_exec.h"
 #include "vk_mem_internal.h"
 #include "platform/platform.h"
+#ifdef __PROSPERO__
+#include "platform/ps5_guest_memory.h"
+#endif
+
+uint64_t vk_sparse_bytes(void);
+
+// Atomic snapshot of Vulkan/VMA memory totals so signal-context OOM logging
+// can report them without taking VMA or texture mutexes.
+static struct {
+    uint64_t vma_block[4], vma_used[4], drv_usage[4];
+    uint32_t n_heaps;
+    uint64_t tex_own, tex_rel, sparse, shadow, placed;
+} ps5_vk_snap;
+
+static void ps5_vk_snap_refresh(void) {
+    VkCtx *c = vk_ctx();
+    if (!c) return;
+    VmaBudget vb[VK_MAX_MEMORY_HEAPS];
+    const char *prev = hang_mark("census: vmaGetHeapBudgets");
+    vmaGetHeapBudgets(c->vma, vb);
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT b = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, .pNext = &b};
+    hang_mark("census: vkGetPhysicalDeviceMemoryProperties2");
+    if (c->has_memory_budget) vkGetPhysicalDeviceMemoryProperties2(c->phys, &p2);
+    hang_mark(prev);
+    uint32_t nh = c->mem_props.memoryHeapCount;
+    if (nh > 4) nh = 4;
+    for (uint32_t h = 0; h < nh; h++) {
+        __atomic_store_n(&ps5_vk_snap.vma_block[h], vb[h].statistics.blockBytes, __ATOMIC_RELAXED);
+        __atomic_store_n(&ps5_vk_snap.vma_used[h], vb[h].statistics.allocationBytes, __ATOMIC_RELAXED);
+        __atomic_store_n(&ps5_vk_snap.drv_usage[h], c->has_memory_budget ? b.heapUsage[h] : 0, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&ps5_vk_snap.n_heaps, nh, __ATOMIC_RELAXED);
+    VkTexCensus t = {0};
+    const char *prev2 = hang_mark("census: vk_texture_census");
+    vk_texture_census(&t);
+    hang_mark(prev2);
+    __atomic_store_n(&ps5_vk_snap.tex_own, t.bytes_live, __ATOMIC_RELAXED);
+    __atomic_store_n(&ps5_vk_snap.tex_rel, t.bytes_released, __ATOMIC_RELAXED);
+    __atomic_store_n(&ps5_vk_snap.sparse, vk_sparse_bytes(), __ATOMIC_RELAXED);
+    __atomic_store_n(&ps5_vk_snap.shadow, (uint64_t)__atomic_load_n(&s_live_bytes, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+    __atomic_store_n(&ps5_vk_snap.placed, (uint64_t)__atomic_load_n(&placed_bytes, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
+}
+
+// Reads the snapshot only: vk_mem_census refreshes it every 15 frames. The census is logged from
+// vk_sparse.c under the queue lock, and a refresh there took VMA's mutex and the texture lock while the guest's main
+// thread held one of them and waited for the queue lock (console run 7: a hang after "before-sparse-bind").
+void vk_mem_ps5_census(char *out, size_t cap, int in_signal) {
+    (void)in_signal;
+    uint32_t nh = __atomic_load_n(&ps5_vk_snap.n_heaps, __ATOMIC_RELAXED);
+    if (!nh) {
+        snprintf(out, cap, "vk=uninit");
+        return;
+    }
+    size_t k = (size_t)snprintf(out, cap, "vk=vma(");
+    for (uint32_t h = 0; h < nh && k < cap; h++) {
+        uint64_t blk = __atomic_load_n(&ps5_vk_snap.vma_block[h], __ATOMIC_RELAXED) >> 20;
+        uint64_t drv = __atomic_load_n(&ps5_vk_snap.drv_usage[h], __ATOMIC_RELAXED) >> 20;
+        k += (size_t)snprintf(out + k, k < cap ? cap - k : 0, "%sh%u:%llu/%llu", h ? " " : "", h,
+                              (unsigned long long)blk, (unsigned long long)drv);
+    }
+    snprintf(out + k, k < cap ? cap - k : 0, ") sparse=%llu tex=%llu(+%llurel) shadow=%llu placed=%llu MiB",
+             (unsigned long long)(__atomic_load_n(&ps5_vk_snap.sparse, __ATOMIC_RELAXED) >> 20),
+             (unsigned long long)(__atomic_load_n(&ps5_vk_snap.tex_own, __ATOMIC_RELAXED) >> 20),
+             (unsigned long long)(__atomic_load_n(&ps5_vk_snap.tex_rel, __ATOMIC_RELAXED) >> 20),
+             (unsigned long long)(__atomic_load_n(&ps5_vk_snap.shadow, __ATOMIC_RELAXED) >> 20),
+             (unsigned long long)(__atomic_load_n(&ps5_vk_snap.placed, __ATOMIC_RELAXED) >> 20));
+}
 
 // ---------------------------------------------------------------- census
 static volatile int64_t traffic[VK_MCLS_N][VK_MUSE_N];
@@ -39,33 +108,35 @@ void flag_names(uint32_t f, char *buf, size_t n) {
 
 
 
-void vk_mem_census(uint64_t frame) {
-    static uint64_t window_start;
-    mem_early_log(frame);   // MKW_EARLY_READ
-    if ((rt_trace & RT_TRACE_PERF) && frame % 150 == 0) vram_log(frame);
-    if (vk_dirty_census && !vk_mirror_on) dirty_frame(frame);
-    if ((rt_trace & RT_TRACE_PERF) ? frame % 60 == 0 : frame == 600 || frame == 1800)
-        mirror_log(frame), shadow_log(frame);   // mirror_log also logs the write-watch line
-    if (frame == 1200) {   // loading is over: the first window starts here
-        for (int c = 0; c < VK_MCLS_N; c++)
-            for (int u = 0; u < VK_MUSE_N; u++) plat_xchg64(&traffic[c][u], 0);
-        window_start = frame;
-        return;
+static void log_mem_census(uint64_t frame, int force) {
+    static uint64_t window_start, window_ns;
+    if (!force) {
+        if (frame == 1200) {   // loading is over: the first window starts here
+            for (int c = 0; c < VK_MCLS_N; c++)
+                for (int u = 0; u < VK_MUSE_N; u++) plat_xchg64(&traffic[c][u], 0);
+            vk_pool_fini_stats(NULL, NULL, NULL, NULL, NULL, NULL, NULL, 1);
+            window_start = frame;
+            window_ns = plat_now_ns();
+            return;
+        }
+        // Frame 600 as well: runs on slow machines end before 1800.
+        if (frame != 600 && (frame % 1800 || !(frame == 1800 || (rt_trace & RT_TRACE_PERF)))) return;
     }
-    // Frame 600 as well: runs on slow machines end before 1800.
-    if (frame != 600 && (frame % 1800 || !(frame == 1800 || (rt_trace & RT_TRACE_PERF)))) return;
-    typedef struct { int kind; uint32_t flags; uint64_t n, bytes; } Group;
+    typedef struct { int kind; uint32_t flags; uint64_t n, bytes, backed; } Group;
     Group g[64];
     int ng = 0;
-    uint64_t total[4] = {0}, count[4] = {0};
+    uint64_t total[4] = {0}, count[4] = {0}, cna_total = 0, cna_backed = 0;
     plat_mutex_lock_shared(&pool_lock);
     for (int i = 0; i < pool_index.n; i++) {
         const PoolRec *r = pool_index.e[i].buf;
+        uint64_t b = r->kind != POOL_VIRT ? plat_mem_backed_bytes(r->lo, r->size) : 0;
         int j = 0;
         while (j < ng && (g[j].kind != r->kind || g[j].flags != r->flags)) j++;
-        if (j == ng && ng < 64) g[ng++] = (Group){r->kind, r->flags, 0, 0};
-        if (j < ng) g[j].n++, g[j].bytes += r->size;
+        if (j == ng && ng < 64) g[ng++] = (Group){r->kind, r->flags, 0, 0, 0};
+        if (j < ng) g[j].n++, g[j].bytes += r->size, g[j].backed += b;
         total[r->kind] += r->size, count[r->kind]++;
+        if (r->kind != POOL_VIRT && (r->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS))
+            cna_total += r->size, cna_backed += b;
     }
     plat_mutex_unlock_shared(&pool_lock);
     rt_log("mem: census at frame %llu: import %llu pools %.1f MiB (%d without a GPU buffer), physical %llu pools %.1f MiB, "
@@ -77,19 +148,75 @@ void vk_mem_census(uint64_t frame) {
     for (int j = 0; j < ng; j++) {
         char f[160];
         flag_names(g[j].flags, f, sizeof f);
-        rt_log("mem:   %s %#x %s: %llu pools, %.1f MiB", kinds[g[j].kind], g[j].flags, f, (unsigned long long)g[j].n,
-               g[j].bytes / 1048576.0);
+        rt_log("mem:   %s %#x %s: %llu pools, %.1f MiB (backed %.1f MiB)", kinds[g[j].kind], g[j].flags, f,
+               (unsigned long long)g[j].n, g[j].bytes / 1048576.0, g[j].backed / 1048576.0);
     }
-    uint64_t frames = window_start && frame > window_start ? frame - window_start : frame;
-    static const char *const cls[] = {"", "host CPU_NO_ACCESS", "host CPU_UNCACHED", "host CPU_CACHED", "device", "scratch"};
-    rt_log("mem: traffic per frame over %llu frames, MiB (bound ranges, not bytes read): class: vertex index uniform "
-           "storage indirect copy-src gpu-write cpu-read", (unsigned long long)frames);
-    for (int c = 1; c < VK_MCLS_N; c++) {
-        double v[VK_MUSE_N];
-        for (int u = 0; u < VK_MUSE_N; u++) v[u] = plat_xchg64(&traffic[c][u], 0) / 1048576.0 / (double)(frames ? frames : 1);
-        rt_log("mem:   %s: %.2f %.2f %.2f %.2f %.3f %.2f %.2f %.3f", cls[c], v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+    uint64_t cna_n = 0, cna_b = 0, cna_r = 0;
+    vk_mem_cna_stats(&cna_n, &cna_b, &cna_r);
+    rt_log("mem: CPU_NO_ACCESS backed: %.1f MiB of %.1f MiB (GPU-owned textures released %.1f MiB of %.1f MiB, %llu "
+           "textures; MKW_GPU_ONLY_RELEASE)",
+           cna_backed / 1048576.0, cna_total / 1048576.0, cna_r / 1048576.0, cna_b / 1048576.0,
+           (unsigned long long)cna_n);
+    uint64_t now_ns = plat_now_ns();
+    double mins = window_ns && now_ns > window_ns ? (double)(now_ns - window_ns) / 60e9 : 0.0;
+    uint64_t pf_n = 0, pf_b = 0, pf_bk = 0, pf_rel = 0, pf_ov = 0, pf_wb = 0, pf_wbk = 0;
+    vk_pool_fini_stats(&pf_n, &pf_b, &pf_bk, &pf_rel, &pf_ov, &pf_wb, &pf_wbk, !force);
+    rt_log("mem: pool fini: %llu pools %.1f MiB (%.1f MiB backed; window %.1f MiB/min, %.1f MiB/min backed; "
+           "%llu overlap skipped, %.1f MiB released)",
+           (unsigned long long)pf_n, pf_b / 1048576.0, pf_bk / 1048576.0,
+           mins > 0.0 ? (pf_wb / 1048576.0) / mins : 0.0, mins > 0.0 ? (pf_wbk / 1048576.0) / mins : 0.0,
+           (unsigned long long)pf_ov, pf_rel / 1048576.0);
+    int cb_lp = 0, cb_sp = 0, cb_lc = 0, cb_sc = 0, dc_lp = 0, dc_rp = 0;
+    vk_exec_cb_dpool_stats(&cb_lp, &cb_sp, &cb_lc, &cb_sc);
+    vk_dcache_dpool_stats(&dc_lp, &dc_rp);
+    uint64_t drv_sum = 0, vma_sum = 0;
+    uint32_t nh = __atomic_load_n(&ps5_vk_snap.n_heaps, __ATOMIC_RELAXED);
+    for (uint32_t h = 0; h < nh; h++) {
+        drv_sum += __atomic_load_n(&ps5_vk_snap.drv_usage[h], __ATOMIC_RELAXED);
+        vma_sum += __atomic_load_n(&ps5_vk_snap.vma_block[h], __ATOMIC_RELAXED);
     }
-    window_start = frame;
+    uint64_t sp_b = __atomic_load_n(&ps5_vk_snap.sparse, __ATOMIC_RELAXED);
+    int64_t radv_est = (int64_t)drv_sum - (int64_t)vma_sum - (int64_t)sp_b - (int64_t)total[POOL_IMPORT];
+    if (radv_est < 0) radv_est = 0;
+    rt_log("mem: radv/exec: cb_dpools=%d (+%d spare) cb_chunks=%d (+%d spare), dcache_dpools=%d (+%d retiring), "
+           "drv_usage=%.0f MiB, vma=%.0f MiB, sparse=%.0f MiB, import=%.0f MiB, radv_est=%.0f MiB",
+           cb_lp, cb_sp, cb_lc, cb_sc, dc_lp, dc_rp, drv_sum / 1048576.0, vma_sum / 1048576.0,
+           sp_b / 1048576.0, total[POOL_IMPORT] / 1048576.0, radv_est / 1048576.0);
+    if (!force) {
+        uint64_t frames = window_start && frame > window_start ? frame - window_start : frame;
+        static const char *const cls[] = {"", "host CPU_NO_ACCESS", "host CPU_UNCACHED", "host CPU_CACHED", "device", "scratch"};
+        rt_log("mem: traffic per frame over %llu frames, MiB (bound ranges, not bytes read): class: vertex index uniform "
+               "storage indirect copy-src gpu-write cpu-read", (unsigned long long)frames);
+        for (int c = 1; c < VK_MCLS_N; c++) {
+            double v[VK_MUSE_N];
+            for (int u = 0; u < VK_MUSE_N; u++) v[u] = plat_xchg64(&traffic[c][u], 0) / 1048576.0 / (double)(frames ? frames : 1);
+            rt_log("mem:   %s: %.2f %.2f %.2f %.2f %.3f %.2f %.2f %.3f", cls[c], v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
+        }
+        window_start = frame;
+        window_ns = now_ns;
+    }
+}
+
+void vk_mem_census_now(void) { log_mem_census(0, 1); }
+
+void vk_oom_census(const char *what) {
+    static volatile int32_t once;
+    if (__atomic_exchange_n(&once, 1, __ATOMIC_ACQ_REL)) return;
+    rt_log("vk: === OOM census (%s) ===", what ? what : "alloc");
+    ps5_vk_snap_refresh();
+    vram_log_now();
+    log_mem_census(0, 1);
+    plat_mem_census_log("oom");
+}
+
+void vk_mem_census(uint64_t frame) {
+    if (frame == 1 || frame % 15 == 0) ps5_vk_snap_refresh();
+    mem_early_log(frame);   // MKW_EARLY_READ
+    if ((rt_trace & RT_TRACE_PERF) && frame % 150 == 0) vram_log(frame);
+    if (vk_dirty_census && !vk_mirror_on) dirty_frame(frame);
+    if ((rt_trace & RT_TRACE_PERF) ? frame % 60 == 0 : frame == 600 || frame == 1800)
+        mirror_log(frame), shadow_log(frame);   // mirror_log also logs the write-watch line
+    log_mem_census(frame, 0);
 }
 
 static int g_discrete;   // vk_mem_class_log: the device class is discrete
@@ -168,18 +295,44 @@ void vram_log(uint64_t frame) {
     }
     VkTexCensus t;
     vk_texture_census(&t);
+    int cb_lp = 0, cb_sp = 0, cb_lc = 0, cb_sc = 0, dc_lp = 0, dc_rp = 0;
+    vk_exec_cb_dpool_stats(&cb_lp, &cb_sp, &cb_lc, &cb_sc);
+    vk_dcache_dpool_stats(&dc_lp, &dc_rp);
     const double M = 1048576.0;
     rt_log("mem: vram frame %llu: vma %llu blocks %.0f MiB, %llu allocations %.0f MiB; textures live %llu (own memory %llu, "
            "%.0f MiB), released %llu (own memory %llu, %.0f MiB); mirrors %lld %.0f MiB; releases pending %d; vma/driver usage%s; "
-           "placed pools %lld %.0f MiB, shadow %lld %.0f MiB, physical chunks %lld %.0f MiB (%lld failed); own texture "
+           "placed pools %lld %.0f MiB, shadow %lld %.0f MiB, physical chunks %lld %.0f MiB (%lld failed); "
+           "dpools cb %d(+%dspare) dc %d(+%dret); own texture "
            "memory: ASTC decoded %llu %.0f MiB (RGBA8 %.0f), targets %llu %.0f MiB, images over 64 MiB %.0f MiB",
            (unsigned long long)frame, (unsigned long long)blocks, block_bytes / M, (unsigned long long)allocs,
            alloc_bytes / M, (unsigned long long)t.live, (unsigned long long)t.own_live, t.bytes_live / M,
            (unsigned long long)t.released, (unsigned long long)t.own_released, t.bytes_released / M, (long long)m_live_n,
            m_live_bytes / M, dead_pending(), heaps, (long long)placed_n, placed_bytes / M, (long long)s_live_n,
            s_live_bytes / M, (long long)phys_backed_n, phys_backed_bytes / M, (long long)phys_failed_n,
+           cb_lp, cb_sp, dc_lp, dc_rp,
            (unsigned long long)t.astc_n, t.astc_bytes / M, t.astc_rgba_bytes / M, (unsigned long long)t.target_n, t.target_bytes / M,
            t.big_bytes / M);
+    uint64_t stg_bytes = vk_upload_stg_bytes(), usnap_n = 0, usnap_bytes = 0;
+    vk_usnap_stats(&usnap_n, &usnap_bytes);
+    double h0_blk = c->mem_props.memoryHeapCount ? vb[0].statistics.blockBytes / M : 0.0;
+    double h0_use = c->mem_props.memoryHeapCount ? vb[0].usage / M : 0.0;
+    rt_log("mem: heap0 frame %llu: shadow %lld %.0f MiB, staging %.0f MiB, cb_chunks %d(+%d spare) %.0f MiB, "
+           "usnap %llu %.0f MiB (vma heap0 %.0f/%.0f MiB)",
+           (unsigned long long)frame, (long long)s_live_n, s_live_bytes / M, stg_bytes / M,
+           cb_lc, cb_sc, (double)cb_lc * 4.0, (unsigned long long)usnap_n, usnap_bytes / M, h0_blk, h0_use);
+    rt_log("mem: tex frame %llu: live own %llu %.0f MiB (gpu_owned %llu %.0f, mirrored_ro %llu %.0f, astc_bc %llu %.0f, "
+           "astc_rgba %.0f [arr %.0f], other_gpu %llu %.0f); dup_addr swz %llu %.0f MiB other %llu %.0f MiB; "
+           "idle_evict %llu %.0f MiB",
+           (unsigned long long)frame, (unsigned long long)t.own_live, t.bytes_live / M,
+           (unsigned long long)t.gpu_owned_n, t.gpu_owned_bytes / M,
+           (unsigned long long)t.mirrored_ro_n, t.mirrored_ro_bytes / M,
+           (unsigned long long)t.astc_n, (t.astc_bytes - t.astc_rgba_bytes) / M,
+           t.astc_rgba_bytes / M, t.astc_rgba_arr_bytes / M,
+           (unsigned long long)t.other_gpu_n, t.other_gpu_bytes / M,
+           (unsigned long long)t.dup_swz_n, t.dup_swz_bytes / M,
+           (unsigned long long)t.dup_other_n, t.dup_other_bytes / M,
+           (unsigned long long)t.idle_evict_n, t.idle_evict_bytes / M);
+    vk_sparse_vram_log(frame);
 }
 
 // MKW_MEMORY and the knobs of every part of the memory layer, once the device class is known.
@@ -263,4 +416,7 @@ void vk_mem_class_log(const VkPhysicalDeviceProperties *p, const VkPhysicalDevic
     }
     rt_log("%s", line);
     mirror_mode(discrete);
+#ifdef __PROSPERO__
+    ps5_mem_set_vk_census(vk_mem_ps5_census);
+#endif
 }

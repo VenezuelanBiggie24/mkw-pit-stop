@@ -95,10 +95,17 @@ static struct {
 } DCH = {.lock = PLAT_MUTEX_INIT};
 
 typedef struct { VkDescriptorPool *pools; int n; } DcRetire;
+static int dc_retiring_pools;
+
+void vk_dcache_dpool_stats(int *live_pools, int *retiring_pools) {
+    if (live_pools) *live_pools = __atomic_load_n(&DCH.npools, __ATOMIC_RELAXED);
+    if (retiring_pools) *retiring_pools = __atomic_load_n(&dc_retiring_pools, __ATOMIC_RELAXED);
+}
 
 static void dc_retire(void *arg) {   // completion thread: the GPU is past every use of these sets
     DcRetire *r = arg;
     for (int i = 0; i < r->n; i++) vkDestroyDescriptorPool(vk_ctx()->device, r->pools[i], NULL);
+    __atomic_sub_fetch(&dc_retiring_pools, r->n, __ATOMIC_RELAXED);
     free(r->pools);
     free(r);
 }
@@ -130,6 +137,7 @@ static void dc_flush(uint64_t fence) {   // DCH.lock held
         DcRetire *r = malloc(sizeof *r);
         if (!r) rt_fatal("vk: out of memory (draw cache)");
         *r = (DcRetire){DCH.pools, DCH.npools};
+        __atomic_add_fetch(&dc_retiring_pools, DCH.npools, __ATOMIC_RELAXED);
         vk_completion_add(fence, dc_retire, r);
         DCH.pools = NULL, DCH.npools = DCH.cpools = 0;
     }
@@ -163,7 +171,10 @@ static VkDescriptorSet dc_alloc(VkDescriptorSetLayout sl) {   // DCH.lock held
             DCH.cpools = DCH.cpools ? DCH.cpools * 2 : 8;
             if (!(DCH.pools = realloc(DCH.pools, sizeof *DCH.pools * (size_t)DCH.cpools))) rt_fatal("vk: out of memory (draw cache)");
         }
-        if (vkCreateDescriptorPool(dev, &pi, NULL, &DCH.pools[DCH.npools]) != VK_SUCCESS) rt_fatal("vk: draw cache pool failed");
+        if (vkCreateDescriptorPool(dev, &pi, NULL, &DCH.pools[DCH.npools]) != VK_SUCCESS) {
+            vk_oom_census("draw cache descriptor pool");
+            rt_fatal("vk: draw cache pool failed");
+        }
         DCH.npools++;
     }
     rt_fatal("vk: draw cache set allocation failed twice");

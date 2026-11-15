@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "hangwatch.h"
 #include "gfx.h"
 #include "host.h"
 #include "nvn_api.h"
@@ -63,7 +64,9 @@ int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
                                   .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                   .preferredFlags = VK_MEMORY_PROPERTY_HOST_CACHED_BIT};
     VmaAllocationInfo info;
+    const char *prev = hang_mark_val("shadow_pool: vmaCreateBuffer", addr);   // the shadow-trim hang hunt: see resolve_locked
     VkResult res = vmaCreateBuffer(c->vma, &bi, &ai, &r->buf, &r->salloc, &info);
+    hang_mark(prev);
     if (res != VK_SUCCESS) {
         rt_log("vk: pool %#llx+%#llx: shadow allocation failed (%d)", (unsigned long long)addr, (unsigned long long)size,
                (int)res);
@@ -73,13 +76,17 @@ int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
         return 0;
     }
     r->smap = info.pMappedData;
+    prev = hang_mark_val("shadow_pool: gen_lock", addr);
     gen_lock_x();
     r->sgen = gen_now;   // the copy below holds every write stamped so far; later stamps are copied again
     plat_mutex_unlock(&gen_lock);
-    memcpy(r->smap, (const void *)(uintptr_t)r->import_lo, n);
+    hang_mark_val("shadow_pool: copying guest memory", addr);
+    vk_mem_cna_copy(r->smap, r->import_lo, r->import_hi);   // MKW_GPU_ONLY_RELEASE's released ranges as zeros
+    hang_mark_val("shadow_pool: shadow_lock", addr);
     plat_mutex_lock(&shadow_lock);
     s_live_n++, s_live_bytes += (int64_t)n;
     plat_mutex_unlock(&shadow_lock);
+    hang_mark(prev);
     plat_inc32(&n_imports);
     return 1;
 }
@@ -398,6 +405,7 @@ static void early_bases(void) {   // shadow_lock held
 // The early thread: one pool at a time, so the sync before a submit waits for one pool at most.
 static void early_main(void *arg) {
     (void)arg;
+    plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
     plat_mutex_lock(&touch_lock);
     for (;;) {
         if ((!nstouch && !want_new) || !RT_KNOB_ON(early_mode)) {   // "ab" switches without a signal: the timeout looks
@@ -554,6 +562,74 @@ void shadow_log(uint64_t frame) {
         plat_mutex_unlock(&gen_lock);
     }
     plat_mutex_unlock(&shadow_lock);
+}
+
+// Evicts cold shadow buffers back to lazy = 1 under memory pressure when neither GPU nor CPU writeback depends on them.
+// Any pool resolved again transparently recreates its shadow/import via lazy_back from guest RAM.
+uint64_t shadow_trim(uint64_t bytes) {
+    static int trim_mode = -1;
+    if (trim_mode < 0) {
+#ifdef MKW_PS5_NATIVE
+        trim_mode = rt_knob("SHADOW_TRIM", "1");
+#else
+        trim_mode = rt_knob("SHADOW_TRIM", "0");
+#endif
+    }
+    VkCtx *c = vk_ctx();
+    if (!shadow_on || !c || !RT_KNOB_ON(trim_mode) || !bytes) return 0;
+
+    enum { MAX_DROP = 64, COLD_SUBS = 180 };
+    struct { VkBuffer buf; VmaAllocation alloc; } dead[MAX_DROP];
+    int ndead = 0;
+    uint64_t freed = 0;
+
+    plat_mutex_lock(&pool_lock);
+    plat_mutex_lock(&shadow_lock);
+    // Drained before touch_lock: sdone_drain's spend_take takes touch_lock itself whenever recording threads have
+    // noted new GPU writes, and taking it again here deadlocked this thread holding pool_lock; the replay then waited
+    // for pool_lock in resolve_locked and the game for the replay's fence (every hang with MKW_SHADOW_TRIM on,
+    // 15/11/2026: the hang watch's stacks showed the governor in shadow_trim -> sdone_drain -> spend_take).
+    sdone_drain();
+    plat_mutex_lock(&touch_lock);
+    uint64_t cur_sub = __atomic_load_n(&vk_replay_submit, __ATOMIC_RELAXED);
+    uint64_t done_fence = vk_sync_fence_done();
+    uint64_t part_done = vk_guard_on() ? vk_sync_part_done() : UINT64_MAX;
+    for (int i = 0; i < pool_index.n && freed < bytes && ndead < MAX_DROP; i++) {
+        PoolRec *r = pool_index.e[i].buf;
+        if (!r || r->kind != POOL_IMPORT || !r->salloc || !r->smap) continue;
+        if (vk_mem_cna_has_released(r->import_lo, r->import_hi)) continue;   // its GPU-owned bytes live in the shadow only
+        if (r->stouched || r->cap_on || r->mstate != MS_NONE) continue;
+        uint64_t n = r->import_hi - r->import_lo;
+        if (n < (256ull << 10)) continue;
+        if (r->ssub > done_fence || (vk_guard_on() && r->use > part_done)) continue;
+        if (cur_sub <= r->touch_sub || cur_sub - r->touch_sub <= COLD_SUBS) continue;
+        int busy = 0;
+        for (int j = 0; j < nspend; j++)
+            if (spend[j].pool == r) { busy = 1; break; }
+        if (busy) continue;
+        mem_untrap(r->import_lo, n);
+        dead[ndead].buf = r->buf;
+        dead[ndead].alloc = r->salloc;
+        ndead++;
+        r->buf = VK_NULL_HANDLE;
+        r->salloc = NULL;
+        r->smap = NULL;
+        r->lazy = 1;
+        r->sgen = 0;
+        r->ssub = 0;
+        r->shot = 0;
+        r->shist = 0;
+        s_live_n--;
+        s_live_bytes -= (int64_t)n;
+        freed += n;
+    }
+    if (ndead) __atomic_add_fetch(&pool_gen, 1, __ATOMIC_RELEASE);
+    plat_mutex_unlock(&touch_lock);
+    plat_mutex_unlock(&shadow_lock);
+    plat_mutex_unlock(&pool_lock);
+
+    for (int i = 0; i < ndead; i++) vmaDestroyBuffer(c->vma, dead[i].buf, dead[i].alloc);
+    return freed;
 }
 
 // vk_mem_shutdown, pool_lock held, after every pool went: shadows went with their pools.

@@ -302,7 +302,11 @@ VkBuffer vk_exec_inline_buffer(VkDeviceSize size) {
                              .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                              .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-    if (!t || vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &t->b, &t->a, NULL) != VK_SUCCESS) { free(t); return VK_NULL_HANDLE; }
+    if (!t) return VK_NULL_HANDLE;
+    if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &t->b, &t->a, NULL) != VK_SUCCESS) {
+        vk_mem_relieve(size + (8ull << 20), "an inline transfer buffer");
+        if (vmaCreateBuffer(vk_ctx()->vma, &bi, &ai, &t->b, &t->a, NULL) != VK_SUCCESS) { free(t); return VK_NULL_HANDLE; }
+    }
     vk_completion_add(x_cur ? x_cur->fence : X.fence, free_inline_buf, t);
     return t->b;
 }

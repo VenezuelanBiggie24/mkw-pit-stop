@@ -20,13 +20,16 @@
 
 static int prepare_draw(VkExec *ex, int prim, int32_t count, int restart) { return prepare_draw_ex(ex, prim, count, restart, 0); }
 
-static void bind_index(VkExec *ex, const void *data, uint64_t bytes, VkIndexType type) {
+static int bind_index(VkExec *ex, const void *data, uint64_t bytes, VkIndexType type) {
     if (ru_cap) ru_note_bad(RUB_SCRATCH_INDEX);   // indices made at record time into this command buffer's scratch
-    VkBuffer b;
-    VkDeviceSize o;
-    memcpy(scratch(ex, bytes, &b, &o), data, bytes);
+    VkBuffer b = VK_NULL_HANDLE;
+    VkDeviceSize o = 0;
+    void *p = scratch(ex, bytes, &b, &o);
+    if (!p || !b) return 0;
+    memcpy(p, data, bytes);
     vkCmdBindIndexBuffer(ex->cb, b, o, type);
     ex->recorded++;
+    return 1;
 }
 
 static void op_draw(VkExec *ex, const p_draw *d) {
@@ -42,17 +45,17 @@ static void op_draw(VkExec *ex, const p_draw *d) {
             uint32_t v = first + 4 * i, k[6] = {0, 1, 2, 0, 2, 3};
             for (int j = 0; j < 6; j++) ix[6 * i + j] = v + k[j];
         }
-        bind_index(ex, ix, sizeof *ix * 6 * q, VK_INDEX_TYPE_UINT32);
+        int ok = bind_index(ex, ix, sizeof *ix * 6 * q, VK_INDEX_TYPE_UINT32);
         free(ix);
-        vkCmdDrawIndexed(ex->cb, 6 * q, inst, 0, 0, (uint32_t)d->base_instance);
+        if (ok) vkCmdDrawIndexed(ex->cb, 6 * q, inst, 0, 0, (uint32_t)d->base_instance);
     } else if (d->prim == NVN_DRAW_PRIMITIVE_LINE_LOOP && n >= 2) {   // a strip that returns to its first vertex
         uint32_t *ix = malloc(sizeof *ix * (n + 1));
         if (!ix) rt_fatal("vk: out of memory");
         for (uint32_t i = 0; i < n; i++) ix[i] = first + i;
         ix[n] = first;
-        bind_index(ex, ix, sizeof *ix * (n + 1), VK_INDEX_TYPE_UINT32);
+        int ok = bind_index(ex, ix, sizeof *ix * (n + 1), VK_INDEX_TYPE_UINT32);
         free(ix);
-        vkCmdDrawIndexed(ex->cb, n + 1, inst, 0, 0, (uint32_t)d->base_instance);
+        if (ok) vkCmdDrawIndexed(ex->cb, n + 1, inst, 0, 0, (uint32_t)d->base_instance);
     } else {
         vkCmdDraw(ex->cb, n, inst, first, (uint32_t)d->base_instance);
     }
@@ -400,7 +403,8 @@ static void op_draw_mesh_cs(VkExec *ex, const p_draw_mesh *d) {
         !vk_mesh_cs_alloc(ex->fence, (VkDeviceSize)groups * 32 * MESH_CS_VWORDS * 4, &vb, &vo, &pc.mvo) ||
         !vk_mesh_cs_alloc(ex->fence, nidx * 4, &ib, &io, &pc.mto) ||
         !vk_mesh_cs_alloc(ex->fence, (VkDeviceSize)groups * 4, &mb, &mo, &pc.map) ||
-        (task && !vk_mesh_cs_alloc(ex->fence, 32, &ab, &ao, &aa)))
+        (task && !vk_mesh_cs_alloc(ex->fence, 32, &ab, &ao, &aa)) ||
+        !pc.trec || !pc.mvo || !pc.mto || !pc.map || (task && !aa))
         return warn_once(W_PIPELINE, "no device memory for a task/mesh draw as compute: skipped");
     if (vk_guard_on()) {
         vk_guard_address("mesh as compute: task records", pc.trec), vk_guard_address("mesh as compute: vertices", pc.mvo);
@@ -502,7 +506,7 @@ int vk_exec_bind_state(VkExec *ex, uint32_t op, const void *payload) {
     case OP_BIND_TEX: {
         const p_bind_handles *b = payload;
         bind_handles(b->stage >= 0 && b->stage < NVN_BIND_STAGES ? ex->tex[b->stage] : NULL, 128, b);
-        ex->tex_serial++;
+        if (b->stage == NVN_STAGE_FS) ex->tex_serial++;
         break;
     }
     case OP_BIND_SAMP: {
@@ -513,7 +517,6 @@ int vk_exec_bind_state(VkExec *ex, uint32_t op, const void *payload) {
     case OP_BIND_IMG: {
         const p_bind_handles *b = payload;
         bind_handles(b->stage >= 0 && b->stage < NVN_BIND_STAGES ? ex->img[b->stage] : NULL, 32, b);
-        ex->tex_serial++;   // feedback_scan reads only textures: a rescan at most
         break;
     }
     default: return 0;

@@ -162,6 +162,7 @@ void vk_texture_stats(uint64_t *images, uint64_t *uploads, uint64_t *reuploads) 
 
 void vk_texture_census(VkTexCensus *s) {
     VkCtx *c = vk_ctx();
+    uint32_t idle = tex_evict_idle();
     memset(s, 0, sizeof *s);
     lock();
     for (uint32_t i = 0; i < by_key.cap; i++) {
@@ -179,10 +180,32 @@ void vk_texture_census(VkTexCensus *s) {
             int fmt = e->t.d.format;
             if (fmt >= 0x79 && fmt <= 0x94) {
                 s->astc_bytes += bytes, s->astc_n += bytes != 0;
-                if (!e->f.astc_bc7) s->astc_rgba_bytes += bytes;
+                if (!e->f.astc_bc7) {
+                    s->astc_rgba_bytes += bytes;
+                    if (e->pub.layers > 1 || e->pub.depth > 1) s->astc_rgba_arr_bytes += bytes;
+                }
+            } else {
+                if (e->pub.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
+                    s->target_bytes += bytes, s->target_n += bytes != 0;
+                if (e->pub.gpu_owned)
+                    s->gpu_owned_bytes += bytes, s->gpu_owned_n += bytes != 0;
+                else if (e->pub.mirrored)
+                    s->mirrored_ro_bytes += bytes, s->mirrored_ro_n += bytes != 0;
+                else
+                    s->other_gpu_bytes += bytes, s->other_gpu_n += bytes != 0;
             }
-            else if (e->pub.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))
-                s->target_bytes += bytes, s->target_n += bytes != 0;
+            if (bytes) {
+                if (e->pub.mirrored && !e->pub.gpu_owned && !e->gpu_dirty &&
+                    (uint32_t)(submit_epoch - e->seen) > idle)
+                    s->idle_evict_n++, s->idle_evict_bytes += bytes;
+                const Tex *head = NULL;
+                for (const Tex *p = nvn_hm_get(&by_addr, &e->key.addr); p; p = p->next_at)
+                    if (!p->released && p->alloc) { head = p; break; }
+                if (head && head != e) {
+                    if (same_but_swizzle(&head->key, &e->key)) s->dup_swz_n++, s->dup_swz_bytes += bytes;
+                    else s->dup_other_n++, s->dup_other_bytes += bytes;
+                }
+            }
             if (bytes > (64ull << 20)) s->big_bytes += bytes;
         }
     }

@@ -23,6 +23,7 @@
 #include "gfx.h"
 #include "gfx_wsys.h"
 #include "hacks.h"
+#include "hangwatch.h"
 #include "nvn_api.h"
 #include "ui/menu/menu.h"
 #include "vk.h"
@@ -36,12 +37,32 @@
 // ---- queue lock
 // Taking it sends the parts waiting for the submit thread first (vk_sync.c, MKW_SUBMIT_THREAD): what the taker submits
 // comes after them in queue order.
+// The hang watch (hangwatch.c) logs who holds it: g_ql_owner, set by the outermost lock, read there with no lock.
 static PlatRMutex g_ql;
-void vk_queue_lock(void) {
-    plat_rmutex_lock(&g_ql);
+static uint32_t g_ql_owner;
+static _Thread_local int g_ql_depth;
+static void ql_taken(void) {
+    if (!g_ql_depth++) __atomic_store_n(&g_ql_owner, hang_tid(), __ATOMIC_RELAXED);
     vk_sync_parts_flush();
 }
-void vk_queue_unlock(void) { plat_rmutex_unlock(&g_ql); }
+void vk_queue_lock(void) {
+    const char *prev = hang_mark("queue lock: waiting");
+    plat_rmutex_lock(&g_ql);
+    hang_mark(prev);
+    ql_taken();
+}
+// 1 when taken (or already held by this thread). vk_upload_flush: cmd_lock comes after the queue lock in the lock
+// order, so a thread holding cmd_lock only tries it (vk_mem_upload.c).
+int vk_queue_trylock(void) {
+    if (!plat_rmutex_trylock(&g_ql)) return 0;
+    ql_taken();
+    return 1;
+}
+void vk_queue_unlock(void) {
+    if (!--g_ql_depth) __atomic_store_n(&g_ql_owner, 0, __ATOMIC_RELAXED);
+    plat_rmutex_unlock(&g_ql);
+}
+uint32_t vk_queue_owner(void) { return __atomic_load_n(&g_ql_owner, __ATOMIC_RELAXED); }
 
 // ---- window state shared with the back end
 static VkSurfaceKHR g_surface;
@@ -94,6 +115,7 @@ void gfx_window_set_refresh(double hz) {
 
 // ---- swapchain and present state (g_pl)
 static PlatRMutex g_pl;
+static int g_headless;
 static VkSwapchainKHR g_sc;
 static VkFormat g_sc_fmt;
 static VkExtent2D g_sc_ext;
@@ -101,6 +123,7 @@ static int g_scaler;                        // the last present: 0 the game imag
 static uint32_t g_sc_n;
 static VkImage g_sc_img[MAX_IMAGES];
 static VkImageView g_sc_view[MAX_IMAGES];   // colour attachment views for the menu overlay
+static VmaAllocation g_hl_alloc[FRAMES];    // offscreen targets when MKW_HEADLESS=1
 static VkSemaphore g_render_done[MAX_IMAGES];
 static VkCommandPool g_pool;
 static VkCommandBuffer g_cb[FRAMES];
@@ -270,6 +293,67 @@ static void free_capture(void) {
     g_cap_ptr = NULL;
     g_cap_size = 0;
     g_cap_valid = 0;
+}
+
+static void destroy_headless_targets(VkCtx *c) {
+    for (uint32_t i = 0; i < g_sc_n && i < FRAMES; i++) {
+        if (g_sc_view[i]) vkDestroyImageView(c->device, g_sc_view[i], NULL);
+        if (g_sc_img[i]) vmaDestroyImage(c->vma, g_sc_img[i], g_hl_alloc[i]);
+        g_sc_view[i] = VK_NULL_HANDLE;
+        g_sc_img[i] = VK_NULL_HANDLE;
+        g_hl_alloc[i] = VK_NULL_HANDLE;
+    }
+    g_sc_n = 0;
+}
+
+static void headless_default_size(int *w, int *h) {
+    *w = 1280;
+    *h = 720;
+    const char *ws = cfg_get("MKW_WINDOW_SIZE");
+    int pw = 0, ph = 0;
+    if (ws && sscanf(ws, "%dx%d", &pw, &ph) == 2 && pw > 0 && ph > 0) {
+        *w = pw;
+        *h = ph;
+        return;
+    }
+    const char *res = cfg_get("MKW_RESOLUTION");
+    if (res && atoi(res) == 1080) { *w = 1920; *h = 1080; }
+}
+
+// Offscreen image ring for MKW_HEADLESS=1 (no window or swapchain). Called with g_pl held.
+static int create_headless_targets(int w, int h) {
+    if (w <= 0 || h <= 0) headless_default_size(&w, &h);
+    VkCtx *c = vk_ctx();
+    vk_queue_lock();
+    vkDeviceWaitIdle(c->device);
+    destroy_headless_targets(c);
+    g_sc = VK_NULL_HANDLE;
+    g_sc_fmt = VK_FORMAT_B8G8R8A8_UNORM;
+    g_sc_ext = (VkExtent2D){(uint32_t)w, (uint32_t)h};
+    g_sc_n = FRAMES;
+    for (uint32_t i = 0; i < FRAMES; i++) {
+        VkImageCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                                 .format = g_sc_fmt, .extent = {g_sc_ext.width, g_sc_ext.height, 1},
+                                 .mipLevels = 1, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                 .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                 .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT};
+        VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO};
+        if (vmaCreateImage(c->vma, &ici, &aci, &g_sc_img[i], &g_hl_alloc[i], NULL) != VK_SUCCESS) {
+            rt_log("gfx: headless offscreen image creation failed");
+            destroy_headless_targets(c);
+            vk_queue_unlock();
+            return 0;
+        }
+        VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = g_sc_img[i],
+                                    .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = g_sc_fmt,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        if (vkCreateImageView(c->device, &vi, NULL, &g_sc_view[i]) != VK_SUCCESS) g_sc_view[i] = VK_NULL_HANDLE;
+    }
+    free_capture();
+    vk_queue_unlock();
+    plat_xchg32(&g_dirty, 0);
+    return 1;
 }
 
 // Returns 1 with a usable swapchain, 0 when the window has no area (minimised). Called with g_pl held.
@@ -530,26 +614,35 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     VkCtx *c = vk_ctx();
     plat_rmutex_lock(&g_pl);
     flip_locked();
-    if (!g_sc || plat_cas32(&g_dirty, 0, 0)) {
-        if (!wsys_minimized() && !create_swapchain() && !g_sc) goto out;
+    if (g_headless) {
+        if ((!g_sc_n || plat_cas32(&g_dirty, 0, 0)) && !create_headless_targets(0, 0)) goto out;
+    } else {
+        if (!g_sc || plat_cas32(&g_dirty, 0, 0)) {
+            if (!wsys_minimized() && !create_swapchain() && !g_sc) goto out;
+        }
+        if (wsys_minimized() || !g_sc) goto out;
     }
-    if (wsys_minimized() || !g_sc) goto out;
     if (!g_capture && turbo_drop_present(kern_now_ns())) goto out;   // turbo: the window shows at most 60 a second
 
     unsigned slot = g_frame % FRAMES;
-    if (vkWaitForFences(c->device, 1, &g_fence[slot], VK_TRUE, 5000000000ull) != VK_SUCCESS) {
+    const char *prev_f = hang_mark_val("present: vkWaitForFences", g_frame);
+    VkResult wr = vkWaitForFences(c->device, 1, &g_fence[slot], VK_TRUE, 5000000000ull);
+    hang_mark(prev_f);
+    if (wr != VK_SUCCESS) {
         rt_log("gfx: present fence wait timed out");
         goto out;
     }
-    uint32_t idx = 0;
-    VkResult r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
-    if (r == VK_ERROR_OUT_OF_DATE_KHR) {
-        plat_xchg32(&g_dirty, 1);
-        if (!create_swapchain()) goto out;
-        r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
+    uint32_t idx = slot;
+    if (!g_headless) {
+        VkResult r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
+        if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+            plat_xchg32(&g_dirty, 1);
+            if (!create_swapchain()) goto out;
+            r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
+        }
+        if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) goto out;     // lost, not ready: skip the frame
+        if (r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
     }
-    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) goto out;     // lost, not ready: skip the frame
-    if (r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
     vkResetFences(c->device, 1, &g_fence[slot]);
     if (g_th_pending[slot]) {   // that fence has signalled: the thumbnail its submission wrote is complete
         g_th_tag[g_th_pending[slot] % (uint64_t)g_th_n] = g_th_pending[slot];
@@ -648,7 +741,8 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
         last_write = 0;
         record_thumb(cb, dst, slot);
     }
-    sync_barrier(cb, dst, last, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, last_stage, last_write, VK_PIPELINE_STAGE_2_NONE, 0);
+    sync_barrier(cb, dst, last, g_headless ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                 last_stage, last_write, VK_PIPELINE_STAGE_2_NONE, 0);
     vkEndCommandBuffer(cb);
 
     VkSemaphoreSubmitInfo wait = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = g_acquire[slot],
@@ -656,22 +750,29 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     VkSemaphoreSubmitInfo sig = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = g_render_done[idx],
                                  .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
     VkCommandBufferSubmitInfo cbi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = cb};
-    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = 1, .pWaitSemaphoreInfos = &wait,
-                        .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbi, .signalSemaphoreInfoCount = 1,
-                        .pSignalSemaphoreInfos = &sig};
+    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+                        .waitSemaphoreInfoCount = g_headless ? 0u : 1u, .pWaitSemaphoreInfos = &wait,
+                        .commandBufferInfoCount = 1, .pCommandBufferInfos = &cbi,
+                        .signalSemaphoreInfoCount = g_headless ? 0u : 1u, .pSignalSemaphoreInfos = &sig};
     vk_queue_lock();
-    r = vkQueueSubmit2(c->gfx_queue, 1, &si, g_fence[slot]);
+    const char *prev_s = hang_mark_val("present: vkQueueSubmit2", g_frame);
+    VkResult sr = vkQueueSubmit2(c->gfx_queue, 1, &si, g_fence[slot]);
+    hang_mark(prev_s);
     vk_queue_unlock();
-    if (r == VK_SUCCESS) {
-        g_flip_on = 1;
-        g_flip_idx = idx;
-        if (!defer) flip_locked();
+    if (sr == VK_SUCCESS) {
+        if (!g_headless) {
+            g_flip_on = 1;
+            g_flip_idx = idx;
+            if (!defer) flip_locked();
+        }
     } else {
-        rt_log("gfx: present submit failed (%d)", (int)r);
+        rt_log("gfx: present submit failed (%d)", (int)sr);
     }
     g_frame++;
     if (cap) {
+        const char *prev_c = hang_mark_val("present capture: vkWaitForFences", g_frame);
         vkWaitForFences(c->device, 1, &g_fence[slot], VK_TRUE, 5000000000ull);
+        hang_mark(prev_c);
         vmaInvalidateAllocation(c->vma, g_cap_alloc, 0, VK_WHOLE_SIZE);
         g_cap_w = (int)g_sc_ext.width;
         g_cap_h = (int)g_sc_ext.height;
@@ -706,9 +807,10 @@ void vk_present_flip(void) {
 
 void gfx_window_resize(int cw, int chh) {
     gfx_window_start();
-    wsys_resize(cw, chh);
+    if (!g_headless) wsys_resize(cw, chh);
     plat_rmutex_lock(&g_pl);
-    create_swapchain();
+    if (g_headless) create_headless_targets(cw, chh);
+    else create_swapchain();
     plat_rmutex_unlock(&g_pl);
 }
 
@@ -729,10 +831,14 @@ void gfx_window_release_vk(void) {
             vkDestroySemaphore(c->device, g_acquire[i], NULL);
             vkDestroyFence(c->device, g_fence[i], NULL);
         }
-        for (uint32_t i = 0; i < g_sc_n; i++) {
-            vkDestroySemaphore(c->device, g_render_done[i], NULL);
-            if (g_sc_view[i]) vkDestroyImageView(c->device, g_sc_view[i], NULL);
-            g_sc_view[i] = VK_NULL_HANDLE;
+        if (g_headless) {
+            destroy_headless_targets(c);
+        } else {
+            for (uint32_t i = 0; i < g_sc_n; i++) {
+                vkDestroySemaphore(c->device, g_render_done[i], NULL);
+                if (g_sc_view[i]) vkDestroyImageView(c->device, g_sc_view[i], NULL);
+                g_sc_view[i] = VK_NULL_HANDLE;
+            }
         }
         if (g_pool) vkDestroyCommandPool(c->device, g_pool, NULL);
         if (g_sc) vkDestroySwapchainKHR(c->device, g_sc, NULL);
@@ -746,12 +852,16 @@ void gfx_window_release_vk(void) {
 void gfx_window_start(void) {
     plat_rmutex_lock(&g_start_lock);
     if (!g_started) {
+        const char *hl = cfg_get("MKW_HEADLESS");
+        g_headless = hl && *hl && strcmp(hl, "0");
         if (!vk_init()) rt_fatal("gfx: no usable Vulkan device (see the vk: lines above)");
         VkCtx *c = vk_ctx();
-        static int opened;
-        if (!opened && !(opened = wsys_open())) rt_fatal("gfx: window creation failed");
-        g_surface = wsys_surface(c->instance);
-        if (!g_surface) rt_fatal("gfx: no Vulkan surface for the window");
+        if (!g_headless) {
+            static int opened;
+            if (!opened && !(opened = wsys_open())) rt_fatal("gfx: window creation failed");
+            g_surface = wsys_surface(c->instance);
+            if (!g_surface) rt_fatal("gfx: no Vulkan surface for the window");
+        }
 
         VkCommandPoolCreateInfo pci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                        .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = c->gfx_family};
@@ -768,11 +878,16 @@ void gfx_window_start(void) {
         g_frame = 0;
         g_started = 1;
         plat_rmutex_lock(&g_pl);
-        create_swapchain();
+        if (g_headless) create_headless_targets(0, 0);
+        else create_swapchain();
         plat_rmutex_unlock(&g_pl);
-        int cw = 0, ch = 0;
-        wsys_client_size(&cw, &ch);
-        rt_log("gfx: window %dx%d, swapchain %ux%u format %d", cw, ch, g_sc_ext.width, g_sc_ext.height, (int)g_sc_fmt);
+        if (g_headless) {
+            rt_log("gfx: headless %ux%u format %d (MKW_HEADLESS=1)", g_sc_ext.width, g_sc_ext.height, (int)g_sc_fmt);
+        } else {
+            int cw = 0, ch = 0;
+            wsys_client_size(&cw, &ch);
+            rt_log("gfx: window %dx%d, swapchain %ux%u format %d", cw, ch, g_sc_ext.width, g_sc_ext.height, (int)g_sc_fmt);
+        }
     }
     plat_rmutex_unlock(&g_start_lock);
     vsync_ensure();

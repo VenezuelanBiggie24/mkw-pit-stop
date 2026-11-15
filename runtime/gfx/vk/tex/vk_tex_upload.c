@@ -111,13 +111,15 @@ static int upload_texpre(Tex *e, uint32_t levels, uint32_t layers) {
         VkBuffer sb;
         uint8_t *stg;
         VkCommandBuffer cb = vk_upload_begin_staging(total, &sb, (void **)&stg);
-        if (stg && vk_texpre_load(h, stg, total)) {
-            barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-            vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, n, rg);
-            barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
-            ok = 1;
+        if (cb) {   // no staging: upload() tries its own, smaller or deferred
+            if (vk_texpre_load(h, stg, total)) {
+                barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+                vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, n, rg);
+                barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+                ok = 1;
+            }
+            vk_upload_end();
         }
-        vk_upload_end();
     }
     if (!ok) vk_texpre_record(h, d, pr, (int)n, t->mem, t->L.size);
     free(pr), free(rg);
@@ -146,7 +148,7 @@ int tracing(uint64_t addr) {
 static uint64_t g_glyph_addr;
 static int g_glyph_known;
 static uint32_t g_glyph_gen;
-static void upload(Tex *e);
+static int upload(Tex *e);
 
 int vk_glyphs_due(void) {
     if (!__atomic_load_n(&g_glyph_known, __ATOMIC_ACQUIRE)) return 0;
@@ -167,15 +169,91 @@ void vk_glyphs_redo(void) {
     unlock();
 }
 
-static void upload(Tex *e) {
+// MKW_TEX_UP_LOG's content checks (diagnosis, task 32: magenta bands on the character-select cards, right of a step in
+// every card, the shape of a byte range of a block-linear texture; ASTC blocks that are not valid 4x4 blocks decode to
+// magenta). The cards (275x362 ASTC 4x4, 144 KiB, CPU-written storage) were uploaded up to 6 times in 12 frames as the
+// game wrote them, never with a zero tail. Each ASTC upload of 64 KiB or more keeps a hash per 4 KiB page of what it
+// read (the latest upload of an address replaces the earlier one); tex_up_recheck hashes the pages again 300 frames
+// later: a page changed with no upload since is a write the runtime missed, and its offset places it on the card.
+#define ZT_MAX 256
+#define ZT_PAGES 64
+static struct { uint64_t addr, size, ztail, frame; uint32_t n_up; int checked; uint64_t h[ZT_PAGES]; } zt[ZT_MAX];
+static int nzt;
+static PlatMutex zt_lock = PLAT_MUTEX_INIT;
+
+// Offset of the first byte of [addr, addr + size)'s trailing run of zero bytes (size when the last byte is not zero).
+static uint64_t zero_tail(uint64_t addr, uint64_t size) {
+    const uint8_t *p = (const uint8_t *)(uintptr_t)addr;
+    uint64_t n = size;
+    while (n && !p[n - 1]) n--;
+    return n;
+}
+
+static void page_hashes(uint64_t addr, uint64_t size, uint64_t *h) {   // FNV-1a over each 4 KiB page of the range
+    const uint8_t *p = (const uint8_t *)(uintptr_t)addr;
+    for (uint64_t k = 0; k < ZT_PAGES && k * 4096 < size; k++) {
+        uint64_t x = 0xcbf29ce484222325ull, end = (k + 1) * 4096 < size ? (k + 1) * 4096 : size;
+        for (uint64_t i = k * 4096; i < end; i++) x = (x ^ p[i]) * 0x100000001b3ull;
+        h[k] = x;
+    }
+}
+
+static void zero_tail_note(uint64_t addr, uint64_t size, uint64_t ztail, uint64_t frame, uint32_t n_up) {
+    if (size > (uint64_t)ZT_PAGES * 4096) size = (uint64_t)ZT_PAGES * 4096;
+    plat_mutex_lock(&zt_lock);
+    int i = 0;
+    while (i < nzt && zt[i].addr != addr) i++;
+    if (i == nzt && nzt == ZT_MAX)   // full: an entry already checked makes room (the menus' filled it before the cards)
+        for (i = 0; i < nzt && !zt[i].checked; i++) {}
+    if (i == nzt && nzt < ZT_MAX) nzt++;
+    if (i < nzt) {
+        zt[i].addr = addr, zt[i].size = size, zt[i].ztail = ztail, zt[i].frame = frame, zt[i].n_up = n_up;
+        zt[i].checked = 0;
+        page_hashes(addr, size, zt[i].h);
+    }
+    plat_mutex_unlock(&zt_lock);
+}
+
+// From the texture lock's perf report (vk_tex_slots.c), once a minute: each noted upload 300 frames or more old, read
+// again if its storage is still backed.
+void tex_zero_tail_recheck(uint64_t frame) {
+    plat_mutex_lock(&zt_lock);
+    for (int i = 0; i < nzt; i++) {
+        if (zt[i].checked || frame < zt[i].frame + 300) continue;
+        zt[i].checked = 1;
+        if (plat_mem_backed_bytes(zt[i].addr, zt[i].size) < zt[i].size) {
+            rt_log("vk: upload check %#llx (upload %u at frame %llu): storage no longer backed, not read",
+                   (unsigned long long)zt[i].addr, zt[i].n_up, (unsigned long long)zt[i].frame);
+            continue;
+        }
+        uint64_t h[ZT_PAGES];
+        page_hashes(zt[i].addr, zt[i].size, h);
+        uint64_t npg = (zt[i].size + 4095) / 4096, changed = 0, first = npg, last = 0;
+        for (uint64_t k = 0; k < npg; k++)
+            if (h[k] != zt[i].h[k]) changed++, first = k < first ? k : first, last = k;
+        rt_log("vk: upload check %#llx (%.1f KiB, upload %u at frame %llu, zero tail %#llx) at frame %llu: %s; %llu of "
+               "%llu pages changed (offsets %#llx-%#llx)",
+               (unsigned long long)zt[i].addr, zt[i].size / 1024.0, zt[i].n_up, (unsigned long long)zt[i].frame,
+               (unsigned long long)zt[i].ztail, (unsigned long long)frame,
+               changed ? "CHANGED with no upload since" : "unchanged", (unsigned long long)changed,
+               (unsigned long long)npg, (unsigned long long)(changed ? first * 4096 : 0),
+               (unsigned long long)(changed ? (last + 1) * 4096 : 0));
+    }
+    plat_mutex_unlock(&zt_lock);
+}
+
+// 1 uploaded (or nothing to upload); 0 deferred for want of staging memory (e->up_pending: tried again next frame).
+static int upload(Tex *e) {
     static volatile int32_t n_bad, n_undecoded;
+    uint64_t frame_now = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (e->up_pending && e->up_fail_frame == frame_now) return 0;   // failed this frame already: no new attempt
     if (tracing(e->pub.addr))
         rt_log("vk: trace %#llx: upload %u of entry %p (%ux%u target %d), submit epoch %u", (unsigned long long)e->pub.addr,
                e->n_up + 1, (void *)e, e->t.d.width, e->t.d.height, e->t.d.target, submit_epoch);
     const tex_t *t = &e->t;
     const nvn_texdesc *d = &t->d;
     int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
-    if (!bpb || !t->mem) return;
+    if (!bpb || !t->mem) return 1;
     uint64_t p0 = perf_begin(), u0 = kern_now_ns();
     int linear = nvn_tex_is_linear(d), is3d = d->target == NVN_TEXTURE_TARGET_3D, one_d = e->pub.type == VK_IMAGE_TYPE_1D;
     uint32_t levels = linear ? 1 : e->pub.levels, layers = linear ? 1 : e->pub.layers;
@@ -204,6 +282,13 @@ static void upload(Tex *e) {
     VmaAllocation ralloc = NULL;
     uint8_t *stg;
     VkCommandBuffer cb = vk_upload_begin_staging(total, &sb, (void **)&stg);
+    if (!cb) {   // out of staging memory: the image keeps what it had, and the upload comes again next frame
+        free(ar);
+        free(rg);
+        e->up_pending = 1, e->up_fail_frame = frame_now;
+        perf_end(PERF_TEX, p0);
+        return 0;
+    }
     uint8_t *rmap = acheck ? vk_staging(decoded, &rbuf, &ralloc) : NULL;
     k = 0;
     for (uint32_t lv = 0; lv < levels; lv++)
@@ -293,15 +378,50 @@ counted:;
     uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     if (up_log > 0 && fr >= (uint64_t)up_at) {
         up_log--;
-        rt_log("vk: upload at frame %llu: %#llx %ux%ux%u fmt %#x levels %u, %.1f KiB%s, game %lld submits ahead",
+        uint64_t ztail = zero_tail((uintptr_t)t->mem, t->L.size);
+        rt_log("vk: upload at frame %llu: %#llx %ux%ux%u fmt %#x levels %u, %.1f KiB%s, game %lld submits ahead; "
+               "zero tail from %#llx (%.0f%%)",
                (unsigned long long)fr, (unsigned long long)e->pub.addr, d->width, d->height, d->depth, d->format,
                e->pub.levels, t->L.size / 1024.0, e->uploaded ? " (again)" : "",
-               (long long)(nvn_submit_count() - __atomic_load_n(&vk_replay_submit, __ATOMIC_RELAXED)));
+               (long long)(nvn_submit_count() - __atomic_load_n(&vk_replay_submit, __ATOMIC_RELAXED)),
+               (unsigned long long)ztail, t->L.size ? 100.0 * (t->L.size - ztail) / t->L.size : 0.0);
+        if (astc && t->L.size >= (64u << 10)) zero_tail_note((uintptr_t)t->mem, t->L.size, ztail, fr, e->n_up + 1);
+        uint64_t rlo, rhi, rfreed, rframe;
+        uint32_t rflags;
+        if (vk_pool_release_find((uintptr_t)t->mem, t->L.size, &rlo, &rhi, &rfreed, &rframe, &rflags))
+            rt_log("vk: upload %#llx (%ux%u fmt %#x) lies over pool-finalize release [%#llx,%#llx) flags %#x of frame "
+                   "%llu (%.1f KiB released); its storage %.1f of %.1f KiB backed now",
+                   (unsigned long long)(uintptr_t)t->mem, d->width, d->height, d->format, (unsigned long long)rlo,
+                   (unsigned long long)rhi, rflags, (unsigned long long)rframe, rfreed / 1024.0,
+                   plat_mem_backed_bytes((uintptr_t)t->mem, t->L.size) / 1024.0, t->L.size / 1024.0);
+        // MKW_TEX_UP_DUMP=<w>x<h> (diagnosis, task 32): the raw guest bytes of the first 4 such uploads go to
+        // MKW_TEX_UP_DUMP_DIR (/app0/logs), tex_<addr>_<w>x<h>_<fmt>.bin, to decode on the PC: a fault that is already in
+        // guest memory past the cards' first 64 KiB boundary shows there.
+        static unsigned dump_w, dump_h, dump_n;
+        static int dump_init;
+        if (!dump_init) {
+            dump_init = 1;
+            const char *dw = cfg_get("MKW_TEX_UP_DUMP");
+            if (dw && sscanf(dw, "%ux%u", &dump_w, &dump_h) != 2) dump_w = dump_h = 0;
+        }
+        if (dump_w && d->width == dump_w && d->height == dump_h && dump_n < 4) {
+            dump_n++;
+            const char *dir = cfg_get("MKW_TEX_UP_DUMP_DIR");
+            char path[512];
+            snprintf(path, sizeof path, "%s/tex_%llx_%ux%u_%x.bin", dir && *dir ? dir : "/app0/logs",
+                     (unsigned long long)(uintptr_t)t->mem, d->width, d->height, d->format);
+            FILE *f = fopen(path, "wb");
+            size_t wrote = f ? fwrite(t->mem, 1, t->L.size, f) : 0;
+            if (f) fclose(f);
+            rt_log("vk: upload dump %s: %zu of %llu bytes", path, wrote, (unsigned long long)t->L.size);
+        }
     }
     e->wt_n = 0;
     e->uploaded = 1;
+    e->up_pending = 0;
     e->n_up++;
     perf_end(PERF_TEX, p0);
+    return 1;
 }
 
 // A texture copy from an ASTC texture kept as RGBA8 (under 256x256) into one re-encoded as BC7: the source's own ASTC
@@ -322,6 +442,10 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
     VkBuffer sb;
     uint8_t *stg;
     VkCommandBuffer cb = vk_upload_begin_staging(per * layers, &sb, (void **)&stg);
+    if (!cb) {   // no staging memory: the caller skips the copy (logged by vk_upload_begin_staging)
+        free(ar);
+        return 0;
+    }
     int ok = 1;
     for (uint32_t l = 0; l < layers && ok; l++) {
         ok = !nvn_texels_box(&src->d, level, layer + l, x / f.astc_bw * 16, y / f.astc_bh, 0, rb, rows, src->mem,
@@ -389,7 +513,7 @@ void make_fresh(Tex *e) {
     int ch = vk_mem_changed(e->pub.addr, size, e->wgen, &now);
     e->wgen = now;
     e->last_ch = ch;
-    if (ch) upload(e);   // 1 written, -1 not tracked: both upload again
+    if (ch || e->up_pending) upload(e);   // 1 written, -1 not tracked: both upload again; a deferred one too
 }
 
 // make_fresh for draw bindings: the page check answers from this submission's write-watch snapshot (vk_memory.c
@@ -403,6 +527,6 @@ void make_fresh_snap(Tex *e) {
     e->wgen = now;
     if (!e->uploaded) { upload(e); return; }
     e->last_ch = ch;
-    if (ch) upload(e);
+    if (ch || e->up_pending) upload(e);
 }
 
