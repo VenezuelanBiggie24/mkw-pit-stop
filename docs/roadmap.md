@@ -43,10 +43,14 @@ own threads are the critical path (~72 ms a frame of CPU among them, measured wi
   SignalToAddress ~510 a frame at 3.95 us. `MKW_YIELD_NOLOCK` skips the kernel lock when no waiter may take the core
   (6.3-7 us a yield), but the frame did not move (A/B -0.12 ms): the loops spin waiting for other jobs, and a cheaper
   spin only spins more (yields 595 -> 650 a frame). The time is the game's own job chain: the translator's code next.
-- **To do: the CPU translator's loops.** The generated C keeps only some guest registers in locals (the rest in
-  `c->x[]`) and puts a compiler barrier on every loop's back edge, so a loop reloads its state from memory each turn;
-  the barrier is needed only where a loop waits on memory another thread writes. Broadest lever (all game code),
-  largest change: the whole game regenerated, `tools/cpu/lift_diff.py` before any run.
+- **Done: the CPU translator's loops.** The compiler barrier on loop back edges now stays only where a loop
+  may read or write a fixed address (`recomp/loops.py`: 73 452 of 137 111 dropped, half of them backward jumps that
+  were no loop). More locals, or locals chosen by loop use, cost more than they saved on random functions;
+  `--reg-loop-weight 8` helps `main+0x154e14`'s list walk (`x11` no longer stored and reloaded per node) and is
+  for a second build to measure. -O2 gave more instructions and memory operands than -O1 on the race's 24 hottest
+  functions, so the generated code stays at -O1; PGO is next. Measured on the console (15/11/2026): no hang, every
+  hot function within noise, the game threads' total 74.7 -> 74.0 ms a frame. Next on this line: `frinta` lifted to a
+  libm `round()` call (1.3 ms a frame, from `sinf`), and the `--reg-loop-weight 8` build.
 - **To do: `main+0x154e14`.** A list walk under a mutex (nodes 0x140 bytes apart, flags at +0x138, removal through a
   virtual call), 6.3-6.95 ms a frame through one race and 1.65 ms in another, steady within a race: why the list is
   that long, and whether it should be.

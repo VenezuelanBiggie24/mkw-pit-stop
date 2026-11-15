@@ -34,6 +34,14 @@ CALLEE_SAVED = frozenset(range(19, 30)) | {SP}
 # Locals per function: the most used registers. More cost more than they save, as clang then spills them to the stack
 # and the syncs stay (300 hot functions of the Switch 1 game: fewest instructions and memory operands at 4-6).
 LOCALS = 6
+# With LOOP_WEIGHT above 1 (recomp/gen.py --reg-loop-weight), a use inside a loop counts that much (squared in a
+# nested one), so the locals go to the registers loops use. Off by default: on 400 random functions of MKW's main
+# (40 instructions or more, two samples, prospero-clang -O1, 15/11/2026) weight 8 gave 0.4-1 % more host instructions
+# and memory operands inside loops than the plain count, and so did 8 or 10 locals, a reload cost per call, or
+# weighting only call-free loops. It pays in some hot loops: main+0x154e14 (6.3-6.95 ms a frame on the PS5) walks a
+# list in x9/x10/x11 and x11, eighth by plain count, stays in c->x[11], so every node stores and reloads it on the
+# walk's dependency chain; weighted, x11 takes sp_'s place. Kept as an option to measure that on the console.
+LOOP_WEIGHT = 1
 
 
 def name(r):
@@ -77,12 +85,17 @@ class Plan:
         return text.replace(SPILL, spill).replace(RELOAD, reload).replace(RELOAD_CALL, reload_call)
 
 
-def plan(texts, succ, clean, n_locals=LOCALS, kept=CALLEE_SAVED):
+def plan(texts, succ, clean, n_locals=LOCALS, kept=CALLEE_SAVED, weight=None):
     """texts[i]: instruction i's C with markers; succ[i]: successor indices inside the function; clean: instructions
     after which every local equals the Cpu (a call or an SVC that spills and reloads on every path through it);
-    n_locals: how many registers to keep in locals; kept: registers a call does not reload."""
+    n_locals: how many registers to keep in locals; kept: registers a call does not reload; weight[i]: how much a
+    use in instruction i counts when choosing them (None: 1 each)."""
     n = len(texts)
-    uses = Counter(r for t in texts for r in refs(t))
+    uses = Counter()
+    for i, t in enumerate(texts):
+        w = weight[i] if weight else 1
+        for r in refs(t):
+            uses[r] += w
     regs = {r for r, _ in sorted(uses.items(), key=lambda kv: (-kv[1], kv[0]))[:n_locals]}
     writes = [written(t) & regs for t in texts]
     dirty = [set() for _ in range(n)]

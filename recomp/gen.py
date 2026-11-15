@@ -40,6 +40,7 @@ sys.path.insert(0, str(ROOT / 'recomp'))
 
 import flags  # noqa: E402
 import jumptables  # noqa: E402
+import loops  # noqa: E402
 import patches  # noqa: E402
 import regs  # noqa: E402
 from layout import DEFAULT, INCOMPLETE, PLACEMENTS, check_output_profile, layout, output_lock  # noqa: E402
@@ -220,13 +221,16 @@ def partition(est, max_fns, max_bytes, big_fn):
 class Emitter:
     """C for the functions of one module. starts is the set of every function start of the module."""
 
-    def __init__(self, mod, starts, patched=None, reg_locals=regs.LOCALS, callee_saved=True, spins=None):
+    def __init__(self, mod, starts, patched=None, reg_locals=regs.LOCALS, callee_saved=True, spins=None,
+                 loop_analysis=True, reg_loop_weight=regs.LOOP_WEIGHT):
         self.mod = mod
         self.starts = starts
         self.patched = patched or {}   # {address: (set index, [replacement words])} (recomp/patches.py)
         self.spins = spins or {}       # {spin wait back-edge: its head} (recomp/patches.py `spin`)
         self.reg_locals = reg_locals   # recomp/regs.py: registers per function in C locals
         self.kept = regs.CALLEE_SAVED if callee_saved else frozenset()   # not reloaded after a call
+        self.loop_analysis = loop_analysis   # recomp/loops.py: False puts the barrier on every loop without calls
+        self.reg_loop_weight = reg_loop_weight   # recomp/regs.py: a use inside a loop counts this much (per level)
         self.uses_patches = False
         self.stats = Counter()
         self.unsupported = Counter()
@@ -424,6 +428,30 @@ class Emitter:
         calls = [0]
         for ins in insns:
             calls.append(calls[-1] + (ins.kind in ('bl', 'blr', 'trap')))
+        cycles = None   # recomp/loops.py inputs, built for the first loop that asks
+
+        def barrier(i, head):
+            """A loop without calls keeps the barrier on its back edge i -> head unless recomp/loops.py proves its
+            call-free cycles read and write only memory that moves every trip. Functions without a flow graph
+            (the all-label fallback) keep every barrier."""
+            nonlocal cycles
+            if not self.loop_analysis or succ is None:
+                return True
+            if cycles is None:
+                texts = [ins.code if ins.kind in ('op', 'trap') else ins.cond or '' for ins in insns]
+                ops = [loops.decode(mod.word(entry + 4 * j), entry + 4 * j) if ins.kind == 'op'
+                       else loops.Op('other') for j, ins in enumerate(insns)]
+                # Calls clang cannot see into end a cycle: blr and calls outside the module go through
+                # rt_dispatch, SVCs to the runtime. A bl to a generated function may be inlined (same chunk), so its
+                # loads would join the loop: a call-free cycle through one keeps the barrier, as a patched site does.
+                blocked = {j for j, ins in enumerate(insns) if ins.kind in ('blr', 'trap')
+                           or (ins.kind == 'bl' and ins.target not in starts)
+                           or (ins.kind == 'op' and regs.ESCAPE.search(ins.code))}
+                opaque = {j for j, ins in enumerate(insns) if entry + 4 * j in self.patched
+                          or (ins.kind == 'bl' and ins.target in starts)}
+                cycles = (ops, texts, loops.predecessors(succ), blocked, opaque)
+            ops, texts, preds, blocked, opaque = cycles
+            return loops.needs_barrier(ops, texts, succ, preds, head, i, blocked, opaque, (mod.lo, mod.hi))
 
         k = None
         for i, ins in enumerate(insns):
@@ -445,9 +473,12 @@ class Emitter:
                 elif entry <= ins.target <= a and calls[i] == calls[(ins.target - entry) // 4]:
                     # A loop without calls: guest loads are plain C loads, so clang may hoist one another thread
                     # changes out of the loop and leave a jmp to itself (MKW main+0x27ebb20). The barrier makes
-                    # every pass reload memory, as the guest does.
-                    j = f'__asm__ volatile("" ::: "memory"); {j}'
-                    self.stats['loop_barriers'] += 1
+                    # every pass reload memory, as the guest does; recomp/loops.py says where none can be hoisted.
+                    if barrier(i, (ins.target - entry) // 4):
+                        j = f'__asm__ volatile("" ::: "memory"); {j}'
+                        self.stats['loop_barriers'] += 1
+                    else:
+                        self.stats['loop_barriers_dropped'] += 1
                 emit(i, '    ' + j if k == 'b' else f'    if ({fx(i, ins.cond)}) {{ {j} }}')
             elif k == 'bl':
                 emit(i, '    ' + call(ins.target, a))
@@ -480,7 +511,8 @@ class Emitter:
                     texts[i] += line
             clean = {i for i, ins in enumerate(insns) if entry + 4 * i not in self.patched
                      and (ins.kind in ('bl', 'blr') or (ins.kind == 'op' and regs.RELOAD in texts[i]))}
-            rp = regs.plan(texts, succ, clean, self.reg_locals, self.kept)
+            weight = loops.depth_weights(succ, insns, entry, self.reg_loop_weight) if self.reg_loop_weight > 1 else None
+            rp = regs.plan(texts, succ, clean, self.reg_locals, self.kept, weight)
             if rp.regs:
                 out.append('    ' + rp.decl())
             self.stats['local_reg_functions'] += bool(rp.regs)
@@ -626,9 +658,15 @@ def main():
     ap.add_argument('--patches', type=Path, help='code patch table (recomp/patches.py)')
     ap.add_argument('--reg-locals', type=int, default=regs.LOCALS,
                     help=f'guest registers per function kept in C locals (recomp/regs.py; default {regs.LOCALS}, 0: none)')
+    ap.add_argument('--reg-loop-weight', type=int, default=regs.LOOP_WEIGHT,
+                    help='how much a register use inside a loop counts when choosing the locals (recomp/regs.py; '
+                         f'default {regs.LOOP_WEIGHT}: plain count)')
     ap.add_argument('--no-callee-saved-trust', action='store_true',
                     help='reload X19-X29 and SP after every call too, instead of trusting AAPCS64 (slower; for '
                          'telling a broken callee from a generator bug)')
+    ap.add_argument('--all-loop-barriers', action='store_true',
+                    help='a compiler barrier on every loop without calls, as before recomp/loops.py (for telling a '
+                         'hang it causes from one in the game)')
     args = ap.parse_args()
     try:
         args.out.mkdir(parents=True, exist_ok=True)
@@ -641,7 +679,8 @@ def main():
 
 
 def generate(args, mods):
-    opts = {'reg_locals': args.reg_locals, 'callee_saved': not args.no_callee_saved_trust}
+    opts = {'reg_locals': args.reg_locals, 'callee_saved': not args.no_callee_saved_trust,
+            'loop_analysis': not args.all_loop_barriers, 'reg_loop_weight': args.reg_loop_weight}
     t0 = time.perf_counter()
     table = patches.load(args.patches, mods) if args.patches else patches.Table()
     want = args.modules.split(',')
@@ -736,6 +775,7 @@ def generate(args, mods):
                 'flag_publishing_exits': stats['flag_publishing_exits'],
                 'spin_gates': stats['spin_gates'],
                 'loop_barriers': stats['loop_barriers'],
+                'loop_barriers_dropped': stats['loop_barriers_dropped'],
                 'unsupported': stats['unsupported'],
                 'external_branches': stats['external_branches'],
                 'external_calls': stats['external_calls'],

@@ -14,9 +14,13 @@ Changes against the original:
 - `patches-mkw.txt`: besides the spin waits and zstd, the `output` set (the game's output size, `patches.c`) and the
   `shadow` set (the shadow map's size, and a second pool slot for the render-buffer allocator to hold it).
 - `gen.py`: the `GENERATED_MARKER` (`MKW_RECOMP_…`) lives in the file itself instead of `tools/check_content.py`;
-  `tools/git/pre-commit` watches for it. Every back edge of a loop without calls carries a compiler barrier
+  `tools/git/pre-commit` watches for it. A back edge of a loop without calls carries a compiler barrier
   (`__asm__ volatile("" ::: "memory")`): without it clang hoists out of the loop the loads another thread changes and
-  leaves a `jmp` to itself (`main+0x27ebb20`, which `spin_waits.py` does not recognise).
+  leaves a `jmp` to itself (`main+0x27ebb20`, which `spin_waits.py` does not recognise). `loops.py` drops it where
+  every load and store of the loop's call-free cycles addresses memory that moves each trip (list and array walks):
+  about half of them (`--all-loop-barriers` puts them all back).
+- `regs.py`: `--reg-loop-weight N` makes a register use inside a loop count N times when choosing the locals. Off by
+  default: on random functions it costs more than it saves; it helps some hot loops (`regs.py` says which).
 
 Usage: `uv run python recomp/gen.py --exefs game/exefs --out build/generated --jobs 8 --patches recomp/patches-mkw.txt`
 (~2.5 min, 887 MB of C).
@@ -32,6 +36,7 @@ before building. See [the PS5 layout test](../docs/ps5.md#test-the-guest-layout-
 | `lifter.py` | AArch64 decoder → C statements per instruction |
 | `simd_c.py` | NEON/FP → C |
 | `flags.py`, `regs.py` | NZCV and the most used registers in local variables |
+| `loops.py` | Which loop back edges need the compiler barrier: the addresses of the loop's loads and stores, decoded and followed over its call-free cycles; and the loop depth `--reg-loop-weight` weighs register uses by. Checked by `tools/cpu/loop_decode_check.py` |
 | `jumptables.py` | Jump tables resolved symbolically |
 | `gen.py` | Generates the C by function, in parallel processes |
 | `layout.py` | Shared module and guest memory placements for the generator, runtime build, and PS5 smoke title |
