@@ -421,6 +421,8 @@ void mem_early_watch(uint64_t a, uint64_t n, uint64_t fence, int kind) {
     frz_drop();
 }
 
+static uint64_t siblings_released;   // MKW_EARLY_SIBLING_WAIT=0: sibling-page watches given up without a wait
+
 static uint64_t early_release_page_locked(uint64_t p, uint64_t access_a, int access, int is_fault_page,
                                           int do_protect, size_t ep) {
     EarlyChunk *c = early_chunk(p, 0);
@@ -463,6 +465,15 @@ static uint64_t early_release_page_locked(uint64_t p, uint64_t access_a, int acc
     }
     uint64_t gw = c->gpu_wrote[idx];
     int hit = is_fault_page ? (int)(gw >> (access_a % PAGE / 64) & 1) : (gw != 0);
+    // MKW_EARLY_SIBLING_WAIT (default 1, "ab" to compare; 0: off): an access to another 4 KiB page of the watched page's
+    // 16 KiB native page waits for the watched page's writer too. On the PS5 every wait of a race was such a sibling
+    // (15/11/2026, wake-20261115-185222: address 0x251ee85252, watched page 0x251ee87000), ~1 a frame of ~8 ms on the
+    // game's job threads (4.5-4.8 s a 600-frame window), while "storage buffer 0 early reads 0": no game read touched
+    // bytes the GPU had yet to write. Off, the sibling's watch is given up without a wait (siblings_released counts
+    // them): a later early read of that page would no longer be caught.
+    static int sib = -1;
+    if (sib < 0) sib = rt_knob("EARLY_SIBLING_WAIT", "1");
+    if (!is_fault_page && hit && !RT_KNOB_ON(sib)) hit = 0, siblings_released++;
     // Only the game's own code waits (kern_fault_in_game): a runtime thread, or host code on a guest thread, releases the
     // watch and goes on. With 16 KiB native pages the wait may come from another 4 KiB page of the faulting one
     // (is_fault_page 0): the line still names the fault (run 25 logged page 0, frame 0, exe-0x400000 from that case).
@@ -564,11 +575,12 @@ void mem_early_log(uint64_t frame) {   // every frame
     mem_early_ev_counts(ev, sizeof ev);
     rt_log("mem: early reads at frame %llu (%lld pages watched now)%s; waits %lld, %.1f ms in all, %lld given up (fence "
            "not handed to the queue in %llu ms); touches by host code on game threads %lld (no wait); released by an "
-           "invalidate of other bytes %lld; %s",
+           "invalidate of other bytes %lld; sibling-page watches given up without a wait %llu; %s",
            (unsigned long long)frame, (long long)mem_early_pages, k ? b : ": none", (long long)waits,
            (double)wait_ns / 1e6, (long long)not_issued, (unsigned long long)(ISSUE_WAIT_NS / 1000000),
-           (long long)not_game, (long long)range_skips, ev);
+           (long long)not_game, (long long)range_skips, (unsigned long long)siblings_released, ev);
     waits = wait_ns = range_skips = not_game = not_issued = 0;
+    siblings_released = 0;
     // The early reads by whether the GPU writes the page (as far as the replay has reported), with the code making them.
     uint32_t wrote = 0, page_only = 0;
     uint64_t pcs[8] = {0}, pcn[8] = {0};

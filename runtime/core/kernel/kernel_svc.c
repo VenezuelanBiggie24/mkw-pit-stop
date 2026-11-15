@@ -506,12 +506,42 @@ static int kern_svc_impl(Cpu *c, uint32_t imm) {
 // (the runtime's own cost of the call). For the 60 fps work (15/11/2026): yields (0x0B), WaitForAddress (0x34),
 // SignalToAddress (0x35) and ArbitrateLock/Unlock (0x1A/0x1B) held ~16-20 ms a frame of the game threads' time.
 static int svc_stats = -1;
+int g_svc_stats;
 static struct { uint64_t n, ns, nb, nsb; } sst[0x80];
+// Address waits (addr_block): how long they last, and the wake latency, from the waker's signal to the thread holding
+// its core again (the delay a job's successor sees). Bins in us: <10 <20 <50 <100 <200 <500 <1000 <5000 >=5000.
+#define WB 9
+static const uint64_t wb_lim[WB - 1] = {10, 20, 50, 100, 200, 500, 1000, 5000};
+static uint64_t wh_wait[WB], wh_wake[WB], wake_sum_ns, wake_n;
+static int wbin(uint64_t ns) {
+    int b = 0;
+    while (b < WB - 1 && ns / 1000 >= wb_lim[b]) b++;
+    return b;
+}
+// Slow wakes (200 us or more) by thread: how many, their total, and the part before the thread left its wait (the OS
+// wake: signal to wait_woken's return) against the rest (taking its virtual core back, core_take).
+#define SW_N 32
+static struct { uint32_t h; uint64_t n, ns, os; } sw[SW_N];
+static PlatMutex sw_lock = PLAT_MUTEX_INIT;
+void kern_wait_note(uint64_t wait_ns, uint64_t wake_ns, uint64_t os_ns, uint32_t handle) {
+    if (wake_ns >= 200000) {
+        plat_mutex_lock(&sw_lock);
+        int i = 0;
+        while (i < SW_N && sw[i].h && sw[i].h != handle) i++;
+        if (i < SW_N) sw[i].h = handle, sw[i].n++, sw[i].ns += wake_ns, sw[i].os += os_ns < wake_ns ? os_ns : wake_ns;
+        plat_mutex_unlock(&sw_lock);
+    }
+    __atomic_fetch_add(&wh_wait[wbin(wait_ns)], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&wh_wake[wbin(wake_ns)], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&wake_sum_ns, wake_ns, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&wake_n, 1, __ATOMIC_RELAXED);
+}
 
 int kern_svc(Cpu *c, uint32_t imm) {
     if (svc_stats < 0) {
         const char *e = cfg_get("MKW_SVC_STATS");
         svc_stats = e && atoi(e) > 0;
+        g_svc_stats = svc_stats;
     }
     if (!svc_stats || imm >= 0x80) return kern_svc_impl(c, imm);
     RtThread *t = tcur;
@@ -544,4 +574,27 @@ void kern_svc_stats_report(uint64_t frame, uint64_t frames) {
         rt_log("kernel:   svc %#04x: %8.1f calls/f %7.3f ms/f (%5.2f us each) | blocked %6.1f calls/f %7.3f ms/f",
                row[i].imm, (double)row[i].n / frames, row[i].ns / 1e6 / frames, row[i].n ? row[i].ns / 1e3 / row[i].n : 0.0,
                (double)row[i].nb / frames, row[i].nsb / 1e6 / frames);
+    uint64_t hw[WB], hk[WB], sum = __atomic_exchange_n(&wake_sum_ns, 0, __ATOMIC_RELAXED),
+             n = __atomic_exchange_n(&wake_n, 0, __ATOMIC_RELAXED);
+    char a[200], b[200];
+    int oa = 0, ob = 0;
+    for (int i = 0; i < WB; i++) {
+        hw[i] = __atomic_exchange_n(&wh_wait[i], 0, __ATOMIC_RELAXED);
+        hk[i] = __atomic_exchange_n(&wh_wake[i], 0, __ATOMIC_RELAXED);
+        oa += snprintf(a + oa, sizeof a - (size_t)oa, " %.1f", (double)hw[i] / frames);
+        ob += snprintf(b + ob, sizeof b - (size_t)ob, " %.1f", (double)hk[i] / frames);
+    }
+    if (n)
+        rt_log("kernel:   address waits a frame by length, us <10 <20 <50 <100 <200 <500 <1000 <5000 more:%s; wake to "
+               "running a frame by latency, same bins:%s; mean wake latency %.1f us over %.1f wakes a frame",
+               a, b, sum / 1e3 / n, (double)n / frames);
+    plat_mutex_lock(&sw_lock);
+    for (int i = 1; i < SW_N && sw[i].h; i++)   // by total, longest first
+        for (int j = i; j > 0 && sw[j].ns > sw[j - 1].ns; j--) { __typeof__(sw[0]) x = sw[j]; sw[j] = sw[j - 1]; sw[j - 1] = x; }
+    for (int i = 0; i < 8 && i < SW_N && sw[i].h; i++)
+        rt_log("kernel:   slow wakes (>= 200 us) of %#x: %.1f a frame, %.3f ms/f, %.0f%% before leaving the wait (OS), the "
+               "rest taking the core back", sw[i].h, (double)sw[i].n / frames, sw[i].ns / 1e6 / frames,
+               sw[i].ns ? 100.0 * sw[i].os / sw[i].ns : 0.0);
+    memset(sw, 0, sizeof sw);
+    plat_mutex_unlock(&sw_lock);
 }

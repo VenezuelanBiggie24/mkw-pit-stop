@@ -74,6 +74,7 @@ struct RtThread {
     // virtual core
     int cur_core, c_nosig;     // core held while running guest code, -1 while blocked; c_nosig: spinning in gate
     uint64_t prof_fn, prof_lr; // MKW_PROFILE_FN: the lifted function the thread entered last, and its return address
+    uint64_t last_wake_at;     // MKW_SVC_STATS: when the last wait's signal came (wait_woken), for the wake latency
     uint64_t cseq;
     RtThread *cnext;
     uint8_t *tlr, *tls;
@@ -125,6 +126,8 @@ extern _Thread_local RtThread *tcur;
 _Static_assert(offsetof(RtThread, preempt) == 0, "host.h kern_preempt_pending reads the first int");
 _Static_assert(offsetof(RtThread, host_depth) == sizeof(int), "host.h kern_host_depth reads the second int");
 extern RtThread *g_all, *g_wait, *g_main;
+extern int g_svc_stats;   // MKW_SVC_STATS (kernel_svc.c): also the address waits' length and wake latency
+void kern_wait_note(uint64_t wait_ns, uint64_t wake_ns, uint64_t os_ns, uint32_t handle);   // kernel_svc.c (g_svc_stats)
 extern uint64_t g_next_id, g_wseq, g_created;
 extern uint64_t g_main_stack;
 

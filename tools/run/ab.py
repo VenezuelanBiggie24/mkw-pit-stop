@@ -17,7 +17,10 @@ import sys
 from pathlib import Path
 
 LINE = re.compile(r"interval avg ([\d.]+) ms.*replay avg ([\d.]+) ms; ab (\d+)/(\d+); world (-?[\d.]+) s")
-GPU = re.compile(r"perf: frame \d+: gpu avg ([\d.]+) ms")   # the window's second line (MKW_TRACE=perf with timestamps)
+GPU = re.compile(r"perf: frame \d+: gpu avg ([\d.]+) ms")
+# The frame less the render thread's pacing wait: the work. The interval snaps to vertical blanks (16.7 / 33.3 ms), so a
+# change that shortens the work can leave it unchanged while the pacing wait grows (15/11/2026, MKW_EARLY_SIBLING_WAIT).
+BUSY = re.compile(r"render busy avg ([\d.]+) ms")   # the window's second line (MKW_TRACE=perf with timestamps)
 
 
 def summary(path: Path) -> tuple[str, tuple[float, float] | None, bool]:
@@ -42,7 +45,8 @@ def summary(path: Path) -> tuple[str, tuple[float, float] | None, bool]:
         b, n = int(m[3]), int(m[4])
         last = "A" if b == 0 else "B" if b == n else ""
         if last:
-            side[last].append((float(m[1]), float(m[2])))
+            bz = BUSY.search(line)
+            side[last].append((float(m[1]), float(m[2]), float(bz[1]) if bz else float("nan")))
     out = [path.stem + (" (inverted)" if inverted else "")]
     for k, v in side.items():
         if not v:
@@ -50,8 +54,9 @@ def summary(path: Path) -> tuple[str, tuple[float, float] | None, bool]:
             continue
         frame = [x[0] for x in v]
         replay = [x[1] for x in v]
+        busy = [x[2] for x in v]
         out.append(f"  {k}: {len(v)} windows, frame {statistics.mean(frame):.2f} ms (median "
-                   f"{statistics.median(frame):.2f}), replay {statistics.mean(replay):.2f} ms"
+                   f"{statistics.median(frame):.2f}), busy {statistics.mean(busy):.2f} ms, replay {statistics.mean(replay):.2f} ms"
                    + (f", gpu {statistics.mean(gpu[k]):.2f} ms" if gpu[k] else ""))
     delta = None
     if side["A"] and side["B"]:
@@ -60,6 +65,9 @@ def summary(path: Path) -> tuple[str, tuple[float, float] | None, bool]:
         med = statistics.median(x[0] for x in side["B"]) - statistics.median(x[0] for x in side["A"])
         delta = (b - a, med)
         out.append(f"  B - A: {b - a:+.2f} ms per frame ({(b - a) / a * 100:+.1f} %), median {med:+.2f}")
+        ba = statistics.mean(x[2] for x in side["A"])
+        bb = statistics.mean(x[2] for x in side["B"])
+        out.append(f"  B - A busy (frame less pacing, the work): {bb - ba:+.2f} ms per frame")
     return "\n".join(out), delta, inverted
 
 

@@ -84,7 +84,7 @@ void wake_addr_prepare(RtThread **list, RtThread *t, uint32_t res) {
     t->wkind = W_NONE;
     t->wres = res;
     t->waker = tcur ? tcur->handle : 0;
-    if (rt_trace & RT_TRACE_SCHED) t->wake_at = kern_now_ns();
+    if ((rt_trace & RT_TRACE_SCHED) || g_svc_stats) t->wake_at = kern_now_ns();
     if (g_crit_on) crit_add(CRIT_WAKE, t->handle, t->waker, 0, 0, t->wake_at);
 }
 
@@ -148,6 +148,7 @@ static uint32_t wait_woken(RtThread *t, int64_t ns, PlatMutex *m, RtThread **lis
         plat_cond_wait_ns(&t->cv, m, left);
     }
     if (t->wake_at) {
+        t->last_wake_at = t->wake_at;
         if (rt_trace & RT_TRACE_SCHED) t->ho_wake_at = t->wake_at;
         uint64_t d = kern_now_ns() - t->wake_at;
         t->lw_ns += d;
@@ -270,9 +271,11 @@ uint32_t addr_block(RtThread *t, AddrQueue q, int64_t ns) {
     acct(t, S_ADDR);
     t->nblk++;
     unlock();
+    uint64_t t_block = g_svc_stats ? kern_now_ns() : 0;
+    t->last_wake_at = 0;
     plat_mutex_lock(q.m);
     uint32_t r = wait_woken(t, ns, q.m, q.list);
-    uint64_t t_woke = (rt_trace & RT_TRACE_SCHED) ? kern_now_ns() : 0;
+    uint64_t t_woke = ((rt_trace & RT_TRACE_SCHED) || t_block) ? kern_now_ns() : 0;
     uint64_t wake_ts = t->ho_wake_at;
     uint32_t wk = t->waker;
     plat_mutex_unlock(q.m);
@@ -304,6 +307,10 @@ uint32_t addr_block(RtThread *t, AddrQueue q, int64_t ns) {
                 ho_note_addr(t, addr, 0, 0, 0, 0, 0, 0, 0, ho_kind, 1);
             }
         }
+    }
+    if (t_block && r != R_TIMEOUT && t->last_wake_at) {   // the core is back: the thread runs game code again
+        uint64_t now = kern_now_ns(), w = t->last_wake_at;
+        kern_wait_note(w > t_block ? w - t_block : 0, now > w ? now - w : 0, t_woke > w ? t_woke - w : 0, t->handle);
     }
     return r;
 }
