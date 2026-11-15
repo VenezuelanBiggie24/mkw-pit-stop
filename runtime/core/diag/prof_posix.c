@@ -36,10 +36,11 @@ typedef struct {
     uint64_t caller;  // return address in executable when rip is outside it, else 0
     uint32_t slot;    // registry slot
     uint64_t n;       // CPU us of the samples there (each weighted by its thread's CPU time since its previous sample)
+    uint64_t c;       // samples there, every one (the running profile: samples x period)
 } ProfSlot;
 
 static ProfSlot table[PROF_SLOTS];
-static uint64_t prev_n[PROF_SLOTS];   // counts at the last report: each report covers its window
+static uint64_t prev_n[PROF_SLOTS], prev_c[PROF_SLOTS];   // counts at the last report: each report covers its window
 static volatile uint64_t total_samples, dropped_samples;
 static uint64_t prev_total, prev_dropped, last_report_frame, prev_frame, cur_frame;
 static volatile int active;
@@ -59,7 +60,7 @@ static uint64_t mix64(uint64_t x) {
 static void on_sample(uint32_t tid, int slot, uint64_t rip, uint64_t caller, uint64_t cpu_ns) {
     if (!__atomic_load_n(&active, __ATOMIC_RELAXED) || !rip || slot < 0 || slot >= REG_SLOTS) return;
     uint64_t w = cpu_ns / 1000;   // us
-    if (w < min_us) return;   // blocked (or nearly) since the previous sample
+    if (w < min_us) w = 0;   // blocked (or nearly) since the previous sample: counted, but no CPU weight
     slot_tid[slot] = tid;
     if (caller) rip &= ~0xffull;
     uint64_t h = mix64(rip ^ mix64(caller ^ ((uint64_t)(slot + 1) << 48)));
@@ -81,7 +82,8 @@ static void on_sample(uint32_t tid, int slot, uint64_t rip, uint64_t caller, uin
         }
         while (cur == 1) cur = __atomic_load_n(&table[i].key, __ATOMIC_ACQUIRE);
         if (cur == h && table[i].rip == rip && table[i].caller == caller && table[i].slot == (uint32_t)slot) {
-            __atomic_fetch_add(&table[i].n, w, __ATOMIC_RELAXED);
+            if (w) __atomic_fetch_add(&table[i].n, w, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&table[i].c, 1, __ATOMIC_RELAXED);
             __atomic_fetch_add(&total_samples, w, __ATOMIC_RELAXED);
             return;
         }
@@ -313,7 +315,7 @@ const char *prof_pc_describe(uint64_t pc, char *buf, int n) {
 
 // ---- report
 
-typedef struct { int group, kind, ckind; uint64_t f, cf, n; } Hit;
+typedef struct { int group, kind, ckind; uint64_t f, cf, n, c; } Hit;
 
 static int by_hit(const void *a, const void *b) {
     const Hit *x = a, *y = b;
@@ -322,6 +324,54 @@ static int by_hit(const void *a, const void *b) {
     if (x->f != y->f) return x->f < y->f ? -1 : 1;
     if (x->ckind != y->ckind) return x->ckind - y->ckind;
     return x->cf < y->cf ? -1 : x->cf > y->cf;
+}
+
+// The running profile (15/11/2026): the CPU-weighted list puts a thread's work before a wait under the wait, and the
+// game's job threads block ~75 times a frame each, so most of their CPU went to wait_cond. A sample that finds a thread
+// in code (not blocked) lands there in proportion to the time spent there, so samples x period is that time; the
+// samples that find the thread waiting are left out by their caller's name.
+static int is_wait(const char *caller) {
+    static const char *const w[] = {"wait_cond", "lock_at", "plat_mutex_lock", "plat_cond_wait", "plat_sleep",
+                                    "plat_event_wait", "sem_wait", "pthread_cond", "pthread_mutex_lock", "nanosleep"};
+    for (size_t i = 0; i < sizeof w / sizeof *w; i++)
+        if (strstr(caller, w[i])) return 1;
+    return 0;
+}
+
+static void running_top(int g, const char *gname, const Hit *hits, size_t m, uint64_t frames) {
+    Hit top[16] = {{0}};
+    uint64_t run = 0, all = 0;
+    for (size_t i = 0; i < m; i++) {
+        if (hits[i].group != g || !hits[i].c) continue;
+        all += hits[i].c;
+        if (!hits[i].kind) {   // outside the executable: a wait when its caller is one
+            char cdesc[128] = "";
+            if (hits[i].cf) func_name(hits[i].cf, hits[i].ckind, cdesc, sizeof cdesc);
+            if (is_wait(cdesc)) continue;
+        }
+        run += hits[i].c;
+        for (int j = 0; j < 16; j++)
+            if (hits[i].c > top[j].c) {
+                memmove(top + j + 1, top + j, (size_t)(15 - j) * sizeof *top);
+                top[j] = hits[i];
+                break;
+            }
+    }
+    if (!run || !frames) return;
+    rt_log("prof:   %s running: %.2f ms/frame (%llu of %llu samples not in a wait, x %u us)", gname,
+           run * (double)period_us / 1e3 / frames, (unsigned long long)run, (unsigned long long)all, period_us);
+    for (int j = 0; j < 16 && top[j].c; j++) {
+        char desc[192], cdesc[128];
+        func_name(top[j].f, top[j].kind, desc, sizeof desc);
+        if (!top[j].kind && top[j].cf) {
+            func_name(top[j].cf, top[j].ckind, cdesc, sizeof cdesc);
+            rt_log("prof:     r%-2d %5.1f%% %6.2f ms/f  %s <- %s", j + 1, 100.0 * top[j].c / run,
+                   top[j].c * (double)period_us / 1e3 / frames, desc, cdesc);
+        } else {
+            rt_log("prof:     r%-2d %5.1f%% %6.2f ms/f  %s", j + 1, 100.0 * top[j].c / run,
+                   top[j].c * (double)period_us / 1e3 / frames, desc);
+        }
+    }
 }
 
 static void report(const char *tag, uint64_t frames) {
@@ -342,8 +392,9 @@ static void report(const char *tag, uint64_t frames) {
         uint64_t key = __atomic_load_n(&table[i].key, __ATOMIC_ACQUIRE);
         if (key <= 1) continue;
         uint64_t n = __atomic_load_n(&table[i].n, __ATOMIC_RELAXED), d = n - prev_n[i];
-        prev_n[i] = n;
-        if (!d) continue;
+        uint64_t cn = __atomic_load_n(&table[i].c, __ATOMIC_RELAXED), dc = cn - prev_c[i];
+        prev_n[i] = n, prev_c[i] = cn;
+        if (!d && !dc) continue;
         int slot = (int)table[i].slot;
         if (slot < 0 || slot >= REG_SLOTS) continue;
         if (slot_group[slot] < 0) {   // the group of the slot's thread name (role in brackets)
@@ -364,14 +415,14 @@ static void report(const char *tag, uint64_t frames) {
         uint64_t cf = (!kind && table[i].caller) ? func_of(table[i].caller, &ckind) : 0;
         gtot[g] += d;
         if (!kind) gout[g] += d;
-        hits[nh++] = (Hit){g, kind, ckind, f, cf, d};
+        hits[nh++] = (Hit){g, kind, ckind, f, cf, d, dc};
     }
     qsort(hits, nh, sizeof *hits, by_hit);
     size_t m = 0;   // merge the same function (and caller when outside) of a group
     for (size_t i = 0; i < nh; i++) {
         if (m && hits[m - 1].group == hits[i].group && hits[m - 1].kind == hits[i].kind && hits[m - 1].f == hits[i].f &&
             hits[m - 1].ckind == hits[i].ckind && hits[m - 1].cf == hits[i].cf)
-            hits[m - 1].n += hits[i].n;
+            hits[m - 1].n += hits[i].n, hits[m - 1].c += hits[i].c;
         else
             hits[m++] = hits[i];
     }
@@ -408,6 +459,7 @@ static void report(const char *tag, uint64_t frames) {
                        frames ? top[j].n / 1e3 / frames : 0.0, desc);
             }
         }
+        running_top(g, gname[g], hits, m, frames);
         gtot[g] = 0;
     }
     free(hits);
