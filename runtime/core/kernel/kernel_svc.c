@@ -77,7 +77,7 @@ static void cv_hook(void) {
     if (h) h();
 }
 
-int kern_svc(Cpu *c, uint32_t imm) {
+static int kern_svc_impl(Cpu *c, uint32_t imm) {
     uint64_t *x = c->x;
     if (g_diag > 0 && tcur) tcur->dg_svc = imm;
     switch (imm) {
@@ -149,6 +149,17 @@ int kern_svc(Cpu *c, uint32_t imm) {
             return 1;
         }
         // Yield: hand the core to a waiting thread of equal or better priority.
+        // MKW_YIELD_NOLOCK (default 1, "ab" to compare): when no waiting thread may take this core (its bit is clear
+        // in g_core_wait_mask, kept atomically), there is nothing to hand off and G is not taken. A race of 15/11/2026
+        // made ~590 yields a frame (nn::os::YieldThread in the job system's spin loops) at 8.3 us each, 4.9 ms a frame;
+        // a waiter that comes after the check is the same race as one after the locked scan below.
+        static int nolock = -1;
+        if (nolock < 0) nolock = rt_knob("YIELD_NOLOCK", "1");
+        if (RT_KNOB_ON(nolock) && t->cur_core >= 0 &&
+            !((__atomic_load_n(&g_core_wait_mask, __ATOMIC_ACQUIRE) >> t->cur_core) & 1u)) {
+            plat_yield();
+            return 1;
+        }
         lock();
         int give = 0;
         int tp = prio_of(t);
@@ -488,4 +499,49 @@ int kern_svc(Cpu *c, uint32_t imm) {
         return 1;
     }
     return 0;
+}
+
+// MKW_SVC_STATS=1 (with MKW_TRACE=perf): the kernel's SVCs by number, every 600 frames: calls a frame and host time,
+// split by whether the call blocked (its thread's nblk moved: a wait or a sleep, whose time includes the wait) or not
+// (the runtime's own cost of the call). For the 60 fps work (15/11/2026): yields (0x0B), WaitForAddress (0x34),
+// SignalToAddress (0x35) and ArbitrateLock/Unlock (0x1A/0x1B) held ~16-20 ms a frame of the game threads' time.
+static int svc_stats = -1;
+static struct { uint64_t n, ns, nb, nsb; } sst[0x80];
+
+int kern_svc(Cpu *c, uint32_t imm) {
+    if (svc_stats < 0) {
+        const char *e = cfg_get("MKW_SVC_STATS");
+        svc_stats = e && atoi(e) > 0;
+    }
+    if (!svc_stats || imm >= 0x80) return kern_svc_impl(c, imm);
+    RtThread *t = tcur;
+    uint64_t b0 = t ? __atomic_load_n(&t->nblk, __ATOMIC_RELAXED) : 0, t0 = kern_now_ns();
+    int r = kern_svc_impl(c, imm);
+    uint64_t d = kern_now_ns() - t0;
+    if (r) {
+        if (t && __atomic_load_n(&t->nblk, __ATOMIC_RELAXED) != b0)
+            __atomic_fetch_add(&sst[imm].nb, 1, __ATOMIC_RELAXED), __atomic_fetch_add(&sst[imm].nsb, d, __ATOMIC_RELAXED);
+        else
+            __atomic_fetch_add(&sst[imm].n, 1, __ATOMIC_RELAXED), __atomic_fetch_add(&sst[imm].ns, d, __ATOMIC_RELAXED);
+    }
+    return r;
+}
+
+void kern_svc_stats_report(uint64_t frame, uint64_t frames) {
+    if (svc_stats <= 0 || !frames) return;
+    struct { uint32_t imm; uint64_t n, ns, nb, nsb; } row[0x80];
+    int nr = 0;
+    for (uint32_t i = 0; i < 0x80; i++) {
+        uint64_t n = __atomic_exchange_n(&sst[i].n, 0, __ATOMIC_RELAXED), ns = __atomic_exchange_n(&sst[i].ns, 0, __ATOMIC_RELAXED);
+        uint64_t nb = __atomic_exchange_n(&sst[i].nb, 0, __ATOMIC_RELAXED), nsb = __atomic_exchange_n(&sst[i].nsb, 0, __ATOMIC_RELAXED);
+        if (n || nb) row[nr].imm = i, row[nr].n = n, row[nr].ns = ns, row[nr].nb = nb, row[nr].nsb = nsb, nr++;
+    }
+    for (int i = 1; i < nr; i++)   // by the non-blocking time, the runtime's own cost
+        for (int j = i; j > 0 && row[j].ns > row[j - 1].ns; j--) { __typeof__(row[0]) x = row[j]; row[j] = row[j - 1]; row[j - 1] = x; }
+    rt_log("kernel: frame %llu: SVCs over %llu frames (calls/frame, host time/frame and per call; blocking ones apart):",
+           (unsigned long long)frame, (unsigned long long)frames);
+    for (int i = 0; i < nr && i < 12; i++)
+        rt_log("kernel:   svc %#04x: %8.1f calls/f %7.3f ms/f (%5.2f us each) | blocked %6.1f calls/f %7.3f ms/f",
+               row[i].imm, (double)row[i].n / frames, row[i].ns / 1e6 / frames, row[i].n ? row[i].ns / 1e3 / row[i].n : 0.0,
+               (double)row[i].nb / frames, row[i].nsb / 1e6 / frames);
 }

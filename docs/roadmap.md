@@ -38,9 +38,11 @@ Radeon 660M APU (Ryzen 5 7535HS), Linux, 720p internal resolution.
 A race frame takes ~24 ms on the console (15/11/2026): GPU ~7 ms and replay ~14 ms run beside the game, so the game's
 own threads are the critical path (~72 ms a frame of CPU among them, measured with `MKW_PROFILE_FN`; docs/ps5.md).
 
-- **Now: the synchronization calls.** ~16-20 ms a frame of the game threads' time goes to `nn::os::YieldThread`
-  (`svc 0x0B`, from the job system's spin loops at `main+0x4520` and `main+0x5660`), `WaitForAddress` and
-  `SignalToAddress` (light events and message queues), and the SDK's critical sections. Cheaper SVC paths first.
+- **Done: the synchronization calls' own cost.** `MKW_SVC_STATS` (15/11/2026, a race): ~590 yields a frame
+  (`nn::os::YieldThread`, the job system's spin loops at `main+0x4520` and `main+0x5660`) at 8.3 us each, 4.9 ms a frame;
+  SignalToAddress ~510 a frame at 3.95 us. `MKW_YIELD_NOLOCK` skips the kernel lock when no waiter may take the core
+  (6.3-7 us a yield), but the frame did not move (A/B -0.12 ms): the loops spin waiting for other jobs, and a cheaper
+  spin only spins more (yields 595 -> 650 a frame). The time is the game's own job chain: the translator's code next.
 - **To do: the CPU translator's loops.** The generated C keeps only some guest registers in locals (the rest in
   `c->x[]`) and puts a compiler barrier on every loop's back edge, so a loop reloads its state from memory each turn;
   the barrier is needed only where a loop waits on memory another thread writes. Broadest lever (all game code),

@@ -453,7 +453,7 @@ void perf_present(uint64_t frame) {
     if (!seqwatch_window()) hostfn_time_report(frame);
     uint64_t now = kern_now_ns(), d = last ? now - last : 0;
     prof_sampler_frame(frame, now, last ? d : 0);
-    if ((rt_trace & RT_TRACE_PERF) && frame && frame % 600 == 0) pstat_report(frame, 600);
+    if ((rt_trace & RT_TRACE_PERF) && frame && frame % 600 == 0) pstat_report(frame, 600), kern_svc_stats_report(frame, 600);
     {   // MKW_PROFILE_FN=1 (kernel_diag.c), from MKW_PROFILE_FROM's frame: a report every 600 frames
         static int fn_mode = -1, fn_started;
         static uint64_t fn_from, fn_last;

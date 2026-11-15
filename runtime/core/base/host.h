@@ -227,6 +227,7 @@ extern volatile int g_fn_sampling;
 void kern_fn_note(uint64_t addr, uint64_t lr);                // from fnprof_hit, while g_fn_sampling
 int kern_fn_profile_start(uint32_t period_us);                // 1 when the sampler runs
 void kern_fn_profile_report(uint64_t frame, uint64_t frames); // every 600 frames: the top functions
+void kern_svc_stats_report(uint64_t frame, uint64_t frames);  // MKW_SVC_STATS: the kernel's SVCs, every 600 frames
 void impcensus_write(void);                                // the census file, at exit (prof_write)
 extern volatile int impcensus_on;
 void hostfn_time_report(uint64_t frame);                   // MKW_HOST_TIME=1: host functions by time, every 600 presents
