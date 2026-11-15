@@ -459,6 +459,7 @@ extern "C" int launcher_run(void) {
         SDL_RenderPresent(L.ren);
     }
     if (L.save_pending) opt_save_tick(1);
+    cfg_save_drain();
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();

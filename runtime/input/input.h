@@ -19,14 +19,19 @@ void input_poll_player(int player, uint64_t *buttons, int32_t *lx, int32_t *ly, 
 // The in-game menu (ui/menu/menu.h): input_menu(1) when it opens (input_poll reports nothing, the cursor is released), (0) when
 // it closes (nothing until every button and stick direction is released). Independent of input_block.
 void input_menu(int open);
-// The gamepad alone, for the menu: Switch button bits and the left stick (up +y). 0 without a connected gamepad.
-// Minus+Plus combo and the neutral pad while the menu is open (input_map.c, window-system free): *held is the caller's memory
-// of the combo, sticks are lx, ly, rx, ry. Returns 1 in the poll where the combo goes down (toggle the menu once).
-int input_menu_gate(int *held, int menu_open, uint64_t *buttons, int32_t sticks[4]);
+// The overlay samples physical PAD_* positions before gameplay bindings. Up is +y. A new generation invalidates
+// held UI input after a disconnect, replacement or system interception.
+typedef struct {
+    uint32_t buttons, generation;
+    int32_t lx, ly;
+    int connected, east_confirm;
+} InputMenuPad;
+void input_menu_pad(InputMenuPad *sample);
+// Start/Back held together (down bits 0 and 1). Latches until both are released. Returns 1 on the opening edge.
+int input_menu_chord(int *held, unsigned down);
 int input_overlay_gate(int *held, uint64_t *buttons);   // L3+R3: 1 in the poll both go down
 int input_script_inject(const char *line);   // MKW_CTL: "<ticks from now> <button> [hold]", 1 when queued
 void input_script_phase(const char *node);   // seqwatch.c: a phase started (script lines "<node>+<ticks> ...")
-int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly);
 // The device the player used last (a press, or a stick moved): the button icons follow it (ui/glyphs/glyphs.c). Before any
 // input, the gamepad when one is connected. Any thread.
 enum { INPUT_DEVICE_KEYBOARD = 1, INPUT_DEVICE_PAD = 2 };
@@ -46,6 +51,8 @@ enum { INPUT_CAPTURE_NONE, INPUT_CAPTURE_KEY, INPUT_CAPTURE_PAD, INPUT_CAPTURE_C
 struct InputMap;   // input_map.h
 void input_map_snapshot(struct InputMap *m);
 int input_capture(int reset, int *id);
+// Capture only the keyboard/mouse, using the overlay's already sampled controller separately.
+int input_capture_key(int reset, int *id);
 // The character on a punctuation key (KEY_MINUS..KEY_GRAVE) in the keyboard layout in use, 0 for another key.
 uint32_t input_key_char(int key);
 // F8, the flight recorder's key (no KEY_ id), held while the game window is in front.

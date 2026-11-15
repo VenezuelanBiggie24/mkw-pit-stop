@@ -5,11 +5,6 @@
 // The Vulkan set-up follows LAS Recomp's runtime/nvn/vulkan/imgui_glue.cpp (https://github.com/peiikai/LASRecomp @
 // da35b83a9611d046a9a681aae668d7085954d37f, MIT, Copyright (c) 2026 Peiikai): dynamic rendering into the swapchain
 // image, an internal descriptor pool, vertex buffers rotated over more frames than are in flight.
-//
-// The look (colours, rounding, the tab bar with L / R and Q / E, the window over a dimmed game) follows
-// SavageWindRecomp's runtime/ui/menu.mm (https://github.com/Revivedx/SavageWindRecomp @
-// 575ad88e02f9a89a9a885d90039d48af33c982f4, MIT, Copyright (c) 2026 Revivedx and the Savage Wind Recomp contributors,
-// Copyright (c) 2026 Peiikai); the pages are rows of option_rows.cpp.
 #include <atomic>
 #include <math.h>
 #include <stdio.h>
@@ -17,9 +12,9 @@
 #include <string.h>
 
 #include "imgui.h"
-#include "imgui_internal.h"   // SetFocusID, NavCursorVisible
+#include "imgui_internal.h"
 #include "backends/imgui_impl_vulkan.h"
-#include "ui/menu/binds_page.h"
+#include "ui/menu/pit_stop.h"
 #include "ui/menu/menu_look.h"
 #include "ui/menu/settings_tabs.h"
 #include "ui/menu/option_rows.h"
@@ -27,8 +22,6 @@
 extern "C" {
 #include "cfg.h"
 #include "fs.h"
-#include "input.h"
-#include "input_map.h"
 #include "perfmon.h"
 #include "platform/platform.h"
 #include "sysinfo.h"
@@ -38,8 +31,6 @@ extern "C" {
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void vk_queue_lock(void);
 void vk_queue_unlock(void);
-extern const char rt_port_version[];
-int rt_game_version(void);
 }
 
 // ---- open state, any thread
@@ -112,46 +103,6 @@ static void drain_events(ImGuiIO &io) {
     }
 }
 
-// ---- gamepad navigation: the Switch buttons of our SDL3 gamepad to ImGui's gamepad keys. Nintendo layout: A (east)
-// activates, B (south) cancels.
-static const struct { int bit; ImGuiKey key; } pad_keys[] = {
-    {B_A, ImGuiKey_GamepadFaceDown}, {B_B, ImGuiKey_GamepadFaceRight}, {B_X, ImGuiKey_GamepadFaceUp},
-    {B_Y, ImGuiKey_GamepadFaceLeft}, {B_L, ImGuiKey_GamepadL1}, {B_R, ImGuiKey_GamepadR1},
-    {B_ZL, ImGuiKey_GamepadL2}, {B_ZR, ImGuiKey_GamepadR2}, {B_LEFT, ImGuiKey_GamepadDpadLeft},
-    {B_UP, ImGuiKey_GamepadDpadUp}, {B_RIGHT, ImGuiKey_GamepadDpadRight}, {B_DOWN, ImGuiKey_GamepadDpadDown},
-};
-static uint64_t pad_prev;   // buttons at the last frame; a button held when the menu opened counts once released
-static int stick_dir = -1;  // the D-pad button the left stick holds, -1 none
-
-// The left stick moves the cursor as the D-pad does (ImGui's own stick handling only scrolls the page): past half way
-// it holds the D-pad direction of its larger axis, kept until that axis falls under 0.35; ImGui repeats a held one.
-static int stick_to_dpad(int32_t lx, int32_t ly) {
-    float x = lx / 32767.0f, y = ly / 32767.0f;   // y up
-    float along = stick_dir == B_LEFT ? -x : stick_dir == B_RIGHT ? x : stick_dir == B_UP ? y : stick_dir == B_DOWN ? -y : 0;
-    if (stick_dir >= 0 && along > 0.35f) return stick_dir;
-    if (fmaxf(fabsf(x), fabsf(y)) < 0.5f) return -1;
-    return fabsf(x) > fabsf(y) ? (x < 0 ? B_LEFT : B_RIGHT) : (y > 0 ? B_UP : B_DOWN);
-}
-
-static void pad_events(ImGuiIO &io, int reset) {
-    uint64_t b;
-    int32_t lx, ly;
-    int have = input_pad_read(&b, &lx, &ly);
-    if (have) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
-    else io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
-    stick_dir = stick_to_dpad(lx, ly);
-    if (stick_dir >= 0) b |= 1ull << stick_dir;
-    if (reset) {
-        pad_prev = b;
-        return;
-    }
-    for (const auto &k : pad_keys) {
-        uint64_t m = 1ull << k.bit;
-        if ((b ^ pad_prev) & m) io.AddKeyEvent(k.key, (b & m) != 0);
-    }
-    pad_prev = b;
-}
-
 // ---- ImGui and its Vulkan back end (present path)
 static int g_ctx_ok;              // context made
 static std::atomic<int> g_failed; // set-up failed for good (the menu stays closed)
@@ -169,7 +120,6 @@ static void make_context(void) {
     ImGuiIO &io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.BackendPlatformName = "mkw_menu";
     menu_look_style(g_base_style);
     ImGui::GetStyle() = g_base_style;
@@ -215,6 +165,7 @@ static int vk_up(const MenuTarget *t) {
 // Made again when the window height changes; the old texture goes after the queue is idle (CreateFontsTexture).
 static int fonts_up(float scale) {
     menu_look_fonts(scale);
+    pit_load_fonts(scale);
     vk_queue_lock();   // the upload submits on the queue and waits for it
     int ok = ImGui_ImplVulkan_CreateFontsTexture();
     vk_queue_unlock();
@@ -230,9 +181,9 @@ extern "C" void menu_vk_release(void) {
 }
 
 // ---- test hooks
-// MKW_MENU_TEST=<frame>[:<frames per page>]: at that presented frame the menu opens on its first tab; each tab stays
+// MKW_MENU_TEST=<frame>[:<frames per page>]: at that presented frame the menu opens on Display; each category stays
 // <frames per page> frames (default 30) and its last frame's swapchain image goes to MKW_MENU_TEST_DIR (default: the
-// working directory) as menu-test-<frame>-<page>.png; after the last tab the menu closes.
+// working directory) as menu-test-<frame>-<page>.png; after the last category the menu closes.
 // MKW_MENU_TEST_SET=<frame>:<key>=<value>[,<key>=<value>...][;<frame>:...]: cfg_set of each key (MKW_ prefix
 // optional) at that presented frame; changes live settings with no input, menu open or not. mkw.ini is written only by
 // the pseudo-key SAVE=1 (cfg_save, as a row change does; a failed write shows the menu's save note).
@@ -293,48 +244,6 @@ static void test_apply_sets(uint64_t frame) {
 }
 
 
-// ---- the window: title, tabs (L / R or Q / E switch), the page, and the bottom row with "Continue" and "Quit game".
-// B on the gamepad and Esc close it.
-static void layout_menu(uint32_t w, uint32_t h, float scale) {
-    ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), ImVec2((float)w, (float)h), IM_COL32(0, 0, 0, 120));
-    float ww = fminf(w * 0.88f, 1400 * scale), wh = fminf(h * 0.86f, 820 * scale);
-    ImGui::SetNextWindowPos(ImVec2(w * 0.5f, h * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(ww, wh), ImGuiCond_Always);
-    ImGui::Begin("##menu", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                                        ImGuiWindowFlags_NoSavedSettings);
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", menu_text(UI_MENU_TITLE));
-    // the port version and the game update, right-aligned on the title line: what a bug report needs first
-    char game[16], version[96];
-    int gv = rt_game_version();
-    snprintf(game, sizeof game, "%d.%d.%d", gv / 100, gv / 10 % 10, gv % 10);
-    snprintf(version, sizeof version, menu_text(UI_MENU_VERSION), rt_port_version, game);
-    ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - ImGui::CalcTextSize(version).x);
-    ImGui::TextDisabled("%s", version);
-
-    const ImGuiStyle &st = ImGui::GetStyle();
-    float bottom = ImGui::GetFrameHeight() + st.ItemSpacing.y * 2;
-    settings_tabs(scale, bottom);
-
-    // bottom row: the save status on the left, the two buttons on the right
-    ImGui::Spacing();
-    float y = ImGui::GetCursorPosY();
-    if (!cfg_last_save_ok()) {   // stays until a save succeeds; the settings hold for the session
-        ImGui::SetCursorPosY(y + st.FramePadding.y);
-        ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1), "%s", menu_text(UI_MENU_SAVE_FAILED));
-    }
-    const char *cont = menu_text(UI_MENU_CONTINUE), *quit = menu_text(UI_MENU_QUIT);
-    float bw = fmaxf(ImGui::CalcTextSize(cont).x, ImGui::CalcTextSize(quit).x) + st.FramePadding.x * 4;
-    ImGui::SetCursorPos(ImVec2(ImGui::GetWindowWidth() - st.WindowPadding.x - bw * 2 - st.ItemSpacing.x, y));
-    if (ImGui::Button(cont, ImVec2(bw, 0))) set_open(0);
-    ImGui::SameLine();
-    if (ImGui::Button(quit, ImVec2(bw, 0))) gfx_window_request_close();
-    bool was_modal = settings_modal();
-    settings_tabs_done();
-    if (!was_modal && (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)))
-        set_open(0);
-    ImGui::End();
-}
-
 static int g_save_pending;   // a changed setting still waits for its write to mkw.ini (opt_save_tick)
 
 // ---- the performance overlay (MKW_PERF_OVERLAY), in the top right corner. "fps": the frame rate over the presents of
@@ -343,7 +252,6 @@ static int g_save_pending;   // a changed setting still waits for its write to m
 // Off, it costs a cfg_version load per present.
 static unsigned g_perf_ver = ~0u;
 static int g_perf_mode;                  // 0 off, 1 fps, 2 full
-static std::atomic<int> g_perf_save;     // F10 changed the mode: mkw.ini is written on the present thread
 static uint64_t g_perf_last_ns, g_perf_win_ns, g_perf_max_ns;
 static int g_perf_frames;
 static char g_perf_text[96];
@@ -351,9 +259,10 @@ static char g_perf_text[96];
 static int perf_mode_of(const char *s) { return !strcmp(s, "full") ? 2 : !strcmp(s, "fps") ? 1 : 0; }
 
 extern "C" void menu_perf_cycle(void) {
+    if (cfg_from_env("MKW_PERF_OVERLAY")) return;
     static const char *const modes[] = {"off", "fps", "full"};
     cfg_set("MKW_PERF_OVERLAY", modes[(perf_mode_of(cfg_value("MKW_PERF_OVERLAY")) + 1) % 3]);
-    g_perf_save.store(1);
+    cfg_save_request(400);
 }
 
 // The device the game renders on, for perfmon's GPU counters (by LUID), NVML (by name) and ADL (by PCI bus, else
@@ -587,7 +496,6 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     *shot = NULL;
     if (!g_test.parsed) test_parse();
     if (g_test.next_set < g_test.n_sets && frame >= g_test.sets[g_test.next_set].frame) test_apply_sets(frame);
-    if (g_perf_save.exchange(0)) cfg_save();
     perf_tick(plat_now_ns(), t);
     bool open = g_open.load(std::memory_order_relaxed);
     if (!open) {
@@ -595,7 +503,6 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
         if (g_test.at && !g_test.opened && frame >= g_test.at) {
             g_test.opened = frame;
             g_test.page = 0;
-            settings_select(0);
             set_open(1);
             open = true;
         } else if (!g_perf_mode) {
@@ -620,46 +527,52 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
         ImGui::GetStyle().ScaleAllSizes(scale);
         g_style_scale = scale;
     }
-    settings_list_gpus(t->instance);
+    if (open) settings_list_gpus(t->instance);
     ImGuiIO &io = ImGui::GetIO();
     int reset = g_reset.exchange(0);
     if (reset) {
         io.ClearInputKeys();
         io.ClearInputMouse();
         g_last_ns = 0;
-        settings_opened();   // opening: the first row has the cursor
-        if (GImGui->OpenPopupStack.Size) ImGui::ClosePopupToLevel(0, false);   // a confirmation left open on closing
+        pit_open();
     }
     io.DisplaySize = ImVec2((float)t->width, (float)t->height);
     double dt = g_last_ns ? (t0 - g_last_ns) / 1e9 : 1 / 60.0;
     io.DeltaTime = (float)(dt < 1e-4 ? 1e-4 : dt > 0.1 ? 0.1 : dt);
     g_last_ns = t0;
-    if (!open) {   // the overlay alone: no input reaches ImGui
-    } else if (g_test.page < 0) {
-        drain_events(io);
-        pad_events(io, reset);
-    } else {   // the test hook's pages: the user's input in a background test window must not change settings
+    InputMenuPad pad = {};
+    if (reset || g_test.page >= 0) {
         plat_mutex_lock(&ev_lock);
         ev_n = 0;
         plat_mutex_unlock(&ev_lock);
     }
+    if (open && g_test.page < 0) {
+        if (!reset) drain_events(io);
+        input_menu_pad(&pad);
+    }
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
-    if (open) layout_menu(t->width, t->height, scale);
-    perf_draw(t, scale);
+    if (open) {
+        PitResult result = pit_frame((float)t->width, (float)t->height, pad, g_test.page);
+        if (result == PitResult::Resume) set_open(0);
+        else if (result == PitResult::Quit) {
+            opt_save_tick(1);
+            gfx_window_request_close();
+        }
+    } else {
+        perf_draw(t, scale);
+    }
     ImGui::Render();
     if (open) g_save_pending = opt_save_tick(0);
     g_cost_ns += plat_now_ns() - t0;
     if (g_test.page >= 0 && frame >= g_test.opened + g_test.per_page * (uint64_t)(g_test.page + 1)) {
-        static char path[512];   // this frame's image goes to a file; then the next tab, or the menu closes
+        static char path[512];   // save this category, then advance or close
         const char *dir = cfg_get("MKW_MENU_TEST_DIR");
         snprintf(path, sizeof path, "%s/menu-test-%llu-%d.png", dir ? dir : ".", (unsigned long long)frame, g_test.page);
         *shot = path;
         if (++g_test.page == TAB_COUNT) {
             g_test.page = -1;
             set_open(0);   // the next frame lays out nothing
-        } else {
-            settings_select(g_test.page);
         }
     }
     return ImGui::GetDrawData()->TotalVtxCount > 0;

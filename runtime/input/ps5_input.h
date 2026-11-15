@@ -12,6 +12,7 @@ typedef struct {
 
 typedef struct {
     uint64_t buttons;
+    uint8_t down[PAD_COUNT];
     int32_t lx, ly, rx, ry;
     bool valid;
 } Ps5PadState;

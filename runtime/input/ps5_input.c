@@ -32,4 +32,5 @@ void input_ps5_update(Ps5PadState *state, bool connected, const Ps5PadSample *sa
         .rx = stick(sample->rx), .ry = -stick(sample->ry),
         .valid = true,
     };
+    memcpy(state->down, down, sizeof down);
 }

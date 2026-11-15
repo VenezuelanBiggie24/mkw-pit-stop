@@ -13,7 +13,7 @@ end's regression test runs over captures instead (`tools/test/`).
 | `test_ps5_guest_span.py`, `ps5_guest_span_host.c` | Checked cross-block host copies, in-flight pin quiescence and stale copy-out after backing reuse |
 | `ps5_guest_span_backing.c` | Linux mapping model shared by the guest-span and QueryMemory tests |
 | `test_ps5_query_memory.py`, `ps5_query_memory.c` | Real SVC 0x06 handler and memory-info layout, checked copy-out across guest boundaries, a racing protection change, and desktop null-output compatibility |
-| `test_ps5_input.py`, `ps5_input_host.c` | DualSense mapping through the real MKW bindings, axis and trigger thresholds, and stale-input clearing |
+| `test_ps5_input.py`, `ps5_input_host.c` | DualSense physical buttons and gameplay bindings, axis and trigger thresholds, and stale-input clearing |
 
 Usage: `uv run pytest tests`
 

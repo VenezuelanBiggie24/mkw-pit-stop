@@ -27,6 +27,10 @@ int cfg_from_env(const char *name);
 // when missing), comments and every other line stay byte for byte. 1 on success or with nothing to write.
 int cfg_save(void);
 int cfg_save_to(const char *path);
+// Coalesce overlay writes on a worker. Ordinary edits pass 400 ms, close passes 0.
+void cfg_save_request(unsigned delay_ms);
+// Finish queued writes before window shutdown. Call off the game and present threads.
+void cfg_save_drain(void);
 
 // Reset (the menu's "Reset all settings to defaults"). Removes the active line of each key (names without MKW_, any
 // case) from mkw.ini at the next cfg_save and its value from memory, so the consumer's own default applies again; the

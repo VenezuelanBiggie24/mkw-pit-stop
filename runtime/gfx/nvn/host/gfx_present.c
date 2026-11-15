@@ -86,6 +86,7 @@ void gfx_window_focus_changed(int in) {
 // done.
 void gfx_window_closed(void) {
     rt_log("gfx: window closed; exiting");
+    cfg_save_drain();
     fs_save_flush();
     vk_pipeline_save();
     prof_write();   // plat_exit runs no atexit handlers

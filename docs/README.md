@@ -8,4 +8,5 @@
 | [images/](images/README.md) | Screenshots of the start screen for the README |
 | [roadmap.md](roadmap.md) | The open work in order of priority, with the measurements behind it: the serial race frame first |
 | [ps5.md](ps5.md) | Native PS5 port plan and smoke-test sequence |
+| [pit-stop.md](pit-stop.md) | Controller-first design for the in-game settings overlay |
 | `release-template.md` | What every release's notes repeat (install, updating, known issues, reporting); `tools/build/notes.py` fills it with the version's section of `CHANGELOG.md` |

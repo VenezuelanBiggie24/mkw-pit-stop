@@ -1,6 +1,6 @@
 # runtime/ui
 
-Menu (F1) and performance overlay (F10) with Dear ImGui, drawn on the present path (`gfx_present.c`), and the start
+Pit Stop (F1 or Start+Back) and performance overlay (F10) with Dear ImGui, drawn on the present path (`gfx_present.c`), and the start
 screen, before the game. Every subfolder with headers is on the include path (`tools/build/build.py`): `#include` goes
 by name.
 

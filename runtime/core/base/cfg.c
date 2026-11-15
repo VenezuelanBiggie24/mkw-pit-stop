@@ -42,7 +42,7 @@ static const char *const known[] = {
     "LOCALE", "MEMORY", "MESH_COMPUTE", "MENU_LANG", "MENU_TEST",
     "MENU_TEST_DIR", "MENU_TEST_SET", "MINIMAL_LAYOUT", "MIRROR_GAP", "MOTION", "MOUSE_SENS",
     "ONE_PER_CORE", "OPERATION_MODE", "PAD_LAYOUT", "PERF_OVERLAY", "PERF_SLOW_MS", "PICTURE_FIT", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SKIP", "PIPE_STALL", "PIPE_SYNC", "PIPE_WAIT", "POOL_RELEASE",
-    "PROFILE", "PROFILE_CHAINS", "PROFILE_DIR", "PROFILE_FRAMES", "PROFILE_FROM", "PROFILE_ONLY", "PROFILE_US",
+    "PROFILE", "PROFILE_CHAINS", "PROFILE_DIR", "PROFILE_FRAMES", "PROFILE_FN", "PROFILE_FROM", "PROFILE_ONLY", "PROFILE_US",
     "PROFILE_MAIN", "PROFILE_RENDER", "PS5_FAST_LOCK", "PS5_OVERLAP", "PS5_PW_BATCH", "PS5_TSC_CLOCK", "PW_HOT", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REEXEC",
     "BIND_XF", "REG_LATE", "REG_QUEUED", "REPLAY_ASYNC", "REPLAY_PAR", "REPLAY_PAR_FIRST", "REPLAY_PAR_MORE", "REPLAY_PAR_SMALL", "REPLAY_PAR_THREADS", "SNAP_BG", "USNAP_CMP",
     "REPLAY_CHECK", "RESOLUTION", "RESOLVE_CHECK", "ROMFS", "ROMFS_MODS", "ROMFS_PATCHES",
@@ -630,6 +630,58 @@ static void load_ini(void) {
         snprintf(var, sizeof var, PREFIX "%s", entries[i].key);
         if (getenv(var)) rt_log("cfg: %s is set in the environment and overrides mkw.ini", var);
     }
+}
+
+// The save lock only protects this queue. The worker runs file I/O without it, so a present or input poll can
+// change the deadline while a write is in progress.
+static PlatMutex save_lock = PLAT_MUTEX_INIT;
+static PlatCond save_cv = PLAT_COND_INIT;
+static uint64_t save_due;
+static int save_worker_started, save_writing, save_draining;
+
+static void save_worker(void *unused) {
+    (void)unused;
+    plat_mutex_lock(&save_lock);
+    for (;;) {
+        while (!save_due) plat_cond_wait(&save_cv, &save_lock);
+        uint64_t now = plat_now_ns();
+        if (!save_draining && now < save_due) {
+            plat_cond_wait_ns(&save_cv, &save_lock, save_due - now);
+            continue;
+        }
+        save_due = 0;
+        save_writing = 1;
+        plat_mutex_unlock(&save_lock);
+        cfg_save();
+        plat_mutex_lock(&save_lock);
+        save_writing = 0;
+        plat_cond_broadcast(&save_cv);
+    }
+}
+
+void cfg_save_request(unsigned delay_ms) {
+    plat_mutex_lock(&save_lock);
+    if (!save_worker_started) {
+        save_worker_started = plat_thread_spawn(save_worker, NULL, "settings save", 64 << 10);
+        if (!save_worker_started) {
+            __atomic_store_n(&save_ok, 0, __ATOMIC_RELEASE);
+            plat_mutex_unlock(&save_lock);
+            rt_log("cfg: could not start the settings save thread");
+            return;
+        }
+    }
+    save_due = plat_now_ns() + delay_ms * 1000000ull;
+    plat_cond_broadcast(&save_cv);
+    plat_mutex_unlock(&save_lock);
+}
+
+void cfg_save_drain(void) {
+    plat_mutex_lock(&save_lock);
+    save_draining = 1;
+    plat_cond_broadcast(&save_cv);
+    while (save_due || save_writing) plat_cond_wait(&save_cv, &save_lock);
+    save_draining = 0;
+    plat_mutex_unlock(&save_lock);
 }
 
 void cfg_init(void) {

@@ -50,6 +50,8 @@ static unsigned pad_layout_seen;
 static volatile int32_t pad_layout_shown = -1;   // pad_layout for the menu (any thread), -1 without a gamepad
 static volatile int32_t last_device;           // INPUT_DEVICE_* the player used last, 0 none yet (input_last_device)
 static int motion_thread;            // 0 not started, 1 running, -1 off (MKW_MOTION=0, no SDL)
+static uint32_t menu_pad_generation;  // under lock
+static volatile int32_t g_menu;        // open (1) or closed and waiting for a neutral pad (2)
 
 #ifndef MKW_PS5_NATIVE
 // SDL buttons of the gamepad inputs (input_map.h PAD_*), by position; PAD_ZL and PAD_ZR are the triggers (axes).
@@ -74,6 +76,7 @@ struct pad {
     uint32_t held, pressed;
     float left_x, left_y, right_x, right_y, l2, r2;
 };
+static Ps5PadState ps5_pads[PS5_PAD_PLAYERS];
 struct pad_reading {
     uint32_t buttons;
     uint8_t left_x, left_y, right_x, right_y, l2, r2;
@@ -181,6 +184,7 @@ static void scan_pads(void) {
 
 // Player 1's new gamepad: its rumble, button labels and layout.
 static void pad_adopt(void) {
+    menu_pad_generation++;
     pad_rumble = SDL_GetBooleanProperty(SDL_GetGamepadProperties(pad), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
     pad_east_a = SDL_GetGamepadButtonLabel(pad, SDL_GAMEPAD_BUTTON_EAST) == SDL_GAMEPAD_BUTTON_LABEL_A;
     for (int i = 0; i < 4; i++) {
@@ -282,7 +286,8 @@ static void start(void) {
         return;
     }
     pad_rumble = 1;
-    pad_east_a = 0;
+    pad_east_a = 1;    // PS5 gameplay Auto follows the Switch positions
+
     plat_xchg32(&pad_labels[0], PAD_LABEL_CROSS);
     plat_xchg32(&pad_labels[1], PAD_LABEL_CIRCLE);
     plat_xchg32(&pad_labels[2], PAD_LABEL_SQUARE);
@@ -319,38 +324,23 @@ static void gamepad_physical(SDL_Gamepad *g, uint8_t pd[PAD_COUNT]) {
     pd[PAD_ZR] = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > TRIGGER_ON;
 }
 
-// A gamepad's buttons (Switch bits after the layout and the MKW_BIND_* lines) and sticks.
-static void gamepad_read(SDL_Gamepad *g, int layout, uint64_t *b, int32_t sl[2], int32_t sr[2]) {
-    uint8_t pd[PAD_COUNT] = {0};
+static void gamepad_read(SDL_Gamepad *g, uint8_t pd[PAD_COUNT], int32_t sl[2], int32_t sr[2]) {
     gamepad_physical(g, pd);
-    *b |= input_map_pad_buttons(pd, layout);
     sl[0] = axis(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX));
     sl[1] = -axis(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY));
     sr[0] = axis(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX));
     sr[1] = -axis(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY));
 }
 
-// Under lock, state 1: player 1's gamepad inputs by position; 0 without a connected gamepad.
-static int pad_physical(uint8_t pd[PAD_COUNT]) {
+static int pad_read(uint8_t pd[PAD_COUNT], int32_t sl[2], int32_t sr[2], int *back, int *touchpad) {
     pads_update();
     if (!pad || !SDL_GamepadConnected(pad)) return 0;
-    gamepad_physical(pad, pd);
-    return 1;
-}
-
-// Under lock, state 1: player 1's gamepad buttons and sticks; 0 without a connected gamepad.
-static int pad_read(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
-    pads_update();
-    if (!pad || !SDL_GamepadConnected(pad)) return 0;
-    gamepad_read(pad, pad_layout_get(), b, sl, sr);
+    gamepad_read(pad, pd, sl, sr);
+    *touchpad = input_pad_label(PAD_SOUTH) == PAD_LABEL_CROSS && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_TOUCHPAD);
+    *back = pd[PAD_BACK] || *touchpad;
     return 1;
 }
 #else
-static void pads_update(void) {
-    struct pad ignored;
-    pad_poll(&ignored);
-}
-
 static Ps5PadSample ps5_sample_of(const struct pad_reading *raw) {
     const uint32_t held = raw->buttons;
     return (Ps5PadSample){
@@ -359,7 +349,8 @@ static Ps5PadSample ps5_sample_of(const struct pad_reading *raw) {
             [PAD_WEST] = !!(held & PS5_PAD_SQUARE), [PAD_NORTH] = !!(held & PS5_PAD_TRIANGLE),
             [PAD_LSTICK] = !!(held & PS5_PAD_L3), [PAD_RSTICK] = !!(held & PS5_PAD_R3),
             [PAD_L] = !!(held & PS5_PAD_L1), [PAD_R] = !!(held & PS5_PAD_R1),
-            [PAD_START] = !!(held & PS5_PAD_OPTIONS), [PAD_BACK] = !!(held & (PS5_PAD_CREATE | PS5_PAD_TOUCH_PAD)),   // Create: OcarinaPS5's Back
+            [PAD_START] = !!(held & PS5_PAD_OPTIONS),
+            [PAD_BACK] = !!(held & (PS5_PAD_CREATE | PS5_PAD_TOUCH_PAD)),
             [PAD_DPAD_LEFT] = !!(held & PS5_PAD_LEFT), [PAD_DPAD_UP] = !!(held & PS5_PAD_UP),
             [PAD_DPAD_RIGHT] = !!(held & PS5_PAD_RIGHT), [PAD_DPAD_DOWN] = !!(held & PS5_PAD_DOWN),
         },
@@ -368,56 +359,76 @@ static Ps5PadSample ps5_sample_of(const struct pad_reading *raw) {
     };
 }
 
-static int ps5_player_read(int player, uint64_t *b, int32_t sl[2], int32_t sr[2], uint8_t pd[PAD_COUNT]) {
-    if (player < 0 || player >= PS5_PAD_PLAYERS) return 0;
-    const struct pad_reading *readings = NULL;
-    int count = pad_player_readings(player, &readings);
-    bool connected = (pad_players() & (1u << player)) != 0;
-    if (count <= 0 || !connected) return 0;
-    const struct pad_reading *latest = &readings[count - 1];
-    Ps5PadSample sample = ps5_sample_of(latest);
-    if (pd) {
-        memcpy(pd, sample.down, PAD_COUNT);
-        pd[PAD_ZL] = sample.l2 >= 128;
-        pd[PAD_ZR] = sample.r2 >= 128;
+static void pads_update(void) {
+    struct pad ignored = {0};
+    pad_poll(&ignored);
+    uint32_t connected = pad_players();
+    for (int p = 0; p < PS5_PAD_PLAYERS; ++p) {
+        const struct pad_reading *readings;
+        int count = pad_player_readings(p, &readings);
+        Ps5PadState *sample = &ps5_pads[p];
+        bool was_valid = sample->valid;
+        bool interrupted = false;
+        for (int i = 0; p == 0 && i < count - 1; ++i) {
+            if (!readings[i].connected || (readings[i].buttons & PS5_PAD_INTERCEPTED)) {
+                interrupted = true;
+                break;
+            }
+        }
+        if (count > 0) {
+            const struct pad_reading *latest = &readings[count - 1];
+            Ps5PadSample raw = ps5_sample_of(latest);
+            input_ps5_update(sample, (connected & (1u << p)) && latest->connected, &raw);
+        } else {
+            input_ps5_update(sample, (connected & (1u << p)) != 0, NULL);
+        }
+        if (p == 0 && (interrupted || was_valid != sample->valid)) menu_pad_generation++;
     }
-    Ps5PadState ps = {0};
-    input_ps5_update(&ps, latest->connected, &sample);
-    if (!ps.valid) return 0;
-    *b |= ps.buttons;
-    sl[0] = ps.lx; sl[1] = ps.ly;
-    sr[0] = ps.rx; sr[1] = ps.ry;
+}
+
+static int ps5_player_read(int player, uint8_t pd[PAD_COUNT], int32_t sl[2], int32_t sr[2]) {
+    if (player < 0 || player >= PS5_PAD_PLAYERS || !ps5_pads[player].valid) return 0;
+    const Ps5PadState *ps = &ps5_pads[player];
+    memcpy(pd, ps->down, PAD_COUNT);
+    sl[0] = ps->lx; sl[1] = ps->ly;
+    sr[0] = ps->rx; sr[1] = ps->ry;
     return 1;
 }
 
-static int pad_physical(uint8_t pd[PAD_COUNT]) {
-    uint64_t b = 0;
-    int32_t sl[2] = {0, 0}, sr[2] = {0, 0};
+static int pad_read(uint8_t pd[PAD_COUNT], int32_t sl[2], int32_t sr[2], int *back, int *touchpad) {
     pads_update();
-    return ps5_player_read(0, &b, sl, sr, pd);
-}
-
-static int pad_read(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
-    pads_update();
-    (void)pad_layout_get();
-    return ps5_player_read(0, b, sl, sr, NULL);
+    int ok = ps5_player_read(0, pd, sl, sr);
+    *back = *touchpad = pd[PAD_BACK];
+    return ok;
 }
 #endif
 
-static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
+static int poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     uint64_t b = 0;
     int32_t sl[2] = {0, 0}, sr[2] = {0, 0};
+    int toggle = 0, physical_held = 0;
     plat_mutex_lock(&lock);
     if (!state) start();
     if (state > 0) {
         binds_refresh();
         uint64_t pb = 0;
         int32_t pl[2] = {0, 0}, pr[2] = {0, 0};
+        uint8_t pd[PAD_COUNT] = {0};
+        int back = 0, touchpad = 0;
         if (state == 1) {
-            pad_read(&pb, pl, pr);
-            b = pb, sl[0] = pl[0], sl[1] = pl[1], sr[0] = pr[0], sr[1] = pr[1];
+            pad_read(pd, pl, pr, &back, &touchpad);
+            static int chord_held;
+            toggle = input_menu_chord(&chord_held, pd[PAD_START] | (back << 1));
+            static const uint8_t neutral[PAD_COUNT];
+            physical_held = memcmp(pd, neutral, PAD_COUNT) != 0 || touchpad ||
+                            abs(pl[0]) > 11468 || abs(pl[1]) > 11468 ||
+                            abs(pr[0]) > 11468 || abs(pr[1]) > 11468;
+            if (chord_held) pd[PAD_START] = pd[PAD_BACK] = 0;
+            b = pb = input_map_pad_buttons(pd, pad_layout_get());
+            sl[0] = pl[0], sl[1] = pl[1], sr[0] = pr[0], sr[1] = pr[1];
         }
         uint64_t kb = 0;
+        int keyboard_stick = 0;
         if (ikb_foreground()) {
             uint8_t down[KEY_COUNT] = {0};
             // Mouse buttons count only while the cursor is captured, and a button already held when the capture began
@@ -434,44 +445,48 @@ static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx
             }
             was_captured = cap;
             kb = input_map_buttons(down);
-            b |= kb;
             int32_t k[2];
             input_map_stick(down, 0, k);
-            if (k[0] || k[1]) kb |= 1;
+            keyboard_stick = k[0] || k[1];
             pick(&sl[0], &sl[1], k[0], k[1]);
             input_map_stick(down, 1, k);
             pick(&sr[0], &sr[1], k[0], k[1]);
             mouse_camera(k);
             pick(&sr[0], &sr[1], k[0], k[1]);
         }
+        static int key_chord;
+        toggle |= input_menu_chord(&key_chord, (unsigned)(kb >> B_PLUS) & 3u);
+        int keyboard_moved = kb != 0 || keyboard_stick;
+        if (key_chord) kb &= ~(3ull << B_PLUS);
+        b |= kb;
         // the device last used, for the button icons (ui/glyphs/glyphs.c): a press, or a stick past a third of its travel
-        int pad_moved = pb || abs(pl[0]) > 11000 || abs(pl[1]) > 11000 || abs(pr[0]) > 11000 || abs(pr[1]) > 11000;
-        if (kb && !pad_moved) plat_xchg32(&last_device, INPUT_DEVICE_KEYBOARD);
-        else if (pad_moved && !kb) plat_xchg32(&last_device, INPUT_DEVICE_PAD);
+        int pad_moved = physical_held || pb || abs(pl[0]) > 11000 || abs(pl[1]) > 11000 ||
+                        abs(pr[0]) > 11000 || abs(pr[1]) > 11000;
+        if (keyboard_moved && !pad_moved) plat_xchg32(&last_device, INPUT_DEVICE_KEYBOARD);
+        else if (pad_moved && !keyboard_moved) plat_xchg32(&last_device, INPUT_DEVICE_PAD);
     }
     script_apply(&b, sl, sr, 0);
     skip_input(&b);
     rec_apply(b, sl, sr);
-    // Minus and Plus held together (gamepad or keys) open or close the menu and never reach the game
-    static int combo_held;
-    int32_t st[4] = {sl[0], sl[1], sr[0], sr[1]};
-    int toggle = input_menu_gate(&combo_held, menu_is_open(), &b, st);
+    if (toggle || menu_is_open()) {
+        b = 0;
+        sl[0] = sl[1] = sr[0] = sr[1] = 0;
+    }
     static int overlay_held;   // L3+R3 step the performance overlay (F10)
     int overlay = input_overlay_gate(&overlay_held, &b);
-    sl[0] = st[0], sl[1] = st[1], sr[0] = st[2], sr[1] = st[3];
     plat_mutex_unlock(&lock);
     if (toggle) menu_toggle();
     if (overlay) menu_perf_cycle();
     stick_bits(&b, sl[0], sl[1], B_SL_LEFT);
     stick_bits(&b, sr[0], sr[1], B_SR_LEFT);
     *buttons = b; *lx = sl[0]; *ly = sl[1]; *rx = sr[0]; *ry = sr[1];
+    return physical_held;
 }
 
 // Text entry (swkbd_*.c): while it is open the game reads no input, as behind the keyboard applet; after it closes
 // the game reads none until every button and stick direction is released, so the press that closed it stays there.
 // g_block: 0 off, 1 text entry open, 2 closed, waiting for the release. The cursor is released while it is open.
 static volatile int32_t g_block;
-static volatile int32_t g_menu;   // the in-game menu, the same way (input_menu)
 
 int input_cursor_allowed(void) {
     const char *in = cfg_get("MKW_INPUT");
@@ -498,8 +513,8 @@ static int blocked(volatile int32_t *flag, uint64_t buttons) {
 }
 
 void input_poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
-    poll_merged(buttons, lx, ly, rx, ry);
-    int text = blocked(&g_block, *buttons), menu = blocked(&g_menu, *buttons);
+    int physical_held = poll_merged(buttons, lx, ly, rx, ry);
+    int text = blocked(&g_block, *buttons), menu = blocked(&g_menu, *buttons || physical_held);
     if (!text && !menu) return;
     *buttons = 0; *lx = *ly = *rx = *ry = 0;
 }
@@ -534,14 +549,17 @@ void input_poll_player(int player, uint64_t *buttons, int32_t *lx, int32_t *ly, 
     plat_mutex_lock(&lock);
     if (!state) start();
     if (state == 1 && player < INPUT_MAX_PLAYERS) {
+        uint8_t pd[PAD_COUNT] = {0};
         binds_refresh();
         pads_update();
 #ifndef MKW_PS5_NATIVE
         SDL_Gamepad *g = extra[player];
-        if (g && SDL_GamepadConnected(g))
-            gamepad_read(g, input_pad_layout_pick(cfg_value("MKW_PAD_LAYOUT"), extra_east_a[player]), &b, sl, sr);
+        if (g && SDL_GamepadConnected(g)) {
+            gamepad_read(g, pd, sl, sr);
+            b = input_map_pad_buttons(pd, input_pad_layout_pick(cfg_value("MKW_PAD_LAYOUT"), extra_east_a[player]));
+        }
 #else
-        (void)ps5_player_read(player, &b, sl, sr, NULL);
+        if (ps5_player_read(player, pd, sl, sr)) b = input_map_pad_buttons(pd, pad_layout_get());
 #endif
     }
     plat_mutex_unlock(&lock);
@@ -552,18 +570,22 @@ void input_poll_player(int player, uint64_t *buttons, int32_t *lx, int32_t *ly, 
     *buttons = b; *lx = sl[0]; *ly = sl[1]; *rx = sr[0]; *ry = sr[1];
 }
 
-int input_pad_read(uint64_t *buttons, int32_t *lx, int32_t *ly) {
-    uint64_t b = 0;
+void input_menu_pad(InputMenuPad *sample) {
+    uint8_t pd[PAD_COUNT] = {0};
     int32_t sl[2] = {0, 0}, sr[2] = {0, 0};
+    int back = 0, touchpad = 0;
     plat_mutex_lock(&lock);
     if (!state) start();
-    if (state > 0) binds_refresh();
-    int ok = state == 1 && pad_read(&b, sl, sr);
+    int connected = state == 1 && pad_read(pd, sl, sr, &back, &touchpad);
+    if (connected) (void)pad_layout_get();
+    uint32_t bits = 0;
+    for (int p = PAD_SOUTH; p < PAD_COUNT; ++p)
+        bits |= (uint32_t)(pd[p] != 0) << p;
+    // Confirm on the button the game reads as A: the east one in the Nintendo layout (MKW_PAD_LAYOUT auto on the PS5,
+    // where a DualSense follows the Switch's positions: Circle confirms, Cross goes back), the south one in Xbox's.
+    int east_confirm = connected && pad_layout_get() == PAD_LAYOUT_NINTENDO;
+    *sample = (InputMenuPad){bits, menu_pad_generation, sl[0], sl[1], connected, east_confirm};
     plat_mutex_unlock(&lock);
-    *buttons = b;
-    *lx = sl[0];
-    *ly = sl[1];
-    return ok;
 }
 
 uint16_t rumble_motor(float a, float curve, float strength) {
@@ -595,28 +617,36 @@ void input_map_snapshot(InputMap *m) {
     plat_mutex_unlock(&lock);
 }
 
-int input_capture(int reset, int *id) {
-    static uint8_t prev_k[KEY_COUNT], prev_p[PAD_COUNT];
+int input_capture_key(int reset, int *id) {
+    static uint8_t prev_k[KEY_COUNT];
     static int prev_esc;
-    uint8_t k[KEY_COUNT] = {0}, p[PAD_COUNT] = {0};
+    uint8_t k[KEY_COUNT] = {0};
     int fg = ikb_foreground();
     for (int i = 1; i < KEY_COUNT; i++) k[i] = fg && ikb_down(i);
     int esc = fg && ikb_escape();
-    plat_mutex_lock(&lock);
-    if (!state) start();
-    if (state == 1) pad_physical(p);
-    plat_mutex_unlock(&lock);
     int got = INPUT_CAPTURE_NONE;
     if (!reset) {
         if (esc && !prev_esc) got = INPUT_CAPTURE_CANCEL;
         for (int i = 1; i < KEY_COUNT && !got; i++)
             if (k[i] && !prev_k[i]) got = INPUT_CAPTURE_KEY, *id = i;
-        for (int i = 1; i < PAD_COUNT && !got; i++)
-            if (p[i] && !prev_p[i]) got = INPUT_CAPTURE_PAD, *id = i;
     }
     memcpy(prev_k, k, sizeof k);
-    memcpy(prev_p, p, sizeof p);
     prev_esc = esc;
+    return got;
+}
+
+int input_capture(int reset, int *id) {
+    static uint32_t previous, generation;
+    InputMenuPad pad;
+    input_menu_pad(&pad);
+    uint32_t pressed = !reset && generation == pad.generation ? pad.buttons & ~previous : 0;
+    previous = pad.buttons;
+    generation = pad.generation;
+    int got = input_capture_key(reset, id);
+    if (!got && pressed) {
+        *id = __builtin_ctz(pressed);
+        return INPUT_CAPTURE_PAD;
+    }
     return got;
 }
 

@@ -42,6 +42,7 @@ static struct {
 static char g_note[160];     // what the last change took or swapped, after its row's description
 static int g_note_action = -1;
 static uint64_t g_note_until;
+static int pit_action = -1, pit_cell;
 
 static const char *action_label(int a) { return menu_text((UiTextId)(UI_BIND_A + a)); }
 
@@ -87,6 +88,9 @@ static const char *key_label(int k, char *buf, size_t n) {
 // A gamepad button: the label the open pad has on a face button, else its place on the pad.
 static const char *pad_label(int p) {
     if (p == PAD_NONE) return "";
+#ifdef MKW_PS5_NATIVE
+    if (p == PAD_BACK) return menu_text(UI_PIT_TOUCHPAD);
+#endif
     switch (input_pad_label(p)) {
     case PAD_LABEL_A: return "A";
     case PAD_LABEL_B: return "B";
@@ -131,22 +135,36 @@ static void set_note(int action, UiTextId fmt, const char *a, const char *b) {
     g_note_until = plat_now_ns() + 5000000000ull;
 }
 
-// cell 0, 1: a key (KEY_NONE clears it); 2: a gamepad button (PAD_NONE clears it).
+// Cell 0 or 1 is a key, cell 2 is a pad button, and input 0 clears the cell.
+// Changing a pad can also swap another action. Reject a swap into an environment-owned binding.
 static void change(int action, int cell, int id) {
-    InputMap m;
-    input_map_snapshot(&m);
-    char buf[48];
-    if (cell < 2) {
-        int lost = input_map_set_key(&m, action, cell, id);
-        if (lost >= 0) set_note(action, UI_BINDS_TAKEN, key_label(id, buf, sizeof buf), action_label(lost));
-    } else {
-        int other = input_map_set_pad(&m, action, shown_layout(), id);
-        if (other >= 0) set_note(action, UI_BINDS_SWAPPED, action_label(action), action_label(other));
+    InputMap map, before;
+    input_map_snapshot(&map);
+    before = map;
+    int other = cell < 2 ? input_map_set_key(&map, action, cell, id)
+                         : input_map_set_pad(&map, action, shown_layout(), id);
+    for (int a = 0; a < ACTION_COUNT; ++a) {
+        char var[40], old[256], next[256];
+        snprintf(var, sizeof var, "MKW_BIND_%s", input_action_name(a));
+        if (!cfg_from_env(var)) continue;
+        input_map_line(&before, a, old, sizeof old);
+        input_map_line(&map, a, next, sizeof next);
+        if (strcmp(old, next)) {
+            set_note(action, UI_PIT_BIND_LOCKED, var, "");
+            return;
+        }
     }
-    write_lines(&m);
+    if (other >= 0) {
+        char buf[48];
+        if (cell < 2) set_note(action, UI_BINDS_TAKEN, key_label(id, buf, sizeof buf), action_label(other));
+        else set_note(action, UI_BINDS_SWAPPED, action_label(action), action_label(other));
+    } else {
+        g_note_action = -1;
+    }
+    write_lines(&map);
 }
 
-static void reset_binds(void) {
+void binds_reset(void) {
     char names[ACTION_COUNT][32];
     const char *keys[ACTION_COUNT];
     for (int a = 0; a < ACTION_COUNT; a++) {
@@ -242,7 +260,63 @@ void binds_rows(float scale) {
 }
 
 void binds_after_page(void) {
-    if (g_reset_asked && g_cap.action < 0) reset_binds();
+    if (g_reset_asked && g_cap.action < 0) binds_reset();
     g_reset_asked = false;
     capture_window();
+}
+
+static void pit_bind_row(int action, int cell, const char *value, int pad, int kind) {
+    char var[40], label[160], reason[100];
+    snprintf(var, sizeof var, "MKW_BIND_%s", input_action_name(action));
+    if (cell < 2) snprintf(label, sizeof label, "%s  ·  %d", action_label(action), cell + 1);
+    else snprintf(label, sizeof label, "%s", action_label(action));
+    bool locked = cfg_from_env(var);
+    if (locked) snprintf(reason, sizeof reason, "%s %s", menu_text(UI_MENU_SET_BY_ENV), var);
+    const char *note = g_note_action == action && plat_now_ns() < g_note_until ? g_note : nullptr;
+    int result = opt_pit_bind(label, menu_text(action_desc(action)), *value ? value : "-", locked ? reason : nullptr,
+                              note, pad, kind);
+    if (result == 1) {
+        pit_action = action;
+        pit_cell = cell;
+    } else if (result == 2) {
+        change(action, cell, 0);
+    }
+}
+
+bool binds_pit_rows(bool keyboard, int kind) {
+    InputMap map;
+    input_map_snapshot(&map);
+    int layout = shown_layout();
+    if (keyboard) {
+        for (int a = 0; a < ACTION_COUNT; ++a) {
+            uint8_t keys[2] = {};
+            input_map_keys_of(&map, a, keys, 2);
+            for (int cell = 0; cell < 2; ++cell) {
+                char buf[48];
+                pit_bind_row(a, cell, key_label(keys[cell], buf, sizeof buf), 0, kind);
+            }
+        }
+    } else {
+        for (int a : kButtons) {
+            uint8_t pad = PAD_NONE;
+            input_map_pads_of(&map, a, layout, &pad, 1);
+            pit_bind_row(a, 2, pad_label(pad), pad, kind);
+        }
+    }
+    return opt_pit_action(menu_text(UI_BINDS_RESET), menu_text(UI_BINDS_RESET_DESC));
+}
+
+bool binds_pit_active(void) { return pit_action >= 0; }
+bool binds_pit_keyboard(void) { return pit_cell < 2; }
+
+void binds_pit_cancel(void) { pit_action = -1; }
+
+void binds_pit_apply(int input) {
+    if (pit_action < 0) return;
+    change(pit_action, pit_cell, input);
+    binds_pit_cancel();
+}
+
+void binds_pit_title(char *text, size_t size) {
+    snprintf(text, size, menu_text(pit_cell == 2 ? UI_BINDS_PRESS_PAD : UI_BINDS_PRESS_KEY), action_label(pit_action));
 }

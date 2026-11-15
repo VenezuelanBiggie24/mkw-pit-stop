@@ -325,34 +325,25 @@ void input_mouse_stick(int32_t dx, int32_t dy, double dt_s, float sens, int32_t 
     out[1] = (int32_t)lrint(y);
 }
 
-// Minus and Plus held together open or close the menu. *held: latched from the poll where both go down until neither is
-// down (the caller keeps it). Every poll of the latch reports neither to the game, so releasing one button first does not
-// leak the other; Minus alone before Plus reaches the game unchanged. With the menu open the game sees a neutral pad.
-// Returns 1 in the poll where both go down: the caller toggles the menu once.
-static int chord(int *held, uint64_t *buttons, uint64_t combo) {
-    uint64_t raw = *buttons & combo;
-    int edge = 0;
+static int chord(int *held, uint64_t raw, uint64_t combo) {
     if (*held) {
         *held = raw != 0;
     } else if (raw == combo) {
         *held = 1;
-        edge = 1;
+        return 1;
     }
-    if (*held) *buttons &= ~combo;
-    return edge;
+    return 0;
 }
 
-int input_menu_gate(int *held, int menu_open, uint64_t *buttons, int32_t sticks[4]) {
-    int edge = chord(held, buttons, 1ull << B_MINUS | 1ull << B_PLUS);
-    if (menu_open) {
-        *buttons = 0;
-        sticks[0] = sticks[1] = sticks[2] = sticks[3] = 0;
-    }
-    return edge;
+int input_menu_chord(int *held, unsigned down) {
+    return chord(held, down & 3u, 3);
 }
 
 // Both stick clicks held together step the performance overlay as F10 does (a gamepad has no F10: the Steam Deck in
 // Game Mode). The same latch as the menu's above; the game sees neither click while it holds.
 int input_overlay_gate(int *held, uint64_t *buttons) {
-    return chord(held, buttons, 1ull << B_STICK_L | 1ull << B_STICK_R);
+    const uint64_t combo = 1ull << B_STICK_L | 1ull << B_STICK_R;
+    int edge = chord(held, *buttons & combo, combo);
+    if (*held) *buttons &= ~combo;
+    return edge;
 }

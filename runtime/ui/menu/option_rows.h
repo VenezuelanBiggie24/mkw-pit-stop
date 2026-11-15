@@ -49,6 +49,25 @@ bool opt_button(const char *id, UiTextId label, UiTextId desc, const char *value
 bool opt_slider(const char *key, UiTextId label, float lo, float hi, UiTextId desc, float step = 1,
                 const char *fmt = "%g");
 
+// Pit Stop uses the same option edits with its own focus and viewport. Rows are submitted in order, including
+// those outside the viewport. The preceding frame's row count bounds navigation before drawing.
+struct OptPitPage { int row, top, count; };
+struct OptPitLayout { ImVec2 pos; float width, row_height, gap, scale; int visible; };
+struct OptPitInput { int move, adjust; bool select, clear; };
+struct OptPitDetail { char label[160], text[768]; bool adjust, select, clear; };
+inline constexpr ImU32 kPitInk = IM_COL32(16, 24, 43, 255);
+inline constexpr ImU32 kPitWhite = IM_COL32(244, 247, 255, 255);
+inline constexpr ImU32 kPitIce = IM_COL32(169, 231, 255, 255);
+inline constexpr ImU32 kPitFocus = IM_COL32(255, 224, 84, 255);
+inline constexpr ImU32 kPitNavy = IM_COL32(16, 31, 59, 255);
+inline constexpr ImU32 kPitLine = IM_COL32(80, 108, 149, 255);
+void opt_pit_begin(OptPitPage &page, const OptPitLayout &layout, const OptPitInput &input);
+OptPitDetail opt_pit_end(void);
+bool opt_pit_action(const char *label, const char *description, bool enter = false);
+// Returns 1 to capture, 2 to clear, or 0. The binding cells can supply their physical icon.
+int opt_pit_bind(const char *label, const char *description, const char *value, const char *lock, const char *note,
+                 int pad, int kind);
+
 // Binding rows (remapping on the Controls tab): a label and three cells, each selectable on its own (left / right move between them).
 // opt_bind_header: the column titles above them. opt_bind_row: key is the setting's name without MKW_ (BIND_A; the
 // description names it when the environment sets it); a disabled cell shows its text greyed and takes no cursor; note

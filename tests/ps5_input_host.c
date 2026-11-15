@@ -13,6 +13,7 @@ const char *cfg_value(const char *name) { return strcmp(name, "MKW_PAD_LAYOUT") 
 
 static void neutral(const Ps5PadState *state) {
     assert(!state->valid && !state->buttons && !state->lx && !state->ly && !state->rx && !state->ry);
+    for (int i = 0; i < PAD_COUNT; ++i) assert(!state->down[i]);
 }
 
 int main(void) {
@@ -40,6 +41,8 @@ int main(void) {
     const uint64_t expected = BUTTON(B_A) | BUTTON(B_B) | BUTTON(B_X) | BUTTON(B_Y) |
                               BUTTON(B_PLUS) | BUTTON(B_MINUS) | BUTTON(B_UP);
     assert(state.buttons == (expected | BUTTON(B_ZR)));
+    assert(state.down[PAD_SOUTH] && state.down[PAD_START] && state.down[PAD_BACK] && state.down[PAD_DPAD_UP]);
+    assert(!state.down[PAD_ZL] && state.down[PAD_ZR]);
     assert(state.lx == -32767 && state.ly == 32767 && state.rx == 32767 && state.ry == -32767);
 
     sample.l2 = 128;
@@ -50,6 +53,7 @@ int main(void) {
     sample.ry = 137;
     input_ps5_update(&state, true, &sample);
     assert(state.buttons == (expected | BUTTON(B_ZL)));
+    assert(state.down[PAD_ZL] && !state.down[PAD_ZR]);
     assert(!state.lx && state.ly < -2500 && state.rx < -2500 && !state.ry);
 
     // Default: by position. Cross (south) is B, circle (east) A, square (west) Y, triangle (north) X.
@@ -69,6 +73,7 @@ int main(void) {
     pad_layout = NULL;
     input_ps5_update(&state, true, NULL);
     assert(state.valid && state.buttons == BUTTON(B_A));
+    assert(state.down[PAD_SOUTH] && !state.down[PAD_EAST]);
 
     sample.intercepted = true;
     input_ps5_update(&state, true, &sample);

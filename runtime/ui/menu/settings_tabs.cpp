@@ -42,6 +42,7 @@ void settings_list_gpus(VkInstance inst) {
     g_gpu_n = (int)n;
 }
 
+#ifndef MKW_PS5_NATIVE
 // Window sizes: the common 16:9 sizes that fit the monitor, the 1920x1080 default and the current size.
 static const int kSizes[][2] = {{1280, 720}, {1366, 768}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3200, 1800},
                                 {3840, 2160}};
@@ -75,6 +76,8 @@ static void row_window_size(void) {
     }
     opt_choice_list("MKW_WINDOW_SIZE", UI_MENU_WINDOW_SIZE, pv, pn, n, UI_MENU_WINDOW_SIZE_DESC);
 }
+
+#endif
 
 static void row_gpu(void) {
     const char *vals[MAX_GPUS + 1], *names[MAX_GPUS + 1];
@@ -133,15 +136,20 @@ static const char *present_note(void) {
 }
 
 // ---- the tabs
-static void tab_screen(float scale) {
-    opt_begin("##screen", scale);
+static void row_performance(bool pit) {
+    static const UiTextId perf[] = {UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL};
+    opt_choice("MKW_PERF_OVERLAY", pit ? UI_PIT_HUD : UI_MENU_PERF_OVERLAY, perf, 3, UI_MENU_PERF_OVERLAY_DESC);
+}
+
+static void rows_screen(bool pit) {
+#ifndef MKW_PS5_NATIVE
     opt_toggle("MKW_FULLSCREEN", UI_MENU_FULLSCREEN, UI_MENU_FULLSCREEN_DESC);
     row_window_size();
+#endif
     static const UiTextId present[] = {UI_MENU_PRESENT_MAILBOX, UI_MENU_PRESENT_VSYNC, UI_MENU_PRESENT_IMMEDIATE};
     opt_choice("MKW_VK_PRESENT", UI_MENU_PRESENT, present, 3, UI_MENU_PRESENT_DESC, present_note());
     row_gpu();
-    static const UiTextId perf[] = {UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL};
-    opt_choice("MKW_PERF_OVERLAY", UI_MENU_PERF_OVERLAY, perf, 3, UI_MENU_PERF_OVERLAY_DESC);
+    row_performance(pit);
     {   // the game's present interval (core/boot/game.c), live
         static const char *const vals[] = {"auto", "30", "60"};
         const char *names[3] = {menu_text(UI_MENU_FPS_AUTO), "30", "60"};
@@ -150,7 +158,6 @@ static void tab_screen(float scale) {
     opt_group(UI_MENU_GRAPHICS);
     static const UiTextId fit[] = {UI_MENU_PICTURE_FIT_KEEP, UI_MENU_PICTURE_FIT_STRETCH};
     opt_choice("MKW_PICTURE_FIT", UI_MENU_PICTURE_FIT, fit, 2, UI_MENU_PICTURE_FIT_DESC);
-    opt_end();
 }
 
 // The Quality presets: the values each one gives the four rows below it, in the order
@@ -186,12 +193,12 @@ static void row_quality(void) {
     const char *picked = cfg_value("MKW_QUALITY");
     for (int p = 0; p < NPRESETS; p++)
         if (!strcmp(picked, kPresets[p].name))
-            for (int k = 0; k < 4; k++) cfg_set(kQualityKeys[k], kPresets[p].v[k]);
+            for (int k = 0; k < 4; k++)
+                if (!cfg_from_env(kQualityKeys[k])) cfg_set(kQualityKeys[k], kPresets[p].v[k]);
 }
 
 // What the graphics card draws and how much: each row defaults to the console's.
-static void tab_graphics(float scale) {
-    opt_begin("##graphics", scale);
+static void rows_graphics(void) {
     {   // the game's internal render resolution (sdk/fs/romfs_res.c), read at start
         static const char *const vals[] = {"original", "540", "720", "900", "1080", "1440", "2160"};   // 2160: issue #55
         const char *names[7] = {menu_text(UI_MENU_RESOLUTION_ORIGINAL), "540p", "720p", "900p", "1080p", "1440p", "2160p"};
@@ -222,19 +229,20 @@ static void tab_graphics(float scale) {
     }
     static const UiTextId mode[] = {UI_MENU_MODE_DOCKED, UI_MENU_MODE_HANDHELD};
     opt_choice("MKW_OPERATION_MODE", UI_MENU_OPERATION_MODE, mode, 2, UI_MENU_OPERATION_MODE_DESC);
-    opt_end();
 }
 
-static void tab_game(float scale) {
-    opt_begin("##game", scale);
-    row_game_lang();
-    opt_end();
+static void row_volume(bool pit) {
+    opt_slider("MKW_VOLUME", pit ? UI_PIT_VOLUME : UI_MENU_VOLUME, 0, 100, UI_MENU_VOLUME_DESC, 5, "%.0f %%");
 }
 
-static void tab_sound(float scale) {
-    opt_begin("##sound", scale);
-    opt_slider("MKW_VOLUME", UI_MENU_VOLUME, 0, 100, UI_MENU_VOLUME_DESC, 5, "%.0f %%");
-    opt_end();
+static void row_rumble(void) {
+    opt_slider("MKW_RUMBLE_STRENGTH", UI_MENU_RUMBLE_STRENGTH, 0, 300, UI_MENU_RUMBLE_STRENGTH_DESC, 10, "%.0f %%");
+}
+
+void settings_pit_quick(void) {
+    row_volume(true);
+    row_rumble();
+    row_performance(true);
 }
 
 // "in use: Xbox" under the layout when it is Automatic and a gamepad is connected; NULL otherwise.
@@ -257,30 +265,30 @@ static const char *button_icons_note(void) {
     return note;
 }
 
-static void tab_controls(float scale) {
-    opt_begin("##controls", scale);
+static void rows_controls(void) {
     static const UiTextId layout[] = {UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO, UI_MENU_PAD_LAYOUT_XBOX};
     opt_choice("MKW_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 3, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());
     static const UiTextId icons[] = {UI_MENU_AUTO, UI_MENU_ICONS_NINTENDO, UI_MENU_ICONS_XBOX, UI_MENU_ICONS_PLAYSTATION,
                                      UI_MENU_ICONS_KEYBOARD};
     opt_choice("MKW_BUTTON_ICONS", UI_MENU_BUTTON_ICONS, icons, 5, UI_MENU_BUTTON_ICONS_DESC, button_icons_note());
+#ifndef MKW_PS5_NATIVE
     opt_toggle("MKW_MOTION", UI_MENU_MOTION, UI_MENU_MOTION_DESC);
-    opt_slider("MKW_RUMBLE_STRENGTH", UI_MENU_RUMBLE_STRENGTH, 0, 300, UI_MENU_RUMBLE_STRENGTH_DESC, 10, "%.0f %%");
+#endif
+    row_rumble();
     opt_slider("MKW_RUMBLE_CURVE", UI_MENU_RUMBLE_CURVE, 0.2f, 1.5f, UI_MENU_RUMBLE_CURVE_DESC, 0.05f, "%.2f");
+#ifndef MKW_PS5_NATIVE
     opt_toggle("MKW_RUMBLE_TRIGGERS", UI_MENU_RUMBLE_TRIGGERS, UI_MENU_RUMBLE_TRIGGERS_DESC);
     opt_slider("MKW_MOUSE_SENS", UI_MENU_MOUSE_SENS, 0, 10, UI_MENU_MOUSE_SENS_DESC, 0.1f, "%.1f");
-    binds_rows(scale);
-    opt_end();
-    binds_after_page();
+#endif
 }
 
-static void tab_menu(float scale) {
-    opt_begin("##menu", scale);
+static void rows_menu(void) {
     static const UiTextId langs[] = {UI_MENU_MENU_LANG_AUTO, UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_RU,
                                      UI_MENU_LANGNAME_ES};
     opt_choice("MKW_MENU_LANG", UI_MENU_MENU_LANG, langs, 4, UI_MENU_MENU_LANG_DESC);
-    opt_toggle("MKW_UPDATE_CHECK", UI_MENU_UPDATE_CHECK, UI_MENU_UPDATE_CHECK_DESC);   // ui/launcher/launcher_update.cpp
-    opt_end();
+#ifndef MKW_PS5_NATIVE
+    opt_toggle("MKW_UPDATE_CHECK", UI_MENU_UPDATE_CHECK, UI_MENU_UPDATE_CHECK_DESC);
+#endif
 }
 
 // ---- Advanced: the testing and troubleshooting keys, the bug report helpers and the reset of every setting
@@ -307,7 +315,7 @@ static bool validation_layer_present(void) {
 }
 
 // Every setting the menu shows back to its default (the environment's keys stay), written to mkw.ini.
-static void reset_all(void) {
+void settings_reset_all(void) {
     const char *keys[128];
     int n = 0;
     for (const CfgMeta *m; n < 128 && (m = cfg_meta_at(n)); n++) keys[n] = m->key;
@@ -317,6 +325,7 @@ static void reset_all(void) {
 }
 
 // A button's result shown in its value for a few seconds: 1 done (done_text), -1 failed.
+#ifndef MKW_PS5_NATIVE
 struct ActionNote { uint64_t until; int result; };
 
 static const char *action_value(const ActionNote &a, UiTextId done_text) {
@@ -326,9 +335,9 @@ static const char *action_value(const ActionNote &a, UiTextId done_text) {
 
 static void action_done(ActionNote &a, bool ok) { a = {plat_now_ns() + 3000000000ull, ok ? 1 : -1}; }
 
-static void tab_advanced(float scale) {
-    static ActionNote copy_note, log_note;
-    opt_begin("##advanced", scale);
+#endif
+
+static bool rows_advanced(void) {
     opt_text(UI_MENU_ADV_WARNING, true);
 
     opt_group(UI_MENU_GROUP_SCHED);
@@ -382,6 +391,8 @@ static void tab_advanced(float scale) {
         snprintf(rec_path, sizeof rec_path, "%s/input-record.txt", sysinfo_log_folder(dir, sizeof dir) ? dir : ".");
     }
     row_set_or_not("MKW_INPUT_RECORD", UI_MENU_INPUT_RECORD, UI_MENU_INPUT_RECORD_DESC, rec_path);
+#ifndef MKW_PS5_NATIVE
+    static ActionNote copy_note, log_note;
     if (opt_button("##open_log", UI_MENU_OPEN_LOG, UI_MENU_OPEN_LOG_DESC, action_value(log_note, UI_MENU_OPEN_LOG))) {
         char dir[512];
         bool ok = sysinfo_log_folder(dir, sizeof dir) && plat_open_folder(dir);
@@ -392,8 +403,11 @@ static void tab_advanced(float scale) {
         static char text[16384];
         action_done(copy_note, sysinfo_text(text, sizeof text) > 0 && plat_clipboard_set(text));
     }
-    bool ask = opt_button("##reset", UI_MENU_RESET, UI_MENU_RESET_DESC);
-    opt_end();
+#endif
+    return opt_button("##reset", UI_MENU_RESET, UI_MENU_RESET_DESC);
+}
+
+static void reset_popup(bool ask) {
     if (ask) ImGui::OpenPopup("##reset_confirm");   // at the level BeginPopupModal looks it up
 
     // the confirmation, over the menu; Cancel has the cursor first
@@ -412,7 +426,7 @@ static void tab_advanced(float scale) {
         if (ImGui::IsWindowAppearing()) ImGui::SetItemDefaultFocus();
         ImGui::SameLine();
         if (ImGui::Button(yes, ImVec2(bw, 0))) {
-            reset_all();
+            settings_reset_all();
             close = true;
         }
         if (ImGui::IsKeyPressed(ImGuiKey_Escape, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false))
@@ -426,8 +440,7 @@ static void tab_advanced(float scale) {
 }
 
 // Shortcuts the console does not have (core/hacks/): all off by default, marked experimental.
-static void tab_hacks(float scale) {
-    opt_begin("##hacks", scale);
+static void rows_hacks(void) {
     opt_text(UI_MENU_HACKS_WARNING, true);
     // the first four values; "until" is the run scripts' (core/hacks/turbo.c)
     static const UiTextId turbo[] = {UI_MENU_OFF, UI_MENU_TURBO_HOLD, UI_MENU_TURBO_TOGGLE, UI_MENU_ON};
@@ -439,7 +452,20 @@ static void tab_hacks(float scale) {
     static const UiTextId quick[] = {UI_MENU_OFF, UI_MENU_QUICK_RACE_TT, UI_MENU_QUICK_RACE_FREE};
     opt_choice("MKW_QUICK_RACE", UI_MENU_QUICK_RACE, quick, 3, UI_MENU_QUICK_RACE_DESC);
     opt_toggle("MKW_FREEZE_KEYS", UI_MENU_FREEZE_KEYS, UI_MENU_FREEZE_KEYS_DESC);
-    opt_end();
+}
+
+bool settings_rows(int tab, bool pit) {
+    switch (tab) {
+    case TAB_SCREEN: rows_screen(pit); break;
+    case TAB_GRAPHICS: rows_graphics(); break;
+    case TAB_GAME: row_game_lang(); break;
+    case TAB_SOUND: row_volume(pit); break;
+    case TAB_CONTROLS: rows_controls(); break;
+    case TAB_MENU: rows_menu(); break;
+    case TAB_ADVANCED: return rows_advanced();
+    case TAB_HACKS: rows_hacks(); break;
+    }
+    return false;
 }
 
 static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_SCREEN, UI_MENU_TAB_GRAPHICS, UI_MENU_TAB_GAME,
@@ -481,16 +507,14 @@ void settings_tabs(float scale, float bottom) {
             // only, so behind a second child level the rows scrolled out above the tabs won D-pad moves from the
             // buttons and the tabs (up from "Continue" went to the tabs, down from the tabs to "Continue")
             opt_reserve_bottom(bottom);
-            switch (k) {
-            case TAB_SCREEN: tab_screen(scale); break;
-            case TAB_GRAPHICS: tab_graphics(scale); break;
-            case TAB_GAME: tab_game(scale); break;
-            case TAB_SOUND: tab_sound(scale); break;
-            case TAB_CONTROLS: tab_controls(scale); break;
-            case TAB_MENU: tab_menu(scale); break;
-            case TAB_ADVANCED: tab_advanced(scale); break;
-            case TAB_HACKS: tab_hacks(scale); break;
-            }
+            ImGui::PushID(k);
+            opt_begin("##tab_rows", scale);
+            bool ask = settings_rows(k, false);
+            if (k == TAB_CONTROLS) binds_rows(scale);
+            opt_end();
+            if (k == TAB_CONTROLS) binds_after_page();
+            if (k == TAB_ADVANCED) reset_popup(ask);
+            ImGui::PopID();
             ImGui::EndTabItem();
         }
         g_tab_request = -1;

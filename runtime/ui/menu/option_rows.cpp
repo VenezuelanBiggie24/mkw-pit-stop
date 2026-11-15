@@ -36,6 +36,147 @@ static float g_bottom;                   // opt_reserve_bottom: kept free under 
 static bool g_disable_next;              // opt_disable_next: the next row is greyed out with g_disable_note
 static UiTextId g_disable_note;
 
+static struct {
+    OptPitPage *page;
+    OptPitLayout layout;
+    OptPitInput input;
+    OptPitDetail detail;
+    int index;
+} pit;
+
+static void fit_text(ImDrawList *dl, float x0, float x1, float y, float h, ImU32 col, const char *t, bool centred,
+                     float font_size = 0);
+
+void opt_pit_begin(OptPitPage &page, const OptPitLayout &layout, const OptPitInput &input) {
+    page.row = ImClamp(page.row + input.move, 0, ImMax(page.count - 1, 0));
+    page.top = ImClamp(page.top, ImMax(0, page.row - layout.visible + 1), page.row);
+    page.top = ImMin(page.top, ImMax(0, page.count - layout.visible));
+    pit = {&page, layout, input, {}, 0};
+    g_disable_next = false;
+}
+
+OptPitDetail opt_pit_end(void) {
+    pit.page->count = pit.index;
+    pit.page = nullptr;
+    return pit.detail;
+}
+
+enum class PitRowKind { Action, Link, Toggle, Stepper, Binding };
+
+struct PitOption {
+    const char *label, *description;
+    const char *value = "", *status = nullptr, *note = nullptr;
+    PitRowKind kind = PitRowKind::Action;
+    bool locked = false, at_min = false, at_max = false;
+    int pad = 0, icon_kind = 0;
+};
+
+static int pit_row(const PitOption &v) {
+    int index = pit.index++;
+    const OptPitLayout &l = pit.layout;
+    int slot = index - pit.page->top;
+    if (slot < 0 || slot >= l.visible) return 0;
+    ImVec2 p(l.pos.x, l.pos.y + slot * (l.row_height + l.gap));
+    ImVec2 end(p.x + l.width, p.y + l.row_height);
+    ImGui::SetCursorScreenPos(p);
+    ImGui::PushID(index);
+    bool clicked = ImGui::InvisibleButton("##option", ImVec2(l.width, l.row_height));
+    if (pit.input.move || pit.input.adjust || pit.input.select || pit.input.clear) clicked = false;
+    bool hover = ImGui::IsItemHovered();
+    ImGui::PopID();
+    if (clicked) pit.page->row = index;
+    bool focus = pit.page->row == index;
+    bool adjust = !v.locked && (v.kind == PitRowKind::Stepper || v.kind == PitRowKind::Toggle);
+    bool select = !v.locked && v.kind != PitRowKind::Stepper;
+    bool clear = !v.locked && v.kind == PitRowKind::Binding;
+    if (focus) {
+        OptPitDetail &d = pit.detail;
+        snprintf(d.label, sizeof d.label, "%s", v.label);
+        snprintf(d.text, sizeof d.text, "%s%s%s%s%s", v.description,
+                 v.status ? "\n\n" : "", v.status ? v.status : "", v.note ? "\n\n" : "", v.note ? v.note : "");
+        d.adjust = adjust;
+        d.select = select;
+        d.clear = clear;
+    }
+
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    float s = l.scale, fs = 30 * s, pad = 20 * s, r = 7 * s;
+    float center = (p.y + end.y) * 0.5f;
+    ImU32 ink = focus ? kPitInk : kPitWhite;
+    dl->AddRectFilled(ImVec2(p.x, p.y + 3 * s), ImVec2(end.x, end.y + 3 * s),
+                      focus ? IM_COL32(171, 117, 25, 255) : IM_COL32(5, 15, 29, 255), r);
+    dl->AddRectFilled(p, end, focus ? kPitFocus : hover ? IM_COL32(34, 67, 120, 255) : kPitNavy, r);
+    dl->AddRect(p, end, focus ? kPitFocus : kPitLine, r);
+    dl->AddRectFilled(p, ImVec2(p.x + 6 * s, end.y), focus ? IM_COL32(255, 248, 212, 255) : kPitLine, r,
+                      ImDrawFlags_RoundCornersLeft);
+
+    ImFont *font = ImGui::GetFont();
+    float value_right = end.x - pad;
+    float value_font = 23 * s, note_font = 17 * s;
+    float right_room = l.width * 0.43f;
+    float value_w = font->CalcTextSizeA(value_font, FLT_MAX, 0, v.value).x;
+    float status_w = v.status ? font->CalcTextSizeA(note_font, FLT_MAX, 0, v.status).x : 0;
+    float field = ImMin(right_room, ImMax(value_w, status_w));
+    float arrow = 8 * s, arrow_gap = 12 * s, left_arrow = 0, right_arrow = 0;
+    auto chevron = [&](float x, float direction, ImU32 color) {
+        dl->AddLine(ImVec2(x - direction * arrow * 0.5f, center - arrow),
+                    ImVec2(x + direction * arrow * 0.5f, center), color, 2.3f * s);
+        dl->AddLine(ImVec2(x + direction * arrow * 0.5f, center),
+                    ImVec2(x - direction * arrow * 0.5f, center + arrow), color, 2.3f * s);
+    };
+    if (v.kind == PitRowKind::Link) {
+        chevron(value_right - arrow * 0.5f, 1, focus ? kPitInk : kPitIce);
+        field = arrow + arrow_gap;
+    } else if (adjust) {
+        field = ImMin(right_room - 2 * (arrow + arrow_gap), field);
+        right_arrow = value_right - arrow * 0.5f;
+        value_right -= arrow + arrow_gap;
+        left_arrow = value_right - field - arrow_gap - arrow * 0.5f;
+        if (focus || hover) {
+            ImU32 active = focus ? kPitInk : kPitIce;
+            ImU32 edge = focus ? IM_COL32(138, 114, 45, 255) : kPitLine;
+            chevron(left_arrow, -1, v.at_min ? edge : active);
+            chevron(right_arrow, 1, v.at_max ? edge : active);
+        }
+    }
+    float label_right = adjust ? left_arrow - arrow_gap : value_right - field;
+    if (!*v.value && !v.status && v.kind == PitRowKind::Action) label_right = end.x;
+    fit_text(dl, p.x + pad, label_right - pad * 0.65f, p.y, l.row_height, ink, v.label, false, fs);
+    if (*v.value && field > 0) {
+        float h = v.status ? l.row_height * 0.60f : l.row_height;
+        float value_y = p.y + (v.status ? 4 * s : 0);
+        if (!(v.pad && pad_icon_draw(dl, ImVec2(value_right - 20 * s, value_y + h * 0.5f), 28 * s, v.pad, v.icon_kind))) {
+            float left = value_right - ImMin(field, value_w);
+            fit_text(dl, left, value_right, value_y, h, ink,
+                     v.value, false, value_font);
+        }
+    }
+    if (v.status && field > 0)
+        fit_text(dl, value_right - ImMin(field, status_w), value_right, p.y + l.row_height * 0.54f, l.row_height * 0.40f,
+                 focus ? kPitInk : kPitIce, v.status, false, note_font);
+
+    if (v.locked) return 0;
+    if (clicked && adjust) {
+        float x = ImGui::GetIO().MousePos.x;
+        if (x >= right_arrow - arrow_gap) return 1;
+        if (x >= left_arrow - arrow_gap && x <= left_arrow + arrow_gap) return -1;
+    }
+    if (focus && clear && pit.input.clear) return 3;
+    if (focus && adjust && pit.input.adjust) return pit.input.adjust;
+    return select && (clicked || (focus && pit.input.select)) ? 2 : 0;
+}
+
+bool opt_pit_action(const char *label, const char *description, bool enter) {
+    return pit_row({label, description, "", nullptr, nullptr, enter ? PitRowKind::Link : PitRowKind::Action}) == 2;
+}
+
+int opt_pit_bind(const char *label, const char *description, const char *value, const char *lock, const char *note,
+                 int pad, int kind) {
+    int result = pit_row({label, description, value, lock ? menu_text(UI_PIT_LOCKED) : nullptr, lock ? lock : note,
+                          PitRowKind::Binding, lock != nullptr, false, false, pad, kind});
+    return result ? result - 1 : 0;
+}
+
 // The description pane: this frame's hovered and selected rows, the page's first row, and the last one shown.
 struct Desc { char text[512]; };
 static Desc g_hover, g_focus, g_first, g_shown;
@@ -111,6 +252,7 @@ struct RowView {
     bool is_default;     // the value is the setting's default: the "default" mark, the value not highlighted
     bool arrows;         // a stepper: < value >, the arrows click too
     const char *note;    // under the value instead of the "default" mark; NULL for none
+    bool toggle = false, at_min = false, at_max = false;
 };
 
 // One row: draws it, handles A / click and left / right while selected. Returns 2 (A / click), -1 / +1 (left / right) or
@@ -120,6 +262,16 @@ static int row(const char *key, UiTextId label, UiTextId desc, const RowView &v)
     const char *disabled = g_disable_next ? menu_text(g_disable_note) : NULL;
     g_disable_next = false;
     bool off = disabled || cfg_from_env(key) != 0;
+    if (pit.page) {
+        const char *status = off ? menu_text(UI_PIT_LOCKED) : m && !m->live ? menu_text(UI_PIT_RESTART) : nullptr;
+        char reason[160];
+        if (off) snprintf(reason, sizeof reason, "%s%s%s", disabled ? disabled : menu_text(UI_MENU_SET_BY_ENV),
+                          disabled ? "" : " ", disabled ? "" : key);
+        const char *note = off ? reason : v.note;
+        return pit_row({menu_text(label), menu_text(desc), v.value, status, note,
+                        v.toggle ? PitRowKind::Toggle : v.arrows ? PitRowKind::Stepper : PitRowKind::Action,
+                        off, v.at_min, v.at_max});
+    }
     ImGui::PushID(key);
     ImVec2 p = ImGui::GetCursorScreenPos();
     // h whole pixels: ImGui truncates cursor positions, which rounds a fractional height the other way above the window's
@@ -205,8 +357,7 @@ static int row(const char *key, UiTextId label, UiTextId desc, const RowView &v)
 }
 
 // ---- writing a setting: at once in memory (live settings follow), to mkw.ini a moment later (opt_save_tick)
-static uint64_t g_save_at;   // plat_now_ns deadline of the pending write; 0 none
-static bool g_save_logged;
+static uint64_t g_save_at;   // when to promote a recently queued write on close
 
 static void apply(const char *key, const char *value) {
     if (*value) {
@@ -218,15 +369,15 @@ static void apply(const char *key, const char *value) {
     opt_save_soon();
 }
 
-void opt_save_soon(void) { g_save_at = plat_now_ns() + 400000000ull; }
+void opt_save_soon(void) {
+    g_save_at = plat_now_ns() + 400000000ull;
+    cfg_save_request(400);
+}
 
 int opt_save_tick(int force) {
     if (!g_save_at || (!force && plat_now_ns() < g_save_at)) return g_save_at != 0;
     g_save_at = 0;
-    if (!cfg_save() && !g_save_logged) {
-        g_save_logged = true;
-        rt_log("menu: could not write mkw.ini; the changed settings hold for this session");
-    }
+    if (force) cfg_save_request(0);
     return 0;
 }
 
@@ -236,9 +387,12 @@ bool opt_toggle(const char *key, UiTextId label, UiTextId desc, bool inverted) {
     const CfgMeta *m = cfg_meta(key);
     bool set = cfg_bool(key) != 0, def = m && strcmp(m->def, "0") != 0;
     bool on = set != inverted;   // what the row shows
-    RowView v = {menu_text(on ? UI_MENU_ON : UI_MENU_OFF), set == def, false, NULL};
-    if (!row(key, label, desc, v)) return false;   // any step flips it
-    apply(key, set ? "0" : "1");
+    RowView v = {menu_text(on ? UI_MENU_ON : UI_MENU_OFF), set == def, false, NULL, true, !on, on};
+    int step = row(key, label, desc, v);
+    if (!step) return false;
+    bool next = !pit.page || step == 2 ? !on : step > 0;
+    if (next == on) return false;
+    apply(key, next != inverted ? "1" : "0");
     return true;
 }
 
@@ -248,11 +402,13 @@ bool opt_button(const char *id, UiTextId label, UiTextId desc, const char *value
 }
 
 void opt_group(UiTextId title) {
+    if (pit.page) return;
     ImGui::Dummy(ImVec2(0, 6 * g_scale));
     ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", menu_text(title));
 }
 
 void opt_text(UiTextId text, bool warn) {
+    if (pit.page) return;
     ImGui::PushTextWrapPos(0);
     if (warn) ImGui::TextColored(ImVec4(0.95f, 0.66f, 0.40f, 1), "%s", menu_text(text));
     else ImGui::TextUnformatted(menu_text(text));
@@ -269,7 +425,7 @@ bool opt_choice_list(const char *key, UiTextId label, const char *const *values,
     int def = -1;
     for (int i = 0; m && i < n; i++)
         if (!strcmp(values[i], m->def)) def = i;
-    RowView v = {cur >= 0 ? names[cur] : now, cur == def, true, note};
+    RowView v = {cur >= 0 ? names[cur] : now, cur == def, true, note, false, cur == 0, cur == n - 1};
     int step = row(key, label, desc, v);
     if (!step || n <= 0) return false;
     int nv;
@@ -305,7 +461,7 @@ bool opt_slider(const char *key, UiTextId label, float lo, float hi, UiTextId de
     double v = cfg_double(key), def = m ? strtod(m->def, NULL) : lo;
     char shown[48];
     snprintf(shown, sizeof shown, fmt, v);
-    RowView rv = {shown, fabs(v - def) < step * 0.01, true, NULL};
+    RowView rv = {shown, fabs(v - def) < step * 0.01, true, NULL, false, v <= lo, v >= hi};
     int s = row(key, label, desc, rv);
     if (!s) return false;
     int steps = g_held && (hi - lo) > 40 * step ? 10 : 1;   // held: ten steps at a time over a long range
@@ -324,9 +480,12 @@ bool opt_slider(const char *key, UiTextId label, float lo, float hi, UiTextId de
 
 // Text centred (left-aligned when centred is false) in [x0, x1] on a row from y to y + h, at the font size or smaller so
 // a long name ("Нажатие правого стика", "Стрелка вправо") fits; under 65 % it is clipped instead.
-static void fit_text(ImDrawList *dl, float x0, float x1, float y, float h, ImU32 col, const char *t, bool centred) {
+static void fit_text(ImDrawList *dl, float x0, float x1, float y, float h, ImU32 col, const char *t, bool centred,
+                     float font_size) {
     ImFont *font = ImGui::GetFont();
-    float fs = ImGui::GetFontSize(), room = x1 - x0, tw = font->CalcTextSizeA(fs, FLT_MAX, 0, t).x;
+    float fs = font_size ? font_size : ImGui::GetFontSize(), room = x1 - x0;
+    if (room <= 0) return;
+    float tw = font->CalcTextSizeA(fs, FLT_MAX, 0, t).x;
     if (tw > room) {
         fs = fmaxf(fs * room / tw, fs * 0.65f);
         tw = font->CalcTextSizeA(fs, FLT_MAX, 0, t).x;

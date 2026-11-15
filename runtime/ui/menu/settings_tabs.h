@@ -11,4 +11,8 @@ void settings_opened(void);                 // the pages were (re)opened: the fi
 bool settings_modal(void);                  // a confirmation or a key capture is open: B and Esc are its own
 void settings_tabs(float scale, float bottom);   // the tab bar and the shown page; bottom: height kept below it
 void settings_tabs_done(void);              // after the window's own B / Esc handling, each frame
+// Shared row definitions. Returns true when the Advanced reset row was activated.
+bool settings_rows(int tab, bool pit);
+void settings_pit_quick(void);
+void settings_reset_all(void);
 const char *settings_present_name(const char *mode);   // the menu's name of a MKW_VK_PRESENT mode; NULL for another
