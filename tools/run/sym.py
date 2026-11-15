@@ -6,6 +6,8 @@ is also named in the guest (main+0x... and its symbol) through tools/analisis/q.
 
 Usage: uv run tools/run/sym.py exe+0x121f3c6 [0x1220b16 ...]   (bare hex: an offset from the base, like exe+)
        uv run tools/run/sym.py < build/run/NAME.log      every such address in the text (first 40, unique)
+       uv run tools/run/sym.py --ps5 exe+0x43d540          the PS5 title: build/ps5-game/link/link/llvm-pie.elf,
+                                                          whose addresses are the log's exe+ offsets (base 0)
 """
 
 import re
@@ -16,15 +18,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 EXE = ROOT / "build/mkw"
 BASE = 0x200000  # first PT_LOAD of build/mkw (readelf -l)
+PS5_EXE = ROOT / "build/ps5-game/link/link/llvm-pie.elf"  # unstripped; the eboot is loaded at exe+0
 TOKEN = re.compile(r"\b(?:(exe|build/mkw|mkw)\+)?(0x[0-9a-f]+)\b")
 
 
-def addresses(text: str, bare: bool) -> list[tuple[str, int]]:
+def addresses(text: str, bare: bool, base: int = BASE) -> list[tuple[str, int]]:
     """(token, absolute address); bare hex only from the command line, where it is an offset like exe+."""
     out: dict[str, int] = {}
     for m in TOKEN.finditer(text):
         if m[1] or bare:
-            out.setdefault(m[0], BASE + int(m[2], 16))
+            out.setdefault(m[0], base + int(m[2], 16))
     return list(out.items())[:40]
 
 
@@ -43,13 +46,16 @@ def guest(name: str) -> str:
 
 def main() -> None:
     args = sys.argv[1:]
+    exe, base = EXE, BASE
+    if args[:1] == ["--ps5"]:
+        args, exe, base = args[1:], PS5_EXE, 0
     if args in ([], ["-"]) and sys.stdin.isatty():
         sys.exit(__doc__)
-    found = addresses(" ".join(args), bare=True) if args else addresses(sys.stdin.read(), bare=False)
+    found = addresses(" ".join(args), True, base) if args else addresses(sys.stdin.read(), False, base)
     if not found:
         sys.exit("sym.py: no host address in the input")
     res = subprocess.run(
-        ["addr2line", "-f", "-i", "-C", "-a", "-e", str(EXE), *(hex(a) for _, a in found)],
+        ["addr2line", "-f", "-i", "-C", "-a", "-e", str(exe), *(hex(a) for _, a in found)],
         capture_output=True,
         text=True,
         check=True,

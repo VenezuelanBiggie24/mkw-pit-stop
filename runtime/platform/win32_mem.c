@@ -32,6 +32,8 @@ int plat_mem_reserve(uint64_t addr, uint64_t n, int watch) {
 
 void *plat_mem_alloc(size_t n) { return VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE); }
 
+void plat_mem_census_log(const char *tag) { (void)tag; }
+
 int plat_mem_commit(uint64_t addr, size_t n) {
     return VirtualAlloc((void *)(uintptr_t)addr, n, MEM_COMMIT, PAGE_READWRITE) != NULL;
 }
@@ -181,6 +183,18 @@ int plat_mem_readable(uint64_t addr, uint64_t n) {
     }
     return 1;
 }
+
+int plat_mem_back(uint64_t addr, size_t n) {
+    (void)addr; (void)n;
+    return 1;   // Windows backs committed pages inside kernel writes automatically.
+}
+int plat_mem_back_hold(uint64_t addr, size_t n) { (void)addr; (void)n; return 1; }
+void plat_mem_back_release(uint64_t addr, size_t n) { (void)addr; (void)n; }
+int plat_mem_watch_info(uint64_t addr) { (void)addr; return 0; }
+void plat_mem_gpu_import(uint64_t addr, size_t n, int on) { (void)addr; (void)n; (void)on; }
+uint64_t plat_mem_dmem_avail(void) { return UINT64_MAX; }
+uint64_t plat_mem_write_watch_faults(int reset) { (void)reset; return 0; }
+uint64_t plat_mem_write_watch_repeats(int reset) { (void)reset; return 0; }
 
 void *plat_aligned_alloc(size_t size, size_t align) { return _aligned_malloc(size, align); }
 void plat_aligned_free(void *p) { _aligned_free(p); }

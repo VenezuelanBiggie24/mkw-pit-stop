@@ -10,7 +10,15 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#ifndef MKW_PS5_NATIVE
 #include <SDL3/SDL.h>
+#else
+#include <stdbool.h>
+#include "ps5_input.h"
+#ifndef SDL_STANDARD_GRAVITY
+#define SDL_STANDARD_GRAVITY 9.80665f
+#endif
+#endif
 
 #include "cfg.h"
 #include "hacks.h"
@@ -28,8 +36,12 @@ enum { STICK_MAX = 32767, STICK_DEAD = 2500, STICK_DIR = 16384, TRIGGER_ON = 163
 
 static PlatMutex lock = PLAT_MUTEX_INIT;
 static int state;                    // 0 not started, 1 running, -1 disabled or SDL failed
+#ifndef MKW_PS5_NATIVE
 static SDL_Gamepad *pad;
 static uint64_t next_scan;
+static SDL_JoystickID sensor_pad;    // the gamepad whose sensors the motion thread set up, 0 none
+static int sensor_ok;                // ... and it has both sensors, enabled
+#endif
 static int pad_rumble;               // the open gamepad has rumble motors
 static volatile int32_t pad_labels[4];  // ... and the labels of its south, east, west, north buttons (PAD_LABEL_*), any thread
 static int pad_east_a;               // ... and labels its east face button A (Nintendo layout under MKW_PAD_LAYOUT=auto)
@@ -37,10 +49,9 @@ static int pad_layout = -1;          // PAD_LAYOUT_* in effect for the open game
 static unsigned pad_layout_seen;
 static volatile int32_t pad_layout_shown = -1;   // pad_layout for the menu (any thread), -1 without a gamepad
 static volatile int32_t last_device;           // INPUT_DEVICE_* the player used last, 0 none yet (input_last_device)
-static SDL_JoystickID sensor_pad;    // the gamepad whose sensors the motion thread set up, 0 none
-static int sensor_ok;                // ... and it has both sensors, enabled
 static int motion_thread;            // 0 not started, 1 running, -1 off (MKW_MOTION=0, no SDL)
 
+#ifndef MKW_PS5_NATIVE
 // SDL buttons of the gamepad inputs (input_map.h PAD_*), by position; PAD_ZL and PAD_ZR are the triggers (axes).
 static const SDL_GamepadButton pad_sdl[PAD_COUNT] = {
     [PAD_SOUTH] = SDL_GAMEPAD_BUTTON_SOUTH, [PAD_EAST] = SDL_GAMEPAD_BUTTON_EAST, [PAD_WEST] = SDL_GAMEPAD_BUTTON_WEST,
@@ -50,6 +61,31 @@ static const SDL_GamepadButton pad_sdl[PAD_COUNT] = {
     [PAD_DPAD_LEFT] = SDL_GAMEPAD_BUTTON_DPAD_LEFT, [PAD_DPAD_UP] = SDL_GAMEPAD_BUTTON_DPAD_UP,
     [PAD_DPAD_RIGHT] = SDL_GAMEPAD_BUTTON_DPAD_RIGHT, [PAD_DPAD_DOWN] = SDL_GAMEPAD_BUTTON_DPAD_DOWN,
 };
+#else
+// Consumed from PS5_VulkanTemplate/ps5/src/platform.c without colliding with runtime/platform/platform.h.
+enum {
+    PS5_PAD_CREATE = 0x000001, PS5_PAD_L3 = 0x000002, PS5_PAD_R3 = 0x000004, PS5_PAD_OPTIONS = 0x000008,
+    PS5_PAD_UP = 0x000010, PS5_PAD_RIGHT = 0x000020, PS5_PAD_DOWN = 0x000040, PS5_PAD_LEFT = 0x000080,
+    PS5_PAD_L1 = 0x000400, PS5_PAD_R1 = 0x000800,
+    PS5_PAD_TRIANGLE = 0x001000, PS5_PAD_CIRCLE = 0x002000, PS5_PAD_CROSS = 0x004000, PS5_PAD_SQUARE = 0x008000,
+    PS5_PAD_TOUCH_PAD = 0x100000, PS5_PAD_INTERCEPTED = 0x80000000u, PS5_PAD_PLAYERS = 4,
+};
+struct pad {
+    uint32_t held, pressed;
+    float left_x, left_y, right_x, right_y, l2, r2;
+};
+struct pad_reading {
+    uint32_t buttons;
+    uint8_t left_x, left_y, right_x, right_y, l2, r2;
+    bool connected;
+    uint64_t timestamp_us;
+};
+extern bool pad_open(void);
+extern void pad_poll(struct pad *pad);
+extern uint32_t pad_players(void);
+extern int pad_player_readings(int player, const struct pad_reading **readings);
+extern void pad_player_vibrate(int player, float large, float small);
+#endif
 
 static float mouse_sens = -1;              // MKW_MOUSE_SENS, 0 = mouse camera off; live (cfg_version)
 static unsigned mouse_sens_seen;
@@ -91,6 +127,7 @@ static void mouse_camera(int32_t out[2]) {
     out[1] = held[1];
 }
 
+#ifndef MKW_PS5_NATIVE
 static int32_t axis(int16_t v) {
     int32_t a = v < -STICK_MAX ? -STICK_MAX : v;
     return a > -STICK_DEAD && a < STICK_DEAD ? 0 : a;
@@ -163,6 +200,7 @@ static void pad_adopt(void) {
     rt_log("input: gamepad \"%s\" (%s, %s, east button %s)", SDL_GetGamepadName(pad), pad_rumble ? "rumble" : "no rumble",
            motion ? "gyro and accelerometer" : "no motion sensors", pad_east_a ? "labelled A" : "not labelled A");
 }
+#endif
 
 // Under lock: the layout of the open gamepad, picked again when a setting or the gamepad changed; logs each change.
 static int pad_layout_get(void) {
@@ -200,6 +238,7 @@ static void binds_refresh(void) {
     input_map_configure();
 }
 
+#ifndef MKW_PS5_NATIVE
 // MKW_VIRTUAL_PADS=N (1-8): N virtual SDL gamepads, opened like real ones after them, to try local multiplayer without
 // controllers. They have no input of their own: the script's "p<N>" lines press for their players.
 static void attach_virtual_pads(void) {
@@ -232,6 +271,26 @@ static void start(void) {
     }
     if (state == -1) state = 2;   // keyboard only
 }
+#else
+static void start(void) {
+    binds_refresh();
+    const char *e = cfg_get("MKW_INPUT");
+    if (e && !strcmp(e, "none")) { state = -1; rt_log("input: disabled (MKW_INPUT=none)"); return; }
+    if (!pad_open()) {
+        state = 2;
+        rt_log("input: DualSense pad_open failed");
+        return;
+    }
+    pad_rumble = 1;
+    pad_east_a = 0;
+    plat_xchg32(&pad_labels[0], PAD_LABEL_CROSS);
+    plat_xchg32(&pad_labels[1], PAD_LABEL_CIRCLE);
+    plat_xchg32(&pad_labels[2], PAD_LABEL_SQUARE);
+    plat_xchg32(&pad_labels[3], PAD_LABEL_TRIANGLE);
+    (void)pad_layout_get();
+    state = 1;
+}
+#endif
 
 static void stick_bits(uint64_t *b, int32_t x, int32_t y, int first) {
     if (x < -STICK_DIR) *b |= 1ull << (first + 0);
@@ -245,6 +304,7 @@ static void pick(int32_t *x, int32_t *y, int32_t kx, int32_t ky) {
     if (b > a) { *x = kx; *y = ky; }
 }
 
+#ifndef MKW_PS5_NATIVE
 // Under lock, state 1: look for new or lost gamepads once a second, then read every open one.
 static void pads_update(void) {
     uint64_t now_ms = plat_now_ns() / 1000000u;
@@ -285,6 +345,64 @@ static int pad_read(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
     gamepad_read(pad, pad_layout_get(), b, sl, sr);
     return 1;
 }
+#else
+static void pads_update(void) {
+    struct pad ignored;
+    pad_poll(&ignored);
+}
+
+static Ps5PadSample ps5_sample_of(const struct pad_reading *raw) {
+    const uint32_t held = raw->buttons;
+    return (Ps5PadSample){
+        .down = {
+            [PAD_SOUTH] = !!(held & PS5_PAD_CROSS), [PAD_EAST] = !!(held & PS5_PAD_CIRCLE),
+            [PAD_WEST] = !!(held & PS5_PAD_SQUARE), [PAD_NORTH] = !!(held & PS5_PAD_TRIANGLE),
+            [PAD_LSTICK] = !!(held & PS5_PAD_L3), [PAD_RSTICK] = !!(held & PS5_PAD_R3),
+            [PAD_L] = !!(held & PS5_PAD_L1), [PAD_R] = !!(held & PS5_PAD_R1),
+            [PAD_START] = !!(held & PS5_PAD_OPTIONS), [PAD_BACK] = !!(held & (PS5_PAD_CREATE | PS5_PAD_TOUCH_PAD)),   // Create: OcarinaPS5's Back
+            [PAD_DPAD_LEFT] = !!(held & PS5_PAD_LEFT), [PAD_DPAD_UP] = !!(held & PS5_PAD_UP),
+            [PAD_DPAD_RIGHT] = !!(held & PS5_PAD_RIGHT), [PAD_DPAD_DOWN] = !!(held & PS5_PAD_DOWN),
+        },
+        .lx = raw->left_x, .ly = raw->left_y, .rx = raw->right_x, .ry = raw->right_y,
+        .l2 = raw->l2, .r2 = raw->r2, .intercepted = !!(held & PS5_PAD_INTERCEPTED),
+    };
+}
+
+static int ps5_player_read(int player, uint64_t *b, int32_t sl[2], int32_t sr[2], uint8_t pd[PAD_COUNT]) {
+    if (player < 0 || player >= PS5_PAD_PLAYERS) return 0;
+    const struct pad_reading *readings = NULL;
+    int count = pad_player_readings(player, &readings);
+    bool connected = (pad_players() & (1u << player)) != 0;
+    if (count <= 0 || !connected) return 0;
+    const struct pad_reading *latest = &readings[count - 1];
+    Ps5PadSample sample = ps5_sample_of(latest);
+    if (pd) {
+        memcpy(pd, sample.down, PAD_COUNT);
+        pd[PAD_ZL] = sample.l2 >= 128;
+        pd[PAD_ZR] = sample.r2 >= 128;
+    }
+    Ps5PadState ps = {0};
+    input_ps5_update(&ps, latest->connected, &sample);
+    if (!ps.valid) return 0;
+    *b |= ps.buttons;
+    sl[0] = ps.lx; sl[1] = ps.ly;
+    sr[0] = ps.rx; sr[1] = ps.ry;
+    return 1;
+}
+
+static int pad_physical(uint8_t pd[PAD_COUNT]) {
+    uint64_t b = 0;
+    int32_t sl[2] = {0, 0}, sr[2] = {0, 0};
+    pads_update();
+    return ps5_player_read(0, &b, sl, sr, pd);
+}
+
+static int pad_read(uint64_t *b, int32_t sl[2], int32_t sr[2]) {
+    pads_update();
+    (void)pad_layout_get();
+    return ps5_player_read(0, b, sl, sr, NULL);
+}
+#endif
 
 static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     uint64_t b = 0;
@@ -394,8 +512,15 @@ uint32_t input_player_mask(void) {
     uint32_t m = 1;
     plat_mutex_lock(&lock);
     if (!state) start();
+#ifndef MKW_PS5_NATIVE
     for (int p = 1; state == 1 && p < INPUT_MAX_PLAYERS; p++)
         if (extra[p] && SDL_GamepadConnected(extra[p])) m |= 1u << p;
+#else
+    if (state == 1) {
+        pads_update();
+        m |= pad_players();
+    }
+#endif
     plat_mutex_unlock(&lock);
     return m;
 }
@@ -411,9 +536,13 @@ void input_poll_player(int player, uint64_t *buttons, int32_t *lx, int32_t *ly, 
     if (state == 1 && player < INPUT_MAX_PLAYERS) {
         binds_refresh();
         pads_update();
+#ifndef MKW_PS5_NATIVE
         SDL_Gamepad *g = extra[player];
         if (g && SDL_GamepadConnected(g))
             gamepad_read(g, input_pad_layout_pick(cfg_value("MKW_PAD_LAYOUT"), extra_east_a[player]), &b, sl, sr);
+#else
+        (void)ps5_player_read(player, &b, sl, sr, NULL);
+#endif
     }
     plat_mutex_unlock(&lock);
     script_apply(&b, sl, sr, player);
@@ -501,12 +630,21 @@ int input_rumble(int player, uint16_t low, uint16_t high, uint32_t ms) {
     static unsigned seen;
     if (triggers < 0 || seen != cfg_version()) seen = cfg_version(), triggers = input_rumble_triggers_enabled();
     plat_mutex_lock(&lock);
+#ifndef MKW_PS5_NATIVE
     SDL_Gamepad *g = player <= 0 ? pad : player < INPUT_MAX_PLAYERS ? extra[player] : NULL;
     int rumble = player <= 0 ? pad_rumble : player < INPUT_MAX_PLAYERS && extra_rumble[player];
     if (state == 1 && g && rumble) {
         ok = SDL_RumbleGamepad(g, low, high, ms);
         if (triggers) SDL_RumbleGamepadTriggers(g, high, high, ms);   // unsupported pads return false: ignored
     }
+#else
+    (void)ms;
+    (void)triggers;
+    if (state == 1 && player >= 0 && player < PS5_PAD_PLAYERS) {
+        pad_player_vibrate(player, low / 65535.0f, high / 65535.0f);
+        ok = 1;
+    }
+#endif
     plat_mutex_unlock(&lock);
     return ok;
 }
@@ -527,6 +665,7 @@ void input_motion_axes(const float a[3], const float g[3], double acc[3], double
     gyro[2] = g[1];
 }
 
+#ifndef MKW_PS5_NATIVE
 // Under lock: (re)enable the sensors when the open gamepad changed; 1 if it has both and they are on.
 static int sensors_ready(void) {
     SDL_JoystickID id = SDL_GetGamepadID(pad);
@@ -592,3 +731,22 @@ void input_motion_start(void) {
     }
     plat_mutex_unlock(&lock);
 }
+#else
+int input_motion_enabled(void) {
+    static int on = -1;
+    static unsigned seen;
+    unsigned v = cfg_version();
+    if (on < 0 || v != seen) {
+        seen = v;
+        on = cfg_bool("MKW_MOTION");
+    }
+    return on;
+}
+
+void input_motion_start(void) {
+    plat_mutex_lock(&lock);
+    if (!state) start();
+    motion_thread = -1;
+    plat_mutex_unlock(&lock);
+}
+#endif

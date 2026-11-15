@@ -122,6 +122,8 @@ typedef struct { volatile uintptr_t a, ra, lk; volatile int64_t ns, n; } LpEnt; 
 static LpEnt lp[LP_N], lp_hold[LP_N];
 static int lp_on = -1;
 
+void plat_lock_prof_mode(int on) { __atomic_store_n(&lp_on, on ? 1 : 0, __ATOMIC_RELEASE); }
+
 // The locks this thread holds exclusively since MKW_LOCK_PROF found its first contention, with when and by whom.
 #define LH_DEPTH 16
 static __thread struct { const void *m; uintptr_t ra; uint64_t t; } lh[LH_DEPTH];

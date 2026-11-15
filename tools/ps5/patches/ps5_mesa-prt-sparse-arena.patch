@@ -1,0 +1,199 @@
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_platform.c
+@@ -149,11 +149,88 @@
+  * (PS5_Vulkan R86-R88). */
+ #define RADV_PS5_REGION_BASE UINT64_C(0x4000000000)
+ #define RADV_PS5_REGION_BYTES (UINT64_C(256) << 30)
++/* Dedicated 128 GiB PRT aperture above the 256 GiB direct-memory region so
++ * unbound sparse tiles read zero without backing a shared zero block. */
++#define RADV_PS5_PRT_ARENA_BASE UINT64_C(0x8000000000)
++#define RADV_PS5_PRT_ARENA_BYTES (UINT64_C(128) << 30)
++
++int sceKernelGetPageTableStats(int *cpu_total, int *cpu_free, int *gpu_total, int *gpu_free);
++int32_t sceKernelSetPrtAperture(int id, void *address, size_t size);
+ 
+ static struct radv_ps5_granules radv_ps5_region;
++static struct radv_ps5_granules radv_ps5_prt_arena;
++static simple_mtx_t radv_ps5_prt_lock = SIMPLE_MTX_INITIALIZER;
++static bool radv_ps5_prt_ready;
++static bool radv_ps5_prt_init_done;
++static bool radv_ps5_prt_fallback_logged;
+ static once_flag radv_ps5_once = ONCE_FLAG_INIT;
+ static bool radv_ps5_ready;
+ 
++static inline bool
++radv_ps5_vrange_is_prt(const void *at)
++{
++   const uintptr_t va = (uintptr_t)at;
++   return va >= RADV_PS5_PRT_ARENA_BASE && va < RADV_PS5_PRT_ARENA_BASE + RADV_PS5_PRT_ARENA_BYTES;
++}
++
++static void
++radv_ps5_prt_log_fallback_once(const char *reason)
++{
++   simple_mtx_lock(&radv_ps5_prt_lock);
++   if (!radv_ps5_prt_fallback_logged) {
++      radv_ps5_prt_fallback_logged = true;
++      fprintf(stderr, "radv/ps5: sparse fallback to zero block (%s)\n", reason);
++   }
++   simple_mtx_unlock(&radv_ps5_prt_lock);
++}
++
++static bool
++radv_ps5_prt_arena_init(void)
++{
++   simple_mtx_lock(&radv_ps5_prt_lock);
++   if (radv_ps5_prt_init_done) {
++      const bool ready = radv_ps5_prt_ready;
++      simple_mtx_unlock(&radv_ps5_prt_lock);
++      return ready;
++   }
++   radv_ps5_prt_init_done = true;
++
++   int cpu_tot = 0, cpu_free_before = 0, gpu_tot = 0, gpu_free_before = 0;
++   int cpu_free_after = 0, gpu_free_after = 0;
++   const int pt_before_rc = sceKernelGetPageTableStats(&cpu_tot, &cpu_free_before, &gpu_tot, &gpu_free_before);
++
++   void *arena = (void *)(uintptr_t)RADV_PS5_PRT_ARENA_BASE;
++   const int32_t res_rc = sceKernelReserveVirtualRange(&arena, RADV_PS5_PRT_ARENA_BYTES, 0, RADV_PS5_LARGE_BYTES);
++   int32_t ap_rc = -1;
++   if (res_rc == 0 && (uintptr_t)arena == RADV_PS5_PRT_ARENA_BASE &&
++       ((uintptr_t)arena % RADV_PS5_PRT_ARENA_BYTES) == 0) {
++      ap_rc = sceKernelSetPrtAperture(0, arena, RADV_PS5_PRT_ARENA_BYTES);
++      if (ap_rc == 0) {
++         radv_ps5_prt_ready = radv_ps5_granules_init(&radv_ps5_prt_arena, RADV_PS5_PRT_ARENA_BASE,
++                                                     RADV_PS5_PRT_ARENA_BYTES, RADV_PS5_LARGE_BYTES);
++      } else {
++         sceKernelMunmap(arena, RADV_PS5_PRT_ARENA_BYTES);
++      }
++   } else if (res_rc == 0 && arena != NULL) {
++      sceKernelMunmap(arena, RADV_PS5_PRT_ARENA_BYTES);
++   }
++
++   const int pt_after_rc = sceKernelGetPageTableStats(&cpu_tot, &cpu_free_after, &gpu_tot, &gpu_free_after);
++   const int cpu_before = pt_before_rc == 0 ? (cpu_tot - cpu_free_before) : -1;
++   const int cpu_after = pt_after_rc == 0 ? (cpu_tot - cpu_free_after) : -1;
++   const int gpu_before = pt_before_rc == 0 ? (gpu_tot - gpu_free_before) : -1;
++   const int gpu_after = pt_after_rc == 0 ? (gpu_tot - gpu_free_after) : -1;
++   fprintf(stderr,
++           "radv/ps5: prt arena va=%p size=%" PRIu64 " reserve_rc=0x%08x aperture_rc=0x%08x "
++           "cpu_used=%d->%d gpu_used=%d->%d\n",
++           arena, (uint64_t)RADV_PS5_PRT_ARENA_BYTES, (unsigned)res_rc, (unsigned)ap_rc,
++           cpu_before, cpu_after, gpu_before, gpu_after);
++
++   const bool ready = radv_ps5_prt_ready;
++   simple_mtx_unlock(&radv_ps5_prt_lock);
++   return ready;
++}
++
+ uint64_t
+ radv_ps5_now_ns(void)
+ {
+@@ -258,8 +335,10 @@
+    radv_ps5_ready = radv_ps5_agc_result == 0 &&
+                     radv_ps5_granules_init(&radv_ps5_region, RADV_PS5_REGION_BASE, RADV_PS5_REGION_BYTES,
+                                            RADV_PS5_LARGE_BYTES);
+-   if (radv_ps5_ready)
++   if (radv_ps5_ready) {
++      radv_ps5_prt_arena_init();
+       radv_ps5_window_replay_init();
++   }
+ }
+ 
+ bool
+@@ -529,6 +608,21 @@
+ bool
+ radv_ps5_vrange_unbind(void *at, uint64_t bytes)
+ {
++   if (radv_ps5_vrange_is_prt(at)) {
++      if ((uintptr_t)at % RADV_PS5_PAGE_BYTES || bytes % RADV_PS5_PAGE_BYTES)
++         return false;
++      simple_mtx_lock(&radv_ps5_prt_lock);
++      const int32_t unmap_rc = sceKernelMunmap(at, bytes);
++      void *reserved = at;
++      const int32_t res_rc = sceKernelReserveVirtualRange(&reserved, bytes, PS5_KERNEL_MAP_FIXED, RADV_PS5_PAGE_BYTES);
++      simple_mtx_unlock(&radv_ps5_prt_lock);
++      if (unmap_rc != 0 || res_rc != 0 || reserved != at) {
++         fprintf(stderr, "radv/ps5: prt unbind(%p, %" PRIu64 ") failed: munmap=0x%08x reserve=0x%08x got=%p\n",
++                 at, bytes, (unsigned)unmap_rc, (unsigned)res_rc, reserved);
++         return false;
++      }
++      return true;
++   }
+    const int64_t zero = radv_ps5_zero_block();
+    if (zero < 0 || (uintptr_t)at % RADV_PS5_PAGE_BYTES || bytes % RADV_PS5_PAGE_BYTES)
+       return false;
+@@ -579,6 +673,39 @@
+    if (window32)
+       return radv_ps5_vrange_reserve_window(bytes, replay_va, out);
+    const uint32_t granules = (uint32_t)DIV_ROUND_UP(MAX2(bytes, 1), RADV_PS5_LARGE_BYTES);
++   const uint64_t span = (uint64_t)granules * RADV_PS5_LARGE_BYTES;
++   if (radv_ps5_prt_arena_init()) {
++      const bool replay_in_arena =
++         !replay_va ||
++         (replay_va >= RADV_PS5_PRT_ARENA_BASE &&
++          replay_va + span <= RADV_PS5_PRT_ARENA_BASE + RADV_PS5_PRT_ARENA_BYTES &&
++          (replay_va - RADV_PS5_PRT_ARENA_BASE) % RADV_PS5_LARGE_BYTES == 0);
++      if (replay_in_arena) {
++         simple_mtx_lock(&radv_ps5_prt_lock);
++         uint32_t prt_granule = UINT32_MAX;
++         if (replay_va) {
++            const uint32_t want = (uint32_t)((replay_va - RADV_PS5_PRT_ARENA_BASE) / RADV_PS5_LARGE_BYTES);
++            if (radv_ps5_granules_take_at(&radv_ps5_prt_arena, want, granules))
++               prt_granule = want;
++         } else {
++            prt_granule = replayable ? radv_ps5_granules_take_top(&radv_ps5_prt_arena, granules, 1)
++                                     : radv_ps5_granules_take(&radv_ps5_prt_arena, granules, 1);
++         }
++         simple_mtx_unlock(&radv_ps5_prt_lock);
++         if (prt_granule != UINT32_MAX) {
++            uint8_t *const va =
++               (uint8_t *)(uintptr_t)(RADV_PS5_PRT_ARENA_BASE + (uint64_t)prt_granule * RADV_PS5_LARGE_BYTES);
++            *out = (struct radv_ps5_memory){
++               .cpu = va, .bytes = span, .physical = -1, .granule = prt_granule, .granules = granules};
++            return true;
++         }
++         radv_ps5_prt_log_fallback_once("prt arena full");
++      } else {
++         radv_ps5_prt_log_fallback_once("replay_va outside prt arena");
++      }
++   } else {
++      radv_ps5_prt_log_fallback_once("prt arena unavailable");
++   }
+    /* Placed as radv_ps5_memory_alloc_replayable places buffers. */
+    uint32_t granule;
+    if (replay_va) {
+@@ -595,7 +722,6 @@
+          return false;
+    }
+    uint8_t *const va = (uint8_t *)(uintptr_t)(RADV_PS5_REGION_BASE + (uint64_t)granule * RADV_PS5_LARGE_BYTES);
+-   const uint64_t span = (uint64_t)granules * RADV_PS5_LARGE_BYTES;
+    if (!radv_ps5_vrange_unbind(va, span)) {
+       sceKernelMunmap(va, span);
+       radv_ps5_granules_give(&radv_ps5_region, granule, granules);
+@@ -610,6 +736,16 @@
+ {
+    if (!range->cpu)
+       return;
++   if (radv_ps5_vrange_is_prt(range->cpu)) {
++      simple_mtx_lock(&radv_ps5_prt_lock);
++      sceKernelMunmap(range->cpu, range->bytes);
++      void *reserved = range->cpu;
++      sceKernelReserveVirtualRange(&reserved, range->bytes, PS5_KERNEL_MAP_FIXED, RADV_PS5_LARGE_BYTES);
++      radv_ps5_granules_give(&radv_ps5_prt_arena, range->granule, range->granules);
++      simple_mtx_unlock(&radv_ps5_prt_lock);
++      *range = (struct radv_ps5_memory){.physical = -1};
++      return;
++   }
+    sceKernelMunmap(range->cpu, range->bytes);
+    radv_ps5_granules_give(&radv_ps5_region, range->granule, range->granules);
+    *range = (struct radv_ps5_memory){.physical = -1};
+@@ -618,7 +754,7 @@
+ uint64_t
+ radv_ps5_vrange_space_bytes(void)
+ {
+-   return RADV_PS5_REGION_BYTES;
++   return radv_ps5_prt_arena_init() ? RADV_PS5_PRT_ARENA_BYTES : RADV_PS5_REGION_BYTES;
+ }
+ 
+ void

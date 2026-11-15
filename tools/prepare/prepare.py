@@ -365,7 +365,11 @@ def main() -> None:
             elif step == "generate":
                 generate(game / "exefs", work, jobs)
             elif step == "compile":
-                compile_game(game, game / "exefs", work, cc, args.target, jobs)
+                try:
+                    with build.output_lock(work / "generated"):
+                        compile_game(game, game / "exefs", work, cc, args.target, jobs)
+                except (KeyError, TypeError, ValueError) as error:
+                    raise Failed(f"generated code: {error}") from error
             elif step == "shaders":
                 shaders(game / "exefs", romfs, game, work, glslc, args.jobs or shader_jobs(), cc)
             elif step == "warm":

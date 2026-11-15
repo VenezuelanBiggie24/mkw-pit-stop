@@ -38,6 +38,42 @@ uint64_t plat_self_cpu_ns(void);            // CPU time of the calling thread, f
 // physical core among them into *first; returns the number of physical cores, 0 when unknown.
 int plat_cpu_cores(uint64_t *all, uint64_t *first);
 int plat_process_affinity(uint64_t mask);   // every thread of the process to the processors in mask; 1 on success
+// Runtime thread priorities on (1) or every runtime thread at the process's own priority (0); returns -1 where the
+// priorities always apply (Linux, Windows). PS5 (ps5_threads.c): MKW_THREAD_PRIO, off by default (perf.c).
+int plat_thread_priority_mode(int on);
+int plat_tsc_clock_mode(int on);
+void plat_cond_probe(void);
+void plat_lock_prof_mode(int on);
+int plat_pw_batch_mode(int on);
+int plat_pw_hot_mode(int on);   // write watch: hot pages stay writable (MKW_PW_HOT); -1 without a write watch
+uint64_t plat_mem_write_watch_hot_skips(int reset);   // arms skipped for hot pages since the last reset
+void plat_mem_pw_stats(uint64_t *calls, uint64_t *pages, int reset);
+
+// Per-thread sampling by signal (sigsample.c, Linux and PS5; Windows has none): the runtime's threads in a registry,
+// each one's CPU time read on the thread itself, and a sampler thread for the profiler.
+// Runs in the signal handler; cpu_ns: the thread's CPU time since its previous sample (about 0 for a blocked thread).
+// caller: first return address inside the executable when rip is outside it (0 otherwise).
+typedef void (*PlatSampleHook)(uint32_t tid, int slot, uint64_t rip, uint64_t caller, uint64_t cpu_ns);
+void plat_sample_add_self(const char *name);       // the calling thread joins the registry (thread start)
+void plat_sample_remove_self(void);                // and leaves it (before it ends)
+int64_t plat_sample_cpu_named(const char *name);   // CPU ns of the registered threads with that name, summed; -1 none
+uint64_t plat_sample_cpu_tid(uint32_t tid);        // CPU ns of one registered thread; 0 unknown
+int plat_sample_slot_name(int slot, char *out, size_t cap);   // the name of a registry slot (the hook's slot)
+int plat_sample_self_name(char *out, size_t cap);
+// fault_guard.c (Linux, PS5): copies n bytes and returns 1, or 0 when the copy faulted; no fault hook runs for that fault.
+// For copies made with a platform lock held (the PS5's plat_mem_read): the fault hooks take frz_lock. The fault handlers
+// call plat_fault_guarded first, which returns to the copy when one is in progress on the thread.
+int plat_mem_copy_guarded(void *dst, const void *src, size_t n);
+void plat_fault_guarded(void);
+// sigsample.c: each registered thread's stack (its interrupted rip first), read on the thread; emit runs on the caller.
+int plat_sample_stacks(void (*emit)(const char *name, uint32_t tid, void *const *frames, int n, void *ctx), void *ctx);   // the calling thread's name in the registry; 0 when not in it
+int plat_sample_start(uint32_t period_us, PlatSampleHook hook);   // SIGPROF to every registered thread each period
+void plat_sample_filter(const char *name);   // only threads of that name are signalled; NULL or "": all
+void plat_sample_stop(void);
+// Holds the sampler's signal off the calling thread (1) and lets it in again (0, a pending one runs then): around a
+// kernel copy into write-watched guest memory (plat_file_pread), which a signal made fail on Linux (t20-linux: a RomFS
+// read returned -1 with userfaultfd write protection on its buffer, 14/11/2026). Calls nest only once.
+void plat_sample_hold(int on);
 
 // Interrupting a thread (kernel.c's asynchronous preemption). A thread makes its own handle; another thread stops it
 // wherever it runs, reads where it is, may send it elsewhere, and lets it go on. While it is stopped the caller must not
@@ -70,6 +106,7 @@ enum { PLAT_PRIO_IDLE = -15, PLAT_PRIO_LOWEST = -2, PLAT_PRIO_BELOW_NORMAL = -1,
 void plat_thread_priority(int prio);
 void plat_thread_set_priority(PlatThread *t, int prio);
 int plat_thread_priority_get(void);       // the calling thread's level
+void plat_threads_log(void (*emit)(const char *line));   // emits one line per live OS thread (tid, name, mask, prio)
 void plat_yield(void);                    // gives the rest of the time slice to another ready thread
 static inline void plat_pause(void) {     // spin-wait hint
 #if defined(__x86_64__) || defined(_M_X64)
@@ -191,6 +228,45 @@ void *plat_mem_alloc(size_t n);
 int plat_mem_commit(uint64_t addr, size_t n);             // read-write pages inside a reserved range; 1 on success
 int plat_mem_decommit(uint64_t addr, uint64_t n);          // contents dropped: committed again, the pages read zero
 int plat_mem_protect(uint64_t addr, uint64_t n, int prot); // committed pages only; 1 on success
+// Ensures committed guest pages in [addr, addr + n) have physical backing before a kernel write (pread/recv) or
+// Vulkan host-pointer import, which returns EFAULT/error instead of faulting on unbacked pages. No-op on Linux/Windows.
+int plat_mem_back(uint64_t addr, size_t n);
+int plat_mem_back_hold(uint64_t addr, size_t n);
+// Everything the runtime made inaccessible over [addr, addr + n) given back: the early-read watches (the hook
+// plat_mem_back_hold runs) and the base and read traps and frozen regions (plat_mem_thaw_hook: memory.c mem_thaw). A
+// game thread's submit may watch a buffer's page, or the shadow sync base-trap it, while a kernel write into it is in
+// progress, and the write fails (EFAULT, or ENOMEM through WSL's 9p: t26-peek1, 14/11/2026): a failed read calls this
+// and retries.
+void plat_mem_early_resolve(uint64_t addr, size_t n);
+void plat_mem_thaw_hook(void (*fn)(uint64_t addr, size_t n));
+enum { PLAT_BACK_WRITE_FAULT, PLAT_BACK_READ_FAULT, PLAT_BACK_RT_READ, PLAT_BACK_IMPORT, PLAT_BACK_COMMIT, PLAT_BACK_N };
+int plat_mem_back_hold_as(uint64_t addr, size_t n, int cause);
+void plat_mem_back_release(uint64_t addr, size_t n);
+uint64_t plat_mem_backed_bytes(uint64_t addr, uint64_t size);
+// Returns bytes physically released. The optional callback receives each discarded span and may stop the scan.
+typedef int (*PlatBackingDiscarded)(uint64_t lo, uint64_t hi);
+uint64_t plat_mem_release_backing(uint64_t addr, uint64_t size, PlatBackingDiscarded discarded);
+// The same for the whole units of [addr, addr + size) that hold only zero bytes: a later access commits them again,
+// zero-filled, so the contents are what they were. Returns bytes physically released.
+uint64_t plat_mem_release_zero_backing(uint64_t addr, uint64_t size);
+// PS5: page-protection calls by caller since the last call (count, ns); ra 1 and 2 are the write watch's unprotect and
+// arm. Nothing elsewhere.
+void plat_mem_protect_stats(void (*emit)(uintptr_t ra, uint64_t n, uint64_t ns, void *ctx), void *ctx);
+void plat_mem_back_causes(uint64_t out[PLAT_BACK_N]);
+int plat_mem_watch_info(uint64_t addr);
+void plat_mem_gpu_import(uint64_t addr, size_t n, int on);
+void plat_mem_census_log(const char *tag);                 // PS5: logs memory & page-table census; no-op elsewhere
+uint64_t plat_mem_dmem_avail(void);                        // PS5: free direct memory in bytes; UINT64_MAX elsewhere
+size_t plat_mem_early_page_size(void);                     // protection granularity for early-read watch (4 KiB or 16 KiB)
+typedef enum {
+    PLAT_EARLY_FAILED,       // arming failed and the prior state was restored
+    PLAT_EARLY_OK,
+    PLAT_EARLY_UNRESTORED,   // a restore failed; callers must stop without retrying or clearing trap state
+} PlatEarlyResult;
+PlatEarlyResult plat_mem_early_protect(uint64_t addr, size_t n, int on, int restore_prot);
+void plat_mem_early_hold_hook(void (*fn)(uint64_t addr, size_t n));
+void plat_mem_frozen_hook(int (*fn)(uint64_t addr));
+uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uint64_t *scanned_bytes);
 int plat_mem_replace_anon(uint64_t addr, uint64_t n);      // fresh read-write pages over a range (Linux); 1 on success
 // Writes n bytes at addr through the page protection (committed pages of a reservation, even inaccessible ones), as the
 // kernel would; no fault reaches the hooks. 1 on success; 0 where the platform cannot (Windows).
@@ -206,6 +282,8 @@ int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end);
 // The pages of a watched reservation written since the last reset, up to max page addresses into pages, in address
 // order; reset: those reported start over as unwritten. UINT64_MAX when writes to the range are not tracked.
 uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t max, int reset);
+uint64_t plat_mem_write_watch_faults(int reset);
+uint64_t plat_mem_write_watch_repeats(int reset);   // of those faults, on pages that faulted in their previous cycle
 // Runs of pages in [addr, addr + n) that hold data (present or swapped out, not the shared zero page), up to max
 // {start, end} pairs into runs, in address order; no write-watch state changes. UINT64_MAX where the platform cannot
 // tell (Windows). The capture of runtime/gfx/cap reads only these: the rest of a reservation reads zero.
@@ -296,6 +374,7 @@ int plat_file_set_readonly(const char *path, int on);     // sets or clears the 
 typedef struct PlatAppend PlatAppend;
 PlatAppend *plat_append_open(const char *path);           // creates or truncates path; NULL on failure
 int plat_append_write(PlatAppend *f, const void *data, size_t n);   // 1 when all n bytes landed
+void plat_append_sync(PlatAppend *f);                     // best-effort fsync/flush before an abrupt exit
 // Calls cb(name, ctx) for each file in dir whose name ends in ext (".in"); name has no directory part. cb returns 0 to
 // stop. Returns 0 when dir cannot be listed.
 int plat_file_list(const char *dir, const char *ext, int (*cb)(const char *name, void *ctx), void *ctx);

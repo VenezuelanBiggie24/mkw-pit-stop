@@ -1,0 +1,22 @@
+--- a/src/util/ralloc.c
++++ b/src/util/ralloc.c
+@@ -1050,6 +1050,8 @@
+ void *
+ linear_alloc_child(linear_ctx *ctx, unsigned size)
+ {
++   if (unlikely(!ctx))
++      return NULL;
+    assert(ctx->magic == LMAGIC_CONTEXT);
+    assert(get_node_canary(ctx->latest)->magic == LMAGIC_NODE);
+    assert(get_node_canary(ctx->latest)->offset == ctx->offset);
+--- a/src/amd/vulkan/layers/radv_threaded_layer.c
++++ b/src/amd/vulkan/layers/radv_threaded_layer.c
+@@ -380,6 +380,8 @@
+    /* RADV makes its command buffers without the runtime's queue. */
+    if (!cmd_buffer->vk.cmd_queue.ctx)
+       vk_cmd_queue_init(&cmd_buffer->vk.cmd_queue);
++   if (!cmd_buffer->vk.cmd_queue.ctx)
++      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+    cmd_buffer->threaded.queued = 0;
+ 
+    return device->layer_dispatch.threaded.BeginCommandBuffer(commandBuffer, pBeginInfo);

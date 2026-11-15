@@ -24,6 +24,10 @@ mkdir -p scratchpad/vma && curl -sSfL -o scratchpad/vma/vk_mem_alloc.h \
 
 Run: `build/mkw --boot` (also `--selftest`, `--probe-loader`).
 
+Use `--guest-layout ps5-smoke` to build the [experimental layout](../../docs/ps5.md#test-the-guest-layout-on-linux)
+with statically linked game code. This reads `build/layout-ps5-smoke/generated` by default and writes the host
+executable and objects under `build/layout-ps5-smoke/`. Generate the sources with the same profile.
+
 Without the game: `uv run tools/build/build.py --dist --runtime-only [--target windows]` builds only the runtime with
 the start screen (`build/dist/<target>/mkw`), what a release ships and the CI checks. A release, as the workflow:
 

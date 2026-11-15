@@ -128,6 +128,10 @@ int plat_append_write(PlatAppend *f, const void *data, size_t n) {
     return k == (ssize_t)n;
 }
 
+void plat_append_sync(PlatAppend *f) {
+    if (f) fsync((int)(intptr_t)f - 1);
+}
+
 // Flushes the directory holding path, so a rename into it survives a crash.
 static void sync_dir_of(const char *path) {
     char dir[PATH_MAX];
@@ -215,10 +219,52 @@ void plat_file_close(PlatFile *f) {
 }
 
 int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
-    ssize_t k;
-    do k = pread(fd_of(f), buf, n, (off_t)off);
-    while (k < 0 && errno == EINTR);
-    return k >= 0 ? k : errno == EFAULT ? -2 : -1;
+    if (!plat_mem_back_hold((uintptr_t)buf, n)) return -2;
+    int64_t ret;
+    int efault_retries = 0;
+    plat_sample_hold(1);
+    for (;;) {
+        ssize_t k = pread(fd_of(f), buf, n, (off_t)off);
+        if (k < 0 && errno == EINTR) continue;
+        if (k < 0 && (errno == EFAULT || errno == ENOMEM)) {   // ENOMEM: WSL's 9p for a page it could not write
+            static int logged;
+            if (!__atomic_exchange_n(&logged, 1, __ATOMIC_ACQ_REL)) {
+                fprintf(stderr, "linux pread %s at %p+%u (watch=%#x)\n", errno == EFAULT ? "EFAULT" : "ENOMEM",
+                        buf, n, (unsigned)plat_mem_watch_info((uintptr_t)buf));
+            }
+            plat_mem_early_resolve((uintptr_t)buf, n);   // a watch set during the read (plat_mem_early_resolve)
+            if (efault_retries++ < 3 && plat_mem_back((uintptr_t)buf, n)) continue;
+            {   // the last retry failed too: the buffer's mappings as the kernel sees them (diagnosis)
+                uint64_t lo = (uintptr_t)buf, hi = lo + n;
+                FILE *m = fopen("/proc/self/maps", "r");
+                char line[256];
+                while (m && fgets(line, sizeof line, m)) {
+                    unsigned long long a0, a1;
+                    if (sscanf(line, "%llx-%llx", &a0, &a1) == 2 && a1 > lo && a0 < hi)
+                        fprintf(stderr, "linux pread: %s", line);
+                }
+                if (m) fclose(m);
+                fprintf(stderr, "linux pread: errno %d after %d retries; page states:", errno, efault_retries);
+                for (uint64_t p = lo & ~4095ull; p < hi; p += 4096) {
+                    uint64_t e;
+                    fprintf(stderr, " %d/%#x", plat_mem_state(p, p + 4096, &e), (unsigned)plat_mem_watch_info(p));
+                }
+                fprintf(stderr, "\n");
+            }
+            ret = -2;
+            break;
+        }
+        if (k < 0) {
+            static int logged;
+            if (!__atomic_exchange_n(&logged, 1, __ATOMIC_ACQ_REL))
+                fprintf(stderr, "linux pread failed: errno %d at %p+%u\n", errno, buf, n);
+        }
+        ret = k >= 0 ? k : -1;
+        break;
+    }
+    plat_sample_hold(0);
+    plat_mem_back_release((uintptr_t)buf, n);
+    return ret;
 }
 
 int plat_file_id(PlatFile *f, PlatFileId *out) {

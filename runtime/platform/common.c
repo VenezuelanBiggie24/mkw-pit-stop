@@ -122,3 +122,71 @@ int plat_file_atomic_cleanup(const char *path) {
     plat_file_list(s.dir, ".tmp", stale_tmp, &s);
     return s.n;
 }
+
+__attribute__((weak)) void plat_threads_log(void (*emit)(const char *line)) { (void)emit; }
+__attribute__((weak)) int plat_thread_priority_mode(int on) { (void)on; return -1; }
+__attribute__((weak)) int plat_tsc_clock_mode(int on) { (void)on; return -1; }
+__attribute__((weak)) void plat_cond_probe(void) {}
+__attribute__((weak)) void plat_lock_prof_mode(int on) { (void)on; }
+__attribute__((weak)) int plat_pw_batch_mode(int on) { (void)on; return -1; }
+__attribute__((weak)) int plat_pw_hot_mode(int on) { (void)on; return -1; }
+__attribute__((weak)) uint64_t plat_mem_write_watch_hot_skips(int reset) { (void)reset; return 0; }
+__attribute__((weak)) void plat_mem_pw_stats(uint64_t *calls, uint64_t *pages, int reset) {
+    (void)reset;
+    if (calls) *calls = 0;
+    if (pages) *pages = 0;
+}
+__attribute__((weak)) int plat_mem_back_hold_as(uint64_t addr, size_t n, int cause) {
+    (void)cause;
+    return plat_mem_back_hold(addr, n);
+}
+__attribute__((weak)) uint64_t plat_mem_backed_bytes(uint64_t addr, uint64_t size) {
+    (void)addr; (void)size;
+    return 0;
+}
+__attribute__((weak)) uint64_t plat_mem_release_backing(uint64_t addr, uint64_t size,
+                                                          PlatBackingDiscarded discarded) {
+    (void)addr; (void)size; (void)discarded;
+    return 0;
+}
+__attribute__((weak)) void plat_mem_protect_stats(void (*emit)(uintptr_t, uint64_t, uint64_t, void *), void *ctx) {
+    (void)emit; (void)ctx;
+}
+__attribute__((weak)) uint64_t plat_mem_release_zero_backing(uint64_t addr, uint64_t size) {
+    (void)addr; (void)size;
+    return 0;
+}
+__attribute__((weak)) void plat_mem_back_causes(uint64_t out[PLAT_BACK_N]) {
+    memset(out, 0, sizeof(uint64_t) * PLAT_BACK_N);
+}
+__attribute__((weak)) size_t plat_mem_early_page_size(void) { return 4096; }
+__attribute__((weak)) PlatEarlyResult plat_mem_early_protect(uint64_t addr, size_t n, int on, int restore_prot) {
+    if (plat_mem_protect(addr, n, on ? PLAT_PROT_NONE : restore_prot)) return PLAT_EARLY_OK;
+    return on ? PLAT_EARLY_FAILED : PLAT_EARLY_UNRESTORED;
+}
+__attribute__((weak)) void plat_mem_early_hold_hook(void (*fn)(uint64_t addr, size_t n)) { (void)fn; }
+__attribute__((weak)) void plat_mem_early_resolve(uint64_t addr, size_t n) { (void)addr, (void)n; }
+__attribute__((weak)) void plat_mem_thaw_hook(void (*fn)(uint64_t addr, size_t n)) { (void)fn; }
+__attribute__((weak)) void plat_mem_frozen_hook(int (*fn)(uint64_t addr)) { (void)fn; }
+__attribute__((weak)) uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uint64_t *scanned_bytes) {
+    (void)target_bytes;
+    if (scanned_bytes) *scanned_bytes = 0;
+    return 0;
+}
+
+// sigsample.c's, where it is not built (Windows).
+__attribute__((weak)) void plat_sample_add_self(const char *name) { (void)name; }
+__attribute__((weak)) void plat_sample_remove_self(void) {}
+__attribute__((weak)) int64_t plat_sample_cpu_named(const char *name) { (void)name; return -1; }
+__attribute__((weak)) uint64_t plat_sample_cpu_tid(uint32_t tid) { (void)tid; return 0; }
+__attribute__((weak)) int plat_sample_slot_name(int slot, char *out, size_t cap) { (void)slot, (void)out, (void)cap; return 0; }
+__attribute__((weak)) int plat_sample_start(uint32_t period_us, PlatSampleHook hook) { (void)period_us, (void)hook; return 0; }
+__attribute__((weak)) void plat_sample_stop(void) {}
+__attribute__((weak)) int plat_mem_copy_guarded(void *dst, const void *src, size_t n) { memcpy(dst, src, n); return 1; }
+__attribute__((weak)) void plat_fault_guarded(void) {}
+__attribute__((weak)) int plat_sample_stacks(void (*emit)(const char *, uint32_t, void *const *, int, void *), void *ctx) {
+    (void)emit, (void)ctx;
+    return 0;
+}
+__attribute__((weak)) int plat_sample_self_name(char *out, size_t cap) { (void)out, (void)cap; return 0; }
+__attribute__((weak)) void plat_sample_hold(int on) { (void)on; }

@@ -21,6 +21,10 @@ Changes against the original:
 Usage: `uv run python recomp/gen.py --exefs game/exefs --out build/generated --jobs 8 --patches recomp/patches-mkw.txt`
 (~2.5 min, 887 MB of C).
 
+Use `--guest-layout ps5-high144` with a separate `--out` to generate the console-tested PS5 placements for a host build.
+The generator records the selected profile in `placement.json`. If interrupted, rerun the same command to finish
+before building. See [the PS5 layout test](../docs/ps5.md#test-the-guest-layout-on-linux).
+
 | File | What it does |
 |---|---|
 | `nso.py` | Loads an NSO: LZ4 segments, image, MOD0, symbols and relocations |
@@ -30,7 +34,7 @@ Usage: `uv run python recomp/gen.py --exefs game/exefs --out build/generated --j
 | `flags.py`, `regs.py` | NZCV and the most used registers in local variables |
 | `jumptables.py` | Jump tables resolved symbolically |
 | `gen.py` | Generates the C by function, in parallel processes |
-| `layout.py` | Load addresses of the modules |
+| `layout.py` | Shared module and guest memory placements for the generator, runtime build, and PS5 smoke title |
 | `patches.py` | Instruction patches by address and spin loops (`spin`) |
 | `patches-mkw.txt` | MKW 1.0.0's table: the 117 spin loops `tools/cpu/spin_waits.py` finds (30/10/2026). Without it clang hoists the load out of the loop and leaves a `jmp` to itself (thread 89 at `main+0xe32c0c`, a spinlock). And the `zstd` set (`MKW_ZSTD_NATIVE`): the two calls to `ZSTD_decompressMultiFrame` and the streaming path's (`main+0x6532b4`) go to `runtime/sdk/ov/ov_zstd.c` |
 

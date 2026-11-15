@@ -6,6 +6,7 @@ Usage: gen.py --exefs build/extracted/v121/exefs --out generated/v121 [--modules
 
 Output, under --out:
   layout.h, layout.json        module bases (recomp/layout.py)
+  placement.json              selected guest address placement
   <mod>/<mod>_NNNN.c           one `void f_<addr>(Cpu *c)` per guest function, about --chunk-bytes of C per file
   <mod>/<mod>_table.c          sorted <mod>_fn_addrs[] / <mod>_fn_ptrs[] / <mod>_fn_count for rt_dispatch
   <mod>/manifest.json          chunk list, function count, statistics and timings
@@ -41,7 +42,8 @@ import flags  # noqa: E402
 import jumptables  # noqa: E402
 import patches  # noqa: E402
 import regs  # noqa: E402
-from layout import layout, write as write_layout  # noqa: E402
+from layout import DEFAULT, INCOMPLETE, PLACEMENTS, check_output_profile, layout, output_lock  # noqa: E402
+from layout import write as write_layout  # noqa: E402
 from lifter import hx  # noqa: E402
 from module import Module  # noqa: E402
 
@@ -613,6 +615,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--exefs', type=Path, required=True)
     ap.add_argument('--out', type=Path, required=True)
+    ap.add_argument('--guest-layout', choices=PLACEMENTS, default=DEFAULT, help='guest address placement')
     ap.add_argument('--modules', default='main,subsdk0,sdk')
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
     ap.add_argument('--limit', type=int, default=0, help='emit only the first N functions of each module')
@@ -627,17 +630,28 @@ def main():
                     help='reload X19-X29 and SP after every call too, instead of trusting AAPCS64 (slower; for '
                          'telling a broken callee from a generator bug)')
     args = ap.parse_args()
-    opts = {'reg_locals': args.reg_locals, 'callee_saved': not args.no_callee_saved_trust}
+    try:
+        args.out.mkdir(parents=True, exist_ok=True)
+        with output_lock(args.out):
+            check_output_profile(args.out, args.guest_layout)
+            mods = layout(args.exefs, args.guest_layout)
+            return generate(args, mods)
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        ap.error(str(error))
 
+
+def generate(args, mods):
+    opts = {'reg_locals': args.reg_locals, 'callee_saved': not args.no_callee_saved_trust}
     t0 = time.perf_counter()
-    mods = layout(args.exefs)
-    write_layout(mods, args.out)
     table = patches.load(args.patches, mods) if args.patches else patches.Table()
-    write_if_changed(args.out / 'patches.h', patches.header_text(table, GENERATED_MARKER))
     want = args.modules.split(',')
     unknown = set(want) - {n for n, _, _ in mods}
     if unknown:
         raise SystemExit(f'not in {args.exefs}: {", ".join(sorted(unknown))}')
+    incomplete = args.out / INCOMPLETE
+    incomplete.touch()
+    write_layout(mods, args.out, args.guest_layout)
+    write_if_changed(args.out / 'patches.h', patches.header_text(table, GENERATED_MARKER))
 
     paths, starts_abs, info, tasks = {}, {}, {}, []
     for name, base, _ in mods:
@@ -751,6 +765,7 @@ def main():
         for e in errors:
             print(f'  {e}', file=sys.stderr)
         return 1
+    incomplete.unlink()
     return 0
 
 
