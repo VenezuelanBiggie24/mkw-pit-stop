@@ -59,8 +59,96 @@ static int read_aspect(const Tex *e, VkImageAspectFlags *a) {
     }
 }
 
-// Image <-> caller rows through a staging buffer; the GPU copy is waited for.
+// Image <-> caller rows through a staging buffer; the GPU copy is waited for. e is pinned while staging is asked for:
+// running short, it trims textures on this thread (vk_texture_trim) and e is used after.
+static int texels_pinned(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, int write);
 int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, int write) {
+    tex_pin(e);
+    int ok = texels_pinned(e, g, r, mem, write);
+    tex_unpin(e);
+    return ok;
+}
+
+// A WriteTexels that did not reach the image (no staging, its ASTC decode not recorded). A write into a mirrored texture
+// is already in its storage (vk_write_texels): the storage is the newer content and make_fresh takes it back
+// (cpu_took_back), unless the GPU wrote the image since its last write-back (gpu_dirty), whose render the storage lacks:
+// uploading it would lose more than this region. Only the image held the texels of anything else, and no copy of them
+// is kept: that write is lost.
+static void write_lost(Tex *e) {
+    static volatile int32_t n_lost;
+    if (e->pub.mirrored && !e->gpu_dirty) e->cpu_newer = 1;
+    else
+        log_limited(&n_lost, "WriteTexels into texture %#llx (fmt %#x) lost: not written to its image%s",
+                    (unsigned long long)e->pub.addr, e->t.d.format,
+                    e->pub.mirrored ? " and its storage lacks the GPU's render" : "");
+}
+
+static uint32_t lcm4(uint32_t b) { return b % 4 == 0 ? b : b % 2 == 0 ? b * 2 : b * 4; }   // lcm(b, 4)
+
+// WriteTexels of ASTC blocks into an image re-encoded as BC7 or BC1 (vk_astc.c) whose region does not fall on whole
+// 4x4 BC blocks: its offsets are multiples of the ASTC footprint (5, 6, 10, 12 texels), and a copy into a BC image
+// takes offsets on 4 and extents on 4 unless they reach the edge (VUID-vkCmdCopyBufferToImage-pRegions-07274..07277).
+// It went to the GPU as it was. The region grows to whole blocks of both (multiples of lcm(footprint, 4)), its other
+// texels read from the storage, which holds every texel, this write's too (vk_write_texels writes it first), when
+// nothing the GPU wrote since is missing from it (mirrored and not gpu_dirty). Otherwise only the whole blocks inside
+// the region, from the caller's rows: the texels of the boundary blocks keep what they held (logged).
+static int bc_unaligned(Tex *e, const Region *g, const NVNcopyRegion *r, const uint8_t *mem, VkImageAspectFlags aspect) {
+    static volatile int32_t n_part;
+    uint32_t bw = e->f.astc_bw, bh = e->f.astc_bh, ax = lcm4(bw), ay = lcm4(bh);
+    uint32_t lw = mip(e->pub.width, g->level), lh = mip(e->pub.height, g->level);
+    uint32_t x0 = (uint32_t)r->xoffset, y0 = (uint32_t)r->yoffset, x1 = x0 + (uint32_t)r->width, y1 = y0 + (uint32_t)r->height;
+    int storage = e->pub.mirrored && !e->gpu_dirty;
+    uint32_t nx0, ny0, nx1, ny1;
+    if (storage) {
+        nx0 = x0 / ax * ax, ny0 = y0 / ay * ay;
+        nx1 = (x1 + ax - 1) / ax * ax, ny1 = (y1 + ay - 1) / ay * ay;
+        if (nx1 > lw) nx1 = lw;
+        if (ny1 > lh) ny1 = lh;
+    } else {
+        nx0 = (x0 + ax - 1) / ax * ax, ny0 = (y0 + ay - 1) / ay * ay;
+        nx1 = x1 == lw ? lw : x1 / ax * ax, ny1 = y1 == lh ? lh : y1 / ay * ay;
+        log_limited(&n_part, "WriteTexels of ASTC texture %#llx (fmt %#x) at %u,%u %ux%u into its BC image: not on 4x4 "
+                    "blocks and its storage does not hold the image's other texels: only %u,%u %ux%u written",
+                    (unsigned long long)e->pub.addr, e->t.d.format, x0, y0, x1 - x0, y1 - y0, nx0, ny0,
+                    nx1 > nx0 ? nx1 - nx0 : 0, ny1 > ny0 ? ny1 - ny0 : 0);
+        if (nx1 <= nx0 || ny1 <= ny0) return 0;
+    }
+    uint32_t w = nx1 - nx0, h = ny1 - ny0, rb = (w + bw - 1) / bw * 16, rows = (h + bh - 1) / bh;
+    size_t per = (size_t)rb * rows;
+    vk_upload_flush_over(64ull << 20);
+    VkBuffer sb;
+    uint8_t *stg;
+    VkCommandBuffer cb = vk_upload_begin_staging(per * (size_t)g->nz, &sb, (void **)&stg);
+    if (!cb) return 0;
+    VkAstcRegion *ar = calloc((size_t)g->nz, sizeof *ar);
+    if (!ar) rt_fatal("vk: out of memory (WriteTexels regions)");
+    int ok = 1;
+    for (int z = 0; z < g->nz && ok; z++) {
+        uint32_t layer = g->is3d ? 0 : g->layer0 + (uint32_t)r->zoffset + (uint32_t)z;
+        uint8_t *d = stg + per * (size_t)z;
+        if (storage) {
+            ok = !nvn_texels_box(&e->t.d, g->level, layer, nx0 / bw * 16, ny0 / bh,
+                                 g->is3d ? (uint32_t)(r->zoffset + z) : 0, rb, rows, e->t.mem, d, rb, 1);
+        } else {
+            const uint8_t *m = mem + (size_t)z * g->img + (size_t)((ny0 - y0) / bh) * g->row + (nx0 - x0) / bw * 16;
+            for (uint32_t y = 0; y < rows; y++) memcpy(d + (size_t)y * rb, m + (size_t)y * g->row, rb);
+        }
+        ar[z] = (VkAstcRegion){.src = per * (size_t)z, .w = w, .h = h, .slices = 1, .level = g->level, .layer = layer,
+                               .offset = {(int32_t)nx0, (int32_t)ny0, g->is3d ? r->zoffset + z : 0}, .lw = lw, .lh = lh};
+    }
+    if (ok) {
+        barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        vk_astc_tag(e->pub.addr, 3);
+        ok = vk_astc_record(cb, sb, per * (size_t)g->nz, ar, g->nz, bw, bh, e->f.astc_srgb, e->pub.image, aspect,
+                            e->f.astc_bc7, VK_NULL_HANDLE);
+        barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+    }
+    vk_upload_end();
+    free(ar);
+    return ok;
+}
+
+static int texels_pinned(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, int write) {
     static volatile int32_t n_astc, n_ds;
     VkCtx *c = vk_ctx();
     VkImageAspectFlags aspect;
@@ -90,6 +178,15 @@ int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, 
         w = rw < lw - (uint32_t)r->xoffset ? rw : lw - (uint32_t)r->xoffset;
         h = rh < lh - (uint32_t)r->yoffset ? rh : lh - (uint32_t)r->yoffset;
     }
+    if (agpu && e->f.astc_bc7) {
+        uint32_t lw = mip(e->pub.width, g->level), lh = mip(e->pub.height, g->level);
+        uint32_t x1 = (uint32_t)r->xoffset + w, y1 = (uint32_t)r->yoffset + h;
+        if (r->xoffset % 4 || r->yoffset % 4 || (x1 % 4 && x1 != lw) || (y1 % 4 && y1 != lh)) {
+            if (bc_unaligned(e, g, r, mem, aspect)) return 1;
+            write_lost(e);
+            return 0;
+        }
+    }
     size_t texels = (size_t)w * h, ib = agpu ? 0 : astc ? 4 : rgb ? (size_t)g->bpb / 3 * 4 : 0;
     size_t slice = ib ? texels * ib : g->wb * g->hb;   // agpu: the raw blocks, decoded by vk_astc_record
     // A write goes into the open upload batch, its staging freed with it, and leaves without waiting: the next
@@ -102,7 +199,10 @@ int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, 
     VkCommandBuffer cb = VK_NULL_HANDLE;
     if (write) cb = vk_upload_begin_staging(slice * (size_t)g->nz, &sb, (void **)&stg);
     else stg = vk_staging_try(slice * (size_t)g->nz, &sb, &sa);
-    if (!stg) return 0;   // no staging memory even after relieving it: the write is lost, a read returns zeros
+    if (!stg) {   // no staging memory even after relieving it (vk_upload_begin_staging): a read returns zeros
+        if (write) write_lost(e);
+        return 0;
+    }
     VkBufferImageCopy *rg = calloc((size_t)g->nz, sizeof *rg);
     for (int z = 0; z < g->nz; z++) {
         uint8_t *s = stg + slice * (size_t)z;
@@ -149,6 +249,12 @@ int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, 
         else if (!done) log_limited(&n_astc, "WriteTexels of ASTC texture %#llx not decoded on the GPU: left as it was",
                                     (unsigned long long)e->pub.addr);
         barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+        if (agpu && !done) {   // as without staging: the storage takes it back when it can
+            vk_upload_end();
+            free(rg);
+            write_lost(e);
+            return 0;
+        }
     } else {
         barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
         vkCmdCopyImageToBuffer(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, sb, (uint32_t)g->nz, rg);
@@ -232,11 +338,19 @@ void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, co
                (unsigned long long)(uintptr_t)t->mem, r->xoffset, r->yoffset, r->width, r->height, (void *)e,
                e ? e->pub.mirrored : -1, e ? e->uploaded : -1, e ? e->pub.gpu_owned : -1);
     if (e && e->pub.mirrored) {
+        // GPU-owned: whether the CPU had already rewritten the storage since the GPU's last write (cpu_took_back then
+        // uploads all of it, this write included); asked before this write stamps the pages
+        uint32_t now;
+        int newer = e->pub.gpu_owned && (e->cpu_newer || storage_rewritten(e, e->gpu_gen, &now) == 1);
         if (!storage_texels(t, &g, r, (uint8_t *)src, 1))
             log_limited(&n_bad, "WriteTexels: region outside level %u of texture %#llx", g.level, (unsigned long long)e->pub.addr);
         vk_guest_written((uintptr_t)t->mem, t->L.size);
-        if (e->pub.gpu_owned) image_texels(e, &g, r, (uint8_t *)src, 1);
-        else if (e->uploaded) e->wt_n++;
+        if (e->pub.gpu_owned) {
+            // written to the image too, so the storage is no newer than it was: this write must not make
+            // cpu_took_back upload the whole storage over a render it lacks; one the image missed set cpu_newer
+            int lost = !image_texels(e, &g, r, (uint8_t *)src, 1) && e->cpu_newer;
+            if (!newer && !lost) gpu_baseline(e);
+        } else if (e->uploaded) e->wt_n++;
     } else if (e) {
         image_texels(e, &g, r, (uint8_t *)src, 1);
     }
@@ -248,6 +362,7 @@ void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, co
 // there. The game may still read that storage with the CPU: TotK moves its generated grass maps between pools with
 // memcpy once the GPU is done, and the copy then carried zeros. Such a read writes the image back first.
 static void write_back(Tex *e) {
+    int ok = 1;
     const nvn_texdesc *d = &e->t.d;
     int linear = nvn_tex_is_linear(d), is3d = d->target == NVN_TEXTURE_TARGET_3D;
     uint32_t levels = linear ? 1 : e->pub.levels, layers = linear || is3d ? 1 : e->pub.layers;
@@ -263,9 +378,12 @@ static void write_back(Tex *e) {
             uint8_t *buf = malloc(g.img * (size_t)g.nz);
             if (!buf) rt_fatal("vk: out of memory for a texture write-back");
             if (image_texels(e, &g, &r, buf, 0)) storage_texels(&e->t, &g, &r, buf, 1);
+            else ok = 0;
             free(buf);
         }
+    if (!ok) return;   // a level not read back (no staging): still dirty, written back at the next read
     e->gpu_dirty = 0;
+    gpu_baseline(e);   // these storage writes are the image's own bytes, not a CPU write after the render
 }
 
 // Mirrored textures overlapping [addr, addr+size) that the GPU wrote since their last write-back.

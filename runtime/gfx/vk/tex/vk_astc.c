@@ -6,7 +6,8 @@
 // device cannot. cpu: astc_decode_ldr_mt on the uploading thread, as before. check: gpu, and every upload is also
 // decoded on the CPU and compared (waits for the GPU; for testing only).
 //
-// The decode is recorded into the upload batch (vk_memory.c) in chunks of at most 32 MiB of texels (a larger region in
+// The decode is recorded into the upload batch (vk_memory.c), or a replay part's command buffer at the place of the copy
+// it stands for (vk_texture_astc_copy), in chunks of at most 32 MiB of texels (a larger region in
 // bands of block rows, split_regions): a chunk's raw blocks go from staging to a device-local scratch buffer, its
 // dispatches write RGBA8 texels behind them, and a buffer-to-image copy puts them into the image; the next chunk reuses
 // the scratch after a barrier. The scratch is one kept buffer (FIXED_SCRATCH); only a call with a readback takes one of
@@ -259,6 +260,12 @@ static uint32_t err_slot(const VkAstcRegion *rg, int n, uint32_t bw, uint32_t bh
     return s;
 }
 static uint64_t n_dispatch, n_texels;
+// vk_texture_astc_copy's census of zero blocks in the staged source (any thread; summed in the "so far" line)
+static uint64_t zero_copies, zero_blocks;
+void vk_astc_zero_note(uint64_t blocks) {
+    __atomic_add_fetch(&zero_copies, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&zero_blocks, blocks, __ATOMIC_RELAXED);
+}
 
 // MKW_ASTC_TIME=1 (or vk_astc_time_enable): timestamps around the dispatches of each scratch chunk (the decode
 // alone) and around a whole vk_astc_record call (one texture upload or WriteTexels: copies and barriers included),
@@ -577,14 +584,20 @@ static VmaAllocator svma(void) {
 // One scratch buffer, made once and kept, serves every call whose chunk fits (blocks + texels + BC of a CHUNK_OUT
 // chunk fit with room): one buffer per call cost 4.9 ms each in the frame after «VALE», 1 719 of its 2 137 ms on the
 // Radeon 660M (vale1, 06/11/2026: 351 allocations), and a buffer per upload batch was worse (wastc4: still new memory,
-// held until the batch ends). Every caller records into the upload batch under its lock (vk_upload_begin) and the
-// batches run in order on the graphics queue, so a barrier at the start of each use is enough, as between the chunks
-// of one call. Regions over a chunk are cut into bands (split_regions), so every call fits; only MKW_ASTC=check and the
+// held until the batch ends). Every caller records under the upload lock (vk_upload_begin, or vk_upload_lock for a
+// replay part's command buffer), and the upload batches and the parts all go to the one graphics queue: a barrier at
+// the start of each use waits for every earlier use in submission order, whichever command buffer it was in, as between
+// the chunks of one call. Regions over a chunk are cut into bands (split_regions), so every call fits; only MKW_ASTC=check and the
 // probes (a readback) take a buffer of their own, freed with the batch.
 #define FIXED_SCRATCH (64ull << 20)
 static VkBuffer fx_buf;
 static VmaAllocation fx_alloc;
 static int fx_tried;
+// A failed creation is tried again FX_RETRY_FRAMES later: memory short at one moment (a course load) left every later
+// call on a buffer of its own for the rest of the run, the 4.9 ms per call the kept buffer was made to save.
+#define FX_RETRY_FRAMES 120
+static uint64_t fx_retry_frame;
+static uint32_t fx_failures;
 
 // Scratch per vk_astc_record: texels of at most this many bytes at a time, so a large texture array (169 M texels, 677 MB
 // as RGBA8, on monsters2) or an 8192x8192 level (256 MiB as RGBA8) does not need its whole RGBA8 copy as scratch.
@@ -738,13 +751,17 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     VkResult ar = VK_SUCCESS;
     int fixed = 0;
     if (bi.size <= FIXED_SCRATCH && !readback) {   // the caller holds the upload lock: fx_* need no lock of their own
-        if (!fx_tried) {
+        uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        if (!fx_buf && (!fx_tried || fr >= fx_retry_frame)) {
             VkBufferCreateInfo fi = bi;
             fi.size = FIXED_SCRATCH;
             fx_tried = 1;
             if (vmaCreateBuffer(svma(), &fi, &aci, &fx_buf, &fx_alloc, NULL) != VK_SUCCESS) fx_buf = VK_NULL_HANDLE;
-            rt_log("vk: ASTC fixed scratch of %llu MiB: %s", (unsigned long long)(FIXED_SCRATCH >> 20),
-                   fx_buf ? "made" : "failed, one buffer per call");
+            if (!fx_buf) fx_retry_frame = fr + FX_RETRY_FRAMES, fx_failures++;
+            if (fx_buf || fx_failures <= 4 || !(fx_failures & (fx_failures - 1)))
+                rt_log("vk: ASTC fixed scratch of %llu MiB at frame %llu: %s (%u failed attempts)",
+                       (unsigned long long)(FIXED_SCRATCH >> 20), (unsigned long long)fr,
+                       fx_buf ? "made" : "failed, one buffer per call until it is tried again", fx_failures);
         }
         if (fx_buf) {   // its previous use (an earlier call or batch) has read and written it
             sb = fx_buf, fixed = 1;
@@ -770,12 +787,19 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     G.tab_uploaded = 1;
     VkBuffer tab = G.tab;
     plat_mutex_unlock(&g_lock);
-    if (need_tab) {   // first use on this device: the tables go up in this batch, before the dispatch
+    if (need_tab) {   // first use on this device: the tables go up in the upload batch, before the dispatch
+        // (the batch is cb itself for a caller recording into it; a replay part follows the batch in queue order, and
+        // the staging, held by the batch, is freed once the batch is done)
+        VkCommandBuffer tcb = vk_upload_begin();
         VkBuffer tb;
         uint8_t *p = vk_staging(TAB_SIZE, &tb, NULL);
         fill_tables(p);
         VkBufferCopy cp = {0, 0, TAB_SIZE};
-        vkCmdCopyBuffer(cb, tb, tab, 1, &cp);
+        vkCmdCopyBuffer(tcb, tb, tab, 1, &cp);
+        if (tcb != cb)
+            mem_barrier(tcb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
+        vk_upload_end();
     }
     int timed = 0, whole = -1;
     uint32_t id = 0;
@@ -901,8 +925,11 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
         plat_mutex_unlock(&t_lock);
     }
     if ((n_dispatch + (uint64_t)n0) / 1024 != n_dispatch / 1024 || !n_dispatch) {
-        rt_log("vk: ASTC: %llu regions, %.1f M texels decoded on the GPU so far; scratch allocations %lld, %.1f ms",
-               (unsigned long long)(n_dispatch + (uint64_t)n0), (double)n_texels / 1e6, (long long)alloc_n, alloc_ns / 1e6);
+        rt_log("vk: ASTC: %llu regions, %.1f M texels decoded on the GPU so far; scratch allocations %lld, %.1f ms; copies "
+               "from a source region over 1%% zero blocks %llu (%llu blocks)",
+               (unsigned long long)(n_dispatch + (uint64_t)n0), (double)n_texels / 1e6, (long long)alloc_n, alloc_ns / 1e6,
+               (unsigned long long)__atomic_load_n(&zero_copies, __ATOMIC_RELAXED),
+               (unsigned long long)__atomic_load_n(&zero_blocks, __ATOMIC_RELAXED));
         vk_astc_time_summary();
     }
     n_dispatch += (uint64_t)n0;
@@ -932,7 +959,7 @@ void vk_astc_release(void) {
         if (G.err) vmaDestroyBuffer(c->vma, G.err, G.err_alloc);
         if (fx_buf) vmaDestroyBuffer(svma(), fx_buf, fx_alloc);
     }
-    fx_buf = VK_NULL_HANDLE, fx_alloc = NULL, fx_tried = 0;
+    fx_buf = VK_NULL_HANDLE, fx_alloc = NULL, fx_tried = 0, fx_retry_frame = 0, fx_failures = 0;
     memset(&G.dsl, 0, sizeof G - offsetof(__typeof__(G), dsl));
     G.dev = VK_NULL_HANDLE;
     G.mode = -1;

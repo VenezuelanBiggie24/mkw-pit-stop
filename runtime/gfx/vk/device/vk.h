@@ -328,6 +328,7 @@ void vk_sparse_written(VkImage img, uint32_t level, uint32_t layer0, uint32_t la
                        uint32_t h);
 typedef struct { VkSemaphore wsem, ssem; uint64_t wait, signal; } VkSparseOrder;   // a NULL semaphore: no wait / signal
 VkSparseOrder vk_sparse_order(uint64_t fence, int binds);
+int vk_sparse_binds_queued(void);                 // binds MapVirtual queued that no submission has issued yet
 void vk_sparse_order_submitted(uint64_t signal);
 void vk_sparse_touch(VkImage img);                // a draw or copy touched img in the current frame
 void vk_sparse_vram_log(uint64_t frame);          // active/idle/never-sampled slot census
@@ -356,6 +357,7 @@ VkCommandBuffer vk_upload_begin(void);
 void vk_upload_end(void);
 void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc);
 void *vk_staging_try(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc);   // NULL when out of memory
+extern int vk_staging_fail_test;   // --probe-vkmem: that many staging buffers fail as out of memory (vk_mem_upload.c)
 // MKW_GPU_ONLY_RELEASE (vk_memory.c): a GPU-owned texture's storage in a CPU_NO_ACCESS pool released; whether a
 // packaged texture's storage overlaps such a release (its bytes lost: counted)
 void vk_mem_cna_gpu_texture(uint64_t lo, uint64_t size);
@@ -380,6 +382,10 @@ uint32_t vk_upload_owner(void);                 // the thread holding the upload
 void vk_upload_wait_stats(uint64_t out[6]);   // MKW_TRACE=perf: cmd_lock waits n/ns/max, wait_and_collect n/ns/max; resets
 void vk_upload_flush_over(VkDeviceSize limit);   // sends the open batch once it holds that much staging or ASTC work
 void vk_upload_work(uint64_t texels);            // ASTC texels the open batch decodes (vk_upload_flush_over)
+// The upload lock alone, without opening a batch: vk_astc_record's kept state (its scratch, counters) is under it when
+// a decode is recorded into a replay part's command buffer instead (vk_texture_astc_copy)
+void vk_upload_lock(void);
+void vk_upload_unlock(void);
 // Deferred destruction: freed once the upload batches recorded so far and the timeline value last noted have completed.
 void vk_defer_image(VkImage img, VmaAllocation alloc);   // alloc NULL: vkDestroyImage only
 void vk_defer_view(VkImageView view);
@@ -399,7 +405,8 @@ void vk_astc_tag(uint64_t addr, int path);  // MKW_ASTC_ERRORS: the next vk_astc
 // after the other), w x h texels and slices deep, written at offset of level / layer; lw x lh, that level's size (for
 // the BC7 copy's extent in whole blocks; 0: the region's own).
 typedef struct { VkDeviceSize src; uint32_t w, h, slices, level, layer; VkOffset3D offset; uint32_t lw, lh; } VkAstcRegion;
-// Records into cb, the open upload batch (between vk_upload_begin and vk_upload_end): src (TRANSFER_SRC, src_size
+// Records into cb, the open upload batch (between vk_upload_begin and vk_upload_end), or a replay part's command buffer
+// with the upload lock held (vk_upload_lock; src then lives until that submission completes): src (TRANSFER_SRC, src_size
 // bytes of blocks) goes to a device-local scratch buffer, a dispatch per region decodes it, and the texels are copied
 // into img (VK_IMAGE_LAYOUT_GENERAL). The caller records its usual barriers around an image copy before and after the
 // call. readback (optional, host-visible, TRANSFER_DST): also gets the decoded texels, the regions one after the other.
@@ -412,6 +419,7 @@ void vk_astc_time_enable(int on);
 int vk_astc_time_get(uint32_t bw, uint32_t bh, uint64_t *texels, uint64_t *calls, double *us);   // totals so far
 void vk_astc_time_summary(void);        // logs the totals
 void vk_astc_bands(int on);              // --probe-astc: 0 records each region whole, as before the bands (default 1)
+void vk_astc_zero_note(uint64_t blocks);   // an ASTC copy whose source region was over 1% zero blocks (vk_tex_upload.c)
 void vk_astc_release(void);             // vk_device.c, before the device goes: frees the decoder's objects
 // ---- precomputed BC7 of ASTC textures (vk_texpre.c; MKW_TEXPRE, MKW_TEXPRE_RECORD)
 typedef struct { uint32_t w, h, slices, level, layer; } VkTexpreRegion;   // one region of an upload, in upload order
@@ -434,7 +442,8 @@ void vk_mem_shutdown(void);                        // before vk_shutdown: waits 
 
 // Textures. Images are keyed by storage GPU address plus descriptor and stay in VK_IMAGE_LAYOUT_GENERAL. A mirrored
 // texture (CPU-written pool storage, MNG tex_mirrored) is uploaded on first use and again when its storage pages were
-// written; once the GPU wrote it (vk_texture_gpu_written) the image is its content. A returned pointer stays valid
+// written; once the GPU wrote it (vk_texture_gpu_written) the image is its content until the CPU writes the storage
+// again (or a WriteTexels reaches the storage only), which makes the storage the content. A returned pointer stays valid
 // until the next call that may drop textures (release, pool fini); copy what outlives that.
 typedef struct {
     VkImage image;
@@ -471,6 +480,14 @@ int  vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint
 int  vk_texture_region_copy(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers, uint32_t x, uint32_t y,
                             uint32_t w, uint32_t h, const VkTexImage *dst, VkImageAspectFlags aspect, uint32_t dlevel,
                             uint32_t dlayer, int32_t dx, int32_t dy, const char **why);
+// ASTC copied into an image of another format: decodes the source's blocks, read from its storage, into dst as bc7 says
+// (0 RGBA8, 1 BC7, 2 BC1; vk_tex_upload.c). 0 when it cannot (a source whose content is on the GPU, a region a BC
+// destination cannot take); VK_TEX_COPY_INLINE recorded in the replay's command buffer at its place, VK_TEX_COPY_BATCH
+// in the upload batch (no replay recording on this thread)
+enum { VK_TEX_COPY_INLINE = 1, VK_TEX_COPY_BATCH = 2 };
+int  vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers, uint32_t x, uint32_t y,
+                          uint32_t w, uint32_t h, const VkTexImage *dst, VkImageAspectFlags aspect, uint32_t dlevel,
+                          uint32_t dlayer, int32_t dx, int32_t dy, int bc7);
 // 1 when t is mirrored and no entry at its storage holds GPU-written content (its storage is its content); *uploads:
 // the uploads of t's entry so far (MKW_TEX_COPY_LOG)
 int  vk_texture_cpu_source(const tex_t *t, uint32_t *uploads);
@@ -516,11 +533,15 @@ VkSampler vk_sampler_point_by_id_locked(int id);
 uint32_t vk_texture_slots_gen(void);
 int vk_texture_checked(int id, uint32_t ep);   // unlocked: slot id's check in submit ep still stands (vk_tex_slots.c)
 // What vk_texture_by_id(id) returns can change only when this does: the slot is registered again, or a texture entry at
-// its storage address is created, dropped, released or taken back into use. Unlocked; read it before the lookup it
-// guards (a lookup may create an entry). 0 when the slot was never registered: nothing is kept under 0.
+// its storage address is created, dropped, released or taken back into use, or a deferred first upload is made (the
+// slot gave the zero stand-in before). Unlocked; read it before the lookup it guards (a lookup may create an entry).
+// 0 when the slot was never registered: nothing is kept under 0.
 uint64_t vk_texture_slot_token(int id);
 uint32_t vk_sampler_gen(void);                      // changes whenever a sampler slot is registered
 void vk_texture_gpu_written(const tex_t *t);        // rendered or copied into by the GPU: no re-upload from storage
+void vk_texture_gpu_copied(const tex_t *t);         // the same for a copy recorded into the upload batch: no make_fresh
+                                                    // after it (its upload would land over the copy)
+                                                    // until the CPU writes it after this
 // runtime/gfx/cap: of the live image of t, if any (none is made): VK_TEXCAP_GPU its content is what the GPU wrote,
 // VK_TEXCAP_RECENT a draw sampled it within the last `recent` submissions, VK_TEXCAP_SPARSE it is a Vulkan sparse image
 // (a sparse NVN texture may be a whole image: depth formats in RADV).

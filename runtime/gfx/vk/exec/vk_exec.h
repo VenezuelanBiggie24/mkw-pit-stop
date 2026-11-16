@@ -131,6 +131,7 @@ void wpage_note(const VkExec *ex, uint64_t addr, uint64_t size, const char *what
 // vk_exec_inline_buffer: a device buffer for transfers, destroyed when the submission completes.
 VkCommandBuffer vk_exec_inline_begin(int *reopen);
 void vk_exec_inline_end(int reopen);
+void vk_exec_inline_end_bound(int reopen);   // the same after commands that bound a pipeline and descriptors of their own
 // vk_exec_draw.c: forget what the command buffer being recorded has bound (pipeline, sets, dynamic state, vertex
 // buffers): the replay continues in a new one (vk_sync_split).
 void vk_exec_draw_new_cb(void);

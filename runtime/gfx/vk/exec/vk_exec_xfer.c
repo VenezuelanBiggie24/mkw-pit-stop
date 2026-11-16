@@ -587,6 +587,16 @@ static void copy_buffer_image(VkExec *ex, const p_copy_b2t *p, int to_image) {
     else vk_mem_gpu_wrote(&m, size), note_gpu_write(ex, p->src, size);
 }
 
+// A copy decoded or read from the source's storage wrote dst. Recorded into the upload batch (VK_TEX_COPY_BATCH, or
+// vk_texture_region_copy), dst is marked GPU-written without make_fresh: an upload it made now would go into the same
+// batch after the copy and put the storage's bytes over it (sub_resolve's vk_texture_get made dst fresh before the copy
+// was recorded). Recorded in the replay's command buffer (VK_TEX_COPY_INLINE), as any other copy: make_fresh's upload
+// goes into the batch, ahead of the part.
+static void gpu_wrote(const tex_t *dst, int how) {
+    if (how == VK_TEX_COPY_INLINE) vk_texture_gpu_written(dst);
+    else vk_texture_gpu_copied(dst);
+}
+
 // An ASTC texture copied into a sparse texture re-encoded as BC7: MKW fills each layer of its 8192x8192x68 terrain
 // arrays, level by level, from an 8192x8192 ASTC texture it uses for nothing else (m19). The blocks are decoded from the
 // source's storage straight into the array (vk_texture_astc_copy), so the source never gets an image: 85 MiB of BC7
@@ -608,9 +618,9 @@ static int astc_into_sparse(const p_copy_t2t *p) {
     uint32_t w = p->sr.width > 0 ? (uint32_t)p->sr.width : lw - x, h = p->sr.height > 0 ? (uint32_t)p->sr.height : lh - y;
     uint32_t n = p->sr.depth > 0 ? (uint32_t)p->sr.depth : 1, dl0 = d.layer0 + (uint32_t)d.z;
     if (level >= p->src->d.levels || x + w > lw || y + h > lh || w != d.w || h != d.h) return 0;
-    if (!vk_texture_astc_copy(p->src, level, layer, n, x, y, w, h, d.img, d.aspect, d.level, dl0, d.x, d.y, 1))
-        return 0;
-    vk_texture_gpu_written(p->dst);
+    int how = vk_texture_astc_copy(p->src, level, layer, n, x, y, w, h, d.img, d.aspect, d.level, dl0, d.x, d.y, 1);
+    if (!how) return 0;
+    gpu_wrote(p->dst, how);
     vk_sparse_written(d.img->image, d.level, dl0, n, d.x, d.y, w, h);
     return 1;
 }
@@ -619,9 +629,10 @@ static int astc_into_sparse(const p_copy_t2t *p) {
 // from the source's storage (vk_texture_region_copy) instead of uploading the whole source first. MKW fills its
 // 8192x8192x68 BC6H terrain array a level of a layer at a time from an 8192x8192 BC6H texture it writes in between, as
 // the ASTC arrays above (titleup, 16/11/2026: that texture uploaded 242 times in frame 77, 87 MiB each). Sparse
-// destinations only: the copy goes through the upload batch, ahead of the submission being recorded, as the ASTC
-// copies do; MKW's sparse arrays are filled by copies alone, while another destination (a render target, a texture
-// drawn into earlier in the same submission) would take the copy out of its place among that submission's commands.
+// destinations only: the copy goes through the upload batch, ahead of the submission being recorded; MKW's sparse
+// arrays are filled by copies alone, while another destination (a render target, a texture drawn into earlier in the
+// same submission) would take the copy out of its place among that submission's commands. (The ASTC copies, which
+// went the same way, are recorded at their place now: vk_texture_astc_copy.)
 static int region_into_sparse(const p_copy_t2t *p, const char **why) {
     *why = NULL;
     if (!p->src || !p->dst || !(p->dst->d.flags & NVN_TEXTURE_FLAGS_SPARSE) ||
@@ -646,7 +657,7 @@ static int region_into_sparse(const p_copy_t2t *p, const char **why) {
         return 0;
     if (!vk_texture_region_copy(p->src, level, layer, n, x, y, w, h, d.img, d.aspect, d.level, dl0, d.x, d.y, why))
         return 0;
-    vk_texture_gpu_written(p->dst);
+    gpu_wrote(p->dst, VK_TEX_COPY_BATCH);
     vk_sparse_written(d.img->image, d.level, dl0, n, d.x, d.y, w, h);
     return 1;
 }
@@ -682,9 +693,10 @@ static const char *copy_t2t_do(VkExec *ex, const p_copy_t2t *p) {
               : df == VK_FORMAT_BC1_RGB_SRGB_BLOCK || df == VK_FORMAT_BC1_RGB_UNORM_BLOCK ? 2 : 0;
     if (s.astc_bw && s.astc_bw == d.astc_bw && s.astc_bh == d.astc_bh && s.img->format != df) {
         uint32_t dl0 = d.layer0 + (uint32_t)d.z;
-        if (vk_texture_astc_copy(p->src, s.level, s.layer0 + (uint32_t)s.z, s.nz, (uint32_t)s.x, (uint32_t)s.y, s.w, s.h,
-                                 d.img, d.aspect, d.level, dl0, d.x, d.y, to_bc)) {
-            vk_texture_gpu_written(p->dst);
+        int how = vk_texture_astc_copy(p->src, s.level, s.layer0 + (uint32_t)s.z, s.nz, (uint32_t)s.x, (uint32_t)s.y,
+                                       s.w, s.h, d.img, d.aspect, d.level, dl0, d.x, d.y, to_bc);
+        if (how) {
+            gpu_wrote(p->dst, how);
             vk_sparse_written(d.img->image, d.level, dl0, s.nz, d.x, d.y, s.w, s.h);
             return "ASTC decoded from storage";
         }

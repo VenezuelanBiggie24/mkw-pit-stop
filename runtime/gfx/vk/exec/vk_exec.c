@@ -296,6 +296,14 @@ void vk_exec_inline_end(int reopen) {
     if (reopen) vk_exec_pass_begin(x_cur);
 }
 
+// Commands that bound a pipeline, descriptors and push constants of their own (an ASTC decode, vk_texture_astc_copy):
+// what the replay last bound is not what the command buffer holds any more, so the next draw or dispatch binds again.
+void vk_exec_inline_end_bound(int reopen) {
+    vk_exec_draw_forget();
+    x_cur->dirty = VK_EXEC_DIRTY_ALL;
+    vk_exec_inline_end(reopen);
+}
+
 typedef struct { VkBuffer b; VmaAllocation a; } InlineBuf;
 static void free_inline_buf(void *arg) {   // completion thread
     InlineBuf *t = arg;

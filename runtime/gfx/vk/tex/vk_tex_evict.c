@@ -45,7 +45,7 @@ VkResult evict_idle(VkCtx *c, const VkImageCreateInfo *ci, const VmaAllocationCr
         int n = 0;
         for (uint32_t i = 0; i < by_key.cap && n < 64; i++) {
             Tex *e = by_key.vals ? by_key.vals[i] : NULL;
-            if (e && e->alloc && e->pub.mirrored && !e->pub.gpu_owned && !e->gpu_dirty && !e->released &&
+            if (e && e->alloc && e->pub.mirrored && !e->pub.gpu_owned && !e->gpu_dirty && !e->released && !e->pin &&
                 (uint32_t)(submit_epoch - e->seen) > idle)
                 cand[n++] = e;
         }
@@ -69,20 +69,23 @@ VkResult evict_idle(VkCtx *c, const VkImageCreateInfo *ci, const VmaAllocationCr
 // rule), worth at least bytes, when the texture lock is free or this thread's (a thread holding it may wait for the
 // upload lock the caller holds). 1 if any went. tt4 (09/11/2026) died on a staging buffer with 1 249 released entries
 // holding 946 MiB: the idle ones alone were looked at.
+// The trylock succeeds on the thread that holds the lock, the recursive case: upload() asking for staging trimmed the
+// very entry it was uploading (looked up last more than idle submissions ago) and its caller went on with the freed
+// Tex. make_fresh marks the entry seen before it uploads and pins it (tex_pin); a pinned entry is skipped here.
 uint64_t vk_texture_trim(uint64_t bytes) {
     VkCtx *c = vk_ctx();
     if (!c || !plat_rmutex_trylock(&tex_lock)) return 0;
     uint64_t freed = 0;
-    while (rel_head && freed < bytes) {
+    for (Tex *r; freed < bytes && (r = rel_oldest());) {
         VmaAllocationInfo vi = {0};
-        if (rel_head->alloc) vmaGetAllocationInfo(c->vma, rel_head->alloc, &vi);
+        if (r->alloc) vmaGetAllocationInfo(c->vma, r->alloc, &vi);
         freed += vi.size;
-        destroy_idle(rel_head);
+        destroy_idle(r);
     }
     uint32_t idle = tex_evict_idle();
     for (uint32_t i = 0; i < by_key.cap && freed < bytes; i++) {
         Tex *e = by_key.vals ? by_key.vals[i] : NULL;
-        if (!e || !e->alloc || !e->pub.mirrored || e->pub.gpu_owned || e->gpu_dirty || e->released ||
+        if (!e || !e->alloc || !e->pub.mirrored || e->pub.gpu_owned || e->gpu_dirty || e->released || e->pin ||
             (uint32_t)(submit_epoch - e->seen) <= idle)
             continue;
         VmaAllocationInfo vi = {0};
@@ -99,8 +102,8 @@ uint64_t vk_texture_trim_released(uint64_t keep_bytes) {
     VkCtx *c = vk_ctx();
     if (!c || !plat_rmutex_trylock(&tex_lock)) return 0;
     uint64_t before = released_bytes;
-    while (released_bytes > keep_bytes && rel_head)
-        destroy_idle(rel_head);
+    for (Tex *r; released_bytes > keep_bytes && (r = rel_oldest());)
+        destroy_idle(r);
     uint64_t freed = before > released_bytes ? before - released_bytes : 0;
     unlock();
     return freed;
@@ -155,6 +158,14 @@ void rel_append(Tex *e) {
     if (rel_tail) rel_tail->rel_next = e;
     else rel_head = e;
     rel_tail = e;
+}
+
+// Released entries are never the one a caller is uploading (taking one back clears released), but the sweeps that walk
+// them run inside staging that ran short too: a pinned one stays, as in vk_texture_trim.
+Tex *rel_oldest(void) {
+    Tex *r = rel_head;
+    while (r && r->pin) r = r->rel_next;
+    return r;
 }
 
 void rel_unlink(Tex *e) {
@@ -250,11 +261,11 @@ static uint64_t released_cap(void) {
 static int recreatable(const Tex *e) { return e->pub.mirrored && !e->pub.gpu_owned && !e->gpu_dirty; }
 
 void sweep_released(void) {
-    while (nreleased > RELEASED_MAX && rel_head) destroy_idle(rel_head);
+    for (Tex *r; nreleased > RELEASED_MAX && (r = rel_oldest());) destroy_idle(r);
     if (released_bytes <= released_cap()) return;
     for (Tex *e = rel_head, *next; e && released_bytes > released_cap(); e = next) {
         next = e->rel_next;
-        if (recreatable(e)) destroy_idle(e);
+        if (recreatable(e) && !e->pin) destroy_idle(e);   // a pinned one is in use (tex_pin)
     }
     static uint64_t logged_at;   // what stays over the cap: released images the GPU wrote (render targets and such)
     if (released_bytes > released_cap() && released_bytes > logged_at + (256ull << 20)) {

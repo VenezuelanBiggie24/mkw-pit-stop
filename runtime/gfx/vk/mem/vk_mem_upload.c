@@ -188,6 +188,12 @@ void vk_upload_end(void) {
     cmd_give();
 }
 
+void vk_upload_lock(void) {
+    plat_once(&cmd_once, cmd_init, NULL);
+    cmd_take();
+}
+void vk_upload_unlock(void) { cmd_give(); }
+
 void vk_upload_work(uint64_t texels) {
     cmd_take();
     if (open_active) open_b.texels += texels;
@@ -235,6 +241,18 @@ static void wait_and_collect_body(VkCtx *c) {
     cmd_give();
 }
 
+// --probe-vkmem: the next vk_staging_fail_test staging buffers fail as out of memory, so the relief paths (texture trim,
+// waits) run as on a console low on memory; 0 in a game run.
+int vk_staging_fail_test;
+static VkResult create_staging(VkCtx *c, const VkBufferCreateInfo *bi, const VmaAllocationCreateInfo *aci, VkBuffer *b,
+                               VmaAllocation *a, VmaAllocationInfo *info) {
+    if (__atomic_load_n(&vk_staging_fail_test, __ATOMIC_RELAXED) > 0) {
+        __atomic_sub_fetch(&vk_staging_fail_test, 1, __ATOMIC_RELAXED);
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return vmaCreateBuffer(c->vma, bi, aci, b, a, info);
+}
+
 // NULL when out of memory and fatal is 0.
 static void *staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc, int fatal) {
     VkCtx *c = vk_ctx();
@@ -262,13 +280,13 @@ static void *staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc, int
     VmaAllocationInfo info;
     VkBuffer b;
     VmaAllocation a;
-    VkResult r = vmaCreateBuffer(c->vma, &bi, &aci, &b, &a, &info);
+    VkResult r = create_staging(c, &bi, &aci, &b, &a, &info);
     // Out of memory: the default pool (the staging pool's blocks may all be in use), then idle textures given back
     // (run-race6 stopped on a 341 KiB staging buffer with the heap full of them).
-    if (r != VK_SUCCESS && aci.pool) aci.pool = NULL, r = vmaCreateBuffer(c->vma, &bi, &aci, &b, &a, &info);
+    if (r != VK_SUCCESS && aci.pool) aci.pool = NULL, r = create_staging(c, &bi, &aci, &b, &a, &info);
     for (int round = 0; r != VK_SUCCESS && round < 4 && vk_texture_trim(bi.size * 2 + (8ull << 20)); round++) {
         vk_mem_collect();
-        r = vmaCreateBuffer(c->vma, &bi, &aci, &b, &a, &info);
+        r = create_staging(c, &bi, &aci, &b, &a, &info);
     }
     // Last: wait for the GPU up to the newest submission, its parts already sent (the one being recorded) and every
     // upload batch in flight, so finalized pools, released textures waiting for their fence (cap-race1 died with 454
@@ -276,7 +294,7 @@ static void *staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc, int
     // more.
     if (r != VK_SUCCESS && (retiring_count() || dead_pending() || ninflight)) {
         wait_and_collect(c);
-        r = vmaCreateBuffer(c->vma, &bi, &aci, &b, &a, &info);
+        r = create_staging(c, &bi, &aci, &b, &a, &info);
         rt_log("vk: staging of %llu bytes after waiting for the GPU and the upload batches: %s",
                (unsigned long long)size, r == VK_SUCCESS ? "made" : "still out of memory");
     }
@@ -481,8 +499,32 @@ void vk_upload_flush_over(VkDeviceSize limit) {
     if (over) vk_upload_flush(0);
 }
 
+// The tiles MapVirtual mapped since the last part are bound only at a part's split or submit (vk_sync.c, binds 2), and
+// vk_upload_flush orders its batch behind the binds already issued (vk_sparse_order(0, 0)), not the queued ones. A batch
+// sent in the middle of a recording (vk_upload_flush_over: 64 MiB of staging, 64 M ASTC texels or 128 calls; a
+// readback) carried copies into tiles mapped since the last part to the GPU before those tiles were bound: the writes
+// went nowhere and the tiles read zero (MKW fills its sparse terrain arrays a level of a layer at a time, ~300 copies
+// at a load, right after mapping their pages). So the queued binds go first, as vk_sync.c does before its flush.
+// Only when this thread does not hold the upload lock (the queue lock and sp_lock come before it: vk_mem_relieve's
+// flush goes without) and there is a batch to send. fence: what frees the tiles unbound by these binds: the submission being recorded, as
+// vk_sync.c passes, or outside a recording two past the newest issued (the one being recorded may have taken its
+// wait already, as tail_bind_now).
+static void binds_before_flush(void) {
+    if (cmd_depth || !vk_sparse_binds_queued()) return;
+    cmd_take();
+    int open = open_active;
+    cmd_give();
+    if (!open) return;
+    uint64_t fence = vk_exec_recording_fence();
+    if (!fence) fence = vk_sync_issued() + 2;
+    vk_queue_lock();
+    vk_sparse_order(fence, 2);
+    vk_queue_unlock();
+}
+
 uint64_t vk_upload_flush(int wait) {
     plat_once(&cmd_once, cmd_init, NULL);
+    binds_before_flush();
     cmd_take();
     VkCtx *c = vk_ctx();
     // The queue lock comes before cmd_lock (see cmd_lock): when another thread holds it, cmd_lock is let go while this

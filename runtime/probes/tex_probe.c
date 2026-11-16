@@ -755,6 +755,264 @@ static int test_textures(pool_t *tpool, pool_t *phys) {
     return 0;
 }
 
+// Textures under memory pressure (vk_staging_fail_test makes staging buffers fail as on a console low on memory):
+// 1. an entry idle past the eviction threshold is rewritten by the CPU; its re-upload finds no staging, the relief
+//    trims idle textures on the same thread (recursive lock), and the entry must survive it (it was freed and handed
+//    out: one-frame garbage textures on the PS5).
+// 2. a new texture whose first upload is deferred binds the zero stand-in, not its never-written image, and its slot
+//    gives the image once the upload is made.
+// 3. a mirrored texture the GPU wrote takes the CPU's bytes again once the CPU rewrites its storage.
+static int test_pressure(pool_t *tpool) {
+    uint8_t *lin[1] = {0}, *lin2[1] = {0}, *lin3[1] = {0};
+    tex_t u = make_tex(tpool, 0xE0000, 0x25, 64, 64, 1, 9);
+    if (fill_storage(&u, lin)) return 1;
+    const VkTexImage *img = vk_texture_get(&u);
+    GCHECK(img && img->mirrored, "pressure: RGBA8 texture image");
+    for (int i = 0; i < 80; i++) vk_texture_new_submit();   // idle past EVICT_IDLE (64)
+    if (fill_storage(&u, lin)) return 1;
+    uint64_t up0, up1, re0, re1;
+    vk_texture_stats(NULL, &up0, &re0);
+    vk_staging_fail_test = 2;   // the staging pool and the default pool: then the texture trim
+    const VkTexImage *img2 = vk_texture_get(&u);
+    vk_staging_fail_test = 0;
+    // evicted, the next lookup makes a new entry: a first upload, not a re-upload (the freed one may share its address)
+    const VkTexImage *img3 = vk_texture_get(&u);
+    vk_texture_stats(NULL, &up1, &re1);
+    GCHECK(img2 == img && img3 == img && up1 == up0 && re1 == re0 + 1, "pressure: the entry being uploaded was evicted "
+           "by its own staging's trim (uploads +%llu, re-uploads +%llu)", (unsigned long long)(up1 - up0),
+           (unsigned long long)(re1 - re0));
+    if (read_back(&u, 0, lin, 1, "pressure: re-upload after a trim")) return 1;
+
+    tex_t w = make_tex(tpool, 0xF0000, 0x25, 64, 64, 1, 10);
+    if (fill_storage(&w, lin2)) return 1;
+    vk_texture_register(6, &w, NULL);
+    vk_texture_new_submit();
+    vk_staging_fail_test = 1 << 20;   // every attempt of this upload, relief included
+    const VkTexImage *s0 = vk_texture_by_id(6, NULL, NULL);
+    vk_staging_fail_test = 0;
+    GCHECK(!s0, "pressure: a texture whose first upload was deferred is bound as its uninitialised image");
+    __atomic_add_fetch(&gfx_counters.frames, 1, __ATOMIC_RELAXED);   // a deferred upload is tried again next frame
+    vk_texture_new_submit();
+    const VkTexImage *s1 = vk_texture_by_id(6, NULL, NULL);
+    GCHECK(s1 && s1->mirrored, "pressure: the slot does not give the image once its upload is made");
+    if (read_back(&w, 0, lin2, 1, "pressure: deferred first upload")) return 1;
+
+    tex_t x = make_tex(tpool, 0x100000 - 0x4000, 0x25, 64, 64, 1, 11);   // 16 KiB at the pool's end
+    if (fill_storage(&x, lin3)) return 1;
+    GCHECK(vk_texture_get(&x), "pressure: GPU-written texture image");
+    vk_texture_gpu_written(&x);
+    vk_texture_new_submit();
+    if (fill_storage(&x, lin3)) return 1;   // the CPU writes the storage after the render
+    vk_texture_new_submit();
+    vk_texture_get(&x);
+    if (read_back(&x, 0, lin3, 1, "pressure: CPU rewrite after a GPU write")) return 1;
+    g_gpu_checks += 5;
+    vk_texture_release(&u), vk_texture_release(&w), vk_texture_release(&x);
+    free(lin[0]), free(lin2[0]), free(lin3[0]);
+    printf("probe-vkmem: pressure: an idle texture survives the trim of its own re-upload's staging, a deferred first "
+           "upload binds the zero stand-in until made, a CPU rewrite after a GPU write is uploaded\n");
+    return 0;
+}
+
+// The bytes of an image region (level 0, one layer; RGBA8 texels, or a BC image's blocks: bytes says how many),
+// read back through the upload batch.
+static void image_bytes(VkImage img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t *out, size_t bytes) {
+    VkBuffer rb;
+    VmaAllocation ra;
+    uint8_t *m = vk_staging(bytes, &rb, &ra);
+    VkCommandBuffer cb = vk_upload_begin();
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+    VkBufferImageCopy cp = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageOffset = {(int32_t)x, (int32_t)y, 0},
+                            .imageExtent = {w, h, 1}};
+    vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, rb, 1, &cp);
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, mb.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+    vkCmdPipelineBarrier2(cb, &di);
+    vk_upload_end();
+    vk_upload_flush(1);
+    vmaInvalidateAllocation(vk_ctx()->vma, ra, 0, VK_WHOLE_SIZE);
+    memcpy(out, m, bytes);
+    vmaDestroyBuffer(vk_ctx()->vma, rb, ra);
+}
+
+static void image_rgba(VkImage img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t *out) {
+    image_bytes(img, x, y, w, h, out, (size_t)w * h * 4);
+}
+
+// WriteTexels of ASTC 5x5 blocks into an image re-encoded as BC7 (320x320 in a physical pool: no CPU storage, so not
+// BC1), at 5,5 45x45: not on 4x4 blocks. Before, the copy went to the GPU as it was (an invalid region, which the
+// validation layer reports); now only the whole blocks of both inside it, 20,20 20x20, are written, and the BC blocks
+// around keep the first write's colour.
+static int test_bc_unaligned(pool_t *phys) {
+    TexVkFormat f;
+    if (!tex_vk_format(0x7B, &f) || !f.astc_bw || !vk_astc_gpu()) {
+        printf("probe-vkmem: unaligned BC write: ASTC is not decoded on the GPU here, skipped\n");
+        return 0;
+    }
+    tex_t t = make_tex(phys, 0x10000, 0x7B, 320, 320, 1, 26);
+    const VkTexImage *img = vk_texture_get(&t);
+    if (!img || img->format != VK_FORMAT_BC7_UNORM_BLOCK) {
+        printf("probe-vkmem: unaligned BC write: no BC7 image for ASTC (VkFormat %d), skipped\n", img ? (int)img->format : -1);
+        return 0;
+    }
+    GCHECK(!img->mirrored, "the physical-pool ASTC texture is mirrored");
+    uint8_t *blk = malloc(64 * 64 * 16), *a = malloc(80 * 80 * 16), *b = malloc(80 * 80 * 16);
+    for (int k = 0; k < 64 * 64; k++) void_block(blk + 16 * k, 0x4000, 0x8000, 0xC000, 0xFFFF, 0);
+    NVNcopyRegion all = {0, 0, 0, 320, 320, 1}, part = {5, 5, 0, 45, 45, 1};
+    vk_write_texels(&t, NULL, &all, blk, 64 * 16, 64 * 64 * 16);
+    image_bytes(img->image, 0, 0, 320, 320, a, 80 * 80 * 16);
+    for (int k = 0; k < 64 * 64; k++) void_block(blk + 16 * k, 0xF000, 0x1000, 0x2000, 0xFFFF, 0);
+    vk_write_texels(&t, NULL, &part, blk, 64 * 16, 64 * 64 * 16);
+    image_bytes(img->image, 0, 0, 320, 320, b, 80 * 80 * 16);
+    uint32_t inside = 0, changed_out = 0, same_in = 0;
+    for (uint32_t by = 0; by < 80; by++)
+        for (uint32_t bx = 0; bx < 80; bx++) {
+            int in = bx >= 5 && bx < 10 && by >= 5 && by < 10, ch = memcmp(a + (by * 80 + bx) * 16, b + (by * 80 + bx) * 16, 16);
+            if (in) inside++, same_in += !ch;
+            else changed_out += ch != 0;
+        }
+    int solid = 1;
+    for (uint32_t by = 5; by < 10; by++)
+        for (uint32_t bx = 5; bx < 10; bx++) solid &= !memcmp(b + (by * 80 + bx) * 16, b + (5 * 80 + 5) * 16, 16);
+    free(blk), free(a), free(b);
+    GCHECK(!same_in && !changed_out && solid && inside == 25, "unaligned WriteTexels into BC7: %u of %u inner blocks "
+           "unchanged, %u outer blocks changed, inner blocks alike %d", same_in, inside, changed_out, solid);
+    vk_texture_release(&t);
+    g_gpu_checks++;
+    printf("probe-vkmem: unaligned BC write: ASTC 5x5 at 5,5 45x45 into BC7 wrote the whole blocks inside it only\n");
+    return 0;
+}
+
+// Texels of an RGBA8 region that are not want (count).
+static uint32_t rgba_misses(const uint8_t *px, uint32_t n, const uint8_t want[4]) {
+    uint32_t bad = 0;
+    for (uint32_t i = 0; i < n; i++) bad += memcmp(px + 4 * i, want, 4) != 0;
+    return bad;
+}
+
+// ASTC copies decoded from the source's storage (vk_texture_astc_copy), outside a replay: into the upload batch.
+// 1. A mirrored ASTC destination (kept RGBA8, 64x64) with zero storage, rewritten by the CPU after its last check, as
+//    the game's thread does ahead of the replay: the copied region must hold the source's colour. The destination's own
+//    re-upload, recorded after the copy in the same batch by vk_texture_gpu_written's make_fresh, put its zero blocks
+//    (the error colour, magenta) over it; vk_texture_gpu_copied makes none. The old order is run on a twin and reported.
+// 2. A source whose content the GPU wrote: its storage is not its content, and the copy is refused (the replay copies the
+//    images instead).
+static int test_astc_copy(pool_t *tp) {
+    TexVkFormat f;
+    if (!tex_vk_format(0x79, &f) || !f.astc_bw || !vk_astc_gpu()) {
+        printf("probe-vkmem: ASTC copy: ASTC is not decoded on the GPU here, skipped\n");
+        return 0;
+    }
+    tex_t src = make_tex(tp, 0, 0x79, 64, 64, 1, 20), dst = make_tex(tp, 0x10000, 0x79, 64, 64, 1, 21),
+          old = make_tex(tp, 0x20000, 0x79, 64, 64, 1, 22);
+    uint32_t rb, rows, sl, bpb;
+    uint64_t base;
+    unsigned th, td;
+    GCHECK(!nvn_deswizzle_geom(&src.d, 0, 0, &rb, &rows, &sl, &base, &th, &td, &bpb) && bpb == 16, "ASTC 4x4 geometry");
+    uint8_t *lin = malloc((size_t)rb * rows), want[4] = {0x40, 0x80, 0xC0, 0xFF};
+    for (size_t k = 0; k < (size_t)rb * rows / 16; k++)
+        void_block(lin + 16 * k, (uint16_t)(want[0] << 8), (uint16_t)(want[1] << 8), (uint16_t)(want[2] << 8), 0xFFFF, 0);
+    ref_swizzle(lin, src.mem + base, rb, rows, 1, th, td);
+    free(lin);
+    memset(dst.mem, 0, dst.L.size), memset(old.mem, 0, old.L.size);
+    const VkTexImage *di = vk_texture_get(&dst), *oi = vk_texture_get(&old);
+    GCHECK(di && oi && di->mirrored && di->format == VK_FORMAT_R8G8B8A8_UNORM, "ASTC destination images (RGBA8, mirrored)");
+    memset(dst.mem, 0, dst.L.size), memset(old.mem, 0, old.L.size);   // the CPU writes them after their check
+    int how = vk_texture_astc_copy(&src, 0, 0, 1, 0, 0, 32, 32, di, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 16, 16, 0);
+    GCHECK(how == VK_TEX_COPY_BATCH, "ASTC copy outside a replay: %d (want the upload batch)", how);
+    vk_texture_gpu_copied(&dst);
+    how = vk_texture_astc_copy(&src, 0, 0, 1, 0, 0, 32, 32, oi, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 16, 16, 0);
+    vk_texture_gpu_written(&old);
+    uint8_t *px = malloc(32 * 32 * 4);
+    image_rgba(di->image, 16, 16, 32, 32, px);
+    uint32_t bad = rgba_misses(px, 32 * 32, want);
+    GCHECK(!bad, "ASTC copy into a mirrored destination: %u of 1024 texels not the source's colour (first %02x%02x%02x%02x)",
+           bad, px[0], px[1], px[2], px[3]);
+    image_rgba(oi->image, 16, 16, 32, 32, px);
+    uint8_t magenta[4] = {0xFF, 0x00, 0xFF, 0xFF};
+    uint32_t old_bad = rgba_misses(px, 32 * 32, want), old_magenta = 32 * 32 - rgba_misses(px, 32 * 32, magenta);
+    free(px);
+    // the census of zero blocks (task G): a source never written logs its line ("ASTC copy zero blocks"), the copy made
+    tex_t zs = make_tex(tp, 0x40000, 0x79, 64, 64, 1, 25);
+    memset(zs.mem, 0, zs.L.size);
+    how = vk_texture_astc_copy(&zs, 0, 0, 1, 0, 0, 32, 32, di, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0, 0, 0);
+    GCHECK(how == VK_TEX_COPY_BATCH, "ASTC copy of a zero source: %d", how);
+    // 2. the source's content on the GPU
+    GCHECK(vk_texture_get(&src), "ASTC source image");
+    vk_texture_gpu_written(&src);
+    how = vk_texture_astc_copy(&src, 0, 0, 1, 0, 0, 32, 32, di, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 16, 16, 0);
+    GCHECK(!how, "an ASTC copy decoded the storage of a source the GPU wrote");
+    vk_upload_flush(1);
+    vk_texture_release(&src), vk_texture_release(&dst), vk_texture_release(&old);
+    g_gpu_checks += 5;
+    printf("probe-vkmem: ASTC copy: decoded into a mirrored destination rewritten since its check, the region kept (the "
+           "old order, make_fresh after the copy: %u of 1024 texels lost, %u magenta); a GPU-written source refused\n",
+           old_bad, old_magenta);
+    return 0;
+}
+
+// A copy into a sparse tile mapped since the last part, in an upload batch sent in the middle of a recording
+// (vk_upload_flush_over): the tile's bind must reach the queue before the batch (vk_mem_upload.c binds_before_flush),
+// or the write goes nowhere and the tile reads as it was bound later (zero). The region is read from the CPU-written
+// source's storage (vk_texture_region_copy), into the upload batch, as the replay's copies into the terrain arrays.
+static int test_sparse_flush(pool_t *tp, uint8_t *heap) {
+    pool_t phys = {.magic = NVN_POOL_MAGIC, .flags = 0x189, .mem = (uint8_t *)(uintptr_t)(RT_GPU_VA_BASE + 0x300000000ull),
+                   .size = 0x40000, .game_mem = heap + 0x900000, .span = 0x40000};
+    pool_t virt = {.magic = NVN_POOL_MAGIC, .flags = 0x2a1, .mem = (uint8_t *)(uintptr_t)(RT_GPU_VA_BASE + 0x400000000ull),
+                   .size = 0x100000, .span = 0x100000};
+    GCHECK(vk_pool_init(&phys) && vk_pool_init(&virt), "vk_pool_init of the sparse test's pools");
+    tex_t sp = make_tex(&virt, 0, 0x25, 512, 512, 1, 23);
+    sp.d.flags |= NVN_TEXTURE_FLAGS_SPARSE;
+    nvn_tex_layout(&sp.d, &sp.L);
+    const VkTexImage *si = vk_texture_get(&sp);
+    if (!si || !vk_sparse_is(si->image)) {
+        printf("probe-vkmem: sparse flush: no sparse RGBA8 image on this GPU, skipped\n");
+        vk_texture_release(&sp);
+        vk_pool_fini(&virt), vk_pool_fini(&phys);
+        return 0;
+    }
+    vk_upload_flush(1);
+    vk_queue_lock();
+    vk_sparse_order(vk_sync_issued() + 2, 2);   // nothing queued from before this test
+    vk_queue_unlock();
+    nvn_mapping_t rq = {(const NVNmemoryPool *)(const void *)&phys, 0, 0, 0x10000, 0, 0};   // page 0: tile 0,0
+    GCHECK(vk_pool_map_virtual(&virt, 1, &rq), "MapVirtual of the sparse texture's first page");
+    GCHECK(vk_sparse_binds_queued(), "the mapped tile's bind is not queued");
+    uint8_t *lin[1] = {0};
+    tex_t src = make_tex(tp, 0x30000, 0x25, 128, 128, 1, 24);
+    if (fill_storage(&src, lin)) return 1;
+    const char *why = NULL;
+    GCHECK(vk_texture_region_copy(&src, 0, 0, 1, 0, 0, 128, 128, si, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0, 0, &why),
+           "region copy into the sparse tile refused (%s)", why ? why : "?");
+    vk_upload_flush_over(0);   // the batch sent before the part, as at 64 MiB of staging
+    GCHECK(!vk_sparse_binds_queued(), "the batch went to the queue before the tile's bind");
+    vk_queue_lock();
+    vk_sparse_order(vk_sync_issued() + 2, 2);   // as the part's split would: the read below sees the tile bound
+    vk_queue_unlock();
+    uint8_t *px = malloc(128 * 128 * 4);
+    image_rgba(si->image, 0, 0, 128, 128, px);
+    int same = !memcmp(px, lin[0], 128 * 128 * 4);
+    size_t first = 0;
+    while (same == 0 && first < 128 * 128 * 4 && px[first] == lin[0][first]) first++;
+    free(px), free(lin[0]);
+    GCHECK(same, "the copy into the sparse tile was lost (first difference at byte %zu)", first);
+    vk_texture_release(&sp), vk_texture_release(&src);
+    nvn_mapping_t un = {NULL, 0, 0, 0x10000, 0, 0};
+    vk_pool_map_virtual(&virt, 1, &un);
+    vk_upload_flush(1);
+    // the binds above free the tiles they unbind once the value they were given (two past the newest issued) is done:
+    // empty submissions reach it, and the slots go back before the device does
+    for (int i = 0; i < 3; i++) vk_sync_submit(NULL, 0);
+    vk_sync_finish_submissions();
+    vk_pool_fini(&virt), vk_pool_fini(&phys);
+    g_gpu_checks += 4;
+    printf("probe-vkmem: sparse flush: a copy into a tile mapped since the last part, sent mid-recording, lands in it\n");
+    return 0;
+}
+
 static int test_gpu(void) {
     uint64_t heap = 0;
     GCHECK(mem_set_heap_size(16ull << 20, &heap) == 0 && heap, "SetHeapSize 16 MiB");
@@ -768,7 +1026,11 @@ static int test_gpu(void) {
     if (test_import(&pool) || test_readfile(pool.mem + 0x38000) || test_virtual(&phys, &virt)) return 1;
     if (vk_mem_shadow_on() && test_merge(&pool)) return 1;
     GCHECK(vk_pool_init(&tpool), "vk_pool_init of the texture pool");
-    if (test_textures(&tpool, &phys) || test_region_copy(&tpool)) return 1;
+    if (test_textures(&tpool, &phys) || test_region_copy(&tpool) || test_pressure(&tpool)) return 1;
+    pool_t tpool2 = {.magic = NVN_POOL_MAGIC, .flags = 0x22, .mem = h + 0xA00000, .size = 0x100000, .game_mem = h + 0xA00000};
+    GCHECK(vk_pool_init(&tpool2), "vk_pool_init of the second texture pool");
+    if (test_astc_copy(&tpool2) || test_sparse_flush(&tpool2, h) || test_bc_unaligned(&phys)) return 1;
+    vk_pool_fini(&tpool2);
     const char *cap = cfg_get("MKW_SHADOW_SUBMIT");   // a measurement, off by default
     if (vk_mem_shadow_on() && cap && !strcmp(cap, "1") && test_capture(&pool)) return 1;
     VkMemStats st;

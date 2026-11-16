@@ -237,6 +237,31 @@ int gfx_held_force(void) {
     return n;
 }
 
+// The submit numbers (nvn_submit_count) of the latest submissions with a wait the submit order does not meet (the
+// census) or that were held for one: vk_texture_astc_copy's zero-block line asks about the submission it is replaying
+// (task G: the 8192x8192 terrain staging texture decoded as all error blocks at loading, as if read before the CPU
+// wrote it, which on the console a wait on a CPU-signalled event would prevent). Written under qo, read without it.
+#define UNMET_RING 1024
+static uint64_t unmet_ring[UNMET_RING];
+static uint64_t unmet_n;
+
+static void unmet_note(void) {
+    uint64_t sub = nvn_submit_count(), n = __atomic_load_n(&unmet_n, __ATOMIC_RELAXED);
+    if (n && __atomic_load_n(&unmet_ring[(n - 1) % UNMET_RING], __ATOMIC_RELAXED) == sub) return;
+    __atomic_store_n(&unmet_ring[n % UNMET_RING], sub, __ATOMIC_RELAXED);
+    __atomic_store_n(&unmet_n, n + 1, __ATOMIC_RELEASE);
+}
+
+int nvn_qorder_unmet(uint64_t sub) {
+    uint64_t n = __atomic_load_n(&unmet_n, __ATOMIC_ACQUIRE);
+    uint64_t k = n < UNMET_RING ? n : UNMET_RING;
+    for (uint64_t i = 0; i < k; i++)
+        if (__atomic_load_n(&unmet_ring[(n - 1 - i) % UNMET_RING], __ATOMIC_RELAXED) == sub) return 1;
+    // older than the oldest one kept: not known
+    if (n > UNMET_RING && sub < __atomic_load_n(&unmet_ring[n % UNMET_RING], __ATOMIC_RELAXED)) return -1;
+    return 0;
+}
+
 static void log_line(void) {
     static uint64_t subs;
     if (++subs % 1500) return;
@@ -254,11 +279,14 @@ int nvn_qorder_submit(const void *queue, const uint64_t *handles, int n, void **
     log_line();
     if (!RT_KNOB_ON(m)) {
         if (nslots) force();   // (the B block ended)
-        if (nvn_sub_events || nvn_sub_waits)
+        if (nvn_sub_events || nvn_sub_waits) {
+            uint64_t unmet0 = st_unmet;
             for (int i = 0; i < n; i++) {
                 Span s = handle_ops(handles[i]);
                 follow(s.p, s.end, 0);
             }
+            if (st_unmet != unmet0) unmet_note();
+        }
     } else if (!nslots && !nvn_sub_waits) {   // (nothing held and no wait: as it is; its signals are followed)
         if (nvn_sub_events)
             for (int i = 0; i < n; i++) {
@@ -289,6 +317,7 @@ int nvn_qorder_submit(const void *queue, const uint64_t *handles, int n, void **
         }
         held = was_open || nruns;
         if (held) {
+            unmet_note();
             if (!was_open) st_episodes++;
             st_held++;
             FeSlot *s = calloc(1, sizeof *s);

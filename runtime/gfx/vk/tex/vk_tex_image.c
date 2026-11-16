@@ -51,26 +51,31 @@ static VkImageAspectFlags aspect_of(const TexVkFormat *f) {
     return a ? a : VK_IMAGE_ASPECT_COLOR_BIT;
 }
 
-// Binds img into the pool memory behind its GPU address (physical pools, virtual pools through the page table) when
-// the memory type, alignment and contiguous size allow; 0 otherwise.
 static int format_compressed(VkFormat f) {   // vkCmdClearColorImage takes no block-compressed format
     return (f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK) ||
            (f >= VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK && f <= VK_FORMAT_ASTC_12x12_SFLOAT_BLOCK);
 }
 
-static int bind_pool_memory(VkCtx *c, Tex *e, VkImage img) {
+// Binds img into the pool memory behind its GPU address (physical pools, virtual pools through the page table) when
+// the memory type, alignment and contiguous size allow; 0 otherwise (the caller gives it memory of its own, and a live
+// texture at the address hands it its content: entry_of's alias copy, MKW_TEX_ALIAS).
+// Not when the Vulkan image needs more bytes than the NVN storage: the driver lays it out for its own GPU (padding,
+// and RADV's HTILE / DCC metadata after the texels), and every byte past the storage is another texture's or buffer's,
+// which each render, clear or metadata update of this one overwrote (vk_texture_report counts such images).
+static int bind_pool_memory(VkCtx *c, Tex *e, VkImage img, uint64_t storage) {
+    static volatile int32_t n_spill;
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(c->device, img, &req);
-    // A Vulkan image larger than its NVN storage overwrites the pool memory after it. AMD lays out a 676x676 D32S8 in
+    // A Vulkan image larger than its NVN storage overwrites the pool memory after it: AMD lays out a 676x676 D32S8 in
     // 0x2e0170 bytes for NVN's 0x204000, and the minimap's depth wrote into its colour target at +0x204200 (#365,
-    // diagnosed by elenotrindade). A depth or stencil image is not read through other formats in that memory, so it
-    // gets its own; a colour one stays bound, as the game may alias it. MKW_POOL_SPILL=1 binds them all as before.
+    // diagnosed by elenotrindade). Any format: RADV's DCC / HTILE metadata follows colour texels as well. Such an image
+    // gets memory of its own; MKW_POOL_SPILL=1 binds them all as before.
     static int spill_env = -1;
     if (spill_env < 0) spill_env = cfg_get("MKW_POOL_SPILL") && atoi(cfg_get("MKW_POOL_SPILL"));
-    if ((e->f.depth || e->f.stencil) && req.size > e->t.L.size && !spill_env) {
-        rt_log("vk_tex: depth %#llx %ux%u fmt %#x takes %#llx bytes for NVN's %#llx: own memory (MKW_POOL_SPILL)",
-               (unsigned long long)e->pub.addr, e->key.d.width, e->key.d.height, e->key.d.format,
-               (unsigned long long)req.size, (unsigned long long)e->t.L.size);
+    if (req.size > storage && !spill_env) {
+        log_limited(&n_spill, "texture %#llx needs %#llx bytes for its Vulkan image, its NVN storage %#llx: not bound "
+                    "into its pool memory (it would spill into the next storage; MKW_POOL_SPILL)",
+                    (unsigned long long)e->pub.addr, (unsigned long long)req.size, (unsigned long long)storage);
         return 0;
     }
     VkMemSpan sp;
@@ -218,8 +223,11 @@ static int usage_ok(const VkImageCreateInfo *ci) {
     return ok;
 }
 
-// UNDEFINED -> GENERAL; new depth / stencil images start cleared (LAS textures.c: the game copies depth
-// without stencil, and the stencil of those images must not be whatever the memory held).
+// UNDEFINED -> GENERAL; new depth / stencil images with memory of their own start cleared (LAS textures.c: the game
+// copies depth without stencil, and the stencil of those images must not be whatever the memory held). One aliasing
+// pool memory (bound_to) is not cleared, as the colour ones below: the memory is the pool's, zero when the pool was
+// made (vk_mem_back.c, MKW_FIX_ZERO) and since then what the game's textures there hold, which a clear of a new
+// descriptor of that storage would erase.
 void init_image(Tex *e, VkCommandBuffer cb) {
     VkImageMemoryBarrier2 ib = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
                                 .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -250,7 +258,7 @@ void init_image(Tex *e, VkCommandBuffer cb) {
             barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
             free(regions);
         }
-    } else if (e->f.depth || e->f.stencil) {
+    } else if ((e->f.depth || e->f.stencil) && !e->bound_to) {
         VkClearDepthStencilValue zero = {0.0f, 0};
         VkImageSubresourceRange rg = {e->pub.aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
         vkCmdClearDepthStencilImage(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &rg);
@@ -592,7 +600,7 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     VkImage img = VK_NULL_HANDLE;
     if (vk_sparse_create(&ci, d, k->addr, L.size, &img, &e->sparse_tail)) e->sparse = 1;
     else if (nvn_gpu_only(k->addr)) {   // storage in a physical or virtual pool: alias the pool memory (section 3.2)
-        if (vkCreateImage(c->device, &ci, NULL, &img) == VK_SUCCESS && !bind_pool_memory(c, e, img)) {
+        if (vkCreateImage(c->device, &ci, NULL, &img) == VK_SUCCESS && !bind_pool_memory(c, e, img, L.size)) {
             vkDestroyImage(c->device, img, NULL);
             img = VK_NULL_HANDLE;
             log_limited(&n_unbound, "texture %#llx (%ux%u fmt %#x, %u levels, %u layers) cannot alias its pool memory; "
@@ -612,13 +620,13 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         // Out of memory: released entries kept for a re-use go first, oldest first, then the retry (run115: 1 230
         // released entries held 596 MiB while new textures failed). Their images go to the deferred list; what the
         // GPU finished with is freed by vk_mem_collect.
-        for (int round = 0; can_fit && r == VK_ERROR_OUT_OF_DEVICE_MEMORY && rel_head && round < 8; round++) {
+        for (int round = 0; can_fit && r == VK_ERROR_OUT_OF_DEVICE_MEMORY && rel_oldest() && round < 8; round++) {
             VkDeviceSize freed = 0;
-            while (rel_head && freed < 2 * need + (16ull << 20)) {
+            for (Tex *rl; freed < 2 * need + (16ull << 20) && (rl = rel_oldest());) {
                 VmaAllocationInfo vi = {0};
-                if (rel_head->alloc) vmaGetAllocationInfo(c->vma, rel_head->alloc, &vi);
+                if (rl->alloc) vmaGetAllocationInfo(c->vma, rl->alloc, &vi);
                 freed += vi.size;
-                destroy_idle(rel_head);
+                destroy_idle(rl);
             }
             vk_mem_collect();
             r = vma_image(c, &ci, &ai, &img, &e->alloc);
