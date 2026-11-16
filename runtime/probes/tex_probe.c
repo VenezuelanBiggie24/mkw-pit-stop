@@ -900,6 +900,65 @@ static int test_astc_copy(pool_t *tp) {
     return 0;
 }
 
+// A copy into a sparse tile mapped since the last part, in an upload batch sent in the middle of a recording
+// (vk_upload_flush_over): the tile's bind must reach the queue before the batch (vk_mem_upload.c binds_before_flush),
+// or the write goes nowhere and the tile reads as it was bound later (zero). The region is read from the CPU-written
+// source's storage (vk_texture_region_copy), into the upload batch, as the replay's copies into the terrain arrays.
+static int test_sparse_flush(pool_t *tp, uint8_t *heap) {
+    pool_t phys = {.magic = NVN_POOL_MAGIC, .flags = 0x189, .mem = (uint8_t *)(uintptr_t)(RT_GPU_VA_BASE + 0x300000000ull),
+                   .size = 0x40000, .game_mem = heap + 0x900000, .span = 0x40000};
+    pool_t virt = {.magic = NVN_POOL_MAGIC, .flags = 0x2a1, .mem = (uint8_t *)(uintptr_t)(RT_GPU_VA_BASE + 0x400000000ull),
+                   .size = 0x100000, .span = 0x100000};
+    GCHECK(vk_pool_init(&phys) && vk_pool_init(&virt), "vk_pool_init of the sparse test's pools");
+    tex_t sp = make_tex(&virt, 0, 0x25, 512, 512, 1, 23);
+    sp.d.flags |= NVN_TEXTURE_FLAGS_SPARSE;
+    nvn_tex_layout(&sp.d, &sp.L);
+    const VkTexImage *si = vk_texture_get(&sp);
+    if (!si || !vk_sparse_is(si->image)) {
+        printf("probe-vkmem: sparse flush: no sparse RGBA8 image on this GPU, skipped\n");
+        vk_texture_release(&sp);
+        vk_pool_fini(&virt), vk_pool_fini(&phys);
+        return 0;
+    }
+    vk_upload_flush(1);
+    vk_queue_lock();
+    vk_sparse_order(vk_sync_issued() + 2, 2);   // nothing queued from before this test
+    vk_queue_unlock();
+    nvn_mapping_t rq = {(const NVNmemoryPool *)(const void *)&phys, 0, 0, 0x10000, 0, 0};   // page 0: tile 0,0
+    GCHECK(vk_pool_map_virtual(&virt, 1, &rq), "MapVirtual of the sparse texture's first page");
+    GCHECK(vk_sparse_binds_queued(), "the mapped tile's bind is not queued");
+    uint8_t *lin[1] = {0};
+    tex_t src = make_tex(tp, 0x30000, 0x25, 128, 128, 1, 24);
+    if (fill_storage(&src, lin)) return 1;
+    const char *why = NULL;
+    GCHECK(vk_texture_region_copy(&src, 0, 0, 1, 0, 0, 128, 128, si, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0, 0, &why),
+           "region copy into the sparse tile refused (%s)", why ? why : "?");
+    vk_upload_flush_over(0);   // the batch sent before the part, as at 64 MiB of staging
+    GCHECK(!vk_sparse_binds_queued(), "the batch went to the queue before the tile's bind");
+    vk_queue_lock();
+    vk_sparse_order(vk_sync_issued() + 2, 2);   // as the part's split would: the read below sees the tile bound
+    vk_queue_unlock();
+    uint8_t *px = malloc(128 * 128 * 4);
+    image_rgba(si->image, 0, 0, 128, 128, px);
+    int same = !memcmp(px, lin[0], 128 * 128 * 4);
+    size_t first = 0;
+    while (same == 0 && first < 128 * 128 * 4 && px[first] == lin[0][first]) first++;
+    free(px), free(lin[0]);
+    GCHECK(same, "the copy into the sparse tile was lost (first difference at byte %zu)", first);
+    vk_texture_release(&sp), vk_texture_release(&src);
+    nvn_mapping_t un = {NULL, 0, 0, 0x10000, 0, 0};
+    vk_pool_map_virtual(&virt, 1, &un);
+    vk_upload_flush(1);
+    // the binds above free the tiles they unbind once the value they were given (two past the newest issued) is done:
+    // empty submissions reach it, and the slots go back before the device does
+    for (int i = 0; i < 3; i++) vk_sync_submit(NULL, 0);
+    vk_sync_finish_submissions();
+    vk_pool_fini(&virt), vk_pool_fini(&phys);
+    g_gpu_checks += 4;
+    printf("probe-vkmem: sparse flush: a copy into a tile mapped since the last part, sent mid-recording, lands in it\n");
+    return 0;
+}
+
 static int test_gpu(void) {
     uint64_t heap = 0;
     GCHECK(mem_set_heap_size(16ull << 20, &heap) == 0 && heap, "SetHeapSize 16 MiB");
@@ -916,7 +975,7 @@ static int test_gpu(void) {
     if (test_textures(&tpool, &phys) || test_region_copy(&tpool) || test_pressure(&tpool)) return 1;
     pool_t tpool2 = {.magic = NVN_POOL_MAGIC, .flags = 0x22, .mem = h + 0xA00000, .size = 0x100000, .game_mem = h + 0xA00000};
     GCHECK(vk_pool_init(&tpool2), "vk_pool_init of the second texture pool");
-    if (test_astc_copy(&tpool2)) return 1;
+    if (test_astc_copy(&tpool2) || test_sparse_flush(&tpool2, h)) return 1;
     vk_pool_fini(&tpool2);
     const char *cap = cfg_get("MKW_SHADOW_SUBMIT");   // a measurement, off by default
     if (vk_mem_shadow_on() && cap && !strcmp(cap, "1") && test_capture(&pool)) return 1;

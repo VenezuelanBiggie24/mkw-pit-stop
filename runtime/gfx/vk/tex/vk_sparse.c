@@ -924,8 +924,8 @@ void vk_sparse_written(VkImage img, uint32_t level, uint32_t layer0, uint32_t la
 
 // Queue lock held (it guards order_tl and its values), before a submission to the graphics queue: gives the order of
 // that submission (wait for the last bind, signal its own value). binds: first issue the queued binds behind every
-// earlier submission (vk_sync.c; not vk_upload_flush, which holds cmd_lock, taken under sp_lock by slot_get: the lock
-// order is the queue lock, sp_lock, cmd_lock). fence:
+// earlier submission (vk_sync.c, and vk_upload_flush before it takes cmd_lock, which slot_get takes under sp_lock: the
+// lock order is the queue lock, sp_lock, cmd_lock). fence:
 // the timeline value whose completion frees the slots unbound so far (a part or the end of a replayed submission).
 // MKW_SPARSE_ORDER=0 (A/B): the order before 31/10/2026, binds behind the previous frame's value only, and no wait or
 // signal on the other submissions. binds 2: only issue the queued binds, before the upload batch that a replayed part
@@ -934,6 +934,11 @@ static int order_on(void) {
     static int v = -1;
     if (v < 0) v = !(cfg_get("MKW_SPARSE_ORDER") && !atoi(cfg_get("MKW_SPARSE_ORDER")));
     return v;
+}
+
+// Read without sp_lock: a bind queued after this read is issued by the next split, submit or flush.
+int vk_sparse_binds_queued(void) {
+    return __atomic_load_n(&ndirty, __ATOMIC_RELAXED) || __atomic_load_n(&ntail_pending, __ATOMIC_RELAXED);
 }
 
 VkSparseOrder vk_sparse_order(uint64_t fence, int binds) {

@@ -278,6 +278,7 @@ void vk_sparse_written(VkImage img, uint32_t level, uint32_t layer0, uint32_t la
                        uint32_t h);
 typedef struct { VkSemaphore wsem, ssem; uint64_t wait, signal; } VkSparseOrder;   // a NULL semaphore: no wait / signal
 VkSparseOrder vk_sparse_order(uint64_t fence, int binds);
+int vk_sparse_binds_queued(void);                 // binds MapVirtual queued that no submission has issued yet
 void vk_sparse_order_submitted(uint64_t signal);
 void vk_sparse_touch(VkImage img);                // a draw or copy touched img in the current frame
 void vk_sparse_vram_log(uint64_t frame);          // active/idle/never-sampled slot census

@@ -499,8 +499,32 @@ void vk_upload_flush_over(VkDeviceSize limit) {
     if (over) vk_upload_flush(0);
 }
 
+// The tiles MapVirtual mapped since the last part are bound only at a part's split or submit (vk_sync.c, binds 2), and
+// vk_upload_flush orders its batch behind the binds already issued (vk_sparse_order(0, 0)), not the queued ones. A batch
+// sent in the middle of a recording (vk_upload_flush_over: 64 MiB of staging, 64 M ASTC texels or 128 calls; a
+// readback) carried copies into tiles mapped since the last part to the GPU before those tiles were bound: the writes
+// went nowhere and the tiles read zero (MKW fills its sparse terrain arrays a level of a layer at a time, ~300 copies
+// at a load, right after mapping their pages). So the queued binds go first, as vk_sync.c does before its flush.
+// Only when this thread does not hold the upload lock (the queue lock and sp_lock come before it: vk_mem_relieve's
+// flush goes without) and there is a batch to send. fence: what frees the tiles unbound by these binds: the submission being recorded, as
+// vk_sync.c passes, or outside a recording two past the newest issued (the one being recorded may have taken its
+// wait already, as tail_bind_now).
+static void binds_before_flush(void) {
+    if (cmd_depth || !vk_sparse_binds_queued()) return;
+    cmd_take();
+    int open = open_active;
+    cmd_give();
+    if (!open) return;
+    uint64_t fence = vk_exec_recording_fence();
+    if (!fence) fence = vk_sync_issued() + 2;
+    vk_queue_lock();
+    vk_sparse_order(fence, 2);
+    vk_queue_unlock();
+}
+
 uint64_t vk_upload_flush(int wait) {
     plat_once(&cmd_once, cmd_init, NULL);
+    binds_before_flush();
     cmd_take();
     VkCtx *c = vk_ctx();
     // The queue lock comes before cmd_lock (see cmd_lock): when another thread holds it, cmd_lock is let go while this
