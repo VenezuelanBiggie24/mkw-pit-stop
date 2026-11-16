@@ -60,6 +60,10 @@ def ensure_radv(vulkan: Path, mesa_revision: str, radv_sdk: str) -> tuple[Path, 
     if work_src.is_dir() and applied_marker.is_file() and applied_marker.read_text().strip() != (patch_digest or ""):
         shutil.rmtree(work_src, ignore_errors=True)
         shutil.rmtree(work_build, ignore_errors=True)
+    if not (work_src / ".revision").is_file():
+        # build-radv.sh skips everything, the source tree included, while the installed archive's provenance names
+        # this revision: without the tree the patches had nowhere to go (16/11/2026, two patches added).
+        provenance.unlink(missing_ok=True)
 
     stack_meson = vulkan.parent / "host/python-tools/bin/meson"
     if stack_meson.is_file():

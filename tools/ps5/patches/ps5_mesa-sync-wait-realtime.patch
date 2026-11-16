@@ -1,0 +1,25 @@
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_sync.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_sync.c
+@@ -158,10 +158,19 @@
+       }
+       /* A signal still has to be submitted: sleep until one is, or a
+        * millisecond passes so running work is polled too. */
++      /* cnd_init makes a CLOCK_REALTIME condition variable (C11, TIME_UTC),
++       * while now and abs_timeout_ns are os_time_get_nano()'s monotonic
++       * clock: a monotonic deadline is long past on the realtime clock, so
++       * the wait returned at once and this loop spun on the lock. The
++       * deadline is the same wait from the realtime clock's now. */
++      const uint64_t wait_ns = MIN2(abs_timeout_ns - now, (uint64_t)1000000);
+       struct timespec until;
+-      const uint64_t wake = MIN2(abs_timeout_ns, now + 1000000);
+-      until.tv_sec = wake / 1000000000;
+-      until.tv_nsec = wake % 1000000000;
++      timespec_get(&until, TIME_UTC);
++      until.tv_nsec += (long)wait_ns;
++      if (until.tv_nsec >= 1000000000) {
++         until.tv_sec += until.tv_nsec / 1000000000;
++         until.tv_nsec %= 1000000000;
++      }
+       cnd_timedwait(&queue->sync_cond, &queue->sync_lock, &until);
+    }
+ }

@@ -1,0 +1,15 @@
+--- a/src/amd/vulkan/radv_physical_device.c
++++ b/src/amd/vulkan/radv_physical_device.c
+@@ -3271,7 +3271,11 @@
+     * what the pool has handed out to anyone. */
+    uint64_t pool = 0, available = 0, driver = 0;
+    radv_ps5_winsys_heap_usage(&pool, &available, &driver);
+-   heap_info->allocated_vram = driver;
++   /* One unified pool, all of it CPU-visible: the driver's allocations are
++    * visible VRAM only. Reporting them as both VRAM and visible VRAM made the
++    * APU budget (radv_get_memory_budget_properties adds the two) count them
++    * twice: heapUsage read 10,966 of 7,808 MiB while VMA held ~4.5 GiB. */
++   heap_info->allocated_vram = 0;
+    heap_info->allocated_vram_vis = driver;
+    heap_info->vram_usage = pool - MIN2(available, pool);
+    heap_info->vram_vis_usage = heap_info->vram_usage;
