@@ -159,6 +159,15 @@ int gfx_window_monitor_size(int *width, int *height) {
     return *width && *height;
 }
 
+// The picture's shape for the aspect patches (core/boot/patches.c): the VideoOut display's, 0 before it is known.
+int gfx_window_shape(int *w, int *h) { return gfx_window_monitor_size(w, h); }
+
+// SDR: VideoOut's swapchain here is 8-bit sRGB, and the console tells the game no HDR display (gfx_hdr.c).
+int wsys_hdr(float *sdr_white, float *headroom) {
+    *sdr_white = *headroom = 0;
+    return 0;
+}
+
 int gfx_window_lines(void) { return (int)(uint32_t)__atomic_load_n(&display_size, __ATOMIC_ACQUIRE); }
 int wsys_minimized(void) { return gfx_window_lines() == 0; }
 

@@ -248,8 +248,12 @@ static void auto_set(void) {
     // window: gfx_window_monitor_size says nothing there)
     int mw = 0, mh = 0;
     if (!gfx_window_monitor_size(&mw, &mh)) {
+#ifdef MKW_PS5_NATIVE
+        mh = 1080;   // VideoOut not up yet: the console's own output
+#else
         const SDL_DisplayMode *m = SDL_GetCurrentDisplayMode(SDL_GetPrimaryDisplay());
         mh = m ? (int)(m->h * m->pixel_density + 0.5f) : 1080;
+#endif
     }
     uint32_t mb = g_gpu_n > 0 ? g_gpu_vram_mb[gi] : 0;
     bool weak = g_gpu_n <= 0 || !g_gpu_discrete[gi] || mb < 6 * 1024, strong = !weak && mb >= 16 * 1024;

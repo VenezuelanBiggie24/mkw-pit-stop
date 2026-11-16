@@ -178,8 +178,10 @@ static void ps5_pull(int16_t *out_lr, uint32_t frames, void *userdata) {
     }
 }
 
+int audio_output_channels(void) { return 2; }   // what the game is told: AudioOut opens stereo s16 (ps5_pull)
+
 static void output_open(Mixer *m, int rate) {
-    m->ch = 2;   // AudioOut takes stereo s16 (ps5_pull)
+    m->ch = audio_output_channels();
     const char *mode = cfg_get("MKW_AUDIO");
     if ((mode && !strcmp(mode, "none")) || cfg_get("MKW_AUDIO_OFF")) {
         rt_log("audio: MKW_AUDIO=none: mixing without a device");

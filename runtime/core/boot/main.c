@@ -323,7 +323,7 @@ void rt_udf(Cpu *c, uint64_t pc) {
              ldr_describe(c->x[30], lr, sizeof lr));
 }
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) && !defined(MKW_PS5_NATIVE)   // the PS5's Zen 2 has AVX2, and no SDL for the box
 // The runtime and the game code are built for x86-64-v3 (tools/build/build.py ARCH_FLAGS), so on a CPU without AVX2,
 // FMA or BMI2 (AMD FX, Intel before Haswell) the first such instruction kills the process before any log or window:
 // issue #262 (FX-8320) only saw mkw.exe not open. This runs first of all constructors (101; the others, e.g.

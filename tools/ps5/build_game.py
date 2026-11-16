@@ -25,6 +25,9 @@ from pathlib import Path
 from build_smoke import (APP_SDK, GLM, MESA, ROOT, TEMPLATE, VULKAN, png, require_checkout,
                          require_radv, write_changed)
 from build import game_id, module_glue, port_version
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "i18n"))
+import catalog  # noqa: E402  (tools/i18n: the menu texts of every language, from i18n/*.po)
 from layout import output_lock, placement_defines, read_checked
 
 WORK = ROOT / "build/ps5-game"
@@ -158,6 +161,8 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
         defaults_src += "__attribute__((weak)) const RtGame *rt_game_builtin(void) { return 0; }\n"
     write_changed(defaults, defaults_src.encode())
     files.append((defaults, Path("defaults.c"), "cc"))
+    # the menu texts (ui_text.c's text_<lang> arrays), generated as build.py does
+    files += [(path, Path("i18n") / path.name, "cc") for path in sorted(catalog.generate(out / "i18n"))]
     if generated is not None:
         modules = out / "modules.c"
         if exefs is not None:

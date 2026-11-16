@@ -582,3 +582,20 @@ int plat_temp_dir(char *out, size_t cap) {
     mkdir("/data/mkw_tmp", 0755);
     return snprintf(out, cap, "/data/mkw_tmp") < (int)cap;
 }
+
+// Discord's IPC (core/presence): no Discord client on the console, so nobody listens.
+PlatIpc *plat_ipc_open(const char *name) { (void)name; return NULL; }
+int plat_ipc_send(PlatIpc *c, const void *data, size_t n) { (void)c, (void)data, (void)n; return 0; }
+long plat_ipc_recv(PlatIpc *c, void *buf, size_t cap) { (void)c, (void)buf, (void)cap; return -1; }
+void plat_ipc_close(PlatIpc *c) { (void)c; }
+
+// Windows' lazy commit (core/memory/memory.c): the PS5 backs guest memory its own way (ps5_guest_memory.c).
+void plat_mem_lazy_hook(int (*fn)(uint64_t addr)) { (void)fn; }
+
+int plat_fs_os_error(void) { return errno; }   // the PS5's plat_fs_* calls set errno as Linux's do
+
+// Only Windows refuses to rename a directory with a file open under it: nothing to say elsewhere.
+void plat_fs_busy_reason(const char *dir, char *out, size_t cap) {
+    (void)dir;
+    if (cap) out[0] = 0;
+}
