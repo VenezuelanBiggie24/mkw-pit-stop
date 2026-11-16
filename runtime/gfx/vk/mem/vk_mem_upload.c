@@ -194,9 +194,9 @@ void vk_upload_lock(void) {
 }
 void vk_upload_unlock(void) { cmd_give(); }
 
-void vk_upload_work(uint64_t texels) {
+void vk_upload_work(VkCommandBuffer cb, uint64_t texels) {
     cmd_take();
-    if (open_active) open_b.texels += texels;
+    if (open_active && open_b.cb == cb) open_b.texels += texels;
     cmd_give();
 }
 
@@ -434,6 +434,8 @@ void vk_mem_governor(int force) {
                ab_side ? 'B' : 'A');
 }
 
+static void binds_before_flush(void);
+
 void vk_mem_relieve(uint64_t bytes, const char *what) {
     static volatile int32_t n_logged;
     VkCtx *c = vk_ctx();
@@ -442,6 +444,7 @@ void vk_mem_relieve(uint64_t bytes, const char *what) {
     vk_mem_governor(1);
     vk_texture_trim(bytes);
     plat_once(&cmd_once, cmd_init, NULL);
+    binds_before_flush();   // the flush below runs under cmd_lock, where it cannot issue them
     cmd_take();
     int outside = !depth;
     if (outside) vk_upload_flush(1);
@@ -505,10 +508,16 @@ void vk_upload_flush_over(VkDeviceSize limit) {
 // readback) carried copies into tiles mapped since the last part to the GPU before those tiles were bound: the writes
 // went nowhere and the tiles read zero (MKW fills its sparse terrain arrays a level of a layer at a time, ~300 copies
 // at a load, right after mapping their pages). So the queued binds go first, as vk_sync.c does before its flush.
-// Only when this thread does not hold the upload lock (the queue lock and sp_lock come before it: vk_mem_relieve's
-// flush goes without) and there is a batch to send. fence: what frees the tiles unbound by these binds: the submission being recorded, as
-// vk_sync.c passes, or outside a recording two past the newest issued (the one being recorded may have taken its
-// wait already, as tail_bind_now).
+// Only when this thread does not hold the upload lock (the queue lock and sp_lock come before it) and there is a batch
+// to send; nothing beyond two atomic loads when no bind is queued. vk_mem_relieve flushes under cmd_lock, so it calls
+// this before taking it: a bind queued between the two (another thread mapping) is not for a copy already in the
+// batch, since the game maps a submission's tiles before it submits and the replay records it after. A flush with
+// this thread inside cmd_lock (vk_mem_relieve from a nested batch, which does not flush) issues none.
+// On the PS5 (MKW_SPARSE_CPU_WAIT=1, vk_sparse.c cpu_wait_mode) vk_sparse_order(..., 2) waits on this thread, under the
+// queue lock, for the GPU to finish every earlier submission before it binds: a mid-recording flush with binds queued
+// costs that wait here instead of at the part's split. fence: what frees the tiles unbound by these binds: the
+// submission being recorded, as vk_sync.c passes, or outside a recording two past the newest issued (the one being
+// recorded may have taken its wait already, as tail_bind_now).
 static void binds_before_flush(void) {
     if (cmd_depth || !vk_sparse_binds_queued()) return;
     cmd_take();

@@ -599,9 +599,12 @@ counted:;
     return 1;
 }
 
-// A mirrored texture whose storage holds its content: no entry at its address holds GPU-written content (gpu_owned,
-// gpu_dirty, as alias_has_gpu_content), so a full upload would make the image exactly the storage's bytes. *uploads:
-// the uploads of t's own entry so far (0 without one). Texture lock held.
+// A mirrored texture whose storage holds its content: no entry at its address holds GPU-written content the storage
+// lacks (tex_has_gpu_content, the alias copy's rule), so a full upload would make the image exactly the storage's
+// bytes. Refusing any entry that was GPU-owned or dirty (ce280b0) also refused textures the GPU wrote once and the CPU
+// rewrote since, or whose render was written back, whose storage is their content: the copy was skipped and its
+// destination kept what it held (from review; not seen in a run). *uploads: the uploads of t's own entry so far (0
+// without one). Texture lock held.
 static int cpu_content(const tex_t *t, uint32_t *uploads) {
     *uploads = 0;
     if (!tex_mirrored(t)) return 0;
@@ -610,7 +613,7 @@ static int cpu_content(const tex_t *t, uint32_t *uploads) {
     const Tex *own = nvn_hm_get(&by_key, &k);
     if (own) *uploads = own->n_up;
     for (const Tex *p = entries_at(k.addr); p; p = p->next_at)
-        if (!p->released && (p->pub.gpu_owned || p->gpu_dirty)) return 0;
+        if (!p->released && tex_has_gpu_content(p)) return 0;
     return 1;
 }
 
@@ -622,14 +625,38 @@ static int cpu_content(const tex_t *t, uint32_t *uploads) {
 // hypothesis: on the console the GPU waits on an event the CPU signals once it wrote the staging texture
 // (nvnCommandBufferWaitEvent), and the replay, in submit order, reads it before. The line gives the replay's submission
 // against the game's newest and whether that submission had a wait its submit order did not meet (nvn_qorder.c). The
-// first 64 copies a line each, then the count in vk_astc.c's "so far" line. A sample of every 64th block decides
-// whether to count at all: nothing more is read when it finds none.
+// first 64 copies a line each, then the count in vk_astc.c's "so far" line. ZERO_SAMPLES blocks spread over the level's
+// storage in guest memory decide whether to count at all: the staging may be write-combined on the PS5, where reading
+// back a 1/64 sample of an 8192x8192 copy (16,384 blocks, a cache line each) may cost milliseconds (unmeasured); guest
+// memory is cached. The whole level of each layer is sampled, not only the region (block-linear rows are not contiguous): a zero
+// block outside the region costs a count that finds too few, a region whose zeros the samples miss goes uncounted.
+#define ZERO_SAMPLES 512u
+static int level_has_zero(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers) {
+    nvn_texlayout L;
+    nvn_tex_layout(&src->d, &L);
+    if (level >= src->d.levels || layer + layers > L.layers) return 1;   // unsure: count
+    uint64_t lo = nvn_tex_level_offset(&src->d, level);
+    uint64_t hi = level + 1 < src->d.levels ? nvn_tex_level_offset(&src->d, level + 1) : L.layer_size;
+    uint64_t blocks = hi > lo ? (hi - lo) / 16 : 0;
+    if (!blocks) return 0;
+    uint32_t per = (ZERO_SAMPLES + layers - 1) / layers;
+    if (per > blocks) per = (uint32_t)blocks;
+    for (uint32_t l = 0; l < layers; l++) {
+        const uint8_t *base = (const uint8_t *)src->mem + (uint64_t)(layer + l) * L.layer_size + lo;
+        for (uint32_t k = 0; k < per; k++) {
+            const uint64_t *q = (const uint64_t *)(const void *)(base + (blocks * k / per) * 16);
+            if (!(q[0] | q[1])) return 1;
+        }
+    }
+    return 0;
+}
+
 static void zero_census(const tex_t *src, const uint8_t *stg, size_t bytes, uint32_t level, uint32_t layer,
                         uint32_t layers, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    if (!level_has_zero(src, level, layer, layers)) return;
     const uint64_t *q = (const uint64_t *)(const void *)stg;
-    size_t n = bytes / 16, i = 0;
-    while (i < n && (q[2 * i] | q[2 * i + 1])) i += 64;
-    if (i >= n) return;
+    size_t n = bytes / 16;
+    if (!n) return;
     uint64_t zero = 0;
     for (size_t k = 0; k < n; k++) zero += !(q[2 * k] | q[2 * k + 1]);
     if (zero * 100 <= (uint64_t)n) return;
@@ -646,11 +673,52 @@ static void zero_census(const tex_t *src, const uint8_t *stg, size_t bytes, uint
            (unsigned long long)game, (long long)(game - sub), unmet > 0 ? "yes" : unmet == 0 ? "no" : "unknown");
 }
 
-typedef struct { VkBuffer b; VmaAllocation a; } InlineStg;
+typedef struct InlineStg { VkBuffer b; VmaAllocation a; struct InlineStg *next; } InlineStg;
 static void free_inline_stg(void *arg) {   // completion thread, once the submission that read it is done
     InlineStg *t = arg;
-    vmaDestroyBuffer(vk_ctx()->vma, t->b, t->a);
+    if (t->b) vmaDestroyBuffer(vk_ctx()->vma, t->b, t->a);   // VK_NULL_HANDLE: inline_stg_room freed it already
     free(t);
+}
+
+// The inline copies' staging lives until the submission is done, and only its last part signals that: MKW makes ~300
+// ASTC copies of up to 16 MiB each in one loading submission (8192x8192 ASTC 8x8 levels into the terrain arrays, the
+// PS5's 16/11 logs), several GiB of staging at once on a console with ~1 GiB free. Past INLINE_STG_CAP of staging in
+// the submission, what was recorded so far goes to the GPU as a part (vk_exec_split_part), the replay thread waits for
+// it and frees the staging the part read. A wait on the replay thread, at loading only: ~64 MiB of decodes. A
+// MKW_REPLAY_PAR chunk cannot send a part of its own: its staging waits for the submission, as before.
+// Per thread: the replay's own recording, or a chunk's (its list is reset at its next submission, before which the
+// completion thread may free the entries, untouched since).
+#define INLINE_STG_CAP (64ull << 20)
+static _Thread_local struct { uint64_t fence, bytes; InlineStg *held; } istg;
+uint64_t vk_astc_inline_cap_test;
+static uint64_t astc_counts[VK_ASTC_COPY_N];   // atomics
+
+void vk_texture_astc_copy_counts(uint64_t out[VK_ASTC_COPY_N]) {
+    for (int i = 0; i < VK_ASTC_COPY_N; i++) out[i] = __atomic_load_n(&astc_counts[i], __ATOMIC_RELAXED);
+}
+
+static void inline_stg_room(VkDeviceSize need) {
+    uint64_t fence = vk_exec_recording_fence();
+    if (istg.fence != fence) istg.fence = fence, istg.bytes = 0, istg.held = NULL;
+    uint64_t cap = vk_astc_inline_cap_test ? vk_astc_inline_cap_test : INLINE_STG_CAP;
+    if (!istg.held || istg.bytes + need <= cap) return;
+    uint64_t part, t0 = kern_now_ns();
+    if (!vk_exec_split_part(&part)) {
+        __atomic_fetch_add(&astc_counts[VK_ASTC_COPY_CHUNK_HELD], 1, __ATOMIC_RELAXED);
+        return;
+    }
+    __atomic_fetch_add(&astc_counts[VK_ASTC_COPY_PART_WAITS], 1, __ATOMIC_RELAXED);
+    vk_queue_lock();   // a part the submit thread holds (MKW_SUBMIT_THREAD) goes to the queue first
+    vk_queue_unlock();
+    vk_sync_part_wait(part);
+    uint64_t freed = istg.bytes;
+    for (InlineStg *t = istg.held; t; t = t->next) vmaDestroyBuffer(vk_ctx()->vma, t->b, t->a), t->b = VK_NULL_HANDLE;
+    istg.bytes = 0, istg.held = NULL;
+    static volatile int32_t n_logged;
+    if (plat_inc32(&n_logged) <= 16)
+        rt_log("vk: ASTC copies in the replay: %.1f MiB of staging in submission %llu, sent as part %llu and waited for "
+               "(%.2f ms) to free it", freed / 1048576.0, (unsigned long long)fence, (unsigned long long)part,
+               (kern_now_ns() - t0) / 1e6);
 }
 
 // A texture copy between ASTC textures that went to different Vulkan formats (one kept as RGBA8 under 256x256 into one
@@ -661,7 +729,9 @@ static void free_inline_stg(void *arg) {   // completion thread, once the submis
 // images, or skips).
 // Only a source whose storage is its content (cpu_content, as vk_texture_region_copy): one the GPU wrote (a copy into
 // it, a sparse array, a GPU-only pool) has stale or no blocks in its storage, which decoded as old texels or the error
-// colour. Under the texture lock, which WriteTexels into the storage take.
+// colour. The texture lock covers that check only on the replay's path: the storage is read after it as the game's own
+// writes are, and holding the lock over the deswizzle, the census and the staging (whose last resort waits for the GPU)
+// blocked the game threads that register textures (16 MiB copies at loading). Probes and the readback keep it.
 // A BC destination takes whole 4x4 blocks: dx and dy multiples of 4, and w and h too unless the region reaches the
 // level's edge; a region that ends inside a block would write the whole block, clamped texels over its neighbours.
 // Recorded in the replay's command buffer at the copy's place (vk_exec_inline_begin), not in the upload batch: the
@@ -687,6 +757,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
     VkAstcRegion *ar = calloc(layers, sizeof *ar);
     if (!ar) return 0;
     lock();
+    int locked = 1;
     uint32_t ups;
     if (!cpu_content(src, &ups)) {
         static volatile int32_t n_gpu;
@@ -704,7 +775,13 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
     if (probe == -2) probe = cfg_get("MKW_ASTC_PROBE_LEVEL") ? atoi(cfg_get("MKW_ASTC_PROBE_LEVEL")) : -1;
     int want_probe = probe == (int)dlevel && layers == 1 && w * h <= 64 && plat_inc32(&n_probed) <= 6;
     int reopen = 0;
-    VkCommandBuffer icb = want_probe ? VK_NULL_HANDLE : vk_exec_inline_begin(&reopen);
+    VkCommandBuffer icb = VK_NULL_HANDLE;
+    if (!want_probe && vk_exec_recording_fence()) {
+        unlock(), locked = 0;
+        inline_stg_room(per * layers);   // before vk_exec_inline_begin: a part sent there takes the command buffer
+        icb = vk_exec_inline_begin(&reopen);
+        if (!icb) lock(), locked = 1;
+    }
     VkBuffer sb;
     VmaAllocation sa = NULL;
     uint8_t *stg;
@@ -719,7 +796,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
     }
     if (!stg) {   // no staging memory: the caller copies the images or skips (logged by the staging)
         if (icb) vk_exec_inline_end(reopen);
-        unlock();
+        if (locked) unlock();
         free(ar);
         return 0;
     }
@@ -755,7 +832,8 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
         vk_exec_inline_end_bound(reopen);
         InlineStg *t = malloc(sizeof *t);
         if (!t) rt_fatal("vk: out of memory (ASTC copy staging)");
-        *t = (InlineStg){sb, sa};
+        *t = (InlineStg){sb, sa, istg.held};
+        istg.held = t, istg.bytes += per * layers;
         vk_completion_add(fence, free_inline_stg, t);
     } else {
         if (ok) {
@@ -767,7 +845,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
         }
         vk_upload_end();
     }
-    unlock();
+    if (locked) unlock();
     if (rmap) {
         vk_upload_flush(1);
         vmaInvalidateAllocation(vk_ctx()->vma, ralloc, 0, VK_WHOLE_SIZE);
@@ -786,6 +864,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
         rt_log("vk: ASTC %ux%u (fmt %#x) level %u layer %u x%u -> %s level %u layer %u at %d,%d: %s%s", w, h,
                src->d.format, level, layer, layers, bc7 == 2 ? "BC1" : bc7 ? "BC7" : "RGBA8", dlevel, dlayer, dx, dy,
                ok ? "decoded" : "failed", icb ? " (in the replay's command buffer)" : " (upload batch)");
+    if (ok) __atomic_fetch_add(&astc_counts[icb ? VK_ASTC_COPY_INLINE : VK_ASTC_COPY_BATCH], 1, __ATOMIC_RELAXED);
     return !ok ? 0 : icb ? VK_TEX_COPY_INLINE : VK_TEX_COPY_BATCH;
 }
 
@@ -871,11 +950,20 @@ int vk_texture_region_copy(const tex_t *src, uint32_t level, uint32_t layer, uin
     return ok;
 }
 
-// vk_mem_changed over the pages wholly inside e's storage (all of its pages when it fills none): a neighbour that shares
-// the first or last page does not count as a write to e.
+// The write-watch pages wholly inside e's storage, [*lo, *hi); 0 when it fills none. A write anywhere in a watch page
+// marks all of its 4 KiB pages (prot_watch_written), and on the PS5 that page is 16 KiB (plat_mem_watch_page): rounding
+// to 4 KiB let a neighbour's write in a shared edge page count as a write to e.
+static int watch_span(const Tex *e, uint64_t *lo, uint64_t *hi) {
+    uint64_t pg = plat_mem_watch_page();
+    *lo = (e->pub.addr + pg - 1) & ~(pg - 1), *hi = (e->pub.addr + e->t.L.size) & ~(pg - 1);
+    return *hi > *lo;
+}
+
+// vk_mem_changed over the watch pages wholly inside e's storage (all of its pages when it fills none): a neighbour that
+// shares the first or last page does not count as a write to e.
 int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now) {
-    uint64_t lo = (e->pub.addr + 0xfff) & ~0xfffull, hi = (e->pub.addr + e->t.L.size) & ~0xfffull;
-    if (hi <= lo) lo = e->pub.addr, hi = e->pub.addr + e->t.L.size;
+    uint64_t lo, hi;
+    if (!watch_span(e, &lo, &hi)) lo = e->pub.addr, hi = e->pub.addr + e->t.L.size;
     return vk_mem_changed(lo, hi - lo, since, now);
 }
 
@@ -922,6 +1010,13 @@ static int same_storage(Tex *e) {
     return 0;
 }
 
+int tex_has_gpu_content(const Tex *e) {
+    if (!e->pub.gpu_owned) return 0;
+    if (!e->pub.mirrored) return 1;
+    uint32_t now;
+    return e->gpu_dirty && !storage_rewritten(e, e->gpu_gen, &now);
+}
+
 void gpu_baseline(Tex *e) {
     storage_rewritten(e, 0, &e->gpu_gen);   // queries the write watch now: writes up to here carry gpu_gen or older
     e->cpu_newer = 0;
@@ -931,16 +1026,28 @@ void gpu_baseline(Tex *e) {
 // reached the storage only (cpu_newer), goes back to the CPU: on the console the storage is the texture, so the next
 // sample sees those bytes. Before, gpu_owned was never cleared (make_fresh returned on it, vk_texture_write_back only
 // dropped gpu_dirty, and a released entry taken back kept it), so such a texture showed its last render for good. The
-// rule is vk_texture_write_back's and alias_has_gpu_content's: a CPU write after the render makes the storage the
+// rule is vk_texture_write_back's and tex_has_gpu_content's: a CPU write after the render makes the storage the
 // content. Only a write the page check saw (1); untracked storage (-1) says nothing about the order. From the
 // submission's write-watch snapshot (vk_mem_changed_snap): render targets come through make_fresh at every pass, and a
-// write the snapshot missed shows at the next submission. 1 when the CPU owns it again (the caller uploads).
+// write the snapshot missed shows at the next submission. Only the watch pages wholly inside the storage count, and a
+// storage inside a single watch page is never taken back by a write: unlike storage_rewritten, which keeps the content
+// a render added, a wrong answer here overwrites a live render with the storage's bytes every pass (flicker), so a
+// write that may be a neighbour's says nothing. 1 when the CPU owns it again (the caller uploads).
 static int cpu_took_back(Tex *e) {
+    static int logged;
+    int why = 1;   // 1 WriteTexels reached the storage only, 2 a CPU write the watch saw
     if (!e->cpu_newer) {
-        uint64_t lo = (e->pub.addr + 0xfff) & ~0xfffull, hi = (e->pub.addr + e->t.L.size) & ~0xfffull;
-        if (hi <= lo) lo = e->pub.addr, hi = e->pub.addr + e->t.L.size;   // as storage_rewritten
+        uint64_t lo, hi;
         uint32_t now;
-        if (vk_mem_changed_snap(lo, hi - lo, e->gpu_gen, submit_epoch, &now) != 1) return 0;
+        if (!watch_span(e, &lo, &hi) || vk_mem_changed_snap(lo, hi - lo, e->gpu_gen, submit_epoch, &now) != 1) return 0;
+        why = 2;
+    }
+    if (logged < 32) {
+        logged++;
+        rt_log("vk: texture %#llx %ux%u (%llu bytes) taken back by the CPU after a GPU write: %s%s",
+               (unsigned long long)e->pub.addr, e->pub.width, e->pub.height, (unsigned long long)e->t.L.size,
+               why == 1 ? "a WriteTexels reached the storage only" : "the storage was written",
+               logged == 32 ? " (no more logged)" : "");
     }
     e->pub.gpu_owned = 0, e->gpu_dirty = 0, e->cpu_newer = 0;
     return 1;

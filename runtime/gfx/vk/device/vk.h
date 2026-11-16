@@ -381,7 +381,9 @@ uint64_t vk_upload_flush(int wait);
 uint32_t vk_upload_owner(void);                 // the thread holding the upload lock, 0 if none (hang watch)
 void vk_upload_wait_stats(uint64_t out[6]);   // MKW_TRACE=perf: cmd_lock waits n/ns/max, wait_and_collect n/ns/max; resets
 void vk_upload_flush_over(VkDeviceSize limit);   // sends the open batch once it holds that much staging or ASTC work
-void vk_upload_work(uint64_t texels);            // ASTC texels the open batch decodes (vk_upload_flush_over)
+// ASTC texels the open batch decodes (vk_upload_flush_over); a decode recorded into cb, another command buffer (the
+// replay's, vk_texture_astc_copy), does not count: it did not make the batch's GPU time longer.
+void vk_upload_work(VkCommandBuffer cb, uint64_t texels);
 // The upload lock alone, without opening a batch: vk_astc_record's kept state (its scratch, counters) is under it when
 // a decode is recorded into a replay part's command buffer instead (vk_texture_astc_copy)
 void vk_upload_lock(void);
@@ -488,6 +490,11 @@ enum { VK_TEX_COPY_INLINE = 1, VK_TEX_COPY_BATCH = 2 };
 int  vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers, uint32_t x, uint32_t y,
                           uint32_t w, uint32_t h, const VkTexImage *dst, VkImageAspectFlags aspect, uint32_t dlevel,
                           uint32_t dlayer, int32_t dx, int32_t dy, int bc7);
+// --probe-vkmem: vk_texture_astc_copy's counts since start (VK_ASTC_COPY_*), and the staging the replay's inline
+// copies may hold in one submission before a part is sent and waited for (0: the default, 64 MiB).
+enum { VK_ASTC_COPY_INLINE, VK_ASTC_COPY_BATCH, VK_ASTC_COPY_PART_WAITS, VK_ASTC_COPY_CHUNK_HELD, VK_ASTC_COPY_N };
+void vk_texture_astc_copy_counts(uint64_t out[VK_ASTC_COPY_N]);
+extern uint64_t vk_astc_inline_cap_test;
 // 1 when t is mirrored and no entry at its storage holds GPU-written content (its storage is its content); *uploads:
 // the uploads of t's entry so far (MKW_TEX_COPY_LOG)
 int  vk_texture_cpu_source(const tex_t *t, uint32_t *uploads);
@@ -525,6 +532,9 @@ uint32_t vk_texture_slot_format(int id, uint64_t *addr);   // NVN format the gam
 void vk_texture_lock(void);
 void vk_texture_unlock(void);
 const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view);
+// The same for a storage-image binding: an image whose first upload is deferred is returned, not NULL (the zero
+// stand-in a sampled binding gets, tex_unready), since the shader writes it.
+const VkTexImage *vk_texture_storage_by_id_locked(int id, view_t *view, int *has_view);
 VkSampler vk_sampler_by_id_locked(int id);
 // The slot's sampler with nearest filtering and no anisotropy: a depth texture read without a compare lands on one texel
 // on the Switch although the game binds a linear sampler, and MacNativeGames samples it the same way. VK_NULL_HANDLE

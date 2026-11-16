@@ -1013,6 +1013,103 @@ static int test_sparse_flush(pool_t *tp, uint8_t *heap) {
     return 0;
 }
 
+// ASTC copies decoded in the replay's own command buffer (vk_texture_astc_copy, VK_TEX_COPY_INLINE), the path the
+// game's copies into its terrain arrays take: submissions of texture copies from an ASTC 4x4 source kept RGBA8 (64x64)
+// into an ASTC 4x4 destination re-encoded as BC7 (256x256), once serially (the first submission, MKW_REPLAY_PAR_WARM=1)
+// and once in MKW_REPLAY_PAR chunks (cut before an op, MKW_REPLAY_PAR_CUT_OP). With the inline staging cap at one byte
+// every second copy sends a part and waits for it to free the staging (serial) or keeps it, a chunk having no part of
+// its own. Every block of each region must be the block the upload batch's decode makes of the same source (a reference
+// copy outside the replay): a constant colour encodes to one BC7 block. Runs last: the replay settings stay.
+static uint8_t *put_op(uint8_t *p, uint32_t op, const void *payload, uint32_t n) {
+    op_hdr h = {op, (uint32_t)((sizeof h + n + 7) & ~7u)};
+    memset(p, 0, h.size);
+    memcpy(p, &h, sizeof h);
+    if (n) memcpy(p + sizeof h, payload, n);
+    return p + h.size;
+}
+
+static int astc_inline_submit(const tex_t *src, const tex_t *dst, uint32_t y) {
+    static _Alignas(8) uint8_t stream[1024];
+    uint8_t *p = put_op(stream, OP_BEGIN, NULL, 0);
+    for (int i = 0; i < 4; i++) {
+        p_copy_t2t c;
+        memset(&c, 0, sizeof c);
+        c.src = src, c.dst = dst;
+        c.sr = (NVNcopyRegion){0, 0, 0, 32, 32, 1};
+        c.dr = (NVNcopyRegion){32 * i, (int)y, 0, 32, 32, 1};
+        p = put_op(p, OP_COPY_T2T, &c, sizeof c);
+    }
+    p = put_op(p, OP_END, NULL, 0);
+    uint64_t handle = (uint64_t)(uintptr_t)stream;
+    vk_sync_submit(&handle, 1);
+    vk_sync_finish_submissions();
+    return 0;
+}
+
+static int test_astc_inline(pool_t *tp, pool_t *phys) {
+    TexVkFormat f;
+    if (!tex_vk_format(0x79, &f) || !f.astc_bw || !vk_astc_gpu()) {
+        printf("probe-vkmem: inline ASTC copy: ASTC is not decoded on the GPU here, skipped\n");
+        return 0;
+    }
+    tex_t src = make_tex(tp, 0x60000, 0x79, 64, 64, 1, 27), dst = make_tex(phys, 0x30000, 0x79, 256, 256, 1, 28);
+    const VkTexImage *di = vk_texture_get(&dst);
+    if (!di || di->format != VK_FORMAT_BC7_UNORM_BLOCK) {
+        printf("probe-vkmem: inline ASTC copy: no BC7 image for ASTC 256x256 (VkFormat %d), skipped\n",
+               di ? (int)di->format : -1);
+        vk_texture_release(&dst);
+        return 0;
+    }
+    uint32_t rb, rows, sl, bpb;
+    uint64_t base;
+    unsigned th, td;
+    GCHECK(!nvn_deswizzle_geom(&src.d, 0, 0, &rb, &rows, &sl, &base, &th, &td, &bpb) && bpb == 16, "ASTC 4x4 geometry");
+    uint8_t *lin = malloc((size_t)rb * rows);
+    for (size_t k = 0; k < (size_t)rb * rows / 16; k++) void_block(lin + 16 * k, 0x2000, 0x9000, 0xD000, 0xFFFF, 0);
+    ref_swizzle(lin, src.mem + base, rb, rows, 1, th, td);
+    free(lin);
+    GCHECK(vk_texture_astc_copy(&src, 0, 0, 1, 0, 0, 32, 32, di, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0, 64, 1) ==
+           VK_TEX_COPY_BATCH, "the reference ASTC copy outside a replay");
+    vk_upload_flush(1);
+    uint64_t c0[VK_ASTC_COPY_N], c1[VK_ASTC_COPY_N], c2[VK_ASTC_COPY_N];
+    vk_texture_astc_copy_counts(c0);
+    vk_astc_inline_cap_test = 1;
+    plat_setenv("MKW_REPLAY_PAR", "1");
+    plat_setenv("MKW_REPLAY_PAR_WARM", "1");
+    plat_setenv("MKW_REPLAY_PAR_CUT_OP", "3");
+    astc_inline_submit(&src, &dst, 0);   // serial: the replay's first submission
+    vk_texture_astc_copy_counts(c1);
+    astc_inline_submit(&src, &dst, 32);  // in chunks
+    vk_texture_astc_copy_counts(c2);
+    vk_astc_inline_cap_test = 0;
+    uint8_t *blk = malloc(64 * 24 * 16);
+    image_bytes(di->image, 0, 0, 256, 96, blk, 64 * 24 * 16);
+    const uint8_t *ref = blk + (16 * 64 + 0) * 16;
+    uint32_t bad[2] = {0, 0};
+    for (uint32_t by = 0; by < 16; by++)
+        for (uint32_t bx = 0; bx < 32; bx++) bad[by >= 8] += memcmp(blk + (by * 64 + bx) * 16, ref, 16) != 0;
+    int ref_differs = memcmp(blk + (16 * 64 + 40) * 16, ref, 16) != 0;   // a block no copy wrote
+    free(blk);
+    vk_texture_release(&src), vk_texture_release(&dst);
+    GCHECK(ref_differs, "the reference block equals a block no copy wrote");
+    GCHECK(c1[VK_ASTC_COPY_INLINE] - c0[VK_ASTC_COPY_INLINE] == 4 && c1[VK_ASTC_COPY_PART_WAITS] > c0[VK_ASTC_COPY_PART_WAITS],
+           "serial replay: %llu inline copies (want 4), %llu part waits (want some)",
+           (unsigned long long)(c1[VK_ASTC_COPY_INLINE] - c0[VK_ASTC_COPY_INLINE]),
+           (unsigned long long)(c1[VK_ASTC_COPY_PART_WAITS] - c0[VK_ASTC_COPY_PART_WAITS]));
+    GCHECK(!bad[0], "serial replay: %u of 256 blocks of the inline copies are not the reference's", bad[0]);
+    GCHECK(c2[VK_ASTC_COPY_INLINE] - c1[VK_ASTC_COPY_INLINE] == 4 && c2[VK_ASTC_COPY_CHUNK_HELD] > c1[VK_ASTC_COPY_CHUNK_HELD],
+           "chunked replay: %llu inline copies (want 4), %llu held in a chunk (want some: was it recorded in chunks?)",
+           (unsigned long long)(c2[VK_ASTC_COPY_INLINE] - c1[VK_ASTC_COPY_INLINE]),
+           (unsigned long long)(c2[VK_ASTC_COPY_CHUNK_HELD] - c1[VK_ASTC_COPY_CHUNK_HELD]));
+    GCHECK(!bad[1], "chunked replay: %u of 256 blocks of the inline copies are not the reference's", bad[1]);
+    g_gpu_checks += 5;
+    printf("probe-vkmem: inline ASTC copy: 4 copies decoded in the replay's command buffer serially (%llu part waits for "
+           "the staging cap) and 4 in chunks (%llu held for the submission), every block the upload batch's\n",
+           (unsigned long long)(c1[VK_ASTC_COPY_PART_WAITS] - c0[VK_ASTC_COPY_PART_WAITS]),
+           (unsigned long long)(c2[VK_ASTC_COPY_CHUNK_HELD] - c1[VK_ASTC_COPY_CHUNK_HELD]));
+    return 0;
+}
+
 static int test_gpu(void) {
     uint64_t heap = 0;
     GCHECK(mem_set_heap_size(16ull << 20, &heap) == 0 && heap, "SetHeapSize 16 MiB");
@@ -1030,6 +1127,7 @@ static int test_gpu(void) {
     pool_t tpool2 = {.magic = NVN_POOL_MAGIC, .flags = 0x22, .mem = h + 0xA00000, .size = 0x100000, .game_mem = h + 0xA00000};
     GCHECK(vk_pool_init(&tpool2), "vk_pool_init of the second texture pool");
     if (test_astc_copy(&tpool2) || test_sparse_flush(&tpool2, h) || test_bc_unaligned(&phys)) return 1;
+    if (test_astc_inline(&tpool2, &phys)) return 1;
     vk_pool_fini(&tpool2);
     const char *cap = cfg_get("MKW_SHADOW_SUBMIT");   // a measurement, off by default
     if (vk_mem_shadow_on() && cap && !strcmp(cap, "1") && test_capture(&pool)) return 1;

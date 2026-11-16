@@ -274,6 +274,9 @@ void plat_mem_census_log(const char *tag);                 // PS5: logs memory &
 uint64_t plat_mem_dmem_avail(void);                        // PS5: free direct memory in bytes; UINT64_MAX elsewhere
 void plat_mem_backed_summary(char *out, size_t cap);     // PS5: guest backed memory and free dmem, one line; "" elsewhere
 size_t plat_mem_early_page_size(void);                     // protection granularity for early-read watch (4 KiB or 16 KiB)
+// Granularity of the write watch (plat_mem_written): a write anywhere in such a page reports all of its 4 KiB pages as
+// written. 16 KiB on the PS5 (PS5_MEM_PAGE) and under Linux MKW_PROT_WATCH with MKW_EARLY_16K; 4 KiB elsewhere.
+size_t plat_mem_watch_page(void);
 typedef enum {
     PLAT_EARLY_FAILED,       // arming failed and the prior state was restored
     PLAT_EARLY_OK,

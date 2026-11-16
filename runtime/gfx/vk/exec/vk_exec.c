@@ -373,6 +373,18 @@ static int split_n = -1, split_draws, part_start;
 static uint64_t split_ns, split_ns_b, part_t0;   // split_ns_b: MKW_SPLIT_US_B, the B blocks' (MKW_AB)
 static uint64_t n_parts, n_subs, n_in_pass;
 
+static void split_now(VkExec *ex) {
+    int reopen = ex->in_pass;
+    if (reopen) split_ending = 1, vk_exec_pass_end(ex), split_ending = 0, n_in_pass++;   // not a pass end for rtstats
+    ex->cb = vk_sync_split();
+    part_start = ex->recorded;
+    part_t0 = kern_now_ns();
+    ex->dirty = VK_EXEC_DIRTY_ALL;
+    vk_exec_draw_new_cb();
+    n_parts++;
+    if (reopen) vk_exec_pass_begin(ex);
+}
+
 static void maybe_split(VkExec *ex) {
     if (split_n < 0) {
         split_n = cfg_int("MKW_SPLIT_DRAWS");
@@ -392,15 +404,16 @@ static void maybe_split(VkExec *ex) {
     if (min_ns && kern_now_ns() - part_t0 < min_ns) return;   // split_draws stays: the next draw asks again
     split_draws = 0;
     if (ex->recorded == part_start) return;
-    int reopen = ex->in_pass;
-    if (reopen) split_ending = 1, vk_exec_pass_end(ex), split_ending = 0, n_in_pass++;
-    ex->cb = vk_sync_split();
-    part_start = ex->recorded;
-    part_t0 = kern_now_ns();
-    ex->dirty = VK_EXEC_DIRTY_ALL;
-    vk_exec_draw_new_cb();
-    n_parts++;
-    if (reopen) vk_exec_pass_begin(ex);
+    split_now(ex);
+}
+
+int vk_exec_split_part(uint64_t *part) {
+    VkExec *ex = x_cur;
+    if (ex != &X || !ex->cb || ex->recorded == part_start) return 0;
+    split_now(ex);
+    split_draws = 0;
+    *part = vk_sync_part_next() - 1;   // the value the part just sent signals
+    return 1;
 }
 
 // MKW_TRACE=draw: the replay's time per op (TSC ticks, the call's own handler only), logged with the parts line of

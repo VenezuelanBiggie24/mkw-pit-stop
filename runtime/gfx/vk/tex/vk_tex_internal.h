@@ -172,6 +172,10 @@ void make_fresh_snap(Tex *e);
 void expand_rgb(int format, const uint8_t *src, uint8_t *dst, size_t n);
 void shrink_rgb(int format, const uint8_t *src, uint8_t *dst, size_t n);
 int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now);
+// e holds content its storage bytes do not: the GPU wrote it and, for a mirrored texture, it was not written back and
+// the CPU has not rewritten the storage since (an upload then reads the newer bytes). The alias copy's rule and the
+// ASTC/region copies' (cpu_content).
+int tex_has_gpu_content(const Tex *e);
 void gpu_baseline(Tex *e);   // CPU writes to the storage from here on are newer than the image (cpu_took_back)
 extern uint64_t trace_addr;
 int tracing(uint64_t addr);

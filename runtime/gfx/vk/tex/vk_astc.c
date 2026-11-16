@@ -724,7 +724,7 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
         if (rg != rg0) free((void *)rg);
         return 1;
     }
-    vk_upload_work(out_total / 4);   // RGBA8 texels: bounds the batch's GPU time (vk_upload_flush_over)
+    vk_upload_work(cb, out_total / 4);   // RGBA8 texels: bounds the batch's GPU time (vk_upload_flush_over)
     VkDeviceSize al = c->props.limits.minStorageBufferOffsetAlignment;   // the texels bind at cap_in, BC7 at cap_in + cap_out
     if (al < 16) al = 16;   // also the BC7 copy: its buffer offset must be a multiple of the 16-byte block
     cap_in = (cap_in + al - 1) / al * al, cap_out = (cap_out + al - 1) / al * al;
