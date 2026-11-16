@@ -21,7 +21,10 @@
 
 // ---- process
 
+void rt_log_flush(void) __attribute__((weak));   // core/boot/main.c: the log lines still queued for the log thread
+
 void plat_exit(int code) {
+    if (rt_log_flush) rt_log_flush();
     fflush(stdout);
     fflush(stderr);
     ExitProcess((UINT)code);

@@ -47,6 +47,7 @@ void rt_fatal(const char *fmt, ...) {
     rt_vlogf(fmt, ap);
     rt_log_raw("\n", 1);
     va_end(ap);
+    rt_log_flush();   // the log thread may not run again before _Exit
     fflush(stdout);
     fflush(stderr);
     _Exit(70);

@@ -60,13 +60,20 @@ static char g_log_early[32768];
 static size_t g_log_early_n;
 static uint64_t g_log_bytes;
 
-void rt_log_raw(const char *p, size_t n) {
+// Log writes that took 20 ms or more (read and reset by rt_log_slow_stats): on the PS5 a write to the log file or to
+// stderr (the kernel log) blocks up to ~2.9 s at times (run bench-timing, 16/11/2026: 33.6 s of a 60-frame window).
+static uint64_t g_slow_n, g_slow_ns, g_slow_max;
+void rt_log_slow_stats(uint64_t *n, uint64_t *ns, uint64_t *max) {
+    *n = __atomic_exchange_n(&g_slow_n, 0, __ATOMIC_RELAXED);
+    *ns = __atomic_exchange_n(&g_slow_ns, 0, __ATOMIC_RELAXED);
+    *max = __atomic_exchange_n(&g_slow_max, 0, __ATOMIC_RELAXED);
+}
+
+// The slow part: stderr and the log file. One writer at a time (the log thread, or rt_log_flush).
+static void log_sink(const char *p, size_t n) {
+    uint64_t t0 = plat_now_ns();
     fwrite(p, 1, n, stderr);
-    int state = __atomic_load_n(&g_log_state, __ATOMIC_ACQUIRE);
-    if (state == LOG_EARLY) {
-        size_t at = __atomic_fetch_add(&g_log_early_n, n, __ATOMIC_RELAXED);
-        if (at + n <= sizeof g_log_early) memcpy(g_log_early + at, p, n);
-    } else if (state == LOG_FILE) {
+    if (__atomic_load_n(&g_log_state, __ATOMIC_ACQUIRE) == LOG_FILE) {
         uint64_t at = __atomic_fetch_add(&g_log_bytes, n, __ATOMIC_RELAXED);
         if (at + n <= LOG_CAP) {
             plat_append_write(g_log_file, p, n);
@@ -74,6 +81,98 @@ void rt_log_raw(const char *p, size_t n) {
             static const char cut[] = "[host] log: the file reached 64 MiB, the rest of this run goes to stderr only\n";
             plat_append_write(g_log_file, cut, sizeof cut - 1);
         }
+    }
+    uint64_t dt = plat_now_ns() - t0;
+    if (dt >= 20000000ull) {
+        __atomic_add_fetch(&g_slow_n, 1, __ATOMIC_RELAXED), __atomic_add_fetch(&g_slow_ns, dt, __ATOMIC_RELAXED);
+        uint64_t m = __atomic_load_n(&g_slow_max, __ATOMIC_RELAXED);
+        while (dt > m && !__atomic_compare_exchange_n(&g_slow_max, &m, dt, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+    }
+}
+
+// Asynchronous log: once the log file is open, rt_log_raw copies the line into a ring and returns; the log thread does
+// the writes. The PS5's file and kernel-log writes blocked for up to ~2.9 s, and rt_log runs under the texture lock and
+// others: the game, the replay and the chunk threads stalled behind it (race hitches of seconds, run bench-timing,
+// 16/11/2026). A line that does not fit is dropped and counted, never waited for; rt_log_flush (plat_exit, rt_fatal,
+// the crash report) writes what is queued.
+#define LOG_RING (4u << 20)
+static char g_ring[LOG_RING];
+static uint64_t g_ring_head, g_ring_tail;           // bytes queued, bytes written (head under g_ring_lock)
+static PlatMutex g_ring_lock = PLAT_MUTEX_INIT;     // producers: the reservation and the copy only
+static PlatRMutex g_drain_lock = PLAT_RMUTEX_INIT;  // the writer: the log thread or a flush
+static int g_log_async;
+static uint64_t g_ring_dropped;
+
+static void log_drain_locked(void) {   // g_drain_lock held
+    uint64_t tail = __atomic_load_n(&g_ring_tail, __ATOMIC_RELAXED), head = __atomic_load_n(&g_ring_head, __ATOMIC_ACQUIRE);
+    while (tail < head) {
+        uint64_t off = tail % LOG_RING, n = head - tail;
+        if (off + n > LOG_RING) n = LOG_RING - off;
+        log_sink(g_ring + off, (size_t)n);
+        tail += n;
+        __atomic_store_n(&g_ring_tail, tail, __ATOMIC_RELEASE);
+    }
+    uint64_t dropped = __atomic_exchange_n(&g_ring_dropped, 0, __ATOMIC_RELAXED);
+    if (dropped) {
+        char note[128];
+        int k = snprintf(note, sizeof note, "[host] log: %llu bytes of log lines dropped (the log thread fell behind)\n",
+                         (unsigned long long)dropped);
+        if (k > 0) log_sink(note, (size_t)k);
+    }
+}
+
+static void log_thread(void *arg) {
+    (void)arg;
+    for (;;) {
+        if (__atomic_load_n(&g_ring_tail, __ATOMIC_ACQUIRE) == __atomic_load_n(&g_ring_head, __ATOMIC_ACQUIRE) &&
+            !__atomic_load_n(&g_ring_dropped, __ATOMIC_RELAXED)) {
+            plat_sleep_ms(2);
+            continue;
+        }
+        plat_rmutex_lock(&g_drain_lock);
+        log_drain_locked();
+        plat_rmutex_unlock(&g_drain_lock);
+    }
+}
+
+// Writes what is queued before the process ends. In a crash the writer may hold g_drain_lock forever: after up to
+// 0.5 s of it, drain without it.
+void rt_log_flush(void) {
+    if (!__atomic_load_n(&g_log_async, __ATOMIC_ACQUIRE)) return;
+    for (int i = 0; i < 250; i++) {
+        if (plat_rmutex_trylock(&g_drain_lock)) {
+            log_drain_locked();
+            plat_rmutex_unlock(&g_drain_lock);
+            return;
+        }
+        plat_sleep_ms(2);
+    }
+    log_drain_locked();
+}
+
+void rt_log_raw(const char *p, size_t n) {
+    if (__atomic_load_n(&g_log_async, __ATOMIC_ACQUIRE)) {
+        plat_mutex_lock(&g_ring_lock);
+        uint64_t head = g_ring_head;
+        if (head + n - __atomic_load_n(&g_ring_tail, __ATOMIC_ACQUIRE) > LOG_RING) {
+            plat_mutex_unlock(&g_ring_lock);
+            __atomic_add_fetch(&g_ring_dropped, n, __ATOMIC_RELAXED);
+            return;
+        }
+        uint64_t off = head % LOG_RING, first = n < LOG_RING - off ? n : LOG_RING - off;
+        memcpy(g_ring + off, p, (size_t)first);
+        if (first < n) memcpy(g_ring, p + first, (size_t)(n - first));
+        __atomic_store_n(&g_ring_head, head + n, __ATOMIC_RELEASE);
+        plat_mutex_unlock(&g_ring_lock);
+        return;
+    }
+    int state = __atomic_load_n(&g_log_state, __ATOMIC_ACQUIRE);
+    if (state == LOG_EARLY) {
+        fwrite(p, 1, n, stderr);
+        size_t at = __atomic_fetch_add(&g_log_early_n, n, __ATOMIC_RELAXED);
+        if (at + n <= sizeof g_log_early) memcpy(g_log_early + at, p, n);
+    } else {
+        log_sink(p, n);
     }
 }
 
@@ -137,6 +236,7 @@ static void log_open(int game) {
     plat_append_write(g_log_file, g_log_early, n);
     g_log_bytes = n;
     __atomic_store_n(&g_log_state, LOG_FILE, __ATOMIC_RELEASE);
+    if (plat_thread_spawn(log_thread, NULL, "log", 0)) __atomic_store_n(&g_log_async, 1, __ATOMIC_RELEASE);
     rt_log("log: %s", g_log_path);
 }
 
@@ -255,6 +355,7 @@ static void crash_handler(const PlatCrash *x) {
     } else {
         rt_logf("  not on a guest thread\n");
     }
+    rt_log_flush();
     fflush(stderr);
     fflush(stdout);
     if (g_log_file) plat_append_sync(g_log_file);

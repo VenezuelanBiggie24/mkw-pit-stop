@@ -22,6 +22,8 @@ void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));   // "[
 void rt_logf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void rt_vlogf(const char *fmt, va_list ap);
 void rt_log_raw(const char *p, size_t n);
+void rt_log_slow_stats(uint64_t *n, uint64_t *ns, uint64_t *max);   // log writes of 20 ms or more since the last call
+void rt_log_flush(void);   // writes the queued log lines (the log thread writes them otherwise); plat_exit calls it
 const char *rt_log_path(void);                  // the log file, NULL when this run writes none
 enum { RT_TRACE_SVC = 1, RT_TRACE_HOSTCALL = 2, RT_TRACE_FS = 8, RT_TRACE_GFX = 16, RT_TRACE_PERF = 32,
        RT_TRACE_SCHED = 64, RT_TRACE_AUDIO = 128, RT_TRACE_PRESENT = 256,
