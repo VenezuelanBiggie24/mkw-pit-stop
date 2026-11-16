@@ -167,7 +167,14 @@ static void late_note(int id, const TexSlot *s) {
                         s->t.d.depth, s->t.d.format);
 }
 
-const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view) {
+static const VkTexImage *by_id(int id, view_t *view, int *has_view, int sampled);
+
+const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view) { return by_id(id, view, has_view, 1); }
+const VkTexImage *vk_texture_storage_by_id_locked(int id, view_t *view, int *has_view) {
+    return by_id(id, view, has_view, 0);
+}
+
+static const VkTexImage *by_id(int id, view_t *view, int *has_view, int sampled) {
     if (id < 0 || id >= ntslots || !tslots[id].used) { unresolved_note(id, NULL); return NULL; }
     TexSlot *s = &tslots[id];
     if (vk_tex_reg_limit && (int32_t)((uint32_t)(sinfo[id] >> 16) - vk_tex_reg_limit) > 0) late_note(id, s);
@@ -198,7 +205,9 @@ const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view) {
     }
     if (view) *view = has_view ? s->cview : s->v;
     if (has_view) *has_view = view ? s->chas_view : s->has_view;
-    if (e && tex_unready(e)) {   // never written (first upload deferred): the zero stand-in, not recycled memory
+    // Never written (first upload deferred): a sampled binding reads the zero stand-in, not recycled memory. A storage
+    // binding takes the image: what a shader writes there would go into the stand-in and be lost.
+    if (e && sampled && tex_unready(e)) {
         static volatile int32_t n_unready;
         log_limited(&n_unready, "texture %#llx (%ux%u fmt %#x): first upload deferred for want of staging; zero "
                     "stand-in until it is made", (unsigned long long)e->pub.addr, e->t.d.width, e->t.d.height,

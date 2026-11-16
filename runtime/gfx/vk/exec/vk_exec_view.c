@@ -388,7 +388,8 @@ void tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage, i
     if (h) {
         view_t v;
         int hv;
-        const VkTexImage *img = vk_texture_by_id_locked((int)(h & 0xfffff), &v, &hv);
+        int id = (int)(h & 0xfffff);
+        const VkTexImage *img = storage ? vk_texture_storage_by_id_locked(id, &v, &hv) : vk_texture_by_id_locked(id, &v, &hv);
         if (img) view = get_view(ex, img, &v, hv, r->type, storage, r->format), *image = img->image;
         if (img && storage) vk_texture_storage_bound_locked(img);
         if (img && !storage && ex->nfbl && in_fbl(ex, img->image)) layout = VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT;

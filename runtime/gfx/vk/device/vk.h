@@ -463,6 +463,9 @@ uint32_t vk_texture_slot_format(int id, uint64_t *addr);   // NVN format the gam
 void vk_texture_lock(void);
 void vk_texture_unlock(void);
 const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view);
+// The same for a storage-image binding: an image whose first upload is deferred is returned, not NULL (the zero
+// stand-in a sampled binding gets, tex_unready), since the shader writes it.
+const VkTexImage *vk_texture_storage_by_id_locked(int id, view_t *view, int *has_view);
 VkSampler vk_sampler_by_id_locked(int id);
 // The slot's sampler with nearest filtering and no anisotropy: a depth texture read without a compare lands on one texel
 // on the Switch although the game binds a linear sampler, and MacNativeGames samples it the same way. VK_NULL_HANDLE
