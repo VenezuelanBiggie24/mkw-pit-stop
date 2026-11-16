@@ -62,6 +62,9 @@ static const char *const known[] = {
     "REPLAY_PAR", "REPLAY_PAR_FIRST", "REPLAY_PAR_MORE", "REPLAY_PAR_SMALL", "REPLAY_PAR_THREADS", "SEQ_UNTIL",
     "SEQ_WATCH", "SHADOW_TRIM", "SNAP_BG", "SPARSE_EVICT", "SVC_STATS", "TEX_EVICT_IDLE", "TEX_UP_DUMP",
     "TEX_UP_DUMP_DIR", "TEX_UP_LOG", "TEX_UP_LOG_AT", "TEX_ZERO_LOG", "YIELD_NOLOCK", "ZERO_SCAN_CACHE",
+    // the bench driver, multiplayer and extra pads (PS5 port)
+    "BENCH", "BENCH_MAX", "KEYBOARD_PLAYER", "LOBBY", "LOCAL_WIRELESS", "NET_HOST", "NET_IFACE", "NET_JOIN", "NET_NAME",
+    "NET_PORT", "NET_REGION", "NET_RELAY_ONLY", "VIRTUAL_PADS",
     "UPDATE_AS", "UPDATE_CHECK", "UPDATE_REPO", "WINDOW_SIZE", "ZSTD_CHECK", "ZSTD_NATIVE",
 };
 
@@ -75,6 +78,9 @@ static const struct { const char *key, *section; } sections[] = {
     {"VOLUME", "audio"}, {"AUDIO_CHANNELS", "audio"}, {"BACKGROUND_MUTE", "audio"},
     {"MOTION", "input"}, {"RUMBLE_STRENGTH", "input"}, {"RUMBLE_CURVE", "input"}, {"RUMBLE_TRIGGERS", "input"},
     {"PAD_LAYOUT", "input"}, {"BUTTON_ICONS", "input"}, {"MOUSE_SENS", "input"}, {"STICK_DEADZONE", "input"}, {"SWITCH2", "input"}, {"INPUT_RECORD", "input"},
+    {"LOCAL_WIRELESS", "multiplayer"}, {"LOBBY", "multiplayer"}, {"NET_NAME", "multiplayer"}, {"NET_PORT", "multiplayer"},
+    {"NET_HOST", "multiplayer"}, {"NET_REGION", "multiplayer"}, {"NET_IFACE", "multiplayer"}, {"NET_JOIN", "multiplayer"},
+    {"NET_RELAY_ONLY", "multiplayer"}, {"KEYBOARD_PLAYER", "input"},
     {"BIND_A", "input"}, {"BIND_B", "input"}, {"BIND_X", "input"}, {"BIND_Y", "input"}, {"BIND_LCLICK", "input"},
     {"BIND_RCLICK", "input"}, {"BIND_L", "input"}, {"BIND_R", "input"}, {"BIND_ZL", "input"}, {"BIND_ZR", "input"},
     {"BIND_PLUS", "input"}, {"BIND_MINUS", "input"}, {"BIND_LEFT", "input"}, {"BIND_UP", "input"},
@@ -93,6 +99,7 @@ static const struct { const char *key, *section; } sections[] = {
     {"QUICK_RACE", "hacks"}, {"CLASSIC_GP", "hacks"}, {"MODS", "launcher"}, {"MODS_ACK", "launcher"}, {"MODS_PLAYED", "launcher"},
     {"UPDATE_CHECK", "launcher"}, {"DISCORD", "launcher"}, {"GAME_DIR", "launcher"}, {"PLAYER", "launcher"},
     {"SHORTCUT_ASKED", "launcher"},
+    {"BENCH", "hacks"}, {"BENCH_MAX", "hacks"},
 };
 
 // The settings the menu shows: the value in effect when the key is unset, and what the key accepts. The only place a
@@ -127,6 +134,7 @@ static const CfgMeta metas[] = {
     {"VOLUME", "100", "0..100", LIVE}, {"AUDIO_CHANNELS", "auto", "auto|2|6", RESTART}, {"BACKGROUND_MUTE", "0", "0|1", LIVE},
     {"MOTION", "1", "0|1", LIVE}, {"RUMBLE_STRENGTH", "130", "0..300", LIVE}, {"RUMBLE_CURVE", "0.6", "0.2..1.5", LIVE},
     {"RUMBLE_TRIGGERS", "0", "0|1", LIVE}, {"PAD_LAYOUT", "auto", "auto|nintendo|xbox", LIVE},
+    {"KEYBOARD_PLAYER", "shared", "shared|own", RESTART},   // own: the keyboard alone is player 1 (desktop)
     {"BUTTON_ICONS", "auto", "auto|nintendo|xbox|playstation|keyboard", LIVE},
     {"MOUSE_SENS", "1", "0..10", LIVE}, {"STICK_DEADZONE", "8", "0..40", LIVE}, {"SWITCH2", "0", "0|1|2", RESTART},
     {"MENU_LANG", "", "en|ja|fr|de|it|es|nl|pt|pt-BR|ru|zh-Hans|zh-Hant|ko|es-419|ca|gl|eu|pl|tr|uk|th", LIVE}, {"UPDATE_CHECK", "1", "0|1", LIVE},
@@ -135,6 +143,11 @@ static const CfgMeta metas[] = {
     {"MODS_ACK", "0", "0|1", LIVE},   // the player ticked the Mods page's "I understand" once
     {"MODS_PLAYED", "", NULL, LIVE},   // the mods of the last start: a new set backs the save up first (launcher)
     {"GAME_DIR", "", NULL, RESTART},   // unset: beside the executable; the launcher remembers the selection there
+    // Multiplayer (runtime/net): local wireless off until two consoles have raced together over it
+    {"LOCAL_WIRELESS", "off", "off|lan|online", RESTART}, {"LOBBY", "", NULL, RESTART}, {"NET_NAME", "", NULL, LIVE},
+    {"NET_PORT", "11460", "1024..65535", RESTART}, {"NET_HOST", "private", "private|public", LIVE},
+    {"NET_REGION", "any", "any|eu|na|sa|asia|oc|af", LIVE}, {"NET_IFACE", "", NULL, RESTART}, {"NET_JOIN", "", NULL, LIVE},
+    {"NET_RELAY_ONLY", "0", "0|1", LIVE},
     // Advanced: scheduling
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "1", "0|1", RESTART},
 #ifdef __PROSPERO__
@@ -167,6 +180,7 @@ static const CfgMeta metas[] = {
     {"SKIP_MOVIES", "0", "0|1", LIVE}, {"SEED", "", NULL, RESTART},
     {"UNLOCK_ALL", "0", "0|1", RESTART}, {"FREEZE_KEYS", "0", "0|1", LIVE}, {"QUICK_RACE", "off", "off|tt|gp|free", RESTART},
     {"CLASSIC_GP", "0", "0|1", LIVE},   // core/hacks/classic.c: the cups' intermissions become laps on one course
+    {"BENCH", "off", "off|tt|gp", RESTART}, {"BENCH_MAX", "0", "0..3600", RESTART},
 };
 
 static int is_known(const char *key) {
@@ -263,6 +277,12 @@ static const struct { const char *key, *value; } PS5[] = {
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 
+// MKW_BENCH=tt|gp (core/diag/bench.c): the way to its races, below what the player set and above the device profile,
+// so a benchmark run is the same time trial or Grand Prix on every machine. QUICK_RACE takes the mode's own name.
+static const struct { const char *key, *value; } BENCH[] = {
+    {"QUICK_RACE", NULL}, {"SEED", "1"}, {"SKIP_MOVIES", "1"},
+};
+
 static int read_line(const char *path, char *out, size_t n) {
     FILE *f = fopen(path, "r");
     if (!f) return 0;
@@ -313,6 +333,11 @@ const char *cfg_get(const char *name) {
     const char *v = raw_get(name);
     // A set key (environment, mkw.ini, the menu) wins over the profile.
     if (v || strncmp(name, PREFIX, PREFIX_LEN)) return v;
+    for (size_t i = 0; i < sizeof BENCH / sizeof *BENCH; i++)   // MKW_BENCH read only for its own keys
+        if (!strcasecmp(BENCH[i].key, name + PREFIX_LEN)) {
+            const char *b = raw_get(PREFIX "BENCH");
+            if (b && (!strcmp(b, "tt") || !strcmp(b, "gp"))) return BENCH[i].value ? BENCH[i].value : b;
+        }
     int p = profile_of();
     if (p == 1)
         for (size_t i = 0; i < sizeof DECK / sizeof *DECK; i++)

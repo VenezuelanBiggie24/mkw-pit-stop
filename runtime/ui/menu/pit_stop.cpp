@@ -19,7 +19,7 @@ extern "C" {
 #include <stdio.h>
 #include <stdlib.h>
 
-enum { HOME, ALL, DISPLAY, GRAPHICS, CONTROLS, AUDIO, GENERAL, ADVANCED, HACKS,
+enum { HOME, ALL, DISPLAY, GRAPHICS, CONTROLS, AUDIO, GENERAL, ADVANCED, HACKS, MULTI,
        PAD_BINDS, KEY_BINDS, QUIT, RESET, RESET_BINDS, CAPTURE, PAGE_COUNT };
 
 struct Category { int tab; UiTextId title, description; };
@@ -31,9 +31,10 @@ static const Category categories[] = {
     {TAB_GENERAL, UI_MENU_TAB_GENERAL, UI_PIT_GAME_DESC},
     {TAB_ADVANCED, UI_MENU_TAB_ADVANCED, UI_PIT_ADV_DESC},
     {TAB_HACKS, UI_MENU_TAB_HACKS, UI_PIT_HACKS_DESC},
+    {TAB_MULTI, UI_MENU_TAB_MULTI, UI_PIT_MULTI_DESC},
 };
-static_assert(sizeof categories / sizeof *categories == HACKS - DISPLAY + 1);
-static bool is_category(int page) { return page >= DISPLAY && page <= HACKS; }
+static_assert(sizeof categories / sizeof *categories == MULTI - DISPLAY + 1);
+static bool is_category(int page) { return page >= DISPLAY && page <= MULTI; }
 
 static constexpr uint32_t button(int pad) { return 1u << pad; }
 enum class Command { None, Up, Down, Left, Right, Select, Back, Previous, Next, Clear };
@@ -341,7 +342,7 @@ static PitResult draw_rows(int screen) {
         if (action(UI_PIT_ALL, UI_PIT_ALL_DESC, true)) go(ALL);
         break;
     case ALL:
-        for (int i = DISPLAY; i <= HACKS; ++i)
+        for (int i = DISPLAY; i <= MULTI; ++i)
             if (action(categories[i - DISPLAY].title, categories[i - DISPLAY].description, true)) go(i);
         if (action(UI_MENU_QUIT, UI_PIT_QUIT_DESC, true)) show_confirmation(QUIT);
         break;
@@ -431,7 +432,7 @@ PitResult pit_frame(float width, float height, const InputMenuPad &pad, int test
                                                                 : GLYPHS_XBOX;
     Command key = Command::None, cmd = Command::None;
     if (test_page >= 0) {
-        for (int i = DISPLAY; i <= HACKS; ++i)
+        for (int i = DISPLAY; i <= MULTI; ++i)
             if (categories[i - DISPLAY].tab == test_page) pit.screen = i;
     } else {
         Command physical = pad_command(pad, now);
@@ -448,7 +449,7 @@ PitResult pit_frame(float width, float height, const InputMenuPad &pad, int test
             if (result != PitResult::None) return result;
             cmd = Command::None;
         } else if (is_category(pit.screen) && (cmd == Command::Previous || cmd == Command::Next)) {
-            int next = ImClamp(pit.screen + (cmd == Command::Next ? 1 : -1), (int)DISPLAY, (int)HACKS);
+            int next = ImClamp(pit.screen + (cmd == Command::Next ? 1 : -1), (int)DISPLAY, (int)MULTI);
             if (next != pit.screen) {
                 pit.pages[ALL].row = next - DISPLAY;
                 go(next);

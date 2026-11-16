@@ -15,9 +15,10 @@ behind that code was seen there, not in MKW.
 | [sdk/](sdk/README.md) | `nn::*` functions replaced by name: system, files and RomFS, video, software keyboard |
 | [audio/](audio/README.md) | The SDK's audio renderer and its effects |
 | [input/](input/README.md) | Controllers, keyboard, mouse, gyro |
+| [net/](net/README.md) | Local wireless play over UDP: `nn::ldn` and `nn::socket`, the session, the lobby client |
 | [gfx/](gfx/README.md) | NVN over Vulkan: API front end (`nvn/`) and back end (`vk/`) |
 | [platform/](platform/README.md) | Operating system layer: `linux.c`, `win32.c` |
 | [ui/](ui/README.md) | Menu and overlay (Dear ImGui) |
 | [shaders/](shaders/README.md) | The runtime's own shaders (ASTC, FSR 1) |
 | [probes/](probes/README.md) | Self-tests per subsystem |
-| [third_party/](third_party/README.md) | Dear ImGui, bc7enc |
+| [third_party/](third_party/README.md) | Dear ImGui, bc7enc, Monocypher |

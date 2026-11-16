@@ -10,6 +10,7 @@
 
 #include "imgui.h"
 #include "ui/menu/binds_page.h"
+#include "ui/menu/net_page.h"
 #include "ui/menu/option_rows.h"
 #include "ui/glyphs/glyphs.h"
 #include "ui/menu/settings_tabs.h"
@@ -409,6 +410,10 @@ static void rows_controls(void) {
     opt_slider("MKW_STICK_DEADZONE", UI_MENU_STICK_DEADZONE, 0, 40, UI_MENU_STICK_DEADZONE_DESC, 1, "%.0f %%");   // input.c
 #ifndef MKW_PS5_NATIVE
     opt_slider("MKW_MOUSE_SENS", UI_MENU_MOUSE_SENS, 0, 10, UI_MENU_MOUSE_SENS_DESC, 0.1f, "%.1f");
+    static const char *kb_vals[] = {"shared", "own"};
+    const char *kb_names[] = {menu_text(UI_MENU_KEYBOARD_SHARED), menu_text(UI_MENU_KEYBOARD_OWN)};
+    opt_choice_list("MKW_KEYBOARD_PLAYER", UI_MENU_KEYBOARD_PLAYER, kb_vals, kb_names, 2, UI_MENU_KEYBOARD_PLAYER_DESC,
+                    strcmp(cfg_value("MKW_KEYBOARD_PLAYER"), "own") ? 0 : 1);
 #endif
 }
 
@@ -617,6 +622,8 @@ static void rows_hacks(void) {
     opt_toggle("MKW_UNLOCK_ALL", UI_MENU_UNLOCK_ALL, UI_MENU_UNLOCK_ALL_DESC);
     static const UiTextId quick[] = {UI_MENU_OFF, UI_MENU_QUICK_RACE_TT, UI_MENU_QUICK_RACE_GP, UI_MENU_QUICK_RACE_FREE};
     opt_choice("MKW_QUICK_RACE", UI_MENU_QUICK_RACE, quick, 4, UI_MENU_QUICK_RACE_DESC);
+    static const UiTextId bench[] = {UI_MENU_OFF, UI_MENU_QUICK_RACE_TT, UI_MENU_QUICK_RACE_GP};
+    opt_choice("MKW_BENCH", UI_MENU_BENCH, bench, 3, UI_MENU_BENCH_DESC);   // core/diag/bench.c
     opt_toggle("MKW_FREEZE_KEYS", UI_MENU_FREEZE_KEYS, UI_MENU_FREEZE_KEYS_DESC);
     opt_toggle("MKW_CLASSIC_GP", UI_MENU_CLASSIC_GP, UI_MENU_CLASSIC_GP_DESC);
 }
@@ -627,9 +634,15 @@ static void tab_hacks(float scale) {
     opt_end();
 }
 
+static void tab_multi(float scale) {   // runtime/net: local wireless and online play (net_page.cpp)
+    opt_begin("##multi", scale);
+    net_page_rows();
+    opt_end();
+}
+
 static const UiTextId kTabNames[TAB_COUNT] = {UI_MENU_TAB_SCREEN,   UI_MENU_TAB_GRAPHICS, UI_MENU_TAB_SOUND,
                                               UI_MENU_TAB_CONTROLS, UI_MENU_TAB_GENERAL,  UI_MENU_TAB_ADVANCED,
-                                              UI_MENU_TAB_HACKS};
+                                              UI_MENU_TAB_HACKS,    UI_MENU_TAB_MULTI};
 static int g_tab;               // the tab shown
 static int g_tab_request = -1;  // select this tab at the next layout; -1 none
 static int g_focus_page = -1;   // this tab's first row takes the cursor once it is shown; -1 none
@@ -655,6 +668,7 @@ bool settings_rows(int tab, bool pit) {
     case TAB_GENERAL: rows_general(); break;
     case TAB_ADVANCED: return rows_advanced();
     case TAB_HACKS: rows_hacks(); break;
+    case TAB_MULTI: net_page_rows(); break;
     }
     return false;
 }
@@ -705,6 +719,7 @@ void settings_tabs(float scale, float bottom) {
             case TAB_GENERAL: tab_general(scale); break;
             case TAB_ADVANCED: tab_advanced(scale); break;
             case TAB_HACKS: tab_hacks(scale); break;
+            case TAB_MULTI: tab_multi(scale); break;
             }
             ImGui::EndTabItem();
         }

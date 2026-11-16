@@ -60,6 +60,7 @@ typedef int HostSock;
 
 #include "cfg.h"
 #include "host.h"
+#include "net_game.h"
 #include "ov.h"
 #include "platform/platform.h"
 
@@ -551,28 +552,100 @@ static void ov_getaddrinfo(Cpu *c) {
     ret_x(c, 4);
 }
 
-HOST_OVERRIDE("_ZN2nn6socket8internal10InitializeEi", ov_init);
-HOST_OVERRIDE("_ZN2nn6socket8FinalizeEv", ov_finalize);
-HOST_OVERRIDE("_ZN2nn6socket13IsInitializedEv", ov_is_initialized);
-HOST_OVERRIDE("_ZN2nn6socket12SetAllocatorEPNS_14MemoryResourceE", ov_nothing);
-HOST_OVERRIDE("_ZN2nn6socket12GetLastErrnoEv", ov_last_errno);
-HOST_OVERRIDE("_ZN2nn6socket12GetLastErrorEv", ov_last_errno);   // nn::socket::Errno: the same numbers
-HOST_OVERRIDE("_ZN2nn6socket6SocketEiii", ov_socket);
-HOST_OVERRIDE("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", ov_socket);
-HOST_OVERRIDE("_ZN2nn6socket5CloseEi", ov_close);
-HOST_OVERRIDE("_ZN2nn6socket8ShutdownEii", ov_shutdown);
-HOST_OVERRIDE("_ZN2nn6socket4BindEiPK8sockaddrj", ov_bind);
-HOST_OVERRIDE("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", ov_bind);
-HOST_OVERRIDE("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", ov_setsockopt);
-HOST_OVERRIDE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", ov_recvfrom);
-HOST_OVERRIDE("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", ov_recvfrom);
-HOST_OVERRIDE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", ov_sendto);
-HOST_OVERRIDE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", ov_sendto);
-HOST_OVERRIDE("_ZN2nn6socket4PollEP6pollfdmi", ov_poll);
-HOST_OVERRIDE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", ov_eventfd);
-HOST_OVERRIDE("_ZN2nn6socket11EventFdReadEiPm", ov_eventfd_read);
-HOST_OVERRIDE("_ZN2nn6socket12EventFdWriteEim", ov_eventfd_write);
-HOST_OVERRIDE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", ov_getaddrinfo);
-HOST_OVERRIDE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", ov_getaddrinfo);
-HOST_OVERRIDE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", ov_nothing);   // nothing to free: GetAddrInfo gives none
-HOST_OVERRIDE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", ov_nothing);
+
+// MKW_LOCAL_WIRELESS (runtime/net): the game's sockets live inside the local wireless session there, not on the
+// host's network; the call goes to net_socket.c while it is on, here otherwise (MKW_LAN, or a network that is down).
+static void routed_ov_bind(Cpu *c) {
+    if (net_game_enabled()) net_ov_bind(c);
+    else ov_bind(c);
+}
+static void routed_ov_close(Cpu *c) {
+    if (net_game_enabled()) net_ov_close(c);
+    else ov_close(c);
+}
+static void routed_ov_eventfd(Cpu *c) {
+    if (net_game_enabled()) net_ov_eventfd(c);
+    else ov_eventfd(c);
+}
+static void routed_ov_eventfd_read(Cpu *c) {
+    if (net_game_enabled()) net_ov_eventfd_read(c);
+    else ov_eventfd_read(c);
+}
+static void routed_ov_eventfd_write(Cpu *c) {
+    if (net_game_enabled()) net_ov_eventfd_write(c);
+    else ov_eventfd_write(c);
+}
+static void routed_ov_finalize(Cpu *c) {
+    if (net_game_enabled()) net_ov_ok(c);
+    else ov_finalize(c);
+}
+static void routed_ov_getaddrinfo(Cpu *c) {
+    if (net_game_enabled()) net_ov_getaddrinfo(c);
+    else ov_getaddrinfo(c);
+}
+static void routed_ov_init(Cpu *c) {
+    if (net_game_enabled()) net_ov_ok(c);
+    else ov_init(c);
+}
+static void routed_ov_is_initialized(Cpu *c) {
+    if (net_game_enabled()) net_ov_true(c);
+    else ov_is_initialized(c);
+}
+static void routed_ov_last_errno(Cpu *c) {
+    if (net_game_enabled()) net_ov_last_error(c);
+    else ov_last_errno(c);
+}
+static void routed_ov_nothing(Cpu *c) {
+    if (net_game_enabled()) net_ov_nothing(c);
+    else ov_nothing(c);
+}
+static void routed_ov_poll(Cpu *c) {
+    if (net_game_enabled()) net_ov_poll(c);
+    else ov_poll(c);
+}
+static void routed_ov_recvfrom(Cpu *c) {
+    if (net_game_enabled()) net_ov_recvfrom(c);
+    else ov_recvfrom(c);
+}
+static void routed_ov_sendto(Cpu *c) {
+    if (net_game_enabled()) net_ov_sendto(c);
+    else ov_sendto(c);
+}
+static void routed_ov_setsockopt(Cpu *c) {
+    if (net_game_enabled()) net_ov_setsockopt(c);
+    else ov_setsockopt(c);
+}
+static void routed_ov_shutdown(Cpu *c) {
+    if (net_game_enabled()) net_ov_shutdown(c);
+    else ov_shutdown(c);
+}
+static void routed_ov_socket(Cpu *c) {
+    if (net_game_enabled()) net_ov_socket(c);
+    else ov_socket(c);
+}
+
+HOST_OVERRIDE("_ZN2nn6socket8internal10InitializeEi", routed_ov_init);
+HOST_OVERRIDE("_ZN2nn6socket8FinalizeEv", routed_ov_finalize);
+HOST_OVERRIDE("_ZN2nn6socket13IsInitializedEv", routed_ov_is_initialized);
+HOST_OVERRIDE("_ZN2nn6socket12SetAllocatorEPNS_14MemoryResourceE", routed_ov_nothing);
+HOST_OVERRIDE("_ZN2nn6socket12GetLastErrnoEv", routed_ov_last_errno);
+HOST_OVERRIDE("_ZN2nn6socket12GetLastErrorEv", routed_ov_last_errno);   // nn::socket::Errno: the same numbers
+HOST_OVERRIDE("_ZN2nn6socket6SocketEiii", routed_ov_socket);
+HOST_OVERRIDE("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", routed_ov_socket);
+HOST_OVERRIDE("_ZN2nn6socket5CloseEi", routed_ov_close);
+HOST_OVERRIDE("_ZN2nn6socket8ShutdownEii", routed_ov_shutdown);
+HOST_OVERRIDE("_ZN2nn6socket4BindEiPK8sockaddrj", routed_ov_bind);
+HOST_OVERRIDE("_ZN2nn6socket4BindEiPKNS0_8SockAddrEj", routed_ov_bind);
+HOST_OVERRIDE("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", routed_ov_setsockopt);
+HOST_OVERRIDE("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", routed_ov_recvfrom);
+HOST_OVERRIDE("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", routed_ov_recvfrom);
+HOST_OVERRIDE("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", routed_ov_sendto);
+HOST_OVERRIDE("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", routed_ov_sendto);
+HOST_OVERRIDE("_ZN2nn6socket4PollEP6pollfdmi", routed_ov_poll);
+HOST_OVERRIDE("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", routed_ov_eventfd);
+HOST_OVERRIDE("_ZN2nn6socket11EventFdReadEiPm", routed_ov_eventfd_read);
+HOST_OVERRIDE("_ZN2nn6socket12EventFdWriteEim", routed_ov_eventfd_write);
+HOST_OVERRIDE("_ZN2nn6socket11GetAddrInfoEPKcS2_PK8addrinfoPPS3_", routed_ov_getaddrinfo);
+HOST_OVERRIDE("_ZN2nn6socket11GetAddrInfoEPKcS2_PKNS0_8AddrInfoEPPS3_", routed_ov_getaddrinfo);
+HOST_OVERRIDE("_ZN2nn6socket12FreeAddrInfoEP8addrinfo", routed_ov_nothing);   // nothing to free: GetAddrInfo gives none
+HOST_OVERRIDE("_ZN2nn6socket12FreeAddrInfoEPNS0_8AddrInfoE", routed_ov_nothing);

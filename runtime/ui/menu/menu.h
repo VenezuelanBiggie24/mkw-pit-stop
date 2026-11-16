@@ -68,6 +68,8 @@ const char *gfx_window_present_mode(void);
 // (gfx/vk/device/vk_framegen.c) a fixed frame generation factor does not split the screen's refreshes evenly at the
 // game's rate now, without MKW_VRR: the menu's note
 int vk_fg_uneven(void);
+// The refresh rate of the window's monitor or the PS5's display in millihertz (59,940 on the PS5), 0 unknown. Any thread.
+uint32_t gfx_window_refresh_mhz(void);
 
 #ifdef __cplusplus
 }

@@ -155,6 +155,7 @@ build/mkw
 | [tests/](tests/README.md) | Tests without the game or a GPU, in the CI on Linux and Windows |
 | [docs/](docs/README.md) | PS5 architecture, Pit Stop, research, sources, roadmap and performance |
 | [i18n/](i18n/README.md) | The menu's texts as gettext files (`mkw.pot`, one `.po` per language) |
+| [server/](server/README.md) | The lobby server for online local-wireless play (`server/lobby`) |
 | `.github/` | CI, issue and pull request templates |
 
 At the root: `pyproject.toml` and `uv.lock` (the Python environment of the tools), `Makefile` (shortcuts for the

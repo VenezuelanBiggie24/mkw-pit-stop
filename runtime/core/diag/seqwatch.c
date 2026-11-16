@@ -166,7 +166,9 @@ void seqwatch_init(void) {
     }
     const char *until = cfg_get("MKW_SEQ_UNTIL"), *ex = cfg_get("MKW_SEQ_EXIT");
     // free roam starts from the title's scene with no load: IntoRace2 five frames after Plus (fr1)
-    if ((!until || !*until) && quick_on) until = strcmp(quick, "free") ? "ReadyRace" : "IntoRace2";
+    // a Grand Prix's first race: after the cup movie (race.sh), as ReadyRace is the time trial's
+    if ((!until || !*until) && quick_on)
+        until = !strcmp(quick, "free") ? "IntoRace2" : !strcmp(quick, "gp") ? "-WaitIntroMovie,IsSequenceFlag" : "ReadyRace";
     for (const char *p = until; p && *p && nuntil < UNTIL_MAX;) {
         size_t n = strcspn(p, ",");
         char name[48];

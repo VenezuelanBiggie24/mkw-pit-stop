@@ -78,6 +78,10 @@ struct pad {
     float left_x, left_y, right_x, right_y, l2, r2;
 };
 static Ps5PadState ps5_pads[PS5_PAD_PLAYERS];
+// MKW_VIRTUAL_PADS=N on the PS5: players 2..N+1 are connected without a DualSense (where no signed-in user's is), pressed
+// only by the script's "p<N>" lines, so a 2-4 player race runs unattended (tools/ps5/bench.py, docs/multiplayer.md).
+// Read once at start.
+static uint32_t ps5_virtual_mask;
 struct pad_reading {
     uint32_t buttons;
     uint8_t left_x, left_y, right_x, right_y, l2, r2;
@@ -89,7 +93,17 @@ extern void pad_poll(struct pad *pad);
 extern uint32_t pad_players(void);
 extern int pad_player_readings(int player, const struct pad_reading **readings);
 extern void pad_player_vibrate(int player, float large, float small);
+extern void pad_player_light_bar(int player, uint8_t r, uint8_t g, uint8_t b);
 #endif
+
+// The light colour of controller number n (0-7): the PS5's own order for signed-in users (blue, red, green, pink), then
+// four more, dim enough not to glare in a dark room.
+static void player_colour(int n, uint8_t rgb[3]) {
+    static const uint8_t c[8][3] = {{0, 0, 64}, {64, 0, 0}, {0, 64, 0}, {64, 0, 40},
+                                    {64, 40, 0}, {0, 48, 64}, {40, 0, 64}, {48, 48, 48}};
+    memcpy(rgb, c[n & 7], 3);
+}
+static int8_t player_number[INPUT_MAX_PLAYERS] = {0, 1, 2, 3, 4, 5, 6, 7};   // lock: input_player_number
 
 static float mouse_sens = -1;              // MKW_MOUSE_SENS, 0 = mouse camera off; live (cfg_version)
 static unsigned mouse_sens_seen;
@@ -164,6 +178,17 @@ static void stick(int16_t x, int16_t y, int32_t out[2]) {
 // 1's is `pad`. A player keeps the slot while the gamepad stays connected. Under lock.
 static SDL_Gamepad *extra[INPUT_MAX_PLAYERS];   // [0] unused
 static int extra_rumble[INPUT_MAX_PLAYERS], extra_east_a[INPUT_MAX_PLAYERS];
+static int keyboard_own;                          // MKW_KEYBOARD_PLAYER=own: `pad` stays NULL, gamepads from player 2
+
+// A gamepad's player lamps: SDL's player index (the DualSense's and Switch Pro's LEDs) and, where it has one, the
+// light colour. Under lock.
+static void pad_show_number(SDL_Gamepad *g, int number) {
+    if (!g) return;
+    uint8_t rgb[3];
+    player_colour(number, rgb);
+    SDL_SetGamepadPlayerIndex(g, number);
+    SDL_SetGamepadLED(g, rgb[0], rgb[1], rgb[2]);
+}
 
 static int pad_is_open(SDL_JoystickID id) {
     if (pad && SDL_GetGamepadID(pad) == id) return 1;
@@ -191,11 +216,12 @@ static void scan_pads(void) {
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
     for (int i = 0; ids && i < n; i++) {
         if (pad_is_open(ids[i])) continue;
-        int p = 0;
+        int p = keyboard_own;
         while (p < INPUT_MAX_PLAYERS && (p ? extra[p] != NULL : pad != NULL)) p++;
         if (p == INPUT_MAX_PLAYERS) break;
         SDL_Gamepad *g = SDL_OpenGamepad(ids[i]);
         if (!g) continue;
+        pad_show_number(g, player_number[p]);
         if (!p) { pad = g; pad_adopt(); continue; }
         extra[p] = g;
         extra_rumble[p] = SDL_GetBooleanProperty(SDL_GetGamepadProperties(g), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false);
@@ -290,6 +316,8 @@ static void start(void) {
     binds_refresh();
     const char *e = cfg_get("MKW_INPUT");
     if (e && !strcmp(e, "none")) { state = -1; rt_log("input: disabled (MKW_INPUT=none)"); return; }
+    keyboard_own = !strcmp(cfg_value("MKW_KEYBOARD_PLAYER"), "own");
+    if (keyboard_own) rt_log("input: the keyboard is player 1 alone, every gamepad another player (MKW_KEYBOARD_PLAYER=own)");
     if (!SDL_Init(SDL_INIT_GAMEPAD)) { state = -1; rt_log("input: SDL gamepad init failed (%s), keyboard only", SDL_GetError()); }
     else state = 1;
     if (state == 1) {
@@ -312,6 +340,11 @@ static void start(void) {
     }
     pad_rumble = 1;
     pad_east_a = 1;    // PS5 gameplay Auto follows the Switch positions
+    const char *v = cfg_get("MKW_VIRTUAL_PADS");
+    int nv = v ? atoi(v) : 0;
+    if (nv > INPUT_MAX_PLAYERS - 1) nv = INPUT_MAX_PLAYERS - 1;
+    for (int i = 1; i <= nv; i++) ps5_virtual_mask |= 1u << i;
+    if (nv > 0) rt_log("input: %d virtual players without a controller (MKW_VIRTUAL_PADS), pressed by the script only", nv);
 
     plat_xchg32(&pad_labels[0], PAD_LABEL_CROSS);
     plat_xchg32(&pad_labels[1], PAD_LABEL_CIRCLE);
@@ -406,6 +439,13 @@ static void pads_update(void) {
             input_ps5_update(sample, (connected & (1u << p)) != 0, NULL);
         }
         if (p == 0 && (interrupted || was_valid != sample->valid)) menu_pad_generation++;
+        if (sample->valid && !was_valid) {
+            uint8_t rgb[3];
+            player_colour(player_number[p], rgb);
+            pad_player_light_bar(p, rgb[0], rgb[1], rgb[2]);
+            rt_log("input: DualSense of player %d connected (controller %d)", p + 1, player_number[p] + 1);
+        } else if (!sample->valid && was_valid)
+            rt_log("input: DualSense of player %d disconnected", p + 1);
     }
 }
 
@@ -557,11 +597,29 @@ uint32_t input_player_mask(void) {
 #else
     if (state == 1) {
         pads_update();
-        m |= pad_players();
+        m |= pad_players() | ps5_virtual_mask;
     }
 #endif
     plat_mutex_unlock(&lock);
     return m;
+}
+
+void input_player_number(int player, int number) {
+    if (player < 0 || player >= INPUT_MAX_PLAYERS || number < 0 || number >= INPUT_MAX_PLAYERS) return;
+    plat_mutex_lock(&lock);
+    if (!state) start();
+    int changed = player_number[player] != number;
+    player_number[player] = (int8_t)number;
+#ifndef MKW_PS5_NATIVE
+    if (changed && state == 1) pad_show_number(player ? extra[player] : pad, number);
+#else
+    if (changed && state == 1 && player < PS5_PAD_PLAYERS && ps5_pads[player].valid) {
+        uint8_t rgb[3];
+        player_colour(number, rgb);
+        pad_player_light_bar(player, rgb[0], rgb[1], rgb[2]);
+    }
+#endif
+    plat_mutex_unlock(&lock);
 }
 
 // Players 2-8: their gamepad and the script's lines for them. The text entry and the menu block them as they block

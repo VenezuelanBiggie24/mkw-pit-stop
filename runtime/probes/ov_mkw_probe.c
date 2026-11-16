@@ -11,6 +11,7 @@
 #include <vpx/vpx_encoder.h>
 
 #include "kernel.h"
+#include "net_game.h"
 #include "host.h"
 #include "ov.h"
 #include "ov_probe.h"
@@ -23,6 +24,8 @@
 #define NIFM_R_NO_NETWORK (110u | (1u << 9))
 #define FRIENDS_R_UNAVAILABLE (121u | (1u << 9))
 #define LDN_R_DISABLED (203u | (22u << 9))
+#define LDN_R_STATE (203u | (32u << 9))
+#define LDN_R_ARGUMENT (203u | (96u << 9))
 #define ACCOUNT_R_NSA_UNAVAILABLE (124u | (280u << 9))
 #define R_BUSY 0x1c266fu
 
@@ -47,16 +50,19 @@ static void probe_offline(void) {
         {"friends::Initialize", VOID}, {"friends::SetAllocator", VOID},
         {"friends::EnsureFriendListAvailable", FRIENDS_R_UNAVAILABLE},
         {"friends::GetPlayHistoryRegistrationKey", FRIENDS_R_UNAVAILABLE}, {"friends::AddPlayHistory", 0},
+        // ldn with MKW_LOCAL_WIRELESS off (runtime/net/net_ldn.c): Initialize fails as in airplane mode and every other
+        // call answers as on a console whose game never initialized ldn
         {"ldn::Initialize", LDN_R_DISABLED}, {"ldn::Finalize", VOID}, {"ldn::GetState", 0},
-        {"ldn::GetDisconnectReason", 0}, {"ldn::Disconnect", LDN_R_DISABLED}, {"ldn::OpenStation", LDN_R_DISABLED},
-        {"ldn::CloseStation", LDN_R_DISABLED}, {"ldn::OpenAccessPoint", LDN_R_DISABLED},
-        {"ldn::CloseAccessPoint", LDN_R_DISABLED}, {"ldn::DestroyNetwork", LDN_R_DISABLED},
-        {"ldn::Scan", LDN_R_DISABLED}, {"ldn::ScanPrivate", LDN_R_DISABLED}, {"ldn::CreateNetwork", LDN_R_DISABLED},
-        {"ldn::CreateNetworkPrivate", LDN_R_DISABLED}, {"ldn::Connect", LDN_R_DISABLED},
-        {"ldn::ConnectPrivate", LDN_R_DISABLED}, {"ldn::GetIpv4Address", LDN_R_DISABLED},
-        {"ldn::GetNetworkInfo", LDN_R_DISABLED}, {"ldn::GetSecurityParameter", LDN_R_DISABLED},
-        {"ldn::SetAdvertiseData", LDN_R_DISABLED}, {"ldn::AddAcceptFilterEntry", LDN_R_DISABLED},
-        {"ldn::SetStationAcceptPolicy", LDN_R_DISABLED}, {"ldn::Reject", LDN_R_DISABLED},
+        {"ldn::GetDisconnectReason", 0}, {"ldn::Disconnect", LDN_R_STATE}, {"ldn::OpenStation", LDN_R_STATE},
+        {"ldn::CloseStation", LDN_R_STATE}, {"ldn::OpenAccessPoint", LDN_R_STATE},
+        {"ldn::CloseAccessPoint", LDN_R_STATE}, {"ldn::DestroyNetwork", LDN_R_STATE},
+        {"ldn::Scan", LDN_R_STATE}, {"ldn::ScanPrivate", LDN_R_STATE}, {"ldn::CreateNetwork", LDN_R_STATE},
+        {"ldn::CreateNetworkPrivate", LDN_R_STATE}, {"ldn::Connect", LDN_R_STATE},
+        {"ldn::ConnectPrivate", LDN_R_STATE}, {"ldn::GetIpv4Address", LDN_R_STATE},
+        {"ldn::GetNetworkInfo", LDN_R_STATE}, {"ldn::GetSecurityParameter", LDN_R_STATE},
+        {"ldn::SetAdvertiseData", LDN_R_ARGUMENT},   // x1 is a buffer address here: longer than 0x180 bytes
+        {"ldn::AddAcceptFilterEntry", LDN_R_STATE}, {"ldn::SetStationAcceptPolicy", LDN_R_STATE},
+        {"ldn::Reject", LDN_R_STATE},
         {"ldn::AttachStateChangeEvent", VOID},
         {"nsd::GetEnvironmentIdentifier", NIFM_R_NO_NETWORK}, {"nsd::ResolveEx", NIFM_R_NO_NETWORK},
         // nn::socket as with the network down (ov_net.c): every socket call -1, errno ENETDOWN
@@ -101,6 +107,77 @@ static void probe_offline(void) {
            ip[4], ip[5], ip[6], ip[7]);
     CALL("nifm::SetLocalNetworkMode", 0);
     plat_setenv("MKW_LAN", "");
+}
+
+// ---- nn::socket with local wireless on and outside its session (runtime/net/net_socket.c, which ov_socket.c hands the
+// calls to while MKW_LOCAL_WIRELESS is on): UDP sockets open and bind, nothing leaves, no name resolves; the pure
+// helpers and an event fd work
+static void probe_sockets(void) {
+    enum { E_AGAIN = 11, E_NETUNREACH = 101, MSG_DONTWAIT = 0x80 };
+    plat_setenv("MKW_LOCAL_WIRELESS", "lan");
+    net_game_mode_reread();
+    uint8_t *b = ovp_alloc(0x400);
+    memset(b, 0, 0x400);
+    int fd = (int)CALL("socket::Socket(int)", 2, 2, 0);
+    CHECK(fd >= 3, "Socket(AF_INET, SOCK_DGRAM): %d", fd);
+    CHECK((int)CALL("socket::Socket(int)", 2, 1, 0) == -1, "a TCP socket opened");
+    uint8_t *sa = b;   // sockaddr_in: len, family, port (network order), address
+    sa[0] = 16, sa[1] = 2, sa[2] = 0x2c, sa[3] = 0x84;   // port 11396
+    CHECK(CALL("socket::Bind(sockaddr)", (uint64_t)fd, U(sa), 16) == 0, "Bind to any address");
+    sa[4] = 169, sa[5] = 254, sa[6] = 1, sa[7] = 2;
+    CHECK((int64_t)CALL("socket::SendTo(sockaddr)", (uint64_t)fd, U(b + 0x100), 8, 0, U(sa), 16) == -1 &&
+              (int)CALL("socket::GetLastError") == E_NETUNREACH, "SendTo outside a session");
+    uint32_t *len = (uint32_t *)(b + 0x40);
+    *len = 16;
+    CHECK((int64_t)CALL("socket::RecvFrom(sockaddr)", (uint64_t)fd, U(b + 0x100), 64, MSG_DONTWAIT, U(b + 0x20), U(len)) == -1 &&
+              (int)CALL("socket::GetLastError") == E_AGAIN, "RecvFrom without data");
+    int32_t *pfd = (int32_t *)(b + 0x60);
+    pfd[0] = fd, pfd[1] = 1;   // events POLLIN
+    CHECK(CALL("socket::Poll", U(pfd), 1, 0) == 0, "Poll of an empty socket");
+    CHECK(CALL("socket::Close", (uint64_t)fd) == 0 && (int)CALL("socket::Close", (uint64_t)fd) == -1, "Close");
+    uint64_t *res = (uint64_t *)(b + 0x80);
+    *res = 1;
+    CHECK(CALL("socket::GetAddrInfo(addrinfo)", U("example.com"), 0, 0, U(res)) == 8 && *res == 0, "GetAddrInfo resolved a name");
+    uint32_t *addr = (uint32_t *)(b + 0x90);
+    CHECK(CALL("socket::InetPton", 2, U("192.168.7.21"), U(addr)) == 1 && b[0x90] == 192 && b[0x93] == 21, "InetPton");
+    CHECK(CALL("socket::InetPton", 2, U("192.168.7"), U(addr)) == 0, "InetPton of a short address");
+    *addr = 0x0201a8c0;   // 192.168.1.2 in network order
+    CHECK(CALL("socket::InetNtop", 2, U(addr), U(b + 0xa0), 16) == U(b + 0xa0) && !strcmp((char *)b + 0xa0, "192.168.1.2"),
+          "InetNtop: %s", (char *)b + 0xa0);
+    CHECK(CALL("ldn::MakeBroadcastAddress", 0xa9fe0102u, 0xffffff00u) == 0xa9fe01ffu, "MakeBroadcastAddress");
+    int ev = (int)CALL("socket::EventFd", 0, 0);
+    uint64_t *v = (uint64_t *)(b + 0xc0);
+    CHECK(ev >= 3 && CALL("socket::EventFdWrite", (uint64_t)ev, 3) == 0 && CALL("socket::EventFdRead", (uint64_t)ev, U(v)) == 0 &&
+              *v == 3 && CALL("socket::Close", (uint64_t)ev) == 0, "EventFd");
+    // the other overloads and the library calls: the same answers
+    CHECK(CALL("socket::Initialize", U(b + 0x200), 0x100, 0x40, 4) == 0 && CALL("socket::internal::Initialize", 0x1000a) == 0 &&
+              CALL("socket::IsInitialized") == 1 && CALL("socket::Finalize") == 0, "Initialize, IsInitialized, Finalize");
+    CALL("socket::SetAllocator", 0);
+    CHECK(CALL("socket::InetHtonl", 0x01020304u) == 0x04030201u && CALL("socket::InetNtohl", 0x01020304u) == 0x04030201u &&
+              CALL("socket::InetHtons", 0x1234) == 0x3412 && CALL("socket::InetNtohs", 0x1234) == 0x3412, "byte order");
+    int fd2 = (int)CALL("socket::Socket", 2, 2, 17);
+    int32_t *one = (int32_t *)(b + 0xd0);
+    *one = 1;
+    sa[4] = sa[5] = sa[6] = sa[7] = 0;
+    sa[2] = sa[3] = 0;   // port 0: an ephemeral one
+    CHECK(fd2 >= 3 && CALL("socket::SetSockOpt", (uint64_t)fd2, 0xffff, 4, U(one), 4) == 0 &&
+              CALL("socket::Bind", (uint64_t)fd2, U(sa), 16) == 0, "Socket (2), SetSockOpt, Bind (2)");
+    sa[4] = 169, sa[5] = 254, sa[6] = 1, sa[7] = 2, sa[3] = 9;
+    CHECK((int64_t)CALL("socket::SendTo", (uint64_t)fd2, U(b + 0x100), 8, 0, U(sa), 16) == -1 &&
+              (int)CALL("socket::GetLastErrno") == E_NETUNREACH, "SendTo (2)");
+    *len = 16;
+    CHECK((int64_t)CALL("socket::RecvFrom", (uint64_t)fd2, U(b + 0x100), 64, MSG_DONTWAIT, U(b + 0x20), U(len)) == -1,
+          "RecvFrom (2)");
+    CHECK(CALL("socket::Shutdown", (uint64_t)fd2, 2) == 0 && CALL("socket::Close", (uint64_t)fd2) == 0, "Shutdown");
+    *res = 1;
+    CHECK(CALL("socket::GetAddrInfo", U("example.com"), 0, 0, U(res)) == 8 && *res == 0, "GetAddrInfo (2)");
+    CALL("socket::FreeAddrInfo(addrinfo)", 0);
+    CALL("socket::FreeAddrInfo", 0);
+    const char *gai = (const char *)(uintptr_t)CALL("socket::GAIStrError", 8);
+    CHECK(gai && *gai, "GAIStrError");
+    printf("net: nn::socket outside a session: sockets open, nothing leaves, no name resolves\n");
+    plat_setenv("MKW_LOCAL_WIRELESS", "");
+    net_game_mode_reread();
 }
 
 // ---- account: the one local user, its network service account unavailable
@@ -421,6 +498,7 @@ static void probe_socket(void) {
 
 void probe_mkw_services(void) {
     probe_offline();
+    probe_sockets();
     probe_account_mkw();
     probe_system_mkw();
     probe_codec();

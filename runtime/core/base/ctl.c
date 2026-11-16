@@ -58,8 +58,16 @@ void ctl_run(char *line) {
         char d[400];
         int ubo = 0, luts = 0, logn = 0;
         char *sp = strchr(arg, ' ');
-        if (sp) *sp = 0, ubo = !strcmp(sp + 1, "ubo"), luts = !strcmp(sp + 1, "lut");
-        if (sp && !strncmp(sp + 1, "log ", 4)) logn = atoi(sp + 5);
+        // options after the folder, in any order: ubo, lut (both: the passes and their uniform blocks as text, without
+        // the large PNGs that froze the console for minutes), log N
+        if (sp) {
+            *sp = 0;
+            for (char *o = strtok(sp + 1, " "); o; o = strtok(NULL, " ")) {
+                if (!strcmp(o, "ubo")) ubo = 1;
+                else if (!strcmp(o, "lut")) luts = 1;
+                else if (!strcmp(o, "log") && (o = strtok(NULL, " "))) logn = atoi(o);
+            }
+        }
         snprintf(d, sizeof d, "%s", arg);
         rt_log(vk_dump_rearm(d, ubo, luts, logn) ? "ctl: dump %s queued at frame %llu" : "ctl: dump %s refused: one is pending (frame %llu)",
                d, (unsigned long long)frame);

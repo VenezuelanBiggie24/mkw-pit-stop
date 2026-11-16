@@ -28,6 +28,7 @@ end's regression test runs over captures instead (`tools/test/`).
 | `test_ps5_guest_span.py`, `ps5_guest_span_host.c` | Checked cross-block host copies, in-flight pin quiescence and stale copy-out after backing reuse |
 | `ps5_guest_span_backing.c` | Linux mapping model shared by the guest-span and QueryMemory tests |
 | `test_ps5_query_memory.py`, `ps5_query_memory.c` | Real SVC 0x06 handler and memory-info layout, checked copy-out across guest boundaries, a racing protection change, and desktop null-output compatibility |
+| `test_net.py`, `net_host.c` | Local wireless play over UDP (`runtime/net`) and the lobby/relay (`server/lobby`) on loopback, under AddressSanitizer: LAN discovery, join, routing, broadcast, kick, lock, leave, host gone; wrong password and its block; another build and another local communication version refused; 20 000 fuzzed datagrams and the replay window; invite codes (every forged letter refused), the name filter; a private session by invite, the introduction, the relay with the largest datagram, a stranger through the relay; every lobby message at every length (no answer longer than its request without a cookie) and a flood |
 | `test_ps5_input.py`, `ps5_input_host.c` | DualSense physical buttons and gameplay bindings, axis and trigger thresholds, and stale-input clearing |
 
 Usage: `uv run pytest tests`

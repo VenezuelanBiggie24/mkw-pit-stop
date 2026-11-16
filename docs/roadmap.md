@@ -159,3 +159,20 @@ screen by screen against the console.
   `nvnDeviceGetInteger` answers, boot checkpoint, the new `subsdk1` module's constructors). Still to find in its
   executable: the menu focus probe; to check in a run: the 30 NVN2 procs new in its sdk (weak stubs but three
   scheduling hints), its 43 new shader stages and the button icon sheet's hash.
+
+## 7. Multiplayer
+
+docs/multiplayer.md. Implemented 17/11/2026 and tested without the game (loopback sessions, lobby, relay, fuzzing);
+no console run yet.
+
+- **Measure split screen on the PS5** (`build/run/ps5/mkw.ini.task44-split`): 1, 2 and 4 players on one course; frame,
+  busy, GPU, replay, the game threads' CPU, memory. Whether 4 players hold 30 fps at full speed, and what limits it.
+- **Two machines on a LAN** (`mkw.ini.task44-lan`): search, join, a full race, leave, a dropped peer; PIA's real
+  bandwidth and datagram sizes (the `net:` lines), a 30 fps PS5 with a 60 fps PC. Then `local_wireless` on by default.
+- **Through routers without the relay**: UPnP and PCP/NAT-PMP mappings of the host's port while hosting (lease
+  renewed, removed at the end; whether the PS5 may), so fewer sessions need the relay.
+- **Station to station directly**: today every datagram between two stations passes through the host (one more hop
+  and the host's upload); a mesh needs each pair introduced, as the lobby introduces a station to its host.
+- **The PS5's invite code**: entered with the system keyboard (`runtime/sdk/swkbd`) instead of `mkw.ini`.
+- **Who runs the public lobby** and where (the owner's decision; resources in docs/multiplayer.md).
+- A probe for the controller applet's id order with a player missing in the middle (needs three virtual pads).

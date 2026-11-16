@@ -105,6 +105,9 @@ static void script_add(const ScriptEv *e) {
 // for it). tt: a time trial, Mario, standard kart, the course the map offers (the title's; fixed with MKW_SEED, tt6a/b),
 // alone (tt2: race 29,6 s after boot); gp: a Grand Prix, the first entry everywhere (the character, kart and cup the
 // menus offer: the save's last ones), against 23 rivals; free: free roam, the main menu's Plus (Tab on the keyboard).
+// With MKW_BENCH=gp (core/diag/bench.c), gp is A every QUICK_GP_EVERY ticks from the title on instead
+// (tools/run/press-race.txt's way to the first race: every default choice), and on through the races, where A
+// accelerates, and the results between them, where it goes on to the next race.
 static const char *const quick_tt[] = {
     "TitleWait+40 A 6",       "TitleMenuMain+40 A 6",     "TitleMenuMain+160 DOWN 6", "TitleMenuMain+190 DOWN 6",
     "TitleMenuMain+230 A 6",  "PartsSelectEx+60 A 6",     "PartsSelectEx+180 A 6",    "VSStageSelect+60 A 6",
@@ -122,8 +125,20 @@ static const char *const quick_gp[] = {
     "IntoRace2+660 A 6",        "IntoRace2+800 A 4320000",
 };
 static const char *const quick_free[] = {"TitleWait+40 A 6", "TitleMenuMain+60 PLUS 6"};
+#define QUICK_GP_EVERY 90                 // ticks: press-race.txt's spacing, slower than any menu's transition
+#define QUICK_GP_TICKS (60 * 60 * 25)     // 25 min of game time: four races, their results and the cup's end
 
 static void script_load_quick(const char *mode) {
+    if (!strcmp(mode, "gp") && !strcmp(cfg_value("MKW_BENCH"), "gp")) {   // the benchmark: on through every race
+        for (int t = 40; t < QUICK_GP_TICKS; t += QUICK_GP_EVERY) {
+            char line[64];
+            ScriptEv e;
+            snprintf(line, sizeof line, "TitleWait+%d A 10", t);
+            if (script_parse(line, 0, &e) > 0) script_add(&e);
+        }
+        rt_log("input: MKW_BENCH=gp, A every %d ticks from TitleWait (%d presses)", QUICK_GP_EVERY, script_n);
+        return;
+    }
     int free_roam = !strcmp(mode, "free"), gp = !strcmp(mode, "gp");
     const char *const *lines = free_roam ? quick_free : gp ? quick_gp : quick_tt;
     int n = free_roam ? (int)(sizeof quick_free / sizeof *quick_free)

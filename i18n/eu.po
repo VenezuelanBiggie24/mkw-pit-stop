@@ -157,6 +157,17 @@ msgid ""
 "Changes take several seconds and affect races started afterward."
 msgstr ""
 
+msgctxt "UI_MENU_BENCH"
+msgid "Benchmark"
+msgstr ""
+
+msgctxt "UI_MENU_BENCH_DESC"
+msgid ""
+"At the next start, goes straight to the same time trial or Grand Prix and lets Smart Steering and "
+"Auto-Accelerate drive. At the end the log gets the frame rate of the races and the game closes. "
+"Turns both assists on in your save if the game saves before the end."
+msgstr ""
+
 msgctxt "UI_MENU_ANISO"
 msgid "Texture filtering"
 msgstr "Testura-iragazketa"
@@ -713,6 +724,22 @@ msgstr "Aktibagailuen dardara (Xbox)"
 msgctxt "UI_MENU_RUMBLE_TRIGGERS_DESC"
 msgid "Vibrates the triggers of an Xbox controller too."
 msgstr "Xbox agintearen aktibagailuak ere dardaratzen ditu."
+
+msgctxt "UI_MENU_KEYBOARD_PLAYER"
+msgid "Keyboard player"
+msgstr ""
+
+msgctxt "UI_MENU_KEYBOARD_PLAYER_DESC"
+msgid "With player 1's controller, or a player of its own: then each controller is another player."
+msgstr ""
+
+msgctxt "UI_MENU_KEYBOARD_SHARED"
+msgid "With player 1"
+msgstr ""
+
+msgctxt "UI_MENU_KEYBOARD_OWN"
+msgid "Own player"
+msgstr ""
 
 msgctxt "UI_MENU_PAD_LAYOUT"
 msgid "Button layout"
@@ -2838,6 +2865,149 @@ msgstr ""
 
 msgctxt "UI_PIT_HACKS_DESC"
 msgid "Optional shortcuts that change how the game plays."
+msgstr ""
+
+msgctxt "UI_MENU_TAB_MULTI"
+msgid "Multiplayer"
+msgstr ""
+
+msgctxt "UI_PIT_MULTI_DESC"
+msgid "Local wireless play over your network or the internet: rooms, invite codes, players."
+msgstr ""
+
+msgctxt "UI_NET_GROUP_SETUP"
+msgid "Local wireless"
+msgstr ""
+
+msgctxt "UI_NET_MODE"
+msgid "Local wireless play"
+msgstr ""
+
+msgctxt "UI_NET_MODE_DESC"
+msgid ""
+"Carries the game's Wireless Play over your local network, or also over the internet through a "
+"lobby. Off: the game sees no wireless, as in airplane mode."
+msgstr ""
+
+msgctxt "UI_NET_MODE_OFF"
+msgid "Off"
+msgstr ""
+
+msgctxt "UI_NET_MODE_LAN"
+msgid "Local network"
+msgstr ""
+
+msgctxt "UI_NET_MODE_ONLINE"
+msgid "Local network and online"
+msgstr ""
+
+msgctxt "UI_NET_HOST"
+msgid "Rooms you host"
+msgstr ""
+
+msgctxt "UI_NET_HOST_DESC"
+msgid ""
+"Private: only players with your invite code can join. Public: listed in the lobby for anyone "
+"running the same version."
+msgstr ""
+
+msgctxt "UI_NET_HOST_PRIVATE"
+msgid "Private"
+msgstr ""
+
+msgctxt "UI_NET_HOST_PUBLIC"
+msgid "Public"
+msgstr ""
+
+msgctxt "UI_NET_REGION"
+msgid "Region"
+msgstr ""
+
+msgctxt "UI_NET_REGION_DESC"
+msgid "Shown with your public rooms, so nearby players find them."
+msgstr ""
+
+msgctxt "UI_NET_RELAY_ONLY"
+msgid "Relay only"
+msgstr ""
+
+msgctxt "UI_NET_RELAY_ONLY_DESC"
+msgid ""
+"Online, always go through the lobby's relay: other players never learn your address. Adds a "
+"little delay."
+msgstr ""
+
+msgctxt "UI_NET_GROUP_SESSION"
+msgid "This session"
+msgstr ""
+
+msgctxt "UI_NET_STATUS"
+msgid "Status"
+msgstr ""
+
+msgctxt "UI_NET_STATUS_DESC"
+msgid "What local wireless is doing now."
+msgstr ""
+
+msgctxt "UI_NET_INVITE"
+msgid "Invite code"
+msgstr ""
+
+msgctxt "UI_NET_INVITE_DESC"
+msgid "Give this code to the players you invite; it carries the room's password. Select to copy it."
+msgstr ""
+
+msgctxt "UI_NET_PASTE"
+msgid "Join with an invite code"
+msgstr ""
+
+msgctxt "UI_NET_PASTE_DESC"
+msgid ""
+"Copy an invite code, then select this: the room shows in the game's Wireless Play room search."
+msgstr ""
+
+msgctxt "UI_NET_LOCK"
+msgid "Close the room"
+msgstr ""
+
+msgctxt "UI_NET_LOCK_DESC"
+msgid "No new players can join while it is closed."
+msgstr ""
+
+msgctxt "UI_NET_PLAYER"
+msgid "Player"
+msgstr ""
+
+msgctxt "UI_NET_PLAYER_DESC"
+msgid "Ping to them. As the host, select a player to remove them."
+msgstr ""
+
+msgctxt "UI_NET_GROUP_ROOMS"
+msgid "Public rooms"
+msgstr ""
+
+msgctxt "UI_NET_REFRESH"
+msgid "Find public rooms"
+msgstr ""
+
+msgctxt "UI_NET_REFRESH_DESC"
+msgid "Asks the lobby for the public rooms of this version."
+msgstr ""
+
+msgctxt "UI_NET_ROOM"
+msgid "Room"
+msgstr ""
+
+msgctxt "UI_NET_ROOM_DESC"
+msgid "Join it from the game's Wireless Play: open rooms show there as rooms."
+msgstr ""
+
+msgctxt "UI_NET_NO_LOBBY"
+msgid "No lobby is set (lobby = address:port in mkw.ini): only the local network is searched."
+msgstr ""
+
+msgctxt "UI_NET_OFF_NOTE"
+msgid "Local wireless is off."
 msgstr ""
 
 msgctxt "UI_PIT_DISPLAY_DESC"

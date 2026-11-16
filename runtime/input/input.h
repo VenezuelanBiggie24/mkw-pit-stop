@@ -12,9 +12,14 @@ void input_poll_ui(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int
 void input_block(int on);
 // Local multiplayer, players 1-8 (player index 0-7). Player 1 is input_poll: the keyboard, the first gamepad and the
 // script. Each other player is one more gamepad, in connection order, plus the script's "p<N>" lines; MKW_VIRTUAL_PADS=N
-// attaches N virtual gamepads at start to try it without controllers. Any thread.
+// attaches N virtual gamepads at start to try it without controllers. MKW_KEYBOARD_PLAYER=own (desktop): the keyboard
+// alone is player 1 and every gamepad is another player. On the PS5 a player is a signed-in user's DualSense (the
+// template's pad_scan: up to 4, a guest user counts). Any thread.
 enum { INPUT_MAX_PLAYERS = 8 };
 uint32_t input_player_mask(void);   // bit k: player k + 1 has a controller; bit 0 always (the keyboard)
+// The game's controller number (0-7) the controller applet gave player's gamepad (ov_input.c): shown on the pad as the
+// console's player lamps would (SDL player index and LED colour on the desktop, the light bar on the PS5).
+void input_player_number(int player, int number);
 void input_poll_player(int player, uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
 // The in-game menu (ui/menu/menu.h): input_menu(1) when it opens (input_poll reports nothing, the cursor is released), (0) when
 // it closes (nothing until every button and stick direction is released). Independent of input_block.

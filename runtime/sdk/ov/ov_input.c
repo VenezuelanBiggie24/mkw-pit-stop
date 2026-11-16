@@ -5,7 +5,9 @@
 // each). Docked (default) player N is a full-key controller with id N - 1 (style bit 0); with
 // MKW_OPERATION_MODE=handheld player 1 is the handheld controller (id 0x20, style bit 1) and no other is connected,
 // until the controller applet hands out two or more players: then, as on the console when controllers are detached,
-// every player is full-key with ids from 0. Mouse and keyboard report no input. Each controller has two vibration
+// every player is full-key with ids from 0. The applet gives the ids to the controllers in the order they connected,
+// as the console's does: with players 1 and 3 connected (player 2's signed out or its gamepad went away), ids 0 and 1
+// are theirs; until the first applet, id N is player N + 1. Mouse and keyboard report no input. Each controller has two vibration
 // devices (left, right) played on its gamepad's motors (MKW_RUMBLE=0: none); player 1's six-axis sensor is fed by its
 // gamepad's gyro and accelerometer (MKW_MOTION=0, live: reads at rest), the others read at rest. State layouts follow
 // libnx HID.
@@ -38,6 +40,8 @@ static uint32_t supported = ~0u, disconnected;   // id bits: SetSupportedNpadIdT
 static int enabled, multi;                      // multi: the applet handed out two or more players
 static int8_t assigned[8] = {0, 1, 2, 3, 4, 5, 6, 7};   // the player whose controller each id reads (SwapNpadAssignment)
 static int64_t sample;
+// The input player (input_poll_player) on controller id 0-7, -1 none; the applet sets it (assign_ids). Under lock.
+static int8_t id_to_player[INPUT_MAX_PLAYERS] = {0, 1, 2, 3, 4, 5, 6, 7};
 
 // Player 1 on the handheld controller: handheld mode, until the applet hands out more than one player. Under lock.
 static int on_handheld(void) { return ov_handheld() && !multi; }
@@ -46,10 +50,10 @@ static int id_bit(uint32_t id) { return id == ID_HANDHELD ? BIT_HANDHELD : id < 
 
 // The player (0-7) on controller id, -1 for none; *style its style bit. Under lock.
 static int id_player(uint32_t id, uint32_t *style) {
-    int bit = id_bit(id), player = on_handheld() ? (id == ID_HANDHELD ? 0 : -1) : (id < 8 ? (int)id : -1);
+    int bit = id_bit(id), player = on_handheld() ? (id == ID_HANDHELD ? 0 : -1) : (id < 8 ? id_to_player[id] : -1);
     if (player < 0 || !enabled || !(supported >> bit & 1) || (disconnected >> bit & 1)) return -1;
-    player = assigned[player];
-    if (player && !(input_player_mask() >> player & 1)) return -1;
+    player = assigned[player];   // SwapNpadAssignment
+    if (player < 0 || (player && !(input_player_mask() >> player & 1))) return -1;
     if (style) *style = on_handheld() ? STYLE_HANDHELD : STYLE_FULL_KEY;
     return player;
 }
@@ -155,22 +159,35 @@ static void ov_disconnect(Cpu *c) {
 }
 
 // Result ShowControllerSupport(ControllerSupportResultInfo *out, const ControllerSupportArg &arg): the controllers are
-// already connected, so the applet returns at once with as many players as have one, up to the arg's maximum. Fewer
-// than its minimum is what a player who closes the applet gets: no players (the game goes back). ControllerSupportArg
-// (libnx HidLaControllerSupportArg; MKW fills it at main+0x25da6c8): s8 minimum and maximum players at 0 and 1.
+// already connected, so the applet returns at once with as many players as have one, up to the arg's maximum, and gives
+// them ids 0.. in their order (assign_ids). Fewer than its minimum is what a player who closes the applet gets: no
+// players (the game goes back, or asks again after a controller dropped mid-race). ControllerSupportArg (libnx
+// HidLaControllerSupportArg; MKW fills it at main+0x25da6c8): s8 minimum and maximum players at 0 and 1.
+static int assign_ids(uint32_t mask, int hi, int8_t map[INPUT_MAX_PLAYERS]) {
+    int n = 0;
+    for (int p = 0; p < INPUT_MAX_PLAYERS; p++) map[p] = -1;
+    for (int p = 0; p < INPUT_MAX_PLAYERS && n < hi; p++)
+        if (mask >> p & 1) map[n++] = (int8_t)p;
+    return n;
+}
+
 static void ov_controller_support(Cpu *c) {
     ControllerSupportResult *out = arg_p(c, 0);
     const int8_t *arg = arg_p(c, 1);
     if (!arg) rt_fatal("nn::hid::ShowControllerSupport: null arg");
     int lo = arg[0] < 1 ? 1 : arg[0], hi = arg[1] < 1 || arg[1] > INPUT_MAX_PLAYERS ? INPUT_MAX_PLAYERS : arg[1];
-    uint32_t mask = input_player_mask();
-    int have = 0;
-    while (have < hi && (mask >> have & 1)) have++;   // players 1..have, without a gap
+    int8_t map[INPUT_MAX_PLAYERS];
+    int have = assign_ids(input_player_mask(), hi, map);
     int players = have >= lo ? have : 0;
     plat_mutex_lock(&lock);
-    if (players) multi = players > 1, disconnected = 0;
+    if (players) {
+        multi = players > 1, disconnected = 0;
+        memcpy(id_to_player, map, sizeof map);
+    }
     uint32_t selected = pad_id();
     plat_mutex_unlock(&lock);
+    for (int i = 0; players && i < INPUT_MAX_PLAYERS; i++)
+        if (map[i] >= 0) input_player_number(map[i], i);
     rt_log("hid: controller applet asks for %d-%d players, %d with a controller: %d players%s", arg[0], arg[1], have,
            players, players ? "" : " (connect more controllers: the game takes it as closed)");
     if (!players) {   // the game goes back to its title without a word (#106, #160): say why on screen
@@ -178,6 +195,7 @@ static void ov_controller_support(Cpu *c) {
         snprintf(text, sizeof text, menu_text(UI_NOTICE_PADS_MISSING), lo, have);
         menu_notice(text, 8);
     }
+    for (int i = 0; players && i < players; i++) rt_log("hid: player %d is controller %d", i + 1, map[i] + 1);
     if (out) *out = (ControllerSupportResult){.players = (int8_t)players, .selected = selected};
     ret_x(c, 0);
 }

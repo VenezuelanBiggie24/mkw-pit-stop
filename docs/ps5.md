@@ -220,7 +220,47 @@ interval ~1,400 times a minute (36-41 fps, uneven). Measured at 30 on a busier c
 `fps30-20261116-063832`): every 600-frame window at 33.3 ms, speed 1.00x, 27 slow frames in 5,300 (single hitches up to
 236 ms, some blocked on texture uploads), replay 15-18 ms a frame against ~14 on the first course. The slack under
 33.3 ms is not in that log: `FRAME_TRACE = 1` logs the game's own frame time. Local split screen multiplies the draws
-and is untested.
+and is not measured yet: `build/run/ps5/mkw.ini.task44-split` runs 1, 2 and 4 players on one course (docs/multiplayer.md).
+
+### Multiplayer
+
+Split screen: each player signs in to the PS5 (a guest user works) with their own DualSense, up to 4; the light bar
+shows the player's controller number (blue, red, green, pink). Local wireless with another PS5 or a PC on the LAN:
+`local_wireless = lan` in `mkw.ini` on both, the same build on both (another one is refused), UDP 11460 open between
+them. Over the internet through a lobby: `local_wireless = online`, `lobby = a.b.c.d:11461` (an address: the PS5 build
+does not resolve names). The PS5 cannot paste an invite code: put it in `mkw.ini` as `net_join`. Details:
+[multiplayer.md](multiplayer.md).
+
+### Benchmark
+
+`uv run tools/ps5/bench.py run <PS5 address>` runs one unattended: it sends the `titlectl` payload to the ELF loader if
+it is not running (`tools/ps5/titlectl.c`: starts, stops and reports the title on port 9031), appends `BENCH = gp` to
+`mkw.ini`, kills any running copy, launches the title, follows `mkw.log` over FTP, kills it if the log stops or the run
+times out, saves `build/run/ps5/<name>-<time>-mkw.log` and puts `mkw.ini` back. `--mode tt` for a time trial,
+`--runs N` to repeat, `--set KEY=VALUE` for more keys. Launching works on this console through
+`sceSystemServiceLaunchApp` with the logged-in user (16/11/2026): the payload checks the shell's focus flag and says
+`focused=1` when the game has the screen. A second launch request while the game starts sends it to the background,
+so the payload makes one and waits a few seconds after a kill.
+
+`BENCH = tt | gp` (Hacks tab, or `mkw.ini` `[hacks]`; `runtime/core/diag/bench.c`) runs races with nobody holding the
+controller and ends the title at the finish. Unless set otherwise, it uses `QUICK_RACE = <mode>`, `SEED = 1` and
+`SKIP_MOVIES = 1`. The game's own Smart Steering and Auto-Accelerate drive (switched on in `Play/account.sav` when the
+game opens it). `tt`: the same time trial, from its ReadyRace to its save at the finish. `gp`: the first cup with every
+default choice, A pressed every 1.5 s through the menus, the races and the results, from the first race to the cup's
+ending movie (`Movie/EdEmblem_*`). `BENCH_MAX` seconds (0: 300 for tt, 1800 for gp) end a run that never gets there.
+Each save write and movie in the window is a `bench: mark` line, and save writes split the window into segments with
+their own numbers (whether they fall between a Grand Prix's races is for the first run to show). The log then gets:
+
+```
+bench: Grand Prix finished, 537.5 s, 16001 frames
+bench: average 33.59 ms (29.8 fps), 1% low 30.3 fps, 0.1% low 12.5 fps, worst 236.0 ms
+bench: frames over 33.3 ms 33, over 50 ms 33
+bench: result mode=gp avg_ms=33.59 fps=29.8 low1=30.3 low01=12.5 worst_ms=236.0 frames=16001 secs=537.5 finished=1
+bench: segment 1 (to account.sav): 132.4 s, 4000 frames, average 33.09 ms (30.2 fps), 1% low 30.3 fps, ...
+```
+
+(example numbers). The run exits before the game commits its last save, so the result and the assists stay out of the
+save unless the game committed it earlier. The log's first `bench:` line says what the assists were.
 
 ## Threads, priorities and profiling
 
