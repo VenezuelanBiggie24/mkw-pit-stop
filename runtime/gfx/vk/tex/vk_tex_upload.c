@@ -47,6 +47,103 @@ void shrink_rgb(int format, const uint8_t *src, uint8_t *dst, size_t n) {
     for (size_t i = 0; i < n; i++, src += 4 * e, dst += 3 * e) memcpy(dst, src, 3 * e);
 }
 
+// MKW_ASTC_BC_CHECK=N (diagnosis, task 40; N > 0 turns it on): each ASTC upload re-encoded as BC7 or BC1 (2D, arrays and cube maps, up to
+// 64 MiB of texels) is read back through a blit to RGBA8 and compared with astc_decode_ldr of its blocks: what sampling
+// the BC image gives against what the RGBA8 image gave. Sums for arrays and for single images apart (the arrays went to
+// BC with their layers counted), and the first N textures one line each. Waits for the GPU at every upload.
+static void bc_check(const Tex *e, const uint8_t *raw, const VkAstcRegion *ar, int n, int lines) {
+    static volatile int32_t n_logged;
+    static struct { uint64_t tex, texels, sum, worst_tex; int worst; double worst_psnr; } cls[2];   // [array]
+    static PlatMutex lock = PLAT_MUTEX_INIT;
+    VkCtx *c = vk_ctx();
+    uint64_t texels = 0;
+    for (int k = 0; k < n; k++) texels += (uint64_t)ar[k].w * ar[k].h * ar[k].slices;
+    if (e->pub.type != VK_IMAGE_TYPE_2D || texels * 4 > (64ull << 20)) return;
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                            .format = e->f.astc_srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM,
+                            .extent = {e->pub.width, e->pub.height, 1}, .mipLevels = e->pub.levels,
+                            .arrayLayers = e->pub.layers, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    VkImage img;
+    VmaAllocation alloc;
+    if (vmaCreateImage(c->vma, &ci, &ai, &img, &alloc, NULL) != VK_SUCCESS) return;
+    VkBuffer hb;
+    VmaAllocation ha;
+    VkCommandBuffer cb = vk_upload_begin();
+    uint8_t *map = vk_staging(texels * 4, &hb, &ha);
+    VkBufferImageCopy *cp = calloc((size_t)n, sizeof *cp);
+    if (!cb || !map || !cp) rt_fatal("vk: MKW_ASTC_BC_CHECK: no staging");
+    VkImageMemoryBarrier2 ib = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+                                .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                .image = img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0,
+                                                                   VK_REMAINING_ARRAY_LAYERS}};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &ib};
+    vkCmdPipelineBarrier2(cb, &di);
+    barrier(cb, ALL_RW, ALL_RW);
+    VkDeviceSize off = 0;
+    for (int k = 0; k < n; k++) {
+        const VkAstcRegion *r = &ar[k];
+        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, r->level, r->layer, 1},
+                          .srcOffsets = {{0, 0, 0}, {(int32_t)r->w, (int32_t)r->h, 1}},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, r->level, r->layer, 1},
+                          .dstOffsets = {{0, 0, 0}, {(int32_t)r->w, (int32_t)r->h, 1}}};
+        vkCmdBlitImage(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, img, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_NEAREST);
+        cp[k] = (VkBufferImageCopy){.bufferOffset = off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, r->level, r->layer, 1},
+                                    .imageExtent = {r->w, r->h, 1}};
+        off += (VkDeviceSize)r->w * r->h * 4;
+    }
+    barrier(cb, ALL_RW, ALL_RW);
+    vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, hb, (uint32_t)n, cp);
+    barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+    vk_upload_end();
+    vk_upload_flush(1);
+    vmaInvalidateAllocation(c->vma, ha, 0, VK_WHOLE_SIZE);
+    uint32_t bw = e->f.astc_bw, bh = e->f.astc_bh;
+    uint64_t sum = 0, sq = 0;
+    int worst = 0;
+    const uint8_t *got = map;
+    for (int k = 0; k < n; k++) {
+        const VkAstcRegion *r = &ar[k];
+        size_t st = (size_t)r->w * r->h * 4;
+        uint8_t *want = malloc(st);
+        astc_decode_ldr(raw + r->src, r->w, r->h, bw, bh, e->f.astc_srgb, want);
+        for (size_t i = 0; i < st; i++) {
+            int d = abs((int)want[i] - (int)got[i]);
+            sum += (uint64_t)d, sq += (uint64_t)d * (uint64_t)d;
+            if (d > worst) worst = d;
+        }
+        free(want);
+        got += st;
+    }
+    double mse = (double)sq / (double)(texels * 4), psnr = mse > 0 ? 10 * log10(255.0 * 255.0 / mse) : 99.0;
+    int array = e->pub.layers > 1;
+    plat_mutex_lock(&lock);
+    cls[array].tex++, cls[array].texels += texels, cls[array].sum += sum;
+    if (psnr < cls[array].worst_psnr || !cls[array].worst_tex)
+        cls[array].worst_psnr = psnr, cls[array].worst = worst, cls[array].worst_tex = e->pub.addr;
+    uint64_t all = cls[0].tex + cls[1].tex;
+    if (plat_inc32(&n_logged) <= lines)
+        rt_log("vk: ASTC BC check: %#llx %ux%u x%u layers, %u levels, ASTC %ux%u -> %s: mean error %.3f, largest %d, PSNR "
+               "%.1f dB", (unsigned long long)e->pub.addr, e->pub.width, e->pub.height, e->pub.layers, e->pub.levels, bw, bh,
+               e->f.astc_bc7 == 2 ? "BC1" : "BC7", (double)sum / (double)(texels * 4), worst, psnr);
+    if (all % 32 == 0 || all < 4)
+        for (int a = 0; a < 2; a++)
+            if (cls[a].tex)
+                rt_log("vk: ASTC BC check: %s: %llu textures, %.1f M texels, mean error %.3f per channel; worst PSNR %.1f dB "
+                       "(%#llx, largest error %d)", a ? "arrays and cube maps" : "single images",
+                       (unsigned long long)cls[a].tex, (double)cls[a].texels / 1e6,
+                       (double)cls[a].sum / (double)(cls[a].texels * 4), cls[a].worst_psnr,
+                       (unsigned long long)cls[a].worst_tex, cls[a].worst);
+    plat_mutex_unlock(&lock);
+    free(cp);
+    vmaDestroyBuffer(c->vma, hb, ha);
+    vk_defer_image(img, alloc);
+}
+
 // MKW_ASTC=check: the compute decoder's texels of n regions (gpu: the regions one after the other) against
 // astc_decode_ldr of the same raw blocks (raw: the staging bytes the regions point into).
 static void astc_check(const Tex *e, const uint8_t *raw, const VkAstcRegion *ar, int n, const uint8_t *gpu) {
@@ -324,7 +421,10 @@ static int upload(Tex *e) {
             }
             free(tmp);
         }
-    uint8_t *raw_copy = acheck ? malloc(total) : NULL;
+    static int bcc = -1;   // MKW_ASTC_BC_CHECK (bc_check)
+    if (bcc < 0) bcc = cfg_get("MKW_ASTC_BC_CHECK") ? atoi(cfg_get("MKW_ASTC_BC_CHECK")) : 0;
+    int bcheck = bcc > 0 && agpu && e->f.astc_bc7 && !acheck && !linear;
+    uint8_t *raw_copy = acheck || bcheck ? malloc(total) : NULL;
     if (raw_copy) memcpy(raw_copy, stg, total);
     barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     int checked = 0;
@@ -350,6 +450,7 @@ static int upload(Tex *e) {
         }
         vmaDestroyBuffer(vk_ctx()->vma, rbuf, ralloc);
     }
+    if (bcheck && checked && raw_copy) bc_check(e, raw_copy, ar, (int)n, bcc);
     free(raw_copy);
     free(ar);
     free(rg);
@@ -458,15 +559,17 @@ counted:;
     return 1;
 }
 
-// A texture copy from an ASTC texture kept as RGBA8 (under 256x256) into one re-encoded as BC7: the source's own ASTC
-// blocks, read from its storage, decoded and encoded straight into dst. MKW fills the small levels (5-11) of its sparse
+// A texture copy between ASTC textures that went to different Vulkan formats (one kept as RGBA8 under 256x256 into one
+// re-encoded as BC7, BC1 against BC7): the source's own ASTC blocks, read from its storage, decoded and encoded
+// straight into dst as bc7 says (TexVkFormat.astc_bc7: 0 RGBA8, 1 BC7, 2 BC1). MKW fills the small levels (5-11) of its sparse
 // terrain arrays this way, from small ASTC textures; skipped, those levels read zero and the race's bushes and cacti,
 // which take their colour from level 11, came out black (m16, 01/11/2026). 0 when it cannot (the caller skips).
 int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers, uint32_t x, uint32_t y,
                          uint32_t w, uint32_t h, VkImage dst, VkImageAspectFlags aspect, uint32_t dlevel, uint32_t dlayer,
                          int32_t dx, int32_t dy, int bc7) {
     TexVkFormat f;
-    if (!tex_vk_format(src->d.format, &f) || !f.astc_bw || !src->mem || x % f.astc_bw || y % f.astc_bh || dx % 4 || dy % 4)
+    if (!tex_vk_format(src->d.format, &f) || !f.astc_bw || !src->mem || x % f.astc_bw || y % f.astc_bh ||
+        (bc7 && (dx % 4 || dy % 4)))   // a BC destination: whole blocks
         return 0;
     uint32_t rb = (w + f.astc_bw - 1) / f.astc_bw * 16, rows = (h + f.astc_bh - 1) / f.astc_bh;
     size_t per = (size_t)rb * rows;

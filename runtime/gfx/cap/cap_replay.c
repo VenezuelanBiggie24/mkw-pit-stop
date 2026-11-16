@@ -360,6 +360,7 @@ int cap_replay_main(int argc, char **argv) {
             o += snprintf(times + o, sizeof times - (size_t)o, " %s %.1f s (%llu)", names[t], (double)type_ns[t] / 1e9,
                           (unsigned long long)type_n[t]);
     printf("replay: %s: time by record:%s\n", tag, times);
+    vk_mem_census_now();   // what the replayed frames hold: texture memory by kind (ASTC to BC, ASTC to RGBA8, ...)
     vk_usnap_summary();   // the uniform snapshot's per-submission costs, which a run logs every 3600 submissions
     {   // MKW_LOCK_PROF=1: the lock waits of the whole replay (a run logs them every 1200 submissions, vk_sync.c)
         char lb[1024];

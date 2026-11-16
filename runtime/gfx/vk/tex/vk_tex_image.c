@@ -324,9 +324,24 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     // Small ASTC textures stay RGBA8: they are mostly data (noise, distortion, lookup tables) that a lossy BC7 mode 6
     // turns into visible noise (run116: two 32x32 repeat-wrapped inputs of the world map background), and they hold
     // little memory. Over 256x256 at level 0 they are re-encoded (vk_astc_bc7).
-    // Per slice only (coordinator, run 30, 14/11/2026): counting array layers in sent small ASTC arrays (menu cards,
-    // course thumbnails) through the BC re-encode, and they came out magenta on the console.
-    if (f.astc_bc7 && (uint64_t)d->width * d->height < 256u * 256u) {
+    // Arrays and cube maps count their layers: their slices are mostly small (course thumbnails, menu cards), and kept
+    // as RGBA8 they held 164-278 MiB at 7x their storage in PS5 races (memgrow2, nocache: astc_rgba [arr]). The per-slice
+    // rule (run 30, 14/11/2026) came from magenta on the console, which the BC encoders cannot make: only the
+    // decoders write it, and both causes found since are fixed (task 32's zeroed card units, 15/11; void extents
+    // taken as errors, 16/11). A copy between ASTC textures that went to different formats decodes from the
+    // source's storage (vk_exec_xfer.c copy_t2t). Slices under 64x64 stay RGBA8 as single images do: on the title
+    // capture (t40, MKW_ASTC_BC_CHECK) the 24x24-45x45 arrays came out at a mean error of 5-6 and 27-28 dB in BC7 for
+    // 6.5 MiB in all, the 64x64-128x128 ones at 30.7-49.9 dB (single images: 26.2 dB at worst) for 114 MiB.
+    // MKW_ASTC_BC_ARRAYS=0 (diagnosis) keeps the per-slice rule.
+    static int bc_arrays = -1;
+    if (bc_arrays < 0) bc_arrays = !cfg_get("MKW_ASTC_BC_ARRAYS") || atoi(cfg_get("MKW_ASTC_BC_ARRAYS")) != 0;
+    int array = d->target == NVN_TEXTURE_TARGET_2D_ARRAY || d->target == NVN_TEXTURE_TARGET_CUBEMAP ||
+                d->target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY;
+    // Not a sparse array: vk_sparse.c binds its tiles by the image's own sparse block shape and fills the BC7 ones by
+    // decoding copies (astc_into_sparse); the sparse ASTC arrays MKW makes are 8192x8192 a slice, BC7 already.
+    uint64_t slices = array && bc_arrays && t->L.layers > 1 && !(d->flags & NVN_TEXTURE_FLAGS_SPARSE) &&
+                      (uint64_t)d->width * d->height >= 64u * 64u ? t->L.layers : 1;
+    if (f.astc_bc7 && (uint64_t)d->width * d->height * slices < 256u * 256u) {
         f.astc_bc7 = 0;
         f.vk = f.astc_srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
     }

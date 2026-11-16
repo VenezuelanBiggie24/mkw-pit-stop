@@ -613,12 +613,16 @@ static void copy_t2t(VkExec *ex, const p_copy_t2t *p) {
     if (!sub_resolve(p->src, &p->sv, p->has_sv, &p->sr, 1, &s, 1)) return;
     if (!sub_resolve(p->dst, &p->dv, p->has_dv, &p->dr, 1, &d, 1)) return;
     // ASTC decoded on upload (MKW fills its sparse ASTC arrays from 8192x8192 ASTC textures, run-sp1): a copy of the
-    // decoded texels when both sides are the same ASTC block in the same Vulkan format (BC7 or RGBA8).
-    int to_bc7 = d.img->format == VK_FORMAT_BC7_SRGB_BLOCK || d.img->format == VK_FORMAT_BC7_UNORM_BLOCK;
-    if (s.astc_bw && s.astc_bw == d.astc_bw && s.astc_bh == d.astc_bh && s.img->format != d.img->format && to_bc7) {
+    // decoded texels when both sides are the same ASTC block in the same Vulkan format (BC7, BC1 or RGBA8). When the two
+    // went to different formats (one kept RGBA8 under 256x256, an array re-encoded with its layers counted, BC1 against
+    // BC7), the source's blocks are decoded from its storage and encoded as the destination's format.
+    VkFormat df = d.img->format;
+    int to_bc = df == VK_FORMAT_BC7_SRGB_BLOCK || df == VK_FORMAT_BC7_UNORM_BLOCK ? 1
+              : df == VK_FORMAT_BC1_RGB_SRGB_BLOCK || df == VK_FORMAT_BC1_RGB_UNORM_BLOCK ? 2 : 0;
+    if (s.astc_bw && s.astc_bw == d.astc_bw && s.astc_bh == d.astc_bh && s.img->format != df) {
         uint32_t dl0 = d.layer0 + (uint32_t)d.z;
         if (vk_texture_astc_copy(p->src, s.level, s.layer0 + (uint32_t)s.z, s.nz, (uint32_t)s.x, (uint32_t)s.y, s.w, s.h,
-                                 d.img->image, d.aspect, d.level, dl0, d.x, d.y, 1)) {
+                                 d.img->image, d.aspect, d.level, dl0, d.x, d.y, to_bc)) {
             vk_texture_gpu_written(p->dst);
             vk_sparse_written(d.img->image, d.level, dl0, s.nz, d.x, d.y, s.w, s.h);
             return;

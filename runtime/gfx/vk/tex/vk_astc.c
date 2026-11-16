@@ -6,10 +6,11 @@
 // device cannot. cpu: astc_decode_ldr_mt on the uploading thread, as before. check: gpu, and every upload is also
 // decoded on the CPU and compared (waits for the GPU; for testing only).
 //
-// The decode is recorded into the upload batch (vk_memory.c) in chunks of at most 32 MiB of texels: a chunk's raw
-// blocks go from staging to a device-local scratch buffer, its dispatches write RGBA8 texels behind them, and a
-// buffer-to-image copy puts them into the image; the next chunk reuses the scratch after a barrier. The scratch
-// buffer is freed once the batch completes (vk_defer_buffer).
+// The decode is recorded into the upload batch (vk_memory.c) in chunks of at most 32 MiB of texels (a larger region in
+// bands of block rows, split_regions): a chunk's raw blocks go from staging to a device-local scratch buffer, its
+// dispatches write RGBA8 texels behind them, and a buffer-to-image copy puts them into the image; the next chunk reuses
+// the scratch after a barrier. The scratch is one kept buffer (FIXED_SCRATCH); only a call with a readback takes one of
+// its own, freed once the batch completes (vk_defer_buffer).
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -464,7 +465,8 @@ static int create_pipeline(VkCtx *c) {
     return 1;
 }
 
-// MKW_ASTC_BC7 (default 1; 0 off): ASTC images of 256x256 or more become BC7 images, filled by the decoder and then bc7_encode.comp. The RGBA8
+// MKW_ASTC_BC7 (default 1; 0 off): ASTC images of 256x256 or more (an array's or cube map's layers counted: vk_tex_image.c)
+// become BC7 images (BC1 when opaque), filled by the decoder and then bc7_encode.comp. The RGBA8
 // copies of the textures took 2.3 GB of a 3.4 GB heap on a course (run113) and pushed render targets out of memory.
 int vk_astc_bc7(void) {
     VkCtx *c = vk_ctx();
@@ -577,15 +579,18 @@ static VmaAllocator svma(void) {
 // Radeon 660M (vale1, 06/11/2026: 351 allocations), and a buffer per upload batch was worse (wastc4: still new memory,
 // held until the batch ends). Every caller records into the upload batch under its lock (vk_upload_begin) and the
 // batches run in order on the graphics queue, so a barrier at the start of each use is enough, as between the chunks
-// of one call. Larger calls (one region over a chunk) keep their own buffer, freed with the batch.
+// of one call. Regions over a chunk are cut into bands (split_regions), so every call fits; only MKW_ASTC=check and the
+// probes (a readback) take a buffer of their own, freed with the batch.
 #define FIXED_SCRATCH (64ull << 20)
 static VkBuffer fx_buf;
 static VmaAllocation fx_alloc;
 static int fx_tried;
 
-// Scratch per vk_astc_record: texels of at most this many bytes at a time (or one region, when larger), so a large
-// texture array (169 M texels, 677 MB as RGBA8, on monsters2) does not need its whole RGBA8 copy as scratch.
+// Scratch per vk_astc_record: texels of at most this many bytes at a time, so a large texture array (169 M texels, 677 MB
+// as RGBA8, on monsters2) or an 8192x8192 level (256 MiB as RGBA8) does not need its whole RGBA8 copy as scratch.
 #define CHUNK_OUT (32ull << 20)
+
+static uint32_t lcm_4(uint32_t bh) { return bh % 4 == 0 ? bh : bh % 2 == 0 ? bh * 2 : bh * 4; }   // lcm(bh, 4)
 
 static VkDeviceSize region_out(const VkAstcRegion *r) { return (VkDeviceSize)r->w * r->h * r->slices * 4; }
 static VkDeviceSize region_bc(const VkAstcRegion *r, VkDeviceSize block) {   // BC blocks of a region: per 4x4
@@ -595,7 +600,86 @@ static VkDeviceSize region_in(const VkAstcRegion *r, uint32_t bw, uint32_t bh) {
     return (VkDeviceSize)((r->w + bw - 1) / bw) * ((r->h + bh - 1) / bh) * r->slices * 16;
 }
 
-int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, const VkAstcRegion *rg, int n, uint32_t bw,
+// A region over CHUNK_OUT is cut into pieces that each fit one: groups of whole slices (3D), and a slice over a chunk
+// into bands of whole block rows, so the scratch never holds more than a chunk of texels and the one kept buffer
+// (FIXED_SCRATCH) serves every call. Before, an 8192x8192 level got a buffer of its own of 278-285 MB, which failed
+// when memory was short and left the texture undecoded (PS5 runs nocache and the PGO baseline, 16/11/2026).
+// A band starts on a block row of the ASTC block and on a multiple of 4 texel rows (the BC block, and the image
+// offset a copy into a BC image needs), so it holds whole blocks of both: the decoder works block by block (the
+// partition and the weights only use the texel's place in its block) and the BC encoders clamp reads to the region's
+// last row, which only the last band reaches, so the texels and the BC blocks are the ones the whole region gives.
+// The blocks are already linear here: the caller deswizzled them into tight rows (vk_tex_upload.c upload,
+// vk_texture_astc_copy and vk_tex_texel.c read them out of the block-linear storage), so a band is one byte range.
+// Pieces keep the region's order and texels in it, so a readback gets the same bytes. Returns the pieces in *out
+// (rg itself when nothing is cut; else malloc'd) and their count.
+static int bands_on = 1;   // vk_astc_bands: --probe-astc records with and without them and compares
+void vk_astc_bands(int on) { bands_on = on; }
+
+static int split_regions(const VkAstcRegion *rg, int n, uint32_t bw, uint32_t bh, const VkAstcRegion **out) {
+    if (!bands_on) return *out = rg, n;
+    int need = 0;
+    for (int i = 0; i < n; i++) {
+        const VkAstcRegion *r = &rg[i];
+        VkDeviceSize slice = (VkDeviceSize)r->w * r->h * 4;
+        if (slice * r->slices <= CHUNK_OUT) { need++; continue; }
+        uint32_t step = (uint32_t)(lcm_4(bh) / bh), rows = (r->h + bh - 1) / bh;   // block rows per aligned step
+        uint64_t per = CHUNK_OUT / ((VkDeviceSize)r->w * bh * 4) / step * step;
+        if (!per) per = step;
+        need += slice <= CHUNK_OUT ? (int)((r->slices + CHUNK_OUT / slice - 1) / (CHUNK_OUT / slice))
+                                   : (int)(r->slices * ((rows + per - 1) / per));
+    }
+    if (need == n) return *out = rg, n;
+    VkAstcRegion *p = malloc((size_t)need * sizeof *p);
+    if (!p) rt_fatal("vk: out of memory (ASTC bands)");
+    int k = 0;
+    for (int i = 0; i < n; i++) {
+        const VkAstcRegion *r = &rg[i];
+        uint32_t bx = (r->w + bw - 1) / bw, rows = (r->h + bh - 1) / bh;
+        VkDeviceSize slice = (VkDeviceSize)r->w * r->h * 4, slice_in = (VkDeviceSize)bx * rows * 16;
+        if (slice * r->slices <= CHUNK_OUT) { p[k++] = *r; continue; }
+        if (slice <= CHUNK_OUT) {   // whole slices, as many as a chunk holds
+            uint32_t g = (uint32_t)(CHUNK_OUT / slice);
+            for (uint32_t z = 0; z < r->slices; z += g) {
+                p[k] = *r;
+                p[k].src = r->src + z * slice_in, p[k].slices = r->slices - z < g ? r->slices - z : g;
+                p[k++].offset.z = r->offset.z + (int32_t)z;
+            }
+            continue;
+        }
+        uint32_t step = (uint32_t)(lcm_4(bh) / bh);
+        uint64_t per = CHUNK_OUT / ((VkDeviceSize)r->w * bh * 4) / step * step;
+        if (!per) per = step;
+        for (uint32_t z = 0; z < r->slices; z++)
+            for (uint32_t y = 0; y < rows; y += (uint32_t)per) {
+                uint32_t nb = rows - y < per ? rows - y : (uint32_t)per, y0 = y * bh;
+                p[k] = *r;
+                p[k].src = r->src + z * slice_in + (VkDeviceSize)y * bx * 16;
+                p[k].h = r->h - y0 < nb * bh ? r->h - y0 : nb * bh, p[k].slices = 1;
+                p[k].offset.y = r->offset.y + (int32_t)y0, p[k++].offset.z = r->offset.z + (int32_t)z;
+            }
+    }
+    return *out = p, k;
+}
+
+// Chunks of consecutive regions: the scratch holds the largest chunk's blocks, then its texels, then its BC blocks.
+static void scratch_caps(const VkAstcRegion *rg, int n, uint32_t bw, uint32_t bh, VkDeviceSize blk, VkDeviceSize *cap_in,
+                         VkDeviceSize *cap_out, VkDeviceSize *cap_bc, VkDeviceSize *out_total) {
+    VkDeviceSize ci = 0, co = 0, cb7 = 0;
+    *cap_in = *cap_out = *cap_bc = *out_total = 0;
+    for (int i = 0; i < n; i++) {
+        VkDeviceSize o = region_out(&rg[i]), b = region_in(&rg[i], bw, bh);
+        if (co && co + o > CHUNK_OUT) ci = co = cb7 = 0;
+        ci += b, co += o, cb7 += region_bc(&rg[i], blk), *out_total += o;
+        if (ci > *cap_in) *cap_in = ci;
+        if (co > *cap_out) *cap_out = co;
+        if (cb7 > *cap_bc) *cap_bc = cb7;
+    }
+}
+
+// The largest scratch so far, and what the call would have needed without the bands (logged when either grows).
+static VkDeviceSize max_scratch, max_unsplit;
+
+int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, const VkAstcRegion *rg0, int n0, uint32_t bw,
                    uint32_t bh, int srgb, VkImage img, VkImageAspectFlags aspect, int bc7, VkBuffer readback) {
     static volatile int32_t n_fail;
     (void)src_size;
@@ -611,22 +695,31 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     VkPipeline enc = bc7 == 2 ? G.enc1 : bc7 ? G.enc : VK_NULL_HANDLE;
     VkDeviceSize blk = bc7 == 2 ? 8 : 16;
     if (bc7 && !enc) return 0;
-    // chunks of consecutive regions; scratch = the largest chunk's blocks, then its texels
-    VkDeviceSize out_total = 0, cap_in = 0, cap_out = 0, cap_bc = 0, ci = 0, co = 0, cb7 = 0;
-    for (int i = 0; i < n; i++) {
-        VkDeviceSize o = region_out(&rg[i]), b = region_in(&rg[i], bw, bh);
-        if (co && co + o > CHUNK_OUT) ci = co = cb7 = 0;
-        ci += b, co += o, cb7 += region_bc(&rg[i], blk), out_total += o;
-        if (ci > cap_in) cap_in = ci;
-        if (co > cap_out) cap_out = co;
-        if (cb7 > cap_bc) cap_bc = cb7;
+    const VkAstcRegion *rg;
+    int n = split_regions(rg0, n0, bw, bh, &rg);
+    VkDeviceSize out_total, cap_in, cap_out, cap_bc;
+    scratch_caps(rg, n, bw, bh, blk, &cap_in, &cap_out, &cap_bc, &out_total);
+    if (!out_total) {
+        if (rg != rg0) free((void *)rg);
+        return 1;
     }
-    if (!out_total) return 1;
     vk_upload_work(out_total / 4);   // RGBA8 texels: bounds the batch's GPU time (vk_upload_flush_over)
     VkDeviceSize al = c->props.limits.minStorageBufferOffsetAlignment;   // the texels bind at cap_in, BC7 at cap_in + cap_out
     if (al < 16) al = 16;   // also the BC7 copy: its buffer offset must be a multiple of the 16-byte block
     cap_in = (cap_in + al - 1) / al * al, cap_out = (cap_out + al - 1) / al * al;
     if (!bc7) cap_bc = 0;
+    VkDeviceSize unsplit = cap_in + cap_out + cap_bc;
+    if (rg != rg0) {   // the same sizes over the caller's regions: the buffer one call took before the bands
+        VkDeviceSize ui, uo, ub, ut;
+        scratch_caps(rg0, n0, bw, bh, blk, &ui, &uo, &ub, &ut);
+        unsplit = (ui + al - 1) / al * al + (uo + al - 1) / al * al + (bc7 ? ub : 0);
+    }
+    if (cap_in + cap_out + cap_bc > max_scratch || unsplit > max_unsplit) {   // the upload lock serialises callers
+        if (cap_in + cap_out + cap_bc > max_scratch) max_scratch = cap_in + cap_out + cap_bc;
+        if (unsplit > max_unsplit) max_unsplit = unsplit;
+        rt_log("vk: ASTC scratch: largest %.1f MiB so far (%.1f MiB without the bands; this call %ux%u x%u, %d regions in "
+               "%d pieces)", max_scratch / 1048576.0, max_unsplit / 1048576.0, rg0[0].w, rg0[0].h, rg0[0].slices, n0, n);
+    }
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = cap_in + cap_out + cap_bc,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                                       VK_BUFFER_USAGE_TRANSFER_DST_BIT};
@@ -661,6 +754,7 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
         if (plat_inc32(&n_fail) <= 16)
             rt_log("vk: ASTC scratch buffer of %llu bytes failed: texture left undecoded",
                    (unsigned long long)(cap_in + cap_out));
+        if (rg != rg0) free((void *)rg);
         return 0;
     }
     plat_mutex_lock(&g_lock);
@@ -684,14 +778,14 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
         time_poll_locked(c);
         timed = 1;
         id = ++t_id;
-        t_call[id % TA] = (TCall){.id = id, .w = rg[0].w, .h = rg[0].h, .regions = (uint32_t)n, .fp = fp, .complete = 1};
+        t_call[id % TA] = (TCall){.id = id, .w = rg0[0].w, .h = rg0[0].h, .regions = (uint32_t)n0, .fp = fp, .complete = 1};
         whole = time_slot(id, fp, out_total / 4, 1);
         if (whole < 0) t_call[id % TA].complete = 0;
     }
     VkQueryPool tpool = t_pool;
     plat_mutex_unlock(&t_lock);
     if (whole >= 0) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, tpool, 2 * (uint32_t)whole);
-    uint32_t eslot = err_slot(rg, n, bw, bh);
+    uint32_t eslot = err_slot(rg0, n0, bw, bh);
     VkDescriptorBufferInfo dbi[4] = {{sb, 0, cap_in}, {sb, cap_in, cap_out}, {tab, 0, TAB_SIZE}, {G.err, 0, VK_WHOLE_SIZE}};
     VkWriteDescriptorSet w[4];
     for (int i = 0; i < 4; i++)
@@ -789,13 +883,14 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
         t_call[id % TA].chunks = (uint32_t)chunks;
         plat_mutex_unlock(&t_lock);
     }
-    if ((n_dispatch + (uint64_t)n) / 1024 != n_dispatch / 1024 || !n_dispatch) {
+    if ((n_dispatch + (uint64_t)n0) / 1024 != n_dispatch / 1024 || !n_dispatch) {
         rt_log("vk: ASTC: %llu regions, %.1f M texels decoded on the GPU so far; scratch allocations %lld, %.1f ms",
-               (unsigned long long)(n_dispatch + (uint64_t)n), (double)n_texels / 1e6, (long long)alloc_n, alloc_ns / 1e6);
+               (unsigned long long)(n_dispatch + (uint64_t)n0), (double)n_texels / 1e6, (long long)alloc_n, alloc_ns / 1e6);
         vk_astc_time_summary();
     }
-    n_dispatch += (uint64_t)n;
+    n_dispatch += (uint64_t)n0;
     free(copies), free(bcp);
+    if (rg != rg0) free((void *)rg);
     if (!fixed) vk_defer_buffer_in(svma(), sb, sa);
     return 1;
 }

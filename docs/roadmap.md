@@ -122,6 +122,12 @@ screen by screen against the console.
   read fault at 0x25659903d8 (main+0x7419e8 / sdk+0x776a60, frame 31201, 463 MiB free), in a 0.5 MiB pool at
   0x2565954000: first seen, cause not known. Task 37: `MKW_PACK=1` compresses frozen units cold for 30 s and gives
   their memory back, unpacking on the next access (docs/ps5.md); waiting for its console run (verify first).
+  Task 40 (Linux, capture t40 at the title, 16/11/2026): arrays and cube maps with slices of 64x64 or more now count
+  their layers for the 256x256 rule, so they go to BC1/BC7 too: ASTC copies 678 -> 585 MiB, RGBA8 146 -> 26 MiB
+  (arrays 134 -> 13); their BC error 30.7 dB at worst (`MKW_ASTC_BC_CHECK`; single images 26.2), the 24x24-45x45 ones
+  (27-28 dB, 6.5 MiB) kept as RGBA8. A region over the 32 MiB chunk is decoded in bands of block rows through the kept
+  64 MiB scratch (an 8192x8192 level: 336 MiB -> 42 MiB, bit-exact, `--probe-astc`), so the 278-285 MB scratch buffers
+  that failed are gone. Waiting for a console run.
 - **PS5: sparse tiles left non-resident from boot.** Every run logs 12-13 "tile slots over `MKW_SPARSE_MIB`" (1536
   MiB), up to 2048 tiles (128 MiB) without memory, clean runs too; a lead for the corruption near the start line
   that has been there in every run, and for the black-and-white race intro (not yet looked at).

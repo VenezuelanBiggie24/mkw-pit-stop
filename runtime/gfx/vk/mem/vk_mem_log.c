@@ -249,7 +249,7 @@ static void log_mem_census(uint64_t frame, int force) {
     }
 }
 
-void vk_mem_census_now(void) { log_mem_census(0, 1); }
+void vk_mem_census_now(void) { vram_log_now(); log_mem_census(0, 1); }   // with the texture census line (vram_log)
 
 void vk_oom_census(const char *what) {
     static volatile int32_t once;

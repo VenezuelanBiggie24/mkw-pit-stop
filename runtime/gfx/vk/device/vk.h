@@ -134,7 +134,8 @@ extern uint32_t vk_tex_reg_limit;
 void vk_sampler_register(int id, const samp_par *s);                // sampler descriptor slot (copied)
 uint64_t vk_texture_trim(uint64_t bytes);      // out of memory: released and idle mirrored textures go (vk_staging)
 uint64_t vk_texture_trim_released(uint64_t keep_bytes); // shed released-texture cache down to keep_bytes
-// ASTC kept as RGBA8 copied into a BC7 image: decodes the source's blocks into dst (vk_texture.c); 0 when it cannot
+// ASTC copied into an image of another format: decodes the source's blocks into dst as bc7 says (0 RGBA8, 1 BC7, 2 BC1;
+// vk_tex_upload.c); 0 when it cannot
 int  vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers, uint32_t x, uint32_t y,
                           uint32_t w, uint32_t h, VkImage dst, VkImageAspectFlags aspect, uint32_t dlevel, uint32_t dlayer,
                           int32_t dx, int32_t dy, int bc7);
@@ -255,6 +256,7 @@ void vk_mem_census(uint64_t frame);               // at each present: pool censu
 // 0: this allocator's own allocations against the heap sizes. 0 when unknown.
 int vk_mem_vram(uint64_t *used, uint64_t *budget, int *exact);
 void vram_log_now(void);                                  // the "mem: vram" report now (vk_texture.c on image failures)
+void vk_mem_census_now(void);                              // the pool and texture census now (also at the end of a replay)
 void vk_oom_census(const char *what);                     // one-time full memory census on the first allocation failure
 void vk_exec_cb_dpool_stats(int *live_pools, int *spare_pools, int *live_chunks, int *spare_chunks);
 void vk_dcache_dpool_stats(int *live_pools, int *retiring_pools);
@@ -361,6 +363,7 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
 void vk_astc_time_enable(int on);
 int vk_astc_time_get(uint32_t bw, uint32_t bh, uint64_t *texels, uint64_t *calls, double *us);   // totals so far
 void vk_astc_time_summary(void);        // logs the totals
+void vk_astc_bands(int on);              // --probe-astc: 0 records each region whole, as before the bands (default 1)
 void vk_astc_release(void);             // vk_device.c, before the device goes: frees the decoder's objects
 // ---- precomputed BC7 of ASTC textures (vk_texpre.c; MKW_TEXPRE, MKW_TEXPRE_RECORD)
 typedef struct { uint32_t w, h, slices, level, layer; } VkTexpreRegion;   // one region of an upload, in upload order

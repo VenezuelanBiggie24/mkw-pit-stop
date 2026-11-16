@@ -222,7 +222,6 @@ void mirror_reset(VkCtx *c);
 // vk_mem_log.c: census, VRAM summary and the memory mode
 void flag_names(uint32_t f, char *buf, size_t n);
 void vram_log(uint64_t frame);
-void vk_mem_census_now(void);
 
 // vk_memory.c: pool finalize & GPU-only init release stats
 void vk_pool_fini_stats(uint64_t *n, uint64_t *bytes, uint64_t *backed, uint64_t *released, uint64_t *overlap,

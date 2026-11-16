@@ -265,6 +265,84 @@ static int bc7_case(VkCtx *c, uint32_t bw, uint32_t bh, uint32_t nx, uint32_t ny
     return bad;
 }
 
+// A level 0 over vk_astc.c's 32 MiB chunk, which it records in bands of block rows (split_regions): the decoder's texels
+// (readback and image) bit-exact with astc_decode_ldr, and the BC7 and BC1 blocks byte for byte the ones the region
+// gives recorded whole (vk_astc_bands(0), the code before the bands). Valid blocks and void extents, repeated with a
+// period that is not a row, so a band read from the wrong row shows. bh 6, 10 and 12 put a band's start on a multiple
+// of 12 or 20 texel rows (the ASTC block and the BC block both).
+static int band_case(VkCtx *c, uint32_t bw, uint32_t bh) {
+    uint32_t w0 = 4093, h0 = 2300 - bh / 2, w1 = w0 >> 1, h1 = h0 >> 1;
+    size_t n0 = (size_t)((w0 + bw - 1) / bw) * ((h0 + bh - 1) / bh), n1 = (size_t)((w1 + bw - 1) / bw) * ((h1 + bh - 1) / bh);
+    size_t t0 = (size_t)w0 * h0, t1 = (size_t)w1 * h1;
+    uint8_t *blk = malloc((n0 + n1) * 16), tmp[12 * 12 * 4];
+    for (size_t k = 0; k < 4093;) {
+        uint64_t v[2] = {rnd64(), rnd64()};
+        if (k % 7 == 0) void_block(blk + 16 * k, (int)(k % 5)), k++;
+        else if ((v[0] & 0x1FF) != 0x1FC && astc_decode_block((uint8_t *)v, bw, bh, false, tmp)) memcpy(blk + 16 * k++, v, 16);
+    }
+    for (size_t k = 4093; k < n0 + n1; k++) memcpy(blk + 16 * k, blk + 16 * (k % 4093), 16);
+    uint8_t *want = malloc((t0 + t1) * 4), *rb = malloc((t0 + t1) * 4), *im = malloc((t0 + t1) * 4);
+    astc_decode_ldr_mt(blk, w0, h0, bw, bh, false, want);
+    astc_decode_ldr_mt(blk + n0 * 16, w1, h1, bw, bh, false, want + t0 * 4);
+    int bad = !gpu_decode(c, blk, n0, n1, w0, h0, w1, h1, bw, bh, 0, rb, im, NULL);
+    size_t at = 0;
+    if (bad) printf("probe-astc: FAIL bands %ux%u: not decoded\n", bw, bh);
+    else if (first_diff(want, rb, t0 + t1, &at) || first_diff(want, im, t0 + t1, &at)) {
+        printf("probe-astc: FAIL bands %ux%u %ux%u: texel %zu differs from astc_decode_ldr\n", bw, bh, w0, h0, at);
+        bad = 1;
+    }
+    for (int kind = 1; kind <= 2 && !bad && vk_astc_bc7(); kind++) {   // BC7, then BC1
+        size_t bb = kind == 2 ? 8 : 16, e0 = (size_t)((w0 + 3) / 4) * ((h0 + 3) / 4) * bb, e1 = (size_t)((w1 + 3) / 4) * ((h1 + 3) / 4) * bb;
+        uint8_t *got[2] = {malloc(e0 + e1), malloc(e0 + e1)};
+        for (int whole = 0; whole < 2 && !bad; whole++) {
+            VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                                    .format = kind == 2 ? VK_FORMAT_BC1_RGB_UNORM_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK,
+                                    .extent = {w0, h0, 1}, .mipLevels = 2, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                    .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                    .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
+            VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+            Img bc;
+            if (vmaCreateImage(c->vma, &ci, &ai, &bc.img, &bc.alloc, NULL) != VK_SUCCESS) { bad = 1; break; }
+            VkCommandBuffer cb = vk_upload_begin();
+            VkBuffer sb, ob;
+            VmaAllocation oa;
+            uint8_t *stg = vk_staging((n0 + n1) * 16, &sb, NULL), *omap = vk_staging(e0 + e1, &ob, &oa);
+            memcpy(stg, blk, (n0 + n1) * 16);
+            to_general(cb, bc.img);
+            VkAstcRegion ar[2] = {{.src = 0, .w = w0, .h = h0, .slices = 1, .level = 0},
+                                  {.src = n0 * 16, .w = w1, .h = h1, .slices = 1, .level = 1}};
+            barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            vk_astc_bands(!whole);
+            if (!vk_astc_record(cb, sb, (n0 + n1) * 16, ar, 2, bw, bh, 0, bc.img, VK_IMAGE_ASPECT_COLOR_BIT, kind, VK_NULL_HANDLE))
+                bad = 1;
+            vk_astc_bands(1);
+            barrier(cb, ALL_RW, ALL_RW);
+            VkBufferImageCopy cp[2] = {{.bufferOffset = 0, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w0, h0, 1}},
+                                       {.bufferOffset = e0, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 1, 0, 1}, .imageExtent = {w1, h1, 1}}};
+            vkCmdCopyImageToBuffer(cb, bc.img, VK_IMAGE_LAYOUT_GENERAL, ob, 2, cp);
+            barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+            vk_upload_end();
+            vk_upload_flush(1);
+            vmaInvalidateAllocation(c->vma, oa, 0, VK_WHOLE_SIZE);
+            memcpy(got[whole], omap, e0 + e1);
+            vmaDestroyBuffer(c->vma, ob, oa);
+            vk_defer_image(bc.img, bc.alloc);
+            vk_upload_flush(1);
+        }
+        if (!bad && memcmp(got[0], got[1], e0 + e1)) {
+            size_t i = 0;
+            while (got[0][i] == got[1][i]) i++;
+            printf("probe-astc: FAIL bands %s %ux%u: byte %zu of the BC blocks differs from the whole-region encode\n",
+                   kind == 2 ? "BC1" : "BC7", bw, bh, i);
+            bad = 1;
+        }
+        free(got[0]), free(got[1]);
+    }
+    if (!bad) printf("probe-astc: bands %ux%u %ux%u: texels bit-exact, BC7 and BC1 the same as whole\n", bw, bh, w0, h0);
+    free(blk), free(want), free(rb), free(im);
+    return bad;
+}
+
 // One 2048 x 2048 texture of valid blocks: the CPU worker-pool decode against the GPU time of the dispatches alone
 // (vk_astc.c timestamps, MKW_ASTC_TIME) and the wall time of the upload batch.
 static void timing(VkCtx *c, uint32_t bw, uint32_t bh) {
@@ -312,6 +390,7 @@ int probe_astc(void) {
     } else if (!bad) {
         printf("probe-astc: BC7 re-encoding off (MKW_ASTC_BC7=1 tests it)\n");
     }
+    for (uint32_t i = 0; i < 4 && !bad; i++) bad = band_case(c, (uint32_t[]){4, 6, 10, 12}[i], (uint32_t[]){4, 6, 10, 12}[i]);
     for (int b = 0; b < NB && !bad; b++)
         if (!g_bucket[b]) { printf("probe-astc: FAIL no valid %s block was generated\n", bucket_name[b]); bad = 1; }
     if (!bad) {

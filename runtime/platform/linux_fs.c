@@ -234,6 +234,20 @@ int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
             }
             plat_mem_early_resolve((uintptr_t)buf, n);   // a watch set during the read (plat_mem_early_resolve)
             if (efault_retries++ < 3 && plat_mem_back((uintptr_t)buf, n)) continue;
+            if (errno == ENOMEM) {   // WSL's 9p (a game copy under /mnt) refused one large read of a writable buffer:
+                // 4.5 MB reads into mapped read-write pages failed after every retry and stopped the boot (t40-capture,
+                // linux-vk-base); read it in 256 KiB pieces instead
+                uint32_t got = 0;
+                ssize_t r = 1;
+                while (got < n) {
+                    uint32_t part = n - got < (256u << 10) ? n - got : 256u << 10;
+                    r = pread(fd_of(f), (uint8_t *)buf + got, part, (off_t)(off + got));
+                    if (r < 0 && errno == EINTR) continue;
+                    if (r <= 0) break;   // end of file (a short read, as pread gives) or an error
+                    got += (uint32_t)r;
+                }
+                if (r >= 0) { ret = got; break; }
+            }
             {   // the last retry failed too: the buffer's mappings as the kernel sees them (diagnosis)
                 uint64_t lo = (uintptr_t)buf, hi = lo + n;
                 FILE *m = fopen("/proc/self/maps", "r");
