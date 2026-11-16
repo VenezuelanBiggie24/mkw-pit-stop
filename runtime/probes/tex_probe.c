@@ -814,11 +814,12 @@ static int test_pressure(pool_t *tpool) {
     return 0;
 }
 
-// RGBA8 texels of an image region (level 0, one layer), read back through the upload batch.
-static void image_rgba(VkImage img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t *out) {
+// The bytes of an image region (level 0, one layer; RGBA8 texels, or a BC image's blocks: bytes says how many),
+// read back through the upload batch.
+static void image_bytes(VkImage img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t *out, size_t bytes) {
     VkBuffer rb;
     VmaAllocation ra;
-    uint8_t *m = vk_staging((VkDeviceSize)w * h * 4, &rb, &ra);
+    uint8_t *m = vk_staging(bytes, &rb, &ra);
     VkCommandBuffer cb = vk_upload_begin();
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                            .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -833,8 +834,56 @@ static void image_rgba(VkImage img, uint32_t x, uint32_t y, uint32_t w, uint32_t
     vk_upload_end();
     vk_upload_flush(1);
     vmaInvalidateAllocation(vk_ctx()->vma, ra, 0, VK_WHOLE_SIZE);
-    memcpy(out, m, (size_t)w * h * 4);
+    memcpy(out, m, bytes);
     vmaDestroyBuffer(vk_ctx()->vma, rb, ra);
+}
+
+static void image_rgba(VkImage img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t *out) {
+    image_bytes(img, x, y, w, h, out, (size_t)w * h * 4);
+}
+
+// WriteTexels of ASTC 5x5 blocks into an image re-encoded as BC7 (320x320 in a physical pool: no CPU storage, so not
+// BC1), at 5,5 45x45: not on 4x4 blocks. Before, the copy went to the GPU as it was (an invalid region, which the
+// validation layer reports); now only the whole blocks of both inside it, 20,20 20x20, are written, and the BC blocks
+// around keep the first write's colour.
+static int test_bc_unaligned(pool_t *phys) {
+    TexVkFormat f;
+    if (!tex_vk_format(0x7B, &f) || !f.astc_bw || !vk_astc_gpu()) {
+        printf("probe-vkmem: unaligned BC write: ASTC is not decoded on the GPU here, skipped\n");
+        return 0;
+    }
+    tex_t t = make_tex(phys, 0x10000, 0x7B, 320, 320, 1, 26);
+    const VkTexImage *img = vk_texture_get(&t);
+    if (!img || img->format != VK_FORMAT_BC7_UNORM_BLOCK) {
+        printf("probe-vkmem: unaligned BC write: no BC7 image for ASTC (VkFormat %d), skipped\n", img ? (int)img->format : -1);
+        return 0;
+    }
+    GCHECK(!img->mirrored, "the physical-pool ASTC texture is mirrored");
+    uint8_t *blk = malloc(64 * 64 * 16), *a = malloc(80 * 80 * 16), *b = malloc(80 * 80 * 16);
+    for (int k = 0; k < 64 * 64; k++) void_block(blk + 16 * k, 0x4000, 0x8000, 0xC000, 0xFFFF, 0);
+    NVNcopyRegion all = {0, 0, 0, 320, 320, 1}, part = {5, 5, 0, 45, 45, 1};
+    vk_write_texels(&t, NULL, &all, blk, 64 * 16, 64 * 64 * 16);
+    image_bytes(img->image, 0, 0, 320, 320, a, 80 * 80 * 16);
+    for (int k = 0; k < 64 * 64; k++) void_block(blk + 16 * k, 0xF000, 0x1000, 0x2000, 0xFFFF, 0);
+    vk_write_texels(&t, NULL, &part, blk, 64 * 16, 64 * 64 * 16);
+    image_bytes(img->image, 0, 0, 320, 320, b, 80 * 80 * 16);
+    uint32_t inside = 0, changed_out = 0, same_in = 0;
+    for (uint32_t by = 0; by < 80; by++)
+        for (uint32_t bx = 0; bx < 80; bx++) {
+            int in = bx >= 5 && bx < 10 && by >= 5 && by < 10, ch = memcmp(a + (by * 80 + bx) * 16, b + (by * 80 + bx) * 16, 16);
+            if (in) inside++, same_in += !ch;
+            else changed_out += ch != 0;
+        }
+    int solid = 1;
+    for (uint32_t by = 5; by < 10; by++)
+        for (uint32_t bx = 5; bx < 10; bx++) solid &= !memcmp(b + (by * 80 + bx) * 16, b + (5 * 80 + 5) * 16, 16);
+    free(blk), free(a), free(b);
+    GCHECK(!same_in && !changed_out && solid && inside == 25, "unaligned WriteTexels into BC7: %u of %u inner blocks "
+           "unchanged, %u outer blocks changed, inner blocks alike %d", same_in, inside, changed_out, solid);
+    vk_texture_release(&t);
+    g_gpu_checks++;
+    printf("probe-vkmem: unaligned BC write: ASTC 5x5 at 5,5 45x45 into BC7 wrote the whole blocks inside it only\n");
+    return 0;
 }
 
 // Texels of an RGBA8 region that are not want (count).
@@ -975,7 +1024,7 @@ static int test_gpu(void) {
     if (test_textures(&tpool, &phys) || test_region_copy(&tpool) || test_pressure(&tpool)) return 1;
     pool_t tpool2 = {.magic = NVN_POOL_MAGIC, .flags = 0x22, .mem = h + 0xA00000, .size = 0x100000, .game_mem = h + 0xA00000};
     GCHECK(vk_pool_init(&tpool2), "vk_pool_init of the second texture pool");
-    if (test_astc_copy(&tpool2) || test_sparse_flush(&tpool2, h)) return 1;
+    if (test_astc_copy(&tpool2) || test_sparse_flush(&tpool2, h) || test_bc_unaligned(&phys)) return 1;
     vk_pool_fini(&tpool2);
     const char *cap = cfg_get("MKW_SHADOW_SUBMIT");   // a measurement, off by default
     if (vk_mem_shadow_on() && cap && !strcmp(cap, "1") && test_capture(&pool)) return 1;

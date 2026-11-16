@@ -83,6 +83,71 @@ static void write_lost(Tex *e) {
                     e->pub.mirrored ? " and its storage lacks the GPU's render" : "");
 }
 
+static uint32_t lcm4(uint32_t b) { return b % 4 == 0 ? b : b % 2 == 0 ? b * 2 : b * 4; }   // lcm(b, 4)
+
+// WriteTexels of ASTC blocks into an image re-encoded as BC7 or BC1 (vk_astc.c) whose region does not fall on whole
+// 4x4 BC blocks: its offsets are multiples of the ASTC footprint (5, 6, 10, 12 texels), and a copy into a BC image
+// takes offsets on 4 and extents on 4 unless they reach the edge (VUID-vkCmdCopyBufferToImage-pRegions-07274..07277).
+// It went to the GPU as it was. The region grows to whole blocks of both (multiples of lcm(footprint, 4)), its other
+// texels read from the storage, which holds every texel, this write's too (vk_write_texels writes it first), when
+// nothing the GPU wrote since is missing from it (mirrored and not gpu_dirty). Otherwise only the whole blocks inside
+// the region, from the caller's rows: the texels of the boundary blocks keep what they held (logged).
+static int bc_unaligned(Tex *e, const Region *g, const NVNcopyRegion *r, const uint8_t *mem, VkImageAspectFlags aspect) {
+    static volatile int32_t n_part;
+    uint32_t bw = e->f.astc_bw, bh = e->f.astc_bh, ax = lcm4(bw), ay = lcm4(bh);
+    uint32_t lw = mip(e->pub.width, g->level), lh = mip(e->pub.height, g->level);
+    uint32_t x0 = (uint32_t)r->xoffset, y0 = (uint32_t)r->yoffset, x1 = x0 + (uint32_t)r->width, y1 = y0 + (uint32_t)r->height;
+    int storage = e->pub.mirrored && !e->gpu_dirty;
+    uint32_t nx0, ny0, nx1, ny1;
+    if (storage) {
+        nx0 = x0 / ax * ax, ny0 = y0 / ay * ay;
+        nx1 = (x1 + ax - 1) / ax * ax, ny1 = (y1 + ay - 1) / ay * ay;
+        if (nx1 > lw) nx1 = lw;
+        if (ny1 > lh) ny1 = lh;
+    } else {
+        nx0 = (x0 + ax - 1) / ax * ax, ny0 = (y0 + ay - 1) / ay * ay;
+        nx1 = x1 == lw ? lw : x1 / ax * ax, ny1 = y1 == lh ? lh : y1 / ay * ay;
+        log_limited(&n_part, "WriteTexels of ASTC texture %#llx (fmt %#x) at %u,%u %ux%u into its BC image: not on 4x4 "
+                    "blocks and its storage does not hold the image's other texels: only %u,%u %ux%u written",
+                    (unsigned long long)e->pub.addr, e->t.d.format, x0, y0, x1 - x0, y1 - y0, nx0, ny0,
+                    nx1 > nx0 ? nx1 - nx0 : 0, ny1 > ny0 ? ny1 - ny0 : 0);
+        if (nx1 <= nx0 || ny1 <= ny0) return 0;
+    }
+    uint32_t w = nx1 - nx0, h = ny1 - ny0, rb = (w + bw - 1) / bw * 16, rows = (h + bh - 1) / bh;
+    size_t per = (size_t)rb * rows;
+    vk_upload_flush_over(64ull << 20);
+    VkBuffer sb;
+    uint8_t *stg;
+    VkCommandBuffer cb = vk_upload_begin_staging(per * (size_t)g->nz, &sb, (void **)&stg);
+    if (!cb) return 0;
+    VkAstcRegion *ar = calloc((size_t)g->nz, sizeof *ar);
+    if (!ar) rt_fatal("vk: out of memory (WriteTexels regions)");
+    int ok = 1;
+    for (int z = 0; z < g->nz && ok; z++) {
+        uint32_t layer = g->is3d ? 0 : g->layer0 + (uint32_t)r->zoffset + (uint32_t)z;
+        uint8_t *d = stg + per * (size_t)z;
+        if (storage) {
+            ok = !nvn_texels_box(&e->t.d, g->level, layer, nx0 / bw * 16, ny0 / bh,
+                                 g->is3d ? (uint32_t)(r->zoffset + z) : 0, rb, rows, e->t.mem, d, rb, 1);
+        } else {
+            const uint8_t *m = mem + (size_t)z * g->img + (size_t)((ny0 - y0) / bh) * g->row + (nx0 - x0) / bw * 16;
+            for (uint32_t y = 0; y < rows; y++) memcpy(d + (size_t)y * rb, m + (size_t)y * g->row, rb);
+        }
+        ar[z] = (VkAstcRegion){.src = per * (size_t)z, .w = w, .h = h, .slices = 1, .level = g->level, .layer = layer,
+                               .offset = {(int32_t)nx0, (int32_t)ny0, g->is3d ? r->zoffset + z : 0}};
+    }
+    if (ok) {
+        barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        vk_astc_tag(e->pub.addr, 3);
+        ok = vk_astc_record(cb, sb, per * (size_t)g->nz, ar, g->nz, bw, bh, e->f.astc_srgb, e->pub.image, aspect,
+                            e->f.astc_bc7, VK_NULL_HANDLE);
+        barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+    }
+    vk_upload_end();
+    free(ar);
+    return ok;
+}
+
 static int texels_pinned(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, int write) {
     static volatile int32_t n_astc, n_ds;
     VkCtx *c = vk_ctx();
@@ -99,6 +164,15 @@ static int texels_pinned(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_
     if (g->level >= e->pub.levels) return 0;
     uint32_t w = (uint32_t)r->width, h = (uint32_t)r->height;
     int rgb = e->f.expand_rgb, astc = e->f.astc_bw != 0, agpu = astc && write && vk_astc_gpu();
+    if (agpu && e->f.astc_bc7) {
+        uint32_t lw = mip(e->pub.width, g->level), lh = mip(e->pub.height, g->level);
+        uint32_t x1 = (uint32_t)r->xoffset + w, y1 = (uint32_t)r->yoffset + h;
+        if (r->xoffset % 4 || r->yoffset % 4 || (x1 % 4 && x1 != lw) || (y1 % 4 && y1 != lh)) {
+            if (bc_unaligned(e, g, r, mem, aspect)) return 1;
+            write_lost(e);
+            return 0;
+        }
+    }
     size_t texels = (size_t)w * h, ib = agpu ? 0 : astc ? 4 : rgb ? (size_t)g->bpb / 3 * 4 : 0;
     size_t slice = ib ? texels * ib : g->wb * g->hb;   // agpu: the raw blocks, decoded by vk_astc_record
     // A write goes into the open upload batch, its staging freed with it, and leaves without waiting: the next
