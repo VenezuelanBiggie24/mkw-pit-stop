@@ -74,6 +74,7 @@ struct RtThread {
     // virtual core
     int cur_core, c_nosig;     // core held while running guest code, -1 while blocked; c_nosig: spinning in gate
     uint64_t prof_fn, prof_lr; // MKW_PROFILE_FN: the lifted function the thread entered last, and its return address
+    int gpu_wait;              // 1 during an early-read wait for the GPU (memory_early.c), which keeps the virtual core
     uint64_t last_wake_at;     // MKW_SVC_STATS: when the last wait's signal came (wait_woken), for the wake latency
     uint64_t cseq;
     RtThread *cnext;

@@ -71,9 +71,17 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   waiting for the virtual core, held by an equal-priority worker of the other job pool (two pools of six, one per
   core, priority 44, as main on core 0); main loses ~0.3 ms a frame to them. What is left is the game's own work as
   translated: profile-guided optimization of the generated C next (task 35).
-- **To do: `main+0x154e14`.** A list walk under a mutex (nodes 0x140 bytes apart, flags at +0x138, removal through a
-  virtual call), 6.3-6.95 ms a frame through one race and 1.65 ms in another, steady within a race: why the list is
-  that long, and whether it should be.
+- **Found, to measure: `main+0x154e14` is a wait, not a walk** (task 36, 16/11/2026). Its 6.3-7 ms a frame
+  (`MKW_PROFILE_FN`) are an early-read wait for the GPU at its start: a read at 0x25a052c0e8 of a 16 KiB native page
+  whose other 4 KiB page 0x25a052f000 the GPU writes (a sibling wait). In the sibling A/B run 58 of the 60 logged waits
+  were there, ~1 a frame of 9.7 ms; the race's waits total ~7.8 ms a frame at 60 fps and ~1.9 at 30 (2.2 ms each). The
+  waiting thread keeps its virtual core, so the profiler counted the wait as running; the walk itself counts for the
+  mutex's `Enter` (the last function entered). The list is the game's own: registrations by id (+0x134) with a mask of
+  slots (+0x130), added by `main+0x847680` up to a capacity (+0x100), killed by id by `main+0x1b16850` (one walk a
+  kill) and freed two updates later; nothing reads a fence, a counter or a timestamp. The profile now gives the wait
+  apart, the early-read line names its readers, and `MKW_LIST_WATCH=1` logs the list's length and calls; the console
+  run decides between `MKW_EARLY_WAIT_AWAY` (the core back while waiting; skipping the wait gave nothing, see above)
+  and the per-node cost (`--reg-loop-weight 8`).
 
 ## 2. The picture as on the console
 

@@ -6,6 +6,6 @@ Horizon kernel: handles, waits and threads, the virtual cores, fibers and system
 |---|---|
 | `kernel.c`, `kernel.h`, `kernel_int.h` | Horizon kernel: handles, waits, mutexes and threads (`kernel.c`); `kernel_int.h`, what its files share |
 | `kernel_cores.c`, `kernel_preempt.c` | Switch 2's 6 virtual cores (one game thread per core, by priority; without them the game crashes, `MKW_FREE_CORES=1`; `MKW_CORE_NUM_GATE`, only for the threads that read their core number) and their asynchronous preemption |
-| `kernel_svc.c`, `kernel_fiber.c`, `kernel_diag.c` | Thread and synchronization SVCs; fibers; scheduler diagnostics (`MKW_TRACE=sched`, `MKW_CRIT`, `MKW_CORE_DIAG`) |
+| `kernel_svc.c`, `kernel_fiber.c`, `kernel_diag.c` | Thread and synchronization SVCs; fibers; scheduler diagnostics (`MKW_TRACE=sched`, `MKW_CRIT`, `MKW_CORE_DIAG`) and the function profile (`MKW_PROFILE_FN`: each game thread's last lifted function entered, with the time a thread spent waiting for the GPU in an early read given apart) |
 | `svc.c` | System calls (SVCs); the service message ones (`0x1F`, `0x21`, `0x22`) stop with their name: there are no console services, the SDK is replaced by name |
 | `svc_query.c` | SVC 0x06 register and memory-info output handling, with checked copy-out in the opt-in game-free PS5 fixture |

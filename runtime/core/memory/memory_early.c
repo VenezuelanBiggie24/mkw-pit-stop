@@ -69,6 +69,13 @@ static int64_t range_skips;           // frz_lock: watches released by mem_early
 // far behind the GPU was (lwab1: ~6 waits of ~7.5 ms every 600 frames, each a one-frame hitch).
 static _Thread_local struct { uint64_t page, pc, done, last, frame, addr, watched; int diff; } wq;
 static int nwait_logged;
+// The waits by the code that read (the fault's pc), for the 600-frame line: the wait lines above stop after the first
+// 60, so a race's waits named no reader (task 36, 16/11/2026: the sibling A/B run, whose 60 lines all fell in the race,
+// gave 58 to main+0x154e14 at 0x25a052c0e8, ~1 a frame of ~9.7 ms). sib: waits for another 4 KiB page of the native page.
+#define WREAD_N 8
+static struct { uint64_t pc, addr; int64_t n, ns, sib; } wread[WREAD_N];
+static int64_t wread_other;   // waits that found the table full
+static PlatMutex wread_lock = PLAT_MUTEX_INIT;
 static int64_t cnt[EW_KINDS][4];   // frz_lock: early read by the game, early write by the game, late by the game, by
                                    // the runtime
 static struct { uint64_t page, fence, done, frame, pc; int kind, write; } first[EW_FIRST];
@@ -184,6 +191,7 @@ void mem_early_wait(uint64_t fence) {
     int away = RT_KNOB_ON(early_wait_away) ? kern_core_away() : 0;
     __atomic_add_fetch(&hw_waiting, 1, __ATOMIC_RELAXED);
     __atomic_store_n(&hw_fence, fence, __ATOMIC_RELAXED);
+    if (tcur) __atomic_store_n(&tcur->gpu_wait, 1, __ATOMIC_RELAXED);   // MKW_PROFILE_FN counts it apart
     const char *prev = hang_mark_val("early-read wait: the replay to hand this fence to the queue", fence);
     int issued = !fence_issued_wait || fence_issued_wait(fence, ISSUE_WAIT_NS);
     if (issued && fence_wait) {
@@ -193,6 +201,7 @@ void mem_early_wait(uint64_t fence) {
         __atomic_add_fetch(&not_issued, 1, __ATOMIC_RELAXED);
     }
     hang_mark(prev);
+    if (tcur) __atomic_store_n(&tcur->gpu_wait, 0, __ATOMIC_RELAXED);
     __atomic_sub_fetch(&hw_waiting, 1, __ATOMIC_RELAXED);
     kern_core_back(&away);
     uint64_t ns = plat_now_ns() - t0;
@@ -212,6 +221,16 @@ void mem_early_wait(uint64_t fence) {
     }
     __atomic_add_fetch(&waits, 1, __ATOMIC_RELAXED);
     __atomic_add_fetch(&wait_ns, (int64_t)ns, __ATOMIC_RELAXED);
+    plat_mutex_lock(&wread_lock);   // after a wait of milliseconds: the lock costs nothing beside it
+    int j = 0;
+    while (j < WREAD_N && wread[j].n && wread[j].pc != wq.pc) j++;
+    if (j < WREAD_N) {
+        wread[j].pc = wq.pc, wread[j].addr = wq.addr, wread[j].n++, wread[j].ns += (int64_t)ns;
+        wread[j].sib += wq.page != wq.watched;
+    } else {
+        wread_other++;
+    }
+    plat_mutex_unlock(&wread_lock);
     if (ns > 1000000 && __atomic_fetch_add(&nwait_logged, 1, __ATOMIC_RELAXED) < 60) {   // the close criterion: 1 ms
         char who[48] = "?", code[192];
         plat_sample_self_name(who, sizeof who);
@@ -581,6 +600,28 @@ void mem_early_log(uint64_t frame) {   // every frame
            (long long)not_game, (long long)range_skips, (unsigned long long)siblings_released, ev);
     waits = wait_ns = range_skips = not_game = not_issued = 0;
     siblings_released = 0;
+    char wr[1024];
+    int wo = 0;
+    plat_mutex_lock(&wread_lock);
+    for (int n = 0; n < WREAD_N; n++) {   // the readers by time, the longest first
+        int best = -1;
+        for (int j = 0; j < WREAD_N; j++)
+            if (wread[j].n && (best < 0 || wread[j].ns > wread[best].ns)) best = j;
+        if (best < 0) break;
+        char code[192];
+        prof_pc_describe(wread[best].pc, code, sizeof code);
+        if (wo < (int)sizeof wr - 64)
+            wo += snprintf(wr + wo, sizeof wr - (size_t)wo, "; %s: %lld, %.1f ms (%lld for another 4 KiB page), last at %#llx",
+                           code, (long long)wread[best].n, (double)wread[best].ns / 1e6, (long long)wread[best].sib,
+                           (unsigned long long)wread[best].addr);
+        wread[best].n = 0;
+    }
+    if (wo || wread_other)
+        rt_log("mem: early-read waits at frame %llu by reader%s; %lld more by other code", (unsigned long long)frame,
+               wo ? wr : "", (long long)wread_other);
+    memset(wread, 0, sizeof wread);
+    wread_other = 0;
+    plat_mutex_unlock(&wread_lock);
     // The early reads by whether the GPU writes the page (as far as the replay has reported), with the code making them.
     uint32_t wrote = 0, page_only = 0;
     uint64_t pcs[8] = {0}, pcn[8] = {0};

@@ -34,6 +34,7 @@
 //                 main+0x21e12f8 on the one that leaves (tt1: one pair per DOWN of the script). The button object
 //                 holds its pane's name ("L_Chara_00" at +0x21c, "L_CharaSheet_00/L_Chara_00" further on): the line
 //                 gives the path with a '/' if there is one, else the first name
+//   MKW_LIST_WATCH=1   main+0x154e14's list (listwatch_init below): its length, flags and calls, every 600 frames
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,6 +71,7 @@ static volatile uint8_t held[MAX_NODES];   // MKW_SEQ_HOLD
 static volatile int32_t nheld_active;
 static volatile int32_t movie_ended;      // since the latest start of a held node
 static volatile int seq_on;                // the watch is on (g_fnprof is shared with the import census)
+static volatile int listw_on;              // MKW_LIST_WATCH (shares g_fnprof too)
 static int64_t name_off = -1;              // name slot - vtable pointer, the same in every node class
 #define UNTIL_MAX 4
 static int until_node[UNTIL_MAX];          // MKW_SEQ_UNTIL: the chain of events, in order
@@ -216,7 +218,7 @@ static void set_active(int k, uint8_t on, uint64_t frame, const char *why) {
         if (until_at < nuntil && k == until_node[until_at] && on == until_on[until_at] && ++until_at == nuntil &&
             seq_on) {
             seq_on = 0;
-            rt_fnprof_set(impcensus_on || g_fn_sampling);   // the import census and MKW_PROFILE_FN keep the hook on
+            rt_fnprof_set(impcensus_on || g_fn_sampling || listw_on);   // the other users keep the hook on
             __atomic_store_n(&window_t0, kern_now_ns(), __ATOMIC_RELEASE);
             hostfn_time_window(frame);   // the census starts here
             __atomic_store_n(&window_frame, frame + 1, __ATOMIC_RELEASE);
@@ -248,9 +250,12 @@ static void ui_name(const char *o, char *out, size_t cap) {
     }
 }
 
+static void listw_hit(uint64_t addr, uint64_t x0);
+
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) {
     if (g_fn_sampling) kern_fn_note(addr, lr);
     if (impcensus_on) impcensus_hit(addr, lr);
+    if (listw_on) listw_hit(addr, x0);
     if (!seq_on) return;
     int slot = lookup(addr);
     if (!slot || x0 < 0x1000) return;
@@ -326,4 +331,123 @@ void seqwatch_log_active(void) {
     for (int k = 0; k < nnodes && n < (int)sizeof buf - 50; k++)
         if (active[k]) n += snprintf(buf + n, sizeof buf - (size_t)n, " %s", nodes[k].name);
     rt_log("ctl: seq%s", n ? buf : (nnodes ? " (none active)" : " (MKW_SEQ_WATCH off)"));
+}
+
+// ---- MKW_LIST_WATCH=1: main+0x154e14's list (task 36, 16/11/2026)
+// main+0x154e14 (MKW 1.0.0) is the per-frame update of a pool of registrations that main+0x154b00's object holds at
+// +0x140 (the owner, x0 of all three functions here; the caller also names CmnObj_Cactus000_A_00, FernsJG, MobStones).
+// A node is 0x150 bytes: a mask of slots at +0x130, an id at +0x134, flags at +0x138 and the link at +0x140 (the next
+// link at +0x148, the head at owner+0xd8, its first link at owner+0xe0). The owner's mutex is at +0xb8, the node count
+// at +0xe8, the free nodes at +0xf0 and the capacity at +0x100.
+//   main+0x847680 (from main+0x847614)  adds a node under the mutex while count < capacity: id from *x2, a mask bit for
+//                                       each entry of x3 found in [[main+0x33b9788]+0xc8]'s table
+//   main+0x1b16850 (from main+0x1b179f4, 8 callers)  a kill: one walk of the whole list, bit 0 on each node of that id
+//   main+0x154e14  under the mutex: bit 1 -> the node is freed (a virtual call, +0x90, on owner+0x5898, then back to
+//                  the free list); bit 0 -> bit 1; then a second walk ORs every node's mask into owner+0x5518
+// Nothing there reads a fence, a counter or a timestamp: a node leaves the list two updates after a kill of its id.
+// The entry hook (FN_ENTER) counts the three functions' calls by owner; this thread reads each owner's count every
+// frame and walks its list every LW_WALK_EVERY frames, through plat_mem_read (no fault on memory freed with the owner,
+// and a page the early-read watch protects keeps its watch: the read fails, counted as torn), without the game's
+// mutex: a node freed during the walk has its link zeroed and ends the walk (torn). The game threads pay the hook only.
+//   "list: frame N, owner A: update U/f, add a/f, kill k/f; count mean m max x (capacity c); in W walks: kill asked b0,
+//    to free b1, empty mask z, torn t; node visits ~V/f (two walks an update, one a kill)"
+#define LW_UPDATE 0x154e14
+#define LW_ADD 0x847680
+#define LW_KILL 0x1b16850
+#define LW_OWNERS 8
+#define LW_WALK_EVERY 10
+#define LW_MAX_NODES (1u << 20)
+static struct {
+    uint64_t owner, update, add, kill;   // the hook writes these (atomics)
+    uint64_t frames, count_sum, count_max, cap, walks, walked, b0, b1, zero, torn;   // the watch thread's
+} lw[LW_OWNERS];
+
+static void listw_hit(uint64_t addr, uint64_t x0) {
+    uint64_t off = addr - RT_MODULE_BASE;
+    if (off != LW_UPDATE && off != LW_ADD && off != LW_KILL) return;
+    for (int j = 0; j < LW_OWNERS; j++) {
+        uint64_t o = __atomic_load_n(&lw[j].owner, __ATOMIC_ACQUIRE);
+        if (!o) {
+            uint64_t zero = 0;
+            if (!__atomic_compare_exchange_n(&lw[j].owner, &zero, x0, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) o = zero;
+            else o = x0;
+        }
+        if (o != x0) continue;
+        __atomic_fetch_add(off == LW_UPDATE ? &lw[j].update : off == LW_ADD ? &lw[j].add : &lw[j].kill, 1,
+                           __ATOMIC_RELAXED);
+        return;
+    }
+}
+
+static void listw_walk(int j, uint64_t o) {
+    uint64_t link, sent = o + 0xd8;
+    if (!plat_mem_read(o + 0xe0, &link, 8)) { lw[j].torn++; return; }
+    uint32_t n = 0;
+    while (link != sent && n < LW_MAX_NODES) {
+        uint8_t b[0x20];   // node +0x130..+0x150: mask, id, flags, the link (prev, next)
+        if (!link || (link & 7) || !plat_mem_read(link - 0x10, b, sizeof b)) { lw[j].torn++; break; }
+        uint32_t mask;
+        memcpy(&mask, b, 4);
+        lw[j].b0 += b[8] & 1, lw[j].b1 += b[8] >> 1 & 1, lw[j].zero += !mask;
+        memcpy(&link, b + 0x18, 8);
+        n++;
+    }
+    lw[j].walks++, lw[j].walked += n;
+}
+
+static void listw_main(void *arg) {
+    (void)arg;
+    uint64_t last = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), next_log = (last / 600 + 1) * 600;
+    for (;;) {
+        plat_sleep_ns(2000000ull);
+        uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        if (f == last) continue;
+        last = f;
+        for (int j = 0; j < LW_OWNERS; j++) {
+            uint64_t o = __atomic_load_n(&lw[j].owner, __ATOMIC_ACQUIRE);
+            uint32_t cc[2];   // +0xe8 count; capacity at +0x100
+            if (!o) continue;
+            lw[j].frames++;
+            if (!plat_mem_read(o + 0xe8, &cc[0], 4) || !plat_mem_read(o + 0x100, &cc[1], 4)) { lw[j].torn++; continue; }
+            lw[j].count_sum += cc[0], lw[j].cap = cc[1];
+            if (cc[0] > lw[j].count_max) lw[j].count_max = cc[0];
+            if (f % LW_WALK_EVERY == 0) listw_walk(j, o);
+        }
+        if (f < next_log) continue;
+        next_log = (f / 600 + 1) * 600;
+        for (int j = 0; j < LW_OWNERS; j++) {
+            uint64_t o = __atomic_load_n(&lw[j].owner, __ATOMIC_ACQUIRE);
+            if (!o) continue;
+            uint64_t u = __atomic_exchange_n(&lw[j].update, 0, __ATOMIC_RELAXED);
+            uint64_t a = __atomic_exchange_n(&lw[j].add, 0, __ATOMIC_RELAXED);
+            uint64_t k = __atomic_exchange_n(&lw[j].kill, 0, __ATOMIC_RELAXED);
+            double fr = lw[j].frames ? (double)lw[j].frames : 1.0, mean = (double)lw[j].count_sum / fr;
+            if (u || a || k)
+                rt_log("list: frame %llu, owner %#llx: update %.2f/f, add %.2f/f, kill %.2f/f; count mean %.0f max %llu "
+                       "(capacity %llu); in %llu walks of %.0f nodes: kill asked %llu, to free %llu, empty mask %llu, "
+                       "torn %llu; node visits ~%.0f/f (two walks an update, one a kill)",
+                       (unsigned long long)f, (unsigned long long)o, u / fr, a / fr, k / fr, mean,
+                       (unsigned long long)lw[j].count_max, (unsigned long long)lw[j].cap,
+                       (unsigned long long)lw[j].walks, lw[j].walks ? (double)lw[j].walked / (double)lw[j].walks : 0.0,
+                       (unsigned long long)lw[j].b0, (unsigned long long)lw[j].b1, (unsigned long long)lw[j].zero,
+                       (unsigned long long)lw[j].torn, (2.0 * (double)u + (double)k) / fr * mean);
+            else   // no call in a whole window: the owner is gone (a course change), its slot free for the next one
+                __atomic_store_n(&lw[j].owner, 0, __ATOMIC_RELEASE);
+            lw[j].frames = lw[j].count_sum = lw[j].count_max = lw[j].walks = lw[j].walked = 0;
+            lw[j].b0 = lw[j].b1 = lw[j].zero = lw[j].torn = 0;
+        }
+    }
+}
+
+void listwatch_init(void) {
+    const char *on = cfg_get("MKW_LIST_WATCH");
+    if (!on || !*on || *on == '0') return;
+    if (!plat_thread_new(listw_main, NULL, "list watch")) {
+        rt_log("list: MKW_LIST_WATCH: the watch thread did not start");
+        return;
+    }
+    listw_on = 1;
+    rt_fnprof_set(1);
+    rt_log("list: MKW_LIST_WATCH: main+0x154e14's list (calls of main+%#x, +%#x, +%#x by owner; a walk every %d frames)",
+           LW_UPDATE, LW_ADD, LW_KILL, LW_WALK_EVERY);
 }

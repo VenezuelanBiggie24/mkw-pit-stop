@@ -695,14 +695,19 @@ void kern_sched_report(uint64_t frame) {
 // period, those of the threads that hold a virtual core (running game code or a host call it made; -1 while blocked).
 // A function's samples x period is the time its thread spent there or in what it called that is not lifted (host
 // calls, leaf code without an entry hook). It costs one call and a store per guest call while on.
+// The function is the last one ENTERED, not the one running: code after a call returns counts for the callee's last
+// entered function (main+0x154e14's list walk, after nn::os::LockMutex, counts for the mutex's Enter). And a thread in
+// an early-read wait for the GPU (memory_early.c) keeps its virtual core, so the wait counts as running in the function
+// that read: main+0x154e14's 6.3-7 ms a frame were such a wait at its start (task 36, 16/11/2026). Those samples are
+// counted apart too (w), and the report gives them beside each function.
 volatile int g_fn_sampling;
 static uint32_t fns_period_us = 1000;
 #define FNS_N 16384
-static struct { uint64_t addr, n; } fns[FNS_N];
+static struct { uint64_t addr, n, w; } fns[FNS_N];
 // By call site (the return address of the last call): who called the hot function. A stub a wrapper tail-calls
 // (nn::os::YieldThread -> svc 0x0B) keeps its caller's return address, so the site is the game's own code.
 static struct { uint64_t fn, lr, n; } fsites[FNS_N];
-static uint64_t fns_dropped, fns_run, fns_ticks, fns_threads;
+static uint64_t fns_dropped, fns_run, fns_ticks, fns_threads, fns_wait;
 static PlatMutex fns_lock = PLAT_MUTEX_INIT;
 
 void kern_fn_note(uint64_t addr, uint64_t lr) {
@@ -712,10 +717,10 @@ void kern_fn_note(uint64_t addr, uint64_t lr) {
     __atomic_store_n(&t->prof_lr, lr, __ATOMIC_RELAXED);
 }
 
-static void fns_add(uint64_t a) {   // fns_lock held
+static void fns_add(uint64_t a, int waiting) {   // fns_lock held
     for (uint32_t i = (uint32_t)((a >> 2) * 0x9E3779B1u) % FNS_N, k = 0; k < 64; k++, i = (i + 1) % FNS_N) {
-        if (fns[i].addr == a) { fns[i].n++; return; }
-        if (!fns[i].addr) { fns[i].addr = a, fns[i].n = 1; return; }
+        if (fns[i].addr == a) { fns[i].n++, fns[i].w += (uint64_t)waiting; return; }
+        if (!fns[i].addr) { fns[i].addr = a, fns[i].n = 1, fns[i].w = (uint64_t)waiting; return; }
     }
     fns_dropped++;
 }
@@ -739,7 +744,9 @@ static void fn_sampler_main(void *arg) {
             if (t->cur_core < 0) continue;
             uint64_t a = __atomic_load_n(&t->prof_fn, __ATOMIC_RELAXED);
             if (!a) continue;
-            fns_add(a);
+            int w = __atomic_load_n(&t->gpu_wait, __ATOMIC_RELAXED) != 0;
+            fns_add(a, w);
+            fns_wait += (uint64_t)w;
             fsites_add(a, __atomic_load_n(&t->prof_lr, __ATOMIC_RELAXED));
             fns_run++;
         }
@@ -765,15 +772,15 @@ int kern_fn_profile_start(uint32_t period_us) {
 
 void kern_fn_profile_report(uint64_t frame, uint64_t frames) {
     enum { TOP = 30 };
-    struct { uint64_t addr, n; } top[TOP] = {{0}};
+    struct { uint64_t addr, n, w; } top[TOP] = {{0}};
     plat_mutex_lock(&fns_lock);
-    uint64_t run = fns_run, ticks = fns_ticks, dropped = fns_dropped;
+    uint64_t run = fns_run, ticks = fns_ticks, dropped = fns_dropped, wait = fns_wait;
     for (int i = 0; i < FNS_N; i++) {
         if (!fns[i].n) continue;
         for (int j = 0; j < TOP; j++)
             if (fns[i].n > top[j].n) {
                 memmove(top + j + 1, top + j, (size_t)(TOP - 1 - j) * sizeof *top);
-                top[j].addr = fns[i].addr, top[j].n = fns[i].n;
+                top[j].addr = fns[i].addr, top[j].n = fns[i].n, top[j].w = fns[i].w;
                 break;
             }
     }
@@ -790,18 +797,19 @@ void kern_fn_profile_report(uint64_t frame, uint64_t frames) {
     }
     memset(fns, 0, sizeof fns);
     memset(fsites, 0, sizeof fsites);
-    fns_run = fns_ticks = fns_dropped = fns_threads = 0;
+    fns_run = fns_ticks = fns_dropped = fns_threads = fns_wait = 0;
     plat_mutex_unlock(&fns_lock);
     if (!frames || !ticks) return;
     double per = (double)fns_period_us / 1e3 / (double)frames;   // ms a frame per sample
     rt_log("prof: frame %llu: game threads running %.2f ms/frame (%llu samples in %llu ticks of %u us, %llu not "
-           "counted: table full), by last lifted function:",
+           "counted: table full; %.2f ms/frame of it waiting for the GPU in an early read), by last lifted function:",
            (unsigned long long)frame, run * per, (unsigned long long)run, (unsigned long long)ticks, fns_period_us,
-           (unsigned long long)dropped);
+           (unsigned long long)dropped, wait * per);
     for (int j = 0; j < TOP && top[j].n; j++) {
-        char d[160];
+        char d[160], w[64] = "";
         ldr_describe(top[j].addr, d, sizeof d);
-        rt_log("prof:   f%-2d %5.1f%% %6.2f ms/f  %s", j + 1, 100.0 * top[j].n / run, top[j].n * per, d);
+        if (top[j].w) snprintf(w, sizeof w, "  (%.2f ms/f of it waiting for the GPU)", top[j].w * per);
+        rt_log("prof:   f%-2d %5.1f%% %6.2f ms/f  %s%s", j + 1, 100.0 * top[j].n / run, top[j].n * per, d, w);
     }
     rt_log("prof: frame %llu: by call site (function <- the return address of its call):", (unsigned long long)frame);
     for (int j = 0; j < TOPS && tops[j].n; j++) {
