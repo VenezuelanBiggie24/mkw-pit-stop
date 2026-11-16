@@ -935,6 +935,11 @@ static int test_astc_copy(pool_t *tp) {
     uint8_t magenta[4] = {0xFF, 0x00, 0xFF, 0xFF};
     uint32_t old_bad = rgba_misses(px, 32 * 32, want), old_magenta = 32 * 32 - rgba_misses(px, 32 * 32, magenta);
     free(px);
+    // the census of zero blocks (task G): a source never written logs its line ("ASTC copy zero blocks"), the copy made
+    tex_t zs = make_tex(tp, 0x40000, 0x79, 64, 64, 1, 25);
+    memset(zs.mem, 0, zs.L.size);
+    how = vk_texture_astc_copy(&zs, 0, 0, 1, 0, 0, 32, 32, di, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0, 0, 0);
+    GCHECK(how == VK_TEX_COPY_BATCH, "ASTC copy of a zero source: %d", how);
     // 2. the source's content on the GPU
     GCHECK(vk_texture_get(&src), "ASTC source image");
     vk_texture_gpu_written(&src);
@@ -942,7 +947,7 @@ static int test_astc_copy(pool_t *tp) {
     GCHECK(!how, "an ASTC copy decoded the storage of a source the GPU wrote");
     vk_upload_flush(1);
     vk_texture_release(&src), vk_texture_release(&dst), vk_texture_release(&old);
-    g_gpu_checks += 4;
+    g_gpu_checks += 5;
     printf("probe-vkmem: ASTC copy: decoded into a mirrored destination rewritten since its check, the region kept (the "
            "old order, make_fresh after the copy: %u of 1024 texels lost, %u magenta); a GPU-written source refused\n",
            old_bad, old_magenta);

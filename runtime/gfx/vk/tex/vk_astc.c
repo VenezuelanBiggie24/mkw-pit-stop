@@ -260,6 +260,12 @@ static uint32_t err_slot(const VkAstcRegion *rg, int n, uint32_t bw, uint32_t bh
     return s;
 }
 static uint64_t n_dispatch, n_texels;
+// vk_texture_astc_copy's census of zero blocks in the staged source (any thread; summed in the "so far" line)
+static uint64_t zero_copies, zero_blocks;
+void vk_astc_zero_note(uint64_t blocks) {
+    __atomic_add_fetch(&zero_copies, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&zero_blocks, blocks, __ATOMIC_RELAXED);
+}
 
 // MKW_ASTC_TIME=1 (or vk_astc_time_enable): timestamps around the dispatches of each scratch chunk (the decode
 // alone) and around a whole vk_astc_record call (one texture upload or WriteTexels: copies and barriers included),
@@ -912,8 +918,11 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
         plat_mutex_unlock(&t_lock);
     }
     if ((n_dispatch + (uint64_t)n0) / 1024 != n_dispatch / 1024 || !n_dispatch) {
-        rt_log("vk: ASTC: %llu regions, %.1f M texels decoded on the GPU so far; scratch allocations %lld, %.1f ms",
-               (unsigned long long)(n_dispatch + (uint64_t)n0), (double)n_texels / 1e6, (long long)alloc_n, alloc_ns / 1e6);
+        rt_log("vk: ASTC: %llu regions, %.1f M texels decoded on the GPU so far; scratch allocations %lld, %.1f ms; copies "
+               "from a source region over 1%% zero blocks %llu (%llu blocks)",
+               (unsigned long long)(n_dispatch + (uint64_t)n0), (double)n_texels / 1e6, (long long)alloc_n, alloc_ns / 1e6,
+               (unsigned long long)__atomic_load_n(&zero_copies, __ATOMIC_RELAXED),
+               (unsigned long long)__atomic_load_n(&zero_blocks, __ATOMIC_RELAXED));
         vk_astc_time_summary();
     }
     n_dispatch += (uint64_t)n0;

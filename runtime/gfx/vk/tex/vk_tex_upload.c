@@ -612,6 +612,38 @@ static int cpu_content(const tex_t *t, uint32_t *uploads) {
     return 1;
 }
 
+// The zero-block census of an ASTC copy (task G, a measurement for a console A/B with MKW_QUEUE_WAITS=1; nothing is
+// skipped or deferred on it):
+// an ASTC copy whose staged source region holds over 1% all-zero 16-byte blocks, which decode as the error colour. The
+// PS5's logs had the 8192x8192 ASTC 8x8 terrain staging texture decode as all error blocks through these copies at
+// loading (frames ~70-80, ~300 copies, every layer's level chain), while the same storage holds valid blocks later. The
+// hypothesis: on the console the GPU waits on an event the CPU signals once it wrote the staging texture
+// (nvnCommandBufferWaitEvent), and the replay, in submit order, reads it before. The line gives the replay's submission
+// against the game's newest and whether that submission had a wait its submit order did not meet (nvn_qorder.c). The
+// first 64 copies a line each, then the count in vk_astc.c's "so far" line. A sample of every 64th block decides
+// whether to count at all: nothing more is read when it finds none.
+static void zero_census(const tex_t *src, const uint8_t *stg, size_t bytes, uint32_t level, uint32_t layer,
+                        uint32_t layers, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    const uint64_t *q = (const uint64_t *)(const void *)stg;
+    size_t n = bytes / 16, i = 0;
+    while (i < n && (q[2 * i] | q[2 * i + 1])) i += 64;
+    if (i >= n) return;
+    uint64_t zero = 0;
+    for (size_t k = 0; k < n; k++) zero += !(q[2 * k] | q[2 * k + 1]);
+    if (zero * 100 <= (uint64_t)n) return;
+    vk_astc_zero_note(zero);
+    static volatile int32_t n_logged;
+    if (plat_inc32(&n_logged) > 64) return;
+    uint64_t sub = __atomic_load_n(&vk_replay_submit, __ATOMIC_RELAXED), game = nvn_submit_count();
+    int unmet = nvn_qorder_unmet(sub);
+    rt_log("vk: ASTC copy zero blocks at frame %llu: source %#llx %ux%u fmt %#x level %u layers %u+%u region %u,%u "
+           "%ux%u: %llu of %zu blocks zero (%.1f%%); replay submit %llu, game %llu (%lld ahead), wait not met in submit "
+           "order: %s", (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED),
+           (unsigned long long)(uintptr_t)src->mem, src->d.width, src->d.height, src->d.format, level, layer, layers, x,
+           y, w, h, (unsigned long long)zero, n, 100.0 * (double)zero / (double)n, (unsigned long long)sub,
+           (unsigned long long)game, (long long)(game - sub), unmet > 0 ? "yes" : unmet == 0 ? "no" : "unknown");
+}
+
 typedef struct { VkBuffer b; VmaAllocation a; } InlineStg;
 static void free_inline_stg(void *arg) {   // completion thread, once the submission that read it is done
     InlineStg *t = arg;
@@ -696,6 +728,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
         ar[l] = (VkAstcRegion){.src = l * per, .w = w, .h = h, .slices = 1, .level = dlevel, .layer = dlayer + l,
                                .offset = {dx, dy, 0}};
     }
+    if (ok) zero_census(src, stg, per * layers, level, layer, layers, x, y, w, h);
     VkBuffer rbuf = VK_NULL_HANDLE;
     VmaAllocation ralloc = NULL;
     uint8_t *rmap = NULL;

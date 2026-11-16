@@ -368,6 +368,7 @@ void vk_astc_time_enable(int on);
 int vk_astc_time_get(uint32_t bw, uint32_t bh, uint64_t *texels, uint64_t *calls, double *us);   // totals so far
 void vk_astc_time_summary(void);        // logs the totals
 void vk_astc_bands(int on);              // --probe-astc: 0 records each region whole, as before the bands (default 1)
+void vk_astc_zero_note(uint64_t blocks);   // an ASTC copy whose source region was over 1% zero blocks (vk_tex_upload.c)
 void vk_astc_release(void);             // vk_device.c, before the device goes: frees the decoder's objects
 // ---- precomputed BC7 of ASTC textures (vk_texpre.c; MKW_TEXPRE, MKW_TEXPRE_RECORD)
 typedef struct { uint32_t w, h, slices, level, layer; } VkTexpreRegion;   // one region of an upload, in upload order

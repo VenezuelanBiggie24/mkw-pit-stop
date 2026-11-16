@@ -121,6 +121,9 @@ extern int nvn_sub_ndst;
 extern volatile uint32_t *nvn_sub_event_val[64];
 int nvn_report_at_submit(void);   // MKW_REPORT_AT_SUBMIT (nvn_api_cmd.c)   // the submission being prepared (nvn_api_cmd.c)
 uint64_t nvn_submit_count(void);                           // QueueSubmitCommands calls so far
+// 1: submission number sub had an event wait its submit order does not meet (nvn_qorder.c, held or counted by the
+// census); 0 no; -1 too old to know
+int nvn_qorder_unmet(uint64_t sub);
 const char *nvn_op_name(uint32_t op);                      // "DRAW_IDX", ...; "?" past OP_COUNT_
 // MemoryPoolInvalidateMappedRange: the CPU is about to read pool storage the GPU wrote. Weak no-op in nvn_ext.c; a back
 // end that renders into host-side copies defines it and writes them back.
