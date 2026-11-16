@@ -194,19 +194,22 @@ int vk_texture_capture_state(const tex_t *t, uint32_t recent) {
     return r;
 }
 
-void vk_texture_gpu_written(const tex_t *t) {
+// fresh: bring the entry up to date with its storage first (make_fresh), as a partial render keeps what the storage held
+// before. ret: the caller's return address, for MKW_TRACE_ADDR.
+static void gpu_written(const tex_t *t, int fresh, uintptr_t ret) {
     if (!t || !t->mem) return;
     if (tracing((uintptr_t)t->mem)) {   // with the replay function that wrote it (copies, clears, render targets)
         // the caller as an offset in the executable (addr2line -f -e build/mkw)
-        uintptr_t off = (uintptr_t)__builtin_return_address(0) - plat_exe_base();
-        rt_log("vk: texture %#llx %ux%ux%u fmt %#x written on the GPU, caller build/mkw+%#llx", (unsigned long long)trace_addr,
-               t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long long)off);
+        uintptr_t off = ret - plat_exe_base();
+        rt_log("vk: texture %#llx %ux%ux%u fmt %#x written on the GPU%s, caller build/mkw+%#llx",
+               (unsigned long long)trace_addr, t->d.width, t->d.height, t->d.depth, t->d.format,
+               fresh ? "" : " (copy recorded after its freshness check)", (unsigned long long)off);
     }
     vk_exec_frame_written(t);
     lock();
     Tex *e = entry_of(t);
     if (e) {
-        make_fresh(e);   // a partial render keeps what the storage held before
+        if (fresh) make_fresh(e);
         e->pub.gpu_owned = 1;
         uint64_t f = vk_exec_recording_fence();
         if (f > e->wr_fence) e->wr_fence = f;
@@ -221,6 +224,17 @@ void vk_texture_gpu_written(const tex_t *t) {
     }
     unlock();
 }
+
+// A write recorded into the replay's command buffer: make_fresh's upload, if any, goes into the upload batch, which runs
+// before that command buffer, so the storage's bytes land first and the write over them.
+void vk_texture_gpu_written(const tex_t *t) { gpu_written(t, 1, (uintptr_t)__builtin_return_address(0)); }
+
+// A write recorded into the upload batch (vk_texture_astc_copy's fallback outside a replay, vk_texture_region_copy):
+// an upload from make_fresh now would go into the same batch after the copy and put the storage's bytes over it (a
+// mirrored destination whose pages the game wrote since its last check, or whose upload was deferred; zero storage then
+// decodes as the error colour). The caller looked the destination up with vk_texture_get, which made it fresh before
+// the copy was recorded.
+void vk_texture_gpu_copied(const tex_t *t) { gpu_written(t, 0, (uintptr_t)__builtin_return_address(0)); }
 
 void vk_texture_release(const tex_t *t) {
     if (!t || !t->mem) return;

@@ -814,6 +814,92 @@ static int test_pressure(pool_t *tpool) {
     return 0;
 }
 
+// RGBA8 texels of an image region (level 0, one layer), read back through the upload batch.
+static void image_rgba(VkImage img, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t *out) {
+    VkBuffer rb;
+    VmaAllocation ra;
+    uint8_t *m = vk_staging((VkDeviceSize)w * h * 4, &rb, &ra);
+    VkCommandBuffer cb = vk_upload_begin();
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+    VkBufferImageCopy cp = {.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageOffset = {(int32_t)x, (int32_t)y, 0},
+                            .imageExtent = {w, h, 1}};
+    vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, rb, 1, &cp);
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, mb.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+    vkCmdPipelineBarrier2(cb, &di);
+    vk_upload_end();
+    vk_upload_flush(1);
+    vmaInvalidateAllocation(vk_ctx()->vma, ra, 0, VK_WHOLE_SIZE);
+    memcpy(out, m, (size_t)w * h * 4);
+    vmaDestroyBuffer(vk_ctx()->vma, rb, ra);
+}
+
+// Texels of an RGBA8 region that are not want (count).
+static uint32_t rgba_misses(const uint8_t *px, uint32_t n, const uint8_t want[4]) {
+    uint32_t bad = 0;
+    for (uint32_t i = 0; i < n; i++) bad += memcmp(px + 4 * i, want, 4) != 0;
+    return bad;
+}
+
+// ASTC copies decoded from the source's storage (vk_texture_astc_copy), outside a replay: into the upload batch.
+// 1. A mirrored ASTC destination (kept RGBA8, 64x64) with zero storage, rewritten by the CPU after its last check, as
+//    the game's thread does ahead of the replay: the copied region must hold the source's colour. The destination's own
+//    re-upload, recorded after the copy in the same batch by vk_texture_gpu_written's make_fresh, put its zero blocks
+//    (the error colour, magenta) over it; vk_texture_gpu_copied makes none. The old order is run on a twin and reported.
+// 2. A source whose content the GPU wrote: its storage is not its content, and the copy is refused (the replay copies the
+//    images instead).
+static int test_astc_copy(pool_t *tp) {
+    TexVkFormat f;
+    if (!tex_vk_format(0x79, &f) || !f.astc_bw || !vk_astc_gpu()) {
+        printf("probe-vkmem: ASTC copy: ASTC is not decoded on the GPU here, skipped\n");
+        return 0;
+    }
+    tex_t src = make_tex(tp, 0, 0x79, 64, 64, 1, 20), dst = make_tex(tp, 0x10000, 0x79, 64, 64, 1, 21),
+          old = make_tex(tp, 0x20000, 0x79, 64, 64, 1, 22);
+    uint32_t rb, rows, sl, bpb;
+    uint64_t base;
+    unsigned th, td;
+    GCHECK(!nvn_deswizzle_geom(&src.d, 0, 0, &rb, &rows, &sl, &base, &th, &td, &bpb) && bpb == 16, "ASTC 4x4 geometry");
+    uint8_t *lin = malloc((size_t)rb * rows), want[4] = {0x40, 0x80, 0xC0, 0xFF};
+    for (size_t k = 0; k < (size_t)rb * rows / 16; k++)
+        void_block(lin + 16 * k, (uint16_t)(want[0] << 8), (uint16_t)(want[1] << 8), (uint16_t)(want[2] << 8), 0xFFFF, 0);
+    ref_swizzle(lin, src.mem + base, rb, rows, 1, th, td);
+    free(lin);
+    memset(dst.mem, 0, dst.L.size), memset(old.mem, 0, old.L.size);
+    const VkTexImage *di = vk_texture_get(&dst), *oi = vk_texture_get(&old);
+    GCHECK(di && oi && di->mirrored && di->format == VK_FORMAT_R8G8B8A8_UNORM, "ASTC destination images (RGBA8, mirrored)");
+    memset(dst.mem, 0, dst.L.size), memset(old.mem, 0, old.L.size);   // the CPU writes them after their check
+    int how = vk_texture_astc_copy(&src, 0, 0, 1, 0, 0, 32, 32, di, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 16, 16, 0);
+    GCHECK(how == VK_TEX_COPY_BATCH, "ASTC copy outside a replay: %d (want the upload batch)", how);
+    vk_texture_gpu_copied(&dst);
+    how = vk_texture_astc_copy(&src, 0, 0, 1, 0, 0, 32, 32, oi, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 16, 16, 0);
+    vk_texture_gpu_written(&old);
+    uint8_t *px = malloc(32 * 32 * 4);
+    image_rgba(di->image, 16, 16, 32, 32, px);
+    uint32_t bad = rgba_misses(px, 32 * 32, want);
+    GCHECK(!bad, "ASTC copy into a mirrored destination: %u of 1024 texels not the source's colour (first %02x%02x%02x%02x)",
+           bad, px[0], px[1], px[2], px[3]);
+    image_rgba(oi->image, 16, 16, 32, 32, px);
+    uint8_t magenta[4] = {0xFF, 0x00, 0xFF, 0xFF};
+    uint32_t old_bad = rgba_misses(px, 32 * 32, want), old_magenta = 32 * 32 - rgba_misses(px, 32 * 32, magenta);
+    free(px);
+    // 2. the source's content on the GPU
+    GCHECK(vk_texture_get(&src), "ASTC source image");
+    vk_texture_gpu_written(&src);
+    how = vk_texture_astc_copy(&src, 0, 0, 1, 0, 0, 32, 32, di, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 16, 16, 0);
+    GCHECK(!how, "an ASTC copy decoded the storage of a source the GPU wrote");
+    vk_upload_flush(1);
+    vk_texture_release(&src), vk_texture_release(&dst), vk_texture_release(&old);
+    g_gpu_checks += 4;
+    printf("probe-vkmem: ASTC copy: decoded into a mirrored destination rewritten since its check, the region kept (the "
+           "old order, make_fresh after the copy: %u of 1024 texels lost, %u magenta); a GPU-written source refused\n",
+           old_bad, old_magenta);
+    return 0;
+}
+
 static int test_gpu(void) {
     uint64_t heap = 0;
     GCHECK(mem_set_heap_size(16ull << 20, &heap) == 0 && heap, "SetHeapSize 16 MiB");
@@ -828,6 +914,10 @@ static int test_gpu(void) {
     if (vk_mem_shadow_on() && test_merge(&pool)) return 1;
     GCHECK(vk_pool_init(&tpool), "vk_pool_init of the texture pool");
     if (test_textures(&tpool, &phys) || test_region_copy(&tpool) || test_pressure(&tpool)) return 1;
+    pool_t tpool2 = {.magic = NVN_POOL_MAGIC, .flags = 0x22, .mem = h + 0xA00000, .size = 0x100000, .game_mem = h + 0xA00000};
+    GCHECK(vk_pool_init(&tpool2), "vk_pool_init of the second texture pool");
+    if (test_astc_copy(&tpool2)) return 1;
+    vk_pool_fini(&tpool2);
     const char *cap = cfg_get("MKW_SHADOW_SUBMIT");   // a measurement, off by default
     if (vk_mem_shadow_on() && cap && !strcmp(cap, "1") && test_capture(&pool)) return 1;
     VkMemStats st;

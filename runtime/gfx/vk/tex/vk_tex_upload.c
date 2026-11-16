@@ -587,27 +587,95 @@ counted:;
     return 1;
 }
 
+// A mirrored texture whose storage holds its content: no entry at its address holds GPU-written content (gpu_owned,
+// gpu_dirty, as alias_has_gpu_content), so a full upload would make the image exactly the storage's bytes. *uploads:
+// the uploads of t's own entry so far (0 without one). Texture lock held.
+static int cpu_content(const tex_t *t, uint32_t *uploads) {
+    *uploads = 0;
+    if (!tex_mirrored(t)) return 0;
+    TexKey k;
+    make_key(t, &k);
+    const Tex *own = nvn_hm_get(&by_key, &k);
+    if (own) *uploads = own->n_up;
+    for (const Tex *p = entries_at(k.addr); p; p = p->next_at)
+        if (!p->released && (p->pub.gpu_owned || p->gpu_dirty)) return 0;
+    return 1;
+}
+
+typedef struct { VkBuffer b; VmaAllocation a; } InlineStg;
+static void free_inline_stg(void *arg) {   // completion thread, once the submission that read it is done
+    InlineStg *t = arg;
+    vmaDestroyBuffer(vk_ctx()->vma, t->b, t->a);
+    free(t);
+}
+
 // A texture copy between ASTC textures that went to different Vulkan formats (one kept as RGBA8 under 256x256 into one
 // re-encoded as BC7, BC1 against BC7): the source's own ASTC blocks, read from its storage, decoded and encoded
 // straight into dst as bc7 says (TexVkFormat.astc_bc7: 0 RGBA8, 1 BC7, 2 BC1). MKW fills the small levels (5-11) of its sparse
 // terrain arrays this way, from small ASTC textures; skipped, those levels read zero and the race's bushes and cacti,
-// which take their colour from level 11, came out black (m16, 01/11/2026). 0 when it cannot (the caller skips).
+// which take their colour from level 11, came out black (m16, 01/11/2026). 0 when it cannot (the caller copies the
+// images, or skips).
+// Only a source whose storage is its content (cpu_content, as vk_texture_region_copy): one the GPU wrote (a copy into
+// it, a sparse array, a GPU-only pool) has stale or no blocks in its storage, which decoded as old texels or the error
+// colour. Under the texture lock, which WriteTexels into the storage take.
+// A BC destination takes whole 4x4 blocks: dx and dy multiples of 4, and w and h too unless the region reaches the
+// level's edge; a region that ends inside a block would write the whole block, clamped texels over its neighbours.
+// Recorded in the replay's command buffer at the copy's place (vk_exec_inline_begin), not in the upload batch: the
+// batch runs before the whole part being recorded, so a decode there went ahead of the commands recorded before it (a
+// copy into the same destination through vkCmdCopyImage, a draw that sampled it) and was undone by an earlier copy or
+// seen by an earlier draw. The decoder's scratch is shared with the upload batches under the upload lock (vk_astc.c,
+// FIXED_SCRATCH: one queue, a barrier at each use); the staging is this call's own, freed when the submission is done.
+// Outside a replay (probes), and for MKW_ASTC_PROBE_LEVEL's readback, into the upload batch as before.
 int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers, uint32_t x, uint32_t y,
-                         uint32_t w, uint32_t h, VkImage dst, VkImageAspectFlags aspect, uint32_t dlevel, uint32_t dlayer,
-                         int32_t dx, int32_t dy, int bc7) {
+                         uint32_t w, uint32_t h, const VkTexImage *dsti, VkImageAspectFlags aspect, uint32_t dlevel,
+                         uint32_t dlayer, int32_t dx, int32_t dy, int bc7) {
     TexVkFormat f;
-    if (!tex_vk_format(src->d.format, &f) || !f.astc_bw || !src->mem || x % f.astc_bw || y % f.astc_bh ||
-        (bc7 && (dx % 4 || dy % 4)))   // a BC destination: whole blocks
+    if (!dsti || !tex_vk_format(src->d.format, &f) || !f.astc_bw || !src->mem || x % f.astc_bw || y % f.astc_bh)
         return 0;
+    if (bc7) {   // a BC destination: whole blocks
+        uint32_t lw = mip(dsti->width, dlevel), lh = mip(dsti->height, dlevel);
+        if (dx < 0 || dy < 0 || dx % 4 || dy % 4 || (w % 4 && (uint32_t)dx + w != lw) || (h % 4 && (uint32_t)dy + h != lh))
+            return 0;
+    }
+    VkImage dst = dsti->image;
     uint32_t rb = (w + f.astc_bw - 1) / f.astc_bw * 16, rows = (h + f.astc_bh - 1) / f.astc_bh;
     size_t per = (size_t)rb * rows;
     VkAstcRegion *ar = calloc(layers, sizeof *ar);
     if (!ar) return 0;
-    vk_upload_flush_over(64ull << 20);
+    lock();
+    uint32_t ups;
+    if (!cpu_content(src, &ups)) {
+        static volatile int32_t n_gpu;
+        log_limited(&n_gpu, "ASTC copy out of texture %#llx (fmt %#x %ux%u): its content is on the GPU, not in its storage: "
+                    "not decoded from the storage (the images are copied when their formats match)", (unsigned long long)(uintptr_t)src->mem, src->d.format,
+                    src->d.width, src->d.height);
+        unlock();
+        free(ar);
+        return 0;
+    }
+    // MKW_ASTC_PROBE_LEVEL=<n> (diagnosis): the first copies into level n read back the decoded texels and log them with
+    // the source's first block (the bushes' level 11 of the terrain arrays sampled black, 01/11/2026).
+    static int probe = -2;
+    static volatile int32_t n_probed;
+    if (probe == -2) probe = cfg_get("MKW_ASTC_PROBE_LEVEL") ? atoi(cfg_get("MKW_ASTC_PROBE_LEVEL")) : -1;
+    int want_probe = probe == (int)dlevel && layers == 1 && w * h <= 64 && plat_inc32(&n_probed) <= 6;
+    int reopen = 0;
+    VkCommandBuffer icb = want_probe ? VK_NULL_HANDLE : vk_exec_inline_begin(&reopen);
     VkBuffer sb;
+    VmaAllocation sa = NULL;
     uint8_t *stg;
-    VkCommandBuffer cb = vk_upload_begin_staging(per * layers, &sb, (void **)&stg);
-    if (!cb) {   // no staging memory: the caller skips the copy (logged by vk_upload_begin_staging)
+    VkCommandBuffer cb;
+    if (icb) {
+        cb = icb;
+        stg = vk_staging_try(per * layers, &sb, &sa);
+    } else {
+        vk_upload_flush_over(64ull << 20);
+        cb = vk_upload_begin_staging(per * layers, &sb, (void **)&stg);
+        if (!cb) stg = NULL;
+    }
+    if (!stg) {   // no staging memory: the caller copies the images or skips (logged by the staging)
+        if (icb) vk_exec_inline_end(reopen);
+        unlock();
         free(ar);
         return 0;
     }
@@ -618,26 +686,43 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
         ar[l] = (VkAstcRegion){.src = l * per, .w = w, .h = h, .slices = 1, .level = dlevel, .layer = dlayer + l,
                                .offset = {dx, dy, 0}};
     }
-    // MKW_ASTC_PROBE_LEVEL=<n> (diagnosis): the first copies into level n read back the decoded texels and log them with
-    // the source's first block (the bushes' level 11 of the terrain arrays sampled black, 01/11/2026).
-    static int probe = -2;
-    static volatile int32_t n_probed;
-    if (probe == -2) probe = cfg_get("MKW_ASTC_PROBE_LEVEL") ? atoi(cfg_get("MKW_ASTC_PROBE_LEVEL")) : -1;
     VkBuffer rbuf = VK_NULL_HANDLE;
     VmaAllocation ralloc = NULL;
     uint8_t *rmap = NULL;
-    if (ok && probe == (int)dlevel && layers == 1 && w * h <= 64 && plat_inc32(&n_probed) <= 6)
-        rmap = vk_staging((VkDeviceSize)w * h * 4, &rbuf, &ralloc);
-    if (ok) {
-        barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-        vk_astc_tag((uintptr_t)src->mem, 2);
-        ok = vk_astc_record(cb, sb, per * layers, ar, (int)layers, f.astc_bw, f.astc_bh, f.astc_srgb, dst, aspect, bc7,
-                            rbuf);
-        barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
-    }
+    if (ok && want_probe) rmap = vk_staging((VkDeviceSize)w * h * 4, &rbuf, &ralloc);
     uint8_t block[16];
     memcpy(block, stg, 16);
-    vk_upload_end();
+    if (icb) {
+        vmaFlushAllocation(vk_ctx()->vma, sa, 0, VK_WHOLE_SIZE);
+        uint64_t fence = vk_exec_recording_fence();
+        if (ok) {
+            // a scratch buffer of its own (over FIXED_SCRATCH) waits for this submission, not the upload batches
+            uint64_t prev = vk_mem_defer_fence(fence);
+            vk_upload_lock();
+            barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            vk_astc_tag((uintptr_t)src->mem, 2);
+            ok = vk_astc_record(cb, sb, per * layers, ar, (int)layers, f.astc_bw, f.astc_bh, f.astc_srgb, dst, aspect,
+                                bc7, VK_NULL_HANDLE);
+            barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+            vk_upload_unlock();
+            vk_mem_defer_fence(prev);
+        }
+        vk_exec_inline_end_bound(reopen);
+        InlineStg *t = malloc(sizeof *t);
+        if (!t) rt_fatal("vk: out of memory (ASTC copy staging)");
+        *t = (InlineStg){sb, sa};
+        vk_completion_add(fence, free_inline_stg, t);
+    } else {
+        if (ok) {
+            barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            vk_astc_tag((uintptr_t)src->mem, 2);
+            ok = vk_astc_record(cb, sb, per * layers, ar, (int)layers, f.astc_bw, f.astc_bh, f.astc_srgb, dst, aspect,
+                                bc7, rbuf);
+            barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+        }
+        vk_upload_end();
+    }
+    unlock();
     if (rmap) {
         vk_upload_flush(1);
         vmaInvalidateAllocation(vk_ctx()->vma, ralloc, 0, VK_WHOLE_SIZE);
@@ -653,24 +738,10 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
     free(ar);
     static volatile int32_t n_logged;
     if (plat_inc32(&n_logged) <= 8)
-        rt_log("vk: ASTC %ux%u (fmt %#x) level %u layer %u x%u -> BC7 level %u layer %u at %d,%d: %s", w, h, src->d.format,
-               level, layer, layers, dlevel, dlayer, dx, dy, ok ? "decoded" : "failed");
-    return ok;
-}
-
-// A mirrored texture whose storage holds its content: no entry at its address holds GPU-written content (gpu_owned,
-// gpu_dirty, as alias_has_gpu_content), so a full upload would make the image exactly the storage's bytes. *uploads:
-// the uploads of t's own entry so far (0 without one). Texture lock held.
-static int cpu_content(const tex_t *t, uint32_t *uploads) {
-    *uploads = 0;
-    if (!tex_mirrored(t)) return 0;
-    TexKey k;
-    make_key(t, &k);
-    const Tex *own = nvn_hm_get(&by_key, &k);
-    if (own) *uploads = own->n_up;
-    for (const Tex *p = entries_at(k.addr); p; p = p->next_at)
-        if (!p->released && (p->pub.gpu_owned || p->gpu_dirty)) return 0;
-    return 1;
+        rt_log("vk: ASTC %ux%u (fmt %#x) level %u layer %u x%u -> %s level %u layer %u at %d,%d: %s%s", w, h,
+               src->d.format, level, layer, layers, bc7 == 2 ? "BC1" : bc7 ? "BC7" : "RGBA8", dlevel, dlayer, dx, dy,
+               ok ? "decoded" : "failed", icb ? " (in the replay's command buffer)" : " (upload batch)");
+    return !ok ? 0 : icb ? VK_TEX_COPY_INLINE : VK_TEX_COPY_BATCH;
 }
 
 int vk_texture_cpu_source(const tex_t *t, uint32_t *uploads) {

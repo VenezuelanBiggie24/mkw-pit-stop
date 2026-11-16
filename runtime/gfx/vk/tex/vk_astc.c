@@ -6,7 +6,8 @@
 // device cannot. cpu: astc_decode_ldr_mt on the uploading thread, as before. check: gpu, and every upload is also
 // decoded on the CPU and compared (waits for the GPU; for testing only).
 //
-// The decode is recorded into the upload batch (vk_memory.c) in chunks of at most 32 MiB of texels (a larger region in
+// The decode is recorded into the upload batch (vk_memory.c), or a replay part's command buffer at the place of the copy
+// it stands for (vk_texture_astc_copy), in chunks of at most 32 MiB of texels (a larger region in
 // bands of block rows, split_regions): a chunk's raw blocks go from staging to a device-local scratch buffer, its
 // dispatches write RGBA8 texels behind them, and a buffer-to-image copy puts them into the image; the next chunk reuses
 // the scratch after a barrier. The scratch is one kept buffer (FIXED_SCRATCH); only a call with a readback takes one of
@@ -577,9 +578,10 @@ static VmaAllocator svma(void) {
 // One scratch buffer, made once and kept, serves every call whose chunk fits (blocks + texels + BC of a CHUNK_OUT
 // chunk fit with room): one buffer per call cost 4.9 ms each in the frame after «VALE», 1 719 of its 2 137 ms on the
 // Radeon 660M (vale1, 06/11/2026: 351 allocations), and a buffer per upload batch was worse (wastc4: still new memory,
-// held until the batch ends). Every caller records into the upload batch under its lock (vk_upload_begin) and the
-// batches run in order on the graphics queue, so a barrier at the start of each use is enough, as between the chunks
-// of one call. Regions over a chunk are cut into bands (split_regions), so every call fits; only MKW_ASTC=check and the
+// held until the batch ends). Every caller records under the upload lock (vk_upload_begin, or vk_upload_lock for a
+// replay part's command buffer), and the upload batches and the parts all go to the one graphics queue: a barrier at
+// the start of each use waits for every earlier use in submission order, whichever command buffer it was in, as between
+// the chunks of one call. Regions over a chunk are cut into bands (split_regions), so every call fits; only MKW_ASTC=check and the
 // probes (a readback) take a buffer of their own, freed with the batch.
 #define FIXED_SCRATCH (64ull << 20)
 static VkBuffer fx_buf;
@@ -770,12 +772,19 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     G.tab_uploaded = 1;
     VkBuffer tab = G.tab;
     plat_mutex_unlock(&g_lock);
-    if (need_tab) {   // first use on this device: the tables go up in this batch, before the dispatch
+    if (need_tab) {   // first use on this device: the tables go up in the upload batch, before the dispatch
+        // (the batch is cb itself for a caller recording into it; a replay part follows the batch in queue order, and
+        // the staging, held by the batch, is freed once the batch is done)
+        VkCommandBuffer tcb = vk_upload_begin();
         VkBuffer tb;
         uint8_t *p = vk_staging(TAB_SIZE, &tb, NULL);
         fill_tables(p);
         VkBufferCopy cp = {0, 0, TAB_SIZE};
-        vkCmdCopyBuffer(cb, tb, tab, 1, &cp);
+        vkCmdCopyBuffer(tcb, tb, tab, 1, &cp);
+        if (tcb != cb)
+            mem_barrier(tcb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                        VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
+        vk_upload_end();
     }
     int timed = 0, whole = -1;
     uint32_t id = 0;

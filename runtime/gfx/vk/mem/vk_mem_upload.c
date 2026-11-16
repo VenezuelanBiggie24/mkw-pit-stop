@@ -188,6 +188,12 @@ void vk_upload_end(void) {
     cmd_give();
 }
 
+void vk_upload_lock(void) {
+    plat_once(&cmd_once, cmd_init, NULL);
+    cmd_take();
+}
+void vk_upload_unlock(void) { cmd_give(); }
+
 void vk_upload_work(uint64_t texels) {
     cmd_take();
     if (open_active) open_b.texels += texels;
