@@ -623,14 +623,38 @@ static int cpu_content(const tex_t *t, uint32_t *uploads) {
 // hypothesis: on the console the GPU waits on an event the CPU signals once it wrote the staging texture
 // (nvnCommandBufferWaitEvent), and the replay, in submit order, reads it before. The line gives the replay's submission
 // against the game's newest and whether that submission had a wait its submit order did not meet (nvn_qorder.c). The
-// first 64 copies a line each, then the count in vk_astc.c's "so far" line. A sample of every 64th block decides
-// whether to count at all: nothing more is read when it finds none.
+// first 64 copies a line each, then the count in vk_astc.c's "so far" line. ZERO_SAMPLES blocks spread over the level's
+// storage in guest memory decide whether to count at all: the staging may be write-combined on the PS5, where reading
+// back a 1/64 sample of an 8192x8192 copy (16,384 blocks, a cache line each) may cost milliseconds (unmeasured); guest
+// memory is cached. The whole level of each layer is sampled, not only the region (block-linear rows are not contiguous): a zero
+// block outside the region costs a count that finds too few, a region whose zeros the samples miss goes uncounted.
+#define ZERO_SAMPLES 512u
+static int level_has_zero(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers) {
+    nvn_texlayout L;
+    nvn_tex_layout(&src->d, &L);
+    if (level >= src->d.levels || layer + layers > L.layers) return 1;   // unsure: count
+    uint64_t lo = nvn_tex_level_offset(&src->d, level);
+    uint64_t hi = level + 1 < src->d.levels ? nvn_tex_level_offset(&src->d, level + 1) : L.layer_size;
+    uint64_t blocks = hi > lo ? (hi - lo) / 16 : 0;
+    if (!blocks) return 0;
+    uint32_t per = (ZERO_SAMPLES + layers - 1) / layers;
+    if (per > blocks) per = (uint32_t)blocks;
+    for (uint32_t l = 0; l < layers; l++) {
+        const uint8_t *base = (const uint8_t *)src->mem + (uint64_t)(layer + l) * L.layer_size + lo;
+        for (uint32_t k = 0; k < per; k++) {
+            const uint64_t *q = (const uint64_t *)(const void *)(base + (blocks * k / per) * 16);
+            if (!(q[0] | q[1])) return 1;
+        }
+    }
+    return 0;
+}
+
 static void zero_census(const tex_t *src, const uint8_t *stg, size_t bytes, uint32_t level, uint32_t layer,
                         uint32_t layers, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+    if (!level_has_zero(src, level, layer, layers)) return;
     const uint64_t *q = (const uint64_t *)(const void *)stg;
-    size_t n = bytes / 16, i = 0;
-    while (i < n && (q[2 * i] | q[2 * i + 1])) i += 64;
-    if (i >= n) return;
+    size_t n = bytes / 16;
+    if (!n) return;
     uint64_t zero = 0;
     for (size_t k = 0; k < n; k++) zero += !(q[2 * k] | q[2 * k + 1]);
     if (zero * 100 <= (uint64_t)n) return;
