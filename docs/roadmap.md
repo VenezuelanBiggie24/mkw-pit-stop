@@ -102,6 +102,35 @@ screen by screen against the console.
 - GPU hangs on AMD: upload batches already split; next, breadcrumbs and `VK_EXT_device_fault` to find the cause of the
   remaining ones.
 - GPU memory: races run in 4 GiB with every texture; the sparse tiles above 768 MiB (the asphalt) are next.
+- **PS5: free memory runs out across races** (run `nocache`, 16/11/2026, three races in one session, yesterday's
+  eboot `14752dcc`): free direct memory fell 1104 -> 568 -> 468 -> 405 -> 316 -> 285 -> 105 MiB by frame ~22 400
+  while the VMA heap rose and fell with each race (2.5-3.9 GiB), so what grows is outside VMA. At 105 MiB the ASTC
+  scratch buffers (278-285 MB) and five images failed (`-2`, out of device memory): textures left undecoded or
+  missing. The player saw the texture corruption grow with each race. Run `memgrow` (16/11/2026, the census now
+  logs the guest's backed memory and the pools that grew): the guest's backed memory rose 3282 -> 5178 MiB (heap
+  ranges 2336 -> 3624, alias 875 -> 1483) out of 11712 MiB of direct memory, beside VMA ~3.7-4.5 GiB and sparse
+  1.6 GiB, until 90-136 MiB were free. Almost half of it is one pool: 0x248195b000, 2427 MiB CPU_CACHED|GPU_CACHED,
+  never resolved by the GPU (the staging texture of the terrain arrays, 0x2481a17a00, is in it), backed 901 -> 1635
+  MiB a little each race; the rest is new small pools per course. Pages the CPU wrote stay backed; on the console
+  the whole pool is memory anyway. Run `memgrow2` (the census also gives the textures in each big pool): the live
+  textures' storage is 642 of the pool's 1003 backed MiB at the menus but only 183-220 of 1377-1434 MiB in later
+  courses, so ~1.2 GiB of it is earlier courses' data (textures finalized since, or not textures), kept because it
+  is not zero; giving it back is not safe while the game may read it again (the character cards of task 32). Our
+  copies of the textures there: ASTC to BC 1347-1380 MiB from 461-476 MiB stored (2.9x), ASTC to RGBA8 (arrays,
+  ~200 MiB) 7x their storage; the runtime's own texture memory is ~1.6 GiB, sparse 1.6 GiB. The levers: the arrays
+  to BC like the other ASTC textures, and the governor counting the guest's growth. The same run ended in a guest
+  read fault at 0x25659903d8 (main+0x7419e8 / sdk+0x776a60, frame 31201, 463 MiB free), in a 0.5 MiB pool at
+  0x2565954000: first seen, cause not known. Task 37: `MKW_PACK=1` compresses frozen units cold for 30 s and gives
+  their memory back, unpacking on the next access (docs/ps5.md); waiting for its console run (verify first).
+- **PS5: sparse tiles left non-resident from boot.** Every run logs 12-13 "tile slots over `MKW_SPARSE_MIB`" (1536
+  MiB), up to 2048 tiles (128 MiB) without memory, clean runs too; a lead for the corruption near the start line
+  that has been there in every run, and for the black-and-white race intro (not yet looked at).
+- **PS5: magenta textures, intermittent, new on 16/11/2026** (character select near Mario's eyes, scenery, karts
+  outlined): seen on several eboots including yesterday's, clean on others with the same eboot. Only the ASTC
+  decoders write magenta (error blocks; void extents may legitimately be magenta, so `MKW_ASTC_ERRORS` must skip
+  them before its counts mean anything). Unclear after the run with the pipeline and shader caches set aside
+  (renamed `*.bak-20261116` on the console). If it comes back: the ASTC error counter, and whether it follows low
+  free memory (a scratch buffer or texture allocation failing).
 - Five kernel and platform bugs inherited from totk-pc-recomp (the fiber stack alignment can crash a run).
 
 ## 5. Loading and the player's side
