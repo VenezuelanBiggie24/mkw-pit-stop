@@ -257,6 +257,7 @@ int plat_mem_watch_info(uint64_t addr);
 void plat_mem_gpu_import(uint64_t addr, size_t n, int on);
 void plat_mem_census_log(const char *tag);                 // PS5: logs memory & page-table census; no-op elsewhere
 uint64_t plat_mem_dmem_avail(void);                        // PS5: free direct memory in bytes; UINT64_MAX elsewhere
+void plat_mem_backed_summary(char *out, size_t cap);     // PS5: guest backed memory and free dmem, one line; "" elsewhere
 size_t plat_mem_early_page_size(void);                     // protection granularity for early-read watch (4 KiB or 16 KiB)
 typedef enum {
     PLAT_EARLY_FAILED,       // arming failed and the prior state was restored
@@ -269,6 +270,24 @@ void plat_mem_frozen_hook(int (*fn)(uint64_t addr));
 // Frees frozen units that are all zero, up to target_bytes (0 no limit). cache: skip units found not all zero earlier
 // in the same freeze (mem_frozen's number), which cannot have changed since.
 uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uint64_t *scanned_bytes, int cache);
+// MKW_PACK (PS5; nothing elsewhere): frozen guest units cold for a while are compressed into a store in the C heap and
+// their direct memory given back; the next access to one (a fault, or plat_mem_back* before a system call or import)
+// decompresses it before it retries, so it reads the same bytes. Units the GPU imported or the early-read watch holds
+// are never packed. plat_mem_pack runs on the memory governor's thread only.
+typedef struct {
+    uint64_t target_bytes;   // stop once this much direct memory is given back
+    uint64_t store_cap;      // the store (blobs, headers, verify copies) at most this many bytes
+    uint32_t cold_ms;        // frozen at least this long, and not unpacked for this long
+    uint32_t budget_us;      // stop after this long (0 none)
+    int verify;              // keep each unit's bytes too and compare them on unpack (MKW_PACK_VERIFY)
+} PlatPackParams;
+uint64_t plat_mem_pack(const PlatPackParams *p);   // bytes of direct memory given back
+void plat_mem_pack_collect(void);                  // frees the blobs of units unpacked since (the governor's thread)
+// One line for the census: what is packed now, and the packs, unpacks and skips since the last call (which resets
+// them); "" when nothing was ever packed.
+void plat_mem_pack_summary(char *out, size_t cap);
+// When the region holding addr was frozen (memory.c mem_frozen_ms: plat_now_ms at the freeze, | 1), 0 not frozen.
+void plat_mem_frozen_ms_hook(uint32_t (*fn)(uint64_t addr));
 int plat_mem_replace_anon(uint64_t addr, uint64_t n);      // fresh read-write pages over a range (Linux); 1 on success
 // Writes n bytes at addr through the page protection (committed pages of a reservation, even inaccessible ones), as the
 // kernel would; no fault reaches the hooks. 1 on success; 0 where the platform cannot (Windows).

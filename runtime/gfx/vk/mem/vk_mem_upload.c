@@ -298,9 +298,42 @@ uint64_t vk_upload_stg_bytes(void) {
     return st.blockBytes;
 }
 
+// MKW_PACK=1 (default 0 until a console run passes; cfg.c row): cold guest memory compressed and its direct memory given
+// back (plat_mem_pack, ps5_guest_memory.c), before textures are evicted. Run memgrow2 (16/11/2026): ~1.2 GiB of one pool
+// is data the game no longer reads but never returns. Only on the governor's own thread (vk_headroom.c, force 0): the
+// others that call it (vk_mem_relieve) are the game's and the replay's, on the frame's critical path. It packs toward
+// DMEM_SOFT_BYTES + PACK_MARGIN free, at most PACK_BUDGET_US a tick (~750 units at ~130 us each, below-normal priority,
+// one tick per 500 ms). MKW_PACK_COLD_S (default 30; EglantinePS5 used 20-60 s): frozen for at least that long.
+// MKW_PACK_STORE_MIB (default 512): the store's cap in the C heap (flexible memory). MKW_PACK_VERIFY=1: each unit's
+// bytes kept too and compared when it unpacks (the copies count toward the cap).
+#define PACK_MARGIN (256ull << 20)
+#define PACK_BUDGET_US 100000u
+static uint64_t pack_step(uint64_t avail) {
+    static int on = -1, verify;
+    static uint32_t cold_ms;
+    static uint64_t cap;
+    if (on < 0) {
+        const char *e = cfg_get("MKW_PACK_COLD_S");
+        long s = e && *e ? atol(e) : 30;
+        cold_ms = (uint32_t)(s > 0 ? s : 0) * 1000u;
+        e = cfg_get("MKW_PACK_STORE_MIB");
+        long mib = e && *e ? atol(e) : 512;
+        cap = (uint64_t)(mib > 0 ? mib : 0) << 20;
+        verify = (e = cfg_get("MKW_PACK_VERIFY")) && atoi(e);
+        on = (e = cfg_get("MKW_PACK")) && atoi(e);
+        if (on)
+            rt_log("vk: memory governor: packing cold guest memory (frozen %u s, store up to %llu MiB%s)", cold_ms / 1000,
+                   (unsigned long long)(cap >> 20), verify ? ", verified" : "");
+    }
+    if (!on || avail >= DMEM_SOFT_BYTES + PACK_MARGIN) return 0;
+    PlatPackParams p = {.target_bytes = DMEM_SOFT_BYTES + PACK_MARGIN - avail, .store_cap = cap, .cold_ms = cold_ms,
+                        .budget_us = PACK_BUDGET_US, .verify = verify};
+    return plat_mem_pack(&p);
+}
+
 void vk_mem_governor(int force) {
     static uint32_t idle_logs;
-    (void)force;
+    if (!force) plat_mem_pack_collect();   // the blobs of units unpacked since: freed here, not in the fault handler
     // MKW_SHADOW_TRIM_TEST=1 (a test; with MKW_SHADOW_TRIM=1): every tick trims the cold shadows whatever the memory, so
     // Linux, whose dmem never runs low, drops and rebuilds them as the PS5's governor does (task 28's magenta check).
     static int trim_test = -1;
@@ -319,7 +352,7 @@ void vk_mem_governor(int force) {
         return;
     }
     uint64_t rel_freed = 0, hr_freed = 0, trim_freed = 0, sp_freed = 0, sh_freed = 0, h0_freed = 0, zero_freed = 0,
-             zero_scanned = 0;
+             zero_scanned = 0, pk_freed = 0;
     const char *level;
     uint64_t t0 = plat_now_ns(), zero_ns = 0;
     int ab_side = rt_ab();
@@ -328,6 +361,7 @@ void vk_mem_governor(int force) {
         vk_mem_shadow_shed(1);
         rel_freed = vk_texture_trim_released(0);
         hr_freed = vk_headroom_shed();
+        if (!force) pk_freed = pack_step(plat_mem_dmem_avail());
         trim_freed = vk_texture_trim(GOV_TRIM_HARD);
         sp_freed = vk_sparse_trim(GOV_TRIM_HARD);
         sh_freed = shadow_trim(GOV_TRIM_HARD);
@@ -345,14 +379,15 @@ void vk_mem_governor(int force) {
         level = "soft";
         rel_freed = vk_texture_trim_released(GOV_REL_SOFT);
         hr_freed = vk_headroom_shed();
+        if (!force) pk_freed = pack_step(plat_mem_dmem_avail());
         sh_freed = shadow_trim(128ull << 20);
     }
     uint64_t after = plat_mem_dmem_avail();
-    if (rel_freed || hr_freed || trim_freed || sp_freed || sh_freed || h0_freed || zero_freed ||
+    if (rel_freed || hr_freed || trim_freed || sp_freed || sh_freed || h0_freed || zero_freed || pk_freed ||
         (__atomic_add_fetch(&idle_logs, 1, __ATOMIC_RELAXED) % 60) == 1)
-        rt_log("vk: memory governor (%s): dmem=%llu->%llu MiB, freed rel=%.1f headroom=%.1f trim=%.1f sparse=%.1f shadow=%.1f heap0=%.1f zero=%.1f (scanned=%.1f) MiB; %.2f ms (zero scan %.2f) ab=%c",
+        rt_log("vk: memory governor (%s): dmem=%llu->%llu MiB, freed rel=%.1f headroom=%.1f pack=%.1f trim=%.1f sparse=%.1f shadow=%.1f heap0=%.1f zero=%.1f (scanned=%.1f) MiB; %.2f ms (zero scan %.2f) ab=%c",
                level, (unsigned long long)(avail >> 20), (unsigned long long)(after >> 20),
-               rel_freed / 1048576.0, hr_freed / 1048576.0, trim_freed / 1048576.0,
+               rel_freed / 1048576.0, hr_freed / 1048576.0, pk_freed / 1048576.0, trim_freed / 1048576.0,
                sp_freed / 1048576.0, sh_freed / 1048576.0, h0_freed / 1048576.0,
                zero_freed / 1048576.0, zero_scanned / 1048576.0, (plat_now_ns() - t0) / 1e6, zero_ns / 1e6,
                ab_side ? 'B' : 'A');

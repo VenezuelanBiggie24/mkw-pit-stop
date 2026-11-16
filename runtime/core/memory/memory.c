@@ -74,6 +74,8 @@ static int reserve_at(uint64_t at, uint64_t size, int watch) { return plat_mem_r
 static volatile uint32_t frz[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
 static uint32_t frz_epoch;   // frz_lock
 static uint32_t thaw_ms[RT_ADDRESS_LIMIT >> FRZ_SHIFT];   // frz_lock: GetTickCount of the last thaw request, 0 never
+// plat_now_ms at the freeze, | 1 (written before frz under frz_lock): MKW_PACK packs only units frozen for a while.
+static volatile uint32_t frz_ms[RT_ADDRESS_LIMIT >> FRZ_SHIFT];
 static volatile int32_t nfrz;
 PlatMutex frz_lock = PLAT_MUTEX_INIT;   // memory_int.h
 _Thread_local int frz_held;           // memory_int.h
@@ -153,6 +155,7 @@ int mem_freeze(uint64_t a) {
     else if (thaw_ms[r] && (int32_t)((uint32_t)plat_now_ms() - thaw_ms[r]) < (int32_t)FRZ_HOLD_MS) ok = 0;   // |1 may be ahead
     else if (freeze_locked(r)) {
         frz_epoch = frz_epoch >= 0x7fffffffu ? 1 : frz_epoch + 1;
+        __atomic_store_n(&frz_ms[r], (uint32_t)plat_now_ms() | 1, __ATOMIC_RELAXED);
         __atomic_store_n(&frz[r], frz_epoch, __ATOMIC_RELEASE);
         plat_inc32(&nfrz);
         plat_inc64(&frz_count[0]);
@@ -163,6 +166,13 @@ int mem_freeze(uint64_t a) {
 }
 
 int mem_frozen(uint64_t a) { return a < RT_ADDRESS_LIMIT ? (int)__atomic_load_n(&frz[a >> FRZ_SHIFT], __ATOMIC_ACQUIRE) : 0; }
+
+// When the region holding a was frozen (plat_now_ms | 1), 0 when it is not frozen. Read after mem_frozen, a newer
+// freeze's time only makes the region look younger.
+static uint32_t mem_frozen_ms(uint64_t a) {
+    if (a >= RT_ADDRESS_LIMIT || !__atomic_load_n(&frz[a >> FRZ_SHIFT], __ATOMIC_ACQUIRE)) return 0;
+    return __atomic_load_n(&frz_ms[a >> FRZ_SHIFT], __ATOMIC_RELAXED);
+}
 
 void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws) {
     *frozen = (uint64_t)__atomic_load_n(&nfrz, __ATOMIC_RELAXED);
@@ -457,6 +467,7 @@ void mem_init(void) {
     plat_mem_early_hold_hook(mem_early_resolve_hold);
     plat_mem_thaw_hook(thaw_for_kernel);
     plat_mem_frozen_hook(mem_frozen);
+    plat_mem_frozen_ms_hook(mem_frozen_ms);
 #endif
     alias_pages = calloc(ALIAS_PAGES, 1);
     if (!alias_pages) rt_fatal("memory: cannot allocate the alias page map");

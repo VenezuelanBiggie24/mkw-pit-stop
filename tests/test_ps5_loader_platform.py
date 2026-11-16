@@ -71,6 +71,7 @@ def test_ps5_loader_platform(tmp_path: Path) -> None:
             str(ROOT / "tests/ps5_loader_platform_host.c"),
             str(ROOT / "runtime/core/memory/memory_early.c"),
             *(str(platform / name) for name in sources),
+            "-lzstd",   # MKW_PACK's compression (the PS5 build links the same library)
             "-o",
             str(exe),
         ],

@@ -491,6 +491,16 @@ typedef struct {
     uint64_t idle_evict_n, idle_evict_bytes;
 } VkTexCensus;
 void vk_texture_census(VkTexCensus *s);
+// The textures whose storage starts in [lo, hi) (one pool), for the memory census: distinct storage addresses, their
+// guest storage bytes and how many of those are backed, and the device memory of the images made from them, by format
+// (ASTC to BC7, ASTC to RGBA8, other), released, idle past the eviction age, and never uploaded.
+typedef struct {
+    uint64_t n, storage, backed;                       // distinct storage (first entry at each address), live or not
+    uint64_t live, released, idle, never_up;           // entries
+    uint64_t vk_bytes, astc_bc7_n, astc_bc7_vk, astc_bc7_storage, astc_rgba_n, astc_rgba_vk, astc_rgba_storage;
+    uint64_t other_n, other_vk, other_storage, sparse_n;
+} VkTexRange;
+void vk_texture_range_census(uint64_t lo, uint64_t hi, VkTexRange *out);
 void vk_texture_shutdown(void);                     // vk_mem_shutdown calls it
 void vk_texture_new_submit(void);                   // a queue submit starts: draw bindings check storage again
 uint32_t vk_texture_epoch(void);                    // the write-watch snapshot epoch vk_texture_new_submit started

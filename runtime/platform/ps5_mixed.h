@@ -15,6 +15,11 @@ typedef struct {
     volatile int lock;   // per-unit spinlock; never take vm_lock while holding this
     uint32_t nz_freeze;  // plat_mem_reclaim_zeros: the freeze (mem_frozen's number) in which it found this unit not
                          // all zero; 0 none. Read-only for that whole freeze, so no need to scan it again.
+    // MKW_PACK (ps5_guest_memory.c, plat_mem_pack): the unit's bytes compressed while its backing is released (the
+    // guest pages keep their states); the next backing decompresses them. NULL when not packed. Under the unit's lock.
+    void *pack;
+    uint32_t pk_fail_freeze;   // the freeze in which it did not compress well enough; 0 none
+    uint32_t pk_unpack_ms;     // plat_now_ms at the last unpack, | 1; 0 never: not packed again until it is cold again
 } Ps5MixedBlock;
 
 int ps5_mixed_reserve(Ps5MixedBlock *block, uintptr_t address);
@@ -23,6 +28,11 @@ int ps5_mixed_commit(Ps5MixedBlock *block, size_t offset);
 int ps5_mixed_commit_lazy(Ps5MixedBlock *block, size_t offset);
 int ps5_mixed_back(Ps5MixedBlock *block);
 int ps5_mixed_back_report(Ps5MixedBlock *block, Ps5MemCommitReport *report);
+// The same, with fill(ctx, unit) writing the unit's bytes after the zero-filled commit and before the guest pages'
+// native protections apply (a read-only page could not be written then). A nonzero fill releases the backing again
+// and is returned.
+int ps5_mixed_back_fill(Ps5MixedBlock *block, Ps5MemCommitReport *report, int (*fill)(void *ctx, void *unit),
+                        void *ctx);
 int ps5_mixed_protect(Ps5MixedBlock *block, size_t offset, Ps5GuestPage protection);
 int ps5_mixed_decommit(Ps5MixedBlock *block, size_t offset);
 int ps5_mixed_release(Ps5MixedBlock *block);

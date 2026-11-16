@@ -212,6 +212,42 @@ void vk_texture_census(VkTexCensus *s) {
     unlock();
 }
 
+void vk_texture_range_census(uint64_t lo, uint64_t hi, VkTexRange *s) {
+    VkCtx *c = vk_ctx();
+    uint32_t idle = tex_evict_idle();
+    memset(s, 0, sizeof *s);
+    lock();
+    for (uint32_t i = 0; i < by_key.cap; i++) {
+        const Tex *e = by_key.vals[i];
+        if (!e || e->key.addr < lo || e->key.addr >= hi) continue;
+        uint64_t bytes = 0;
+        if (e->alloc && c) {
+            VmaAllocationInfo ai;
+            vmaGetAllocationInfo(c->vma, e->alloc, &ai);
+            bytes = ai.size;
+        }
+        nvn_texlayout L;
+        nvn_tex_layout(&e->key.d, &L);
+        // Storage counted once per address: the entry the address chain starts with.
+        if (nvn_hm_get(&by_addr, &e->key.addr) == e) {
+            s->n++, s->storage += L.size;
+            s->backed += plat_mem_backed_bytes(e->key.addr, L.size);
+        }
+        if (e->released) s->released++;
+        else s->live++;
+        if (!e->released && (uint32_t)(submit_epoch - e->seen) > idle) s->idle++;
+        if (!e->uploaded) s->never_up++;
+        if (e->sparse) s->sparse_n++;
+        s->vk_bytes += bytes;
+        int fmt = e->key.d.format;
+        if (fmt >= 0x79 && fmt <= 0x94) {
+            if (e->f.astc_bc7) s->astc_bc7_n++, s->astc_bc7_vk += bytes, s->astc_bc7_storage += L.size;
+            else s->astc_rgba_n++, s->astc_rgba_vk += bytes, s->astc_rgba_storage += L.size;
+        } else s->other_n++, s->other_vk += bytes, s->other_storage += L.size;
+    }
+    unlock();
+}
+
 void vk_texture_shutdown(void) {
     VkCtx *c = vk_ctx();
     lock();

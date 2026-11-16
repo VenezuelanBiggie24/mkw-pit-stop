@@ -19,7 +19,7 @@ submit's copies of constant blocks.
 | `vk_mem_dirty.c` | Dirty page census (`MKW_DIRTY_CENSUS` with `MKW_TRACE=perf`) |
 | `vk_mem_cap.c` | For captures (`../cap/`): the chunks of physical pools, which only the GPU writes, read when capturing and written when replaying |
 | `vk_mem_log.c` | Census of pools and traffic, VRAM summary, device class and memory mode (`MKW_MEMORY`) |
-| `vk_mem_upload.c`, `vk_headroom.c` | Upload batches, staging, deferred destruction and `vk_mem_relieve` (what to release when an allocation does not fit); new VMA blocks on another thread |
+| `vk_mem_upload.c`, `vk_headroom.c` | Upload batches, staging, deferred destruction and `vk_mem_relieve` (what to release when an allocation does not fit); the memory governor (`MKW_PACK`'s packing on its own thread); new VMA blocks on another thread |
 | `vk_mem_uptime.c` | Diagnostic `MKW_UPLOAD_TIME`: GPU time of each upload batch, with what it carried |
 | `vk_usnap.c` | Constant blocks copied when recording of the submit starts, so the game can rewrite them afterwards |
 | `vk_usnap_take.c`, `vk_usnap_int.h` | `MKW_USNAP_AT_SUBMIT`: that copy taken at submit, on the game thread, and handed to the replay in order |

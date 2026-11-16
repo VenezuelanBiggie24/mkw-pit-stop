@@ -16,7 +16,7 @@
 | `ps5_memory.c`, `ps5_memory.h` | PS5: CPU-only direct backing for one owned 64 KiB block, used by the native smoke probe |
 | `ps5_mixed.c`, `ps5_mixed.h` | PS5 prototype: 4 KiB guest permissions within one owned backing block, exercised by the native smoke title and synthetic host test |
 | `ps5_guest_span.c`, `ps5_guest_span.h` | Game-free prototype for checked host access and mapping quiescence across two adjacent PS5 backing blocks |
-| `ps5_guest_memory.c`, `ps5_guest_memory.h` | PS5 loader platform memory: exact high144 reservations, sparse direct backing, checked reads and shutdown |
+| `ps5_guest_memory.c`, `ps5_guest_memory.h` | PS5 loader platform memory: exact high144 reservations, sparse direct backing, checked reads and shutdown; `MKW_PACK`'s packing of cold frozen units (zstd, `plat_mem_pack`) and their unpacking when backed again |
 | `ps5_loader_io.c` | PS5 loader file reads, paths, clock and shell exit |
 | `ps5_mutex.c` | PS5 loader reader and writer locks over pthreads |
 | `ps5_threads.c`, `ps5_fiber.c`, `fiber_x86.h` | PS5 host threads, CPU timing, and System V fibers |

@@ -149,6 +149,19 @@ unit zeroed bytes 0xd000-0x1d000 of each card (task 32: magenta bands, gone with
 That version gave back 281-328 MiB per census; this one 2.0-2.4 MiB, since the finalized storage holds the game's data
 (548-678 MiB backed in task 32's fix run).
 
+`MKW_PACK=1` (default 0 until a console run passes) packs cold guest memory instead of holding it: under memory
+pressure the governor's thread compresses (zstd level 1) each 64 KiB unit frozen for `MKW_PACK_COLD_S` (default 30) and
+not GPU-imported or early-watched, and gives back its direct memory when it shrinks to 75 % or less; a zero unit is
+given back with no copy. The next access to a packed unit, a fault on any thread or `plat_mem_back*` before a system
+call or an import, decompresses it into fresh backing before its protections apply, so it reads the same bytes. The
+store is the C heap (`MKW_PACK_STORE_MIB`, default 512; it stops above 128 MiB of free flexible memory), and
+`MKW_PACK_VERIFY=1` keeps each unit's bytes too and compares them on unpack. The census gives `packed N MiB in M MiB`
+and a `mem: pack` line (packs, unpacks by cause and thread, their time, skips). Run memgrow2's ~1.2 GiB of old data in
+one pool is what it is for; on the romfs's 64 KiB units, models packed to 0.46 and large textures to 0.74 (42 % of
+those units under 75 %), so how much that pool gives back depends on how much of it is texture data.
+Save writes (`plat_file_pwrite`) back their guest buffer first: the kernel reads it and answers EFAULT on a unit with
+no backing.
+
 `MKW_SHADOW_TRIM` (default 1 on the PS5) drops cold shadows under memory pressure: no GPU use for 180 submissions,
 their write-backs done, no released ranges, so guest memory holds every byte. A pool whose shadow cannot be made again
 for want of memory now tries again at the next submission. Before, it stayed without GPU storage for the rest of the

@@ -168,11 +168,16 @@ __attribute__((weak)) void plat_mem_early_hold_hook(void (*fn)(uint64_t addr, si
 __attribute__((weak)) void plat_mem_early_resolve(uint64_t addr, size_t n) { (void)addr, (void)n; }
 __attribute__((weak)) void plat_mem_thaw_hook(void (*fn)(uint64_t addr, size_t n)) { (void)fn; }
 __attribute__((weak)) void plat_mem_frozen_hook(int (*fn)(uint64_t addr)) { (void)fn; }
+__attribute__((weak)) void plat_mem_backed_summary(char *out, size_t cap) { if (cap) out[0] = 0; }
 __attribute__((weak)) uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uint64_t *scanned_bytes, int cache) {
     (void)target_bytes, (void)cache;
     if (scanned_bytes) *scanned_bytes = 0;
     return 0;
 }
+__attribute__((weak)) uint64_t plat_mem_pack(const PlatPackParams *p) { (void)p; return 0; }
+__attribute__((weak)) void plat_mem_pack_collect(void) {}
+__attribute__((weak)) void plat_mem_pack_summary(char *out, size_t cap) { if (cap) out[0] = 0; }
+__attribute__((weak)) void plat_mem_frozen_ms_hook(uint32_t (*fn)(uint64_t addr)) { (void)fn; }
 
 // sigsample.c's, where it is not built (Windows).
 __attribute__((weak)) void plat_sample_add_self(const char *name) { (void)name; }

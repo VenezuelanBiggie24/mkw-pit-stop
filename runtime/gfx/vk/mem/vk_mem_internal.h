@@ -69,6 +69,7 @@ typedef struct PoolRec {
     uint8_t gpu_imported;              // POOL_IMPORT via host-pointer import: GPU access granted on [import_lo, import_hi)
     uint8_t lazy;                      // POOL_IMPORT whose GPU storage is made at its first resolve (lazy_back)
     uint64_t lazy_retry;               // lazy_back failed: tried again from this submission on (vk_replay_submit)
+    uint64_t census_backed;            // backed bytes at the last memory census (diagnosis; written under pool_lock shared)
 } PoolRec;
 
 // vk_memory.c: the pool index

@@ -22,6 +22,9 @@
 #include <ucontext.h>
 #include <unistd.h>
 
+#define ZSTD_STATIC_LINKING_ONLY   // ZSTD_initStaticDCtx: the fault handler decompresses without malloc
+#include <zstd.h>
+
 enum {
     PAGE = PS5_GUEST_PAGE,
     CHUNK_SHIFT = 24, // 16 MiB per chunk = 256 x 64 KiB Ps5MixedBlock units
@@ -139,6 +142,28 @@ static void log_backed_totals(const char *call, uint64_t address, int err, int i
     }
 }
 
+// The guest's backed memory by range kind and cause, and free direct memory, as one line for mkw.log (the census in
+// log_backed_totals goes to stderr, the console's klog, so a run's log could not say where direct memory went: run
+// nocache, 16/11/2026, free memory 1104 -> 105 MiB over three races with the VMA heap flat).
+static void pk_backed_note(char *out, size_t cap);   // MKW_PACK, below
+
+void plat_mem_backed_summary(char *out, size_t cap) {
+    int64_t phys = 0;
+    size_t avail = 0;
+    int64_t dmem_total = sceKernelGetDirectMemorySize();
+    int rc = sceKernelAvailableDirectMemorySize(0, INT64_MAX, PS5_MEM_UNIT, &phys, &avail);
+    size_t u[3], c[4];
+    for (int i = 0; i < 3; i++) u[i] = (__atomic_load_n(&backed_units[i], __ATOMIC_RELAXED) * PS5_MEM_UNIT) >> 20;
+    static const int causes[4] = {PLAT_BACK_WRITE_FAULT, PLAT_BACK_READ_FAULT, PLAT_BACK_RT_READ, PLAT_BACK_IMPORT};
+    for (int i = 0; i < 4; i++) c[i] = (__atomic_load_n(&backed_by_cause[causes[i]], __ATOMIC_RELAXED) * PS5_MEM_UNIT) >> 20;
+    snprintf(out, cap, "backed %zu MiB (heap %zu, alias %zu, other %zu; by write fault %zu, read fault %zu, runtime read "
+             "%zu, import %zu), dmem free %zu of %lld MiB",
+             u[RANGE_HEAP] + u[RANGE_ALIAS] + u[RANGE_OTHER], u[RANGE_HEAP], u[RANGE_ALIAS], u[RANGE_OTHER], c[0], c[1],
+             c[2], c[3], rc == 0 ? avail >> 20 : 0, dmem_total > 0 ? (long long)(dmem_total >> 20) : 0ll);
+    size_t at = strlen(out);
+    if (at < cap) pk_backed_note(out + at, cap - at);
+}
+
 void ps5_mem_log_census(const char *tag) { log_backed_totals(tag ? tag : "census", 0, 0, 0); }
 
 void plat_mem_census_log(const char *tag) { ps5_mem_log_census(tag); }
@@ -151,11 +176,110 @@ uint64_t plat_mem_dmem_avail(void) {
     return UINT64_MAX;
 }
 
+// ---- MKW_PACK: cold units compressed, their direct memory given back (plat_mem_pack, task 37)
+// Run memgrow2 (16/11/2026): ~1.2 GiB of one pool is earlier courses' data the game freed inside its own heap and never
+// gave back; it is not zero, so the zero reclaim keeps it, and releasing it is not safe (the game sampled the character
+// cards again after their pool's finalize, task 32). EglantinePS5 (GPL-3.0, the idea only) packed units unwritten for a
+// while with LZ4 and unpacked them on the next fault: 1.0-2.4 GB into 0.2-0.5 GB a session, 1,627 unpacks checked
+// against a kept copy, 0 differed. Here: zstd level 1 (64 KiB units of the romfs's models 0.46 of their size,
+// textures 0.74, ~130 us to compress and ~50 us to decompress one on this machine's Zen 2, task 37), a unit packed only
+// when frozen (read-only, nothing wrote it since the freeze) for MKW_PACK_COLD_S and compressed to 75 % or less.
+// A packed unit's guest pages keep their states and its backing is released; back_unit_locked (a fault, or
+// plat_mem_back* before a system call or an import) decompresses it before the protections apply and the access retries.
+typedef struct PackBlob {
+    struct PackBlob *next;   // pk_free once unpacked: the fault handler does not call free()
+    uint8_t *raw;            // MKW_PACK_VERIFY: the unit's bytes when packed; NULL otherwise
+    uint32_t csize;
+    uint32_t bytes;          // what the store holds for it (header, blob and raw)
+    uint32_t zmask;          // guest pages decommitted since the pack: committed again, they read zero
+    uint8_t data[];
+} PackBlob;
+
+enum { PK_DCTX = 4, PK_THREADS = 16, PK_MAX_PCT = 75, PK_FLEX_FLOOR_MIB = 128 };
+static struct { volatile int lock; ZSTD_DCtx *d; } pk_dctx[PK_DCTX];   // shared by the fault handlers, made up front
+static PackBlob *volatile pk_free;                                     // unpacked blobs, freed by plat_mem_pack_collect
+static size_t packed_units[3];
+static uint64_t pk_packed_bytes, pk_store_bytes, pk_ever;
+// Since the last plat_mem_pack_summary (exchanged there).
+static uint64_t pk_unpacks, pk_unpack_ns, pk_unpack_max_ns, pk_unpack_cause[PLAT_BACK_N];
+static uint64_t pk_verify_checked, pk_verify_bad, pk_verify_addr, pk_fill_bad;
+static struct { uint32_t tid; uint64_t n; char name[24]; } pk_thr[PK_THREADS];   // unpacks by thread
+static uint32_t (*g_frozen_ms_hook)(uint64_t addr);
+
+// The fault handler's half: signal-safe, no malloc, no lock but a free decompression context's.
+static int unpack_fill(void *ctx, void *dst) {
+    PackBlob *b = ctx;
+    size_t got = 0;
+    for (int done = 0; !done;)
+        for (int i = 0; i < PK_DCTX && !done; i++) {
+            if (__atomic_test_and_set(&pk_dctx[i].lock, __ATOMIC_ACQUIRE)) continue;
+            got = ZSTD_decompressDCtx(pk_dctx[i].d, dst, PS5_MEM_UNIT, b->data, b->csize);
+            __atomic_clear(&pk_dctx[i].lock, __ATOMIC_RELEASE);
+            done = 1;
+        }
+    int bad = ZSTD_isError(got) || got != PS5_MEM_UNIT;
+    if (bad) __atomic_add_fetch(&pk_fill_bad, 1, __ATOMIC_RELAXED);
+    if (b->raw) {   // MKW_PACK_VERIFY: the kept bytes win, and a difference is counted
+        __atomic_add_fetch(&pk_verify_checked, 1, __ATOMIC_RELAXED);
+        if (bad || memcmp(dst, b->raw, PS5_MEM_UNIT)) {
+            uint64_t z = 0;
+            __atomic_add_fetch(&pk_verify_bad, 1, __ATOMIC_RELAXED);
+            __atomic_compare_exchange_n(&pk_verify_addr, &z, (uint64_t)(uintptr_t)dst, 0, __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED);
+            memcpy(dst, b->raw, PS5_MEM_UNIT);
+            bad = 0;
+        }
+    }
+    if (bad) return PS5_MEM_BAD_REQUEST;
+    for (unsigned g = 0; g < PS5_MEM_UNIT / PAGE; g++)
+        if (b->zmask >> g & 1) memset((uint8_t *)dst + (size_t)g * PAGE, 0, PAGE);
+    return 0;
+}
+
+static void pk_drop(PackBlob *b) {   // any thread: to the free list
+    PackBlob *head = __atomic_load_n(&pk_free, __ATOMIC_RELAXED);
+    do b->next = head;
+    while (!__atomic_compare_exchange_n(&pk_free, &head, b, 1, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
+}
+
+static void pk_unpacked(PackBlob *b, RangeKind kind, int cause, uint64_t ns) {
+    __atomic_sub_fetch(&packed_units[kind], 1, __ATOMIC_RELAXED);
+    __atomic_sub_fetch(&pk_packed_bytes, b->csize, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&pk_unpacks, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&pk_unpack_ns, ns, __ATOMIC_RELAXED);
+    uint64_t m = __atomic_load_n(&pk_unpack_max_ns, __ATOMIC_RELAXED);
+    while (ns > m && !__atomic_compare_exchange_n(&pk_unpack_max_ns, &m, ns, 1, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+    if ((unsigned)cause < PLAT_BACK_N) __atomic_add_fetch(&pk_unpack_cause[cause], 1, __ATOMIC_RELAXED);
+    uint32_t tid = plat_thread_id();
+    for (int i = 0; i < PK_THREADS; i++) {
+        uint32_t t = __atomic_load_n(&pk_thr[i].tid, __ATOMIC_ACQUIRE);
+        if (!t) {
+            uint32_t z = 0;
+            if (__atomic_compare_exchange_n(&pk_thr[i].tid, &z, tid, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+                char nm[24];
+                if (!plat_sample_self_name(nm, sizeof nm) || !nm[0]) memcpy(nm, "?", 2);
+                memcpy(pk_thr[i].name, nm, sizeof nm);
+                t = tid;
+            } else t = z;
+        }
+        if (t == tid) {
+            __atomic_add_fetch(&pk_thr[i].n, 1, __ATOMIC_RELAXED);
+            break;
+        }
+    }
+    pk_drop(b);
+}
+
 static bool back_unit_locked(Ps5MixedBlock *unit, RangeKind kind, int in_signal, int cause) {
     if (unit->backing.committed) return true;
+    PackBlob *pk = unit->pack;
+    uint64_t t0 = pk ? plat_now_ns() : 0;
     Ps5MemCommitReport rep = {0};
-    int rc = ps5_mixed_back_report(unit, &rep);
+    int rc = pk ? ps5_mixed_back_fill(unit, &rep, unpack_fill, pk) : ps5_mixed_back_report(unit, &rep);
     if (rc) {
+        if (pk && !rep.allocation_status && !rep.mapping_status)
+            fprintf(stderr, "PS5 memory unpack %#llx failed: its packed bytes do not decompress (%u bytes)\n",
+                    (unsigned long long)unit->backing.address, pk->csize);
         const char *call = rep.allocation_status ? "sceKernelAllocateDirectMemory"
                            : (rep.fixed_attempted && rep.mapping_status) ? "sceKernelMapDirectMemory"
                            : "ps5_mixed_back";
@@ -165,7 +289,11 @@ static bool back_unit_locked(Ps5MixedBlock *unit, RangeKind kind, int in_signal,
         return false;
     }
     __atomic_add_fetch(&backed_units[kind], 1, __ATOMIC_RELAXED);
-    if ((unsigned)cause < PLAT_BACK_N)
+    if (pk) {   // the same bytes again, not growth: counted as an unpack, not by cause
+        unit->pack = NULL;
+        unit->pk_unpack_ms = (uint32_t)plat_now_ms() | 1;
+        pk_unpacked(pk, kind, cause, plat_now_ns() - t0);
+    } else if ((unsigned)cause < PLAT_BACK_N)
         __atomic_add_fetch(&backed_by_cause[cause], 1, __ATOMIC_RELAXED);
     for (uint64_t off = 0; off < PS5_MEM_UNIT; off += PS5_MEM_PAGE) {
         uint64_t p = unit->backing.address + off;
@@ -605,6 +733,18 @@ static bool change(uint64_t address, uint64_t bytes, Change action, int protecti
         }
         if (action == DECOMMIT && was_committed && !unit->backing.committed)
             __atomic_sub_fetch(&backed_units[range->kind], 1, __ATOMIC_RELAXED);
+        // A packed unit (MKW_PACK): a page decommitted now reads zero when committed again, so its packed bytes must
+        // not come back; and a unit with no page left has nothing to unpack.
+        if (!result && unit->pack && state != PS5_GUEST_RESERVED && action == DECOMMIT) {
+            PackBlob *b = unit->pack;
+            b->zmask |= 1u << (offset / PAGE);
+            if (!unit->live_pages) {
+                unit->pack = NULL;
+                __atomic_sub_fetch(&packed_units[range->kind], 1, __ATOMIC_RELAXED);
+                __atomic_sub_fetch(&pk_packed_bytes, b->csize, __ATOMIC_RELAXED);
+                pk_drop(b);
+            }
+        }
         if (!batching) unit_unlock(unit);
         if (!sdk_ok(action == COMMIT ? "commit" : action == DECOMMIT ? "decommit" : "protect", at, PAGE, result)) {
             if (batching) { CHANGE_RELEASE(); ps5_mem_batch_end(); }
@@ -978,7 +1118,8 @@ uint64_t plat_mem_populated(uint64_t address, uint64_t bytes, uint64_t (*runs)[2
         uint64_t uend = ubase + PS5_MEM_UNIT;
         uint64_t seg_lo = at > ubase ? at : ubase;
         uint64_t seg_hi = uend < hi ? uend : hi;
-        if (__atomic_load_n(&u->backing.committed, __ATOMIC_ACQUIRE)) {
+        // A packed unit holds data too (MKW_PACK): reading it unpacks it.
+        if (__atomic_load_n(&u->backing.committed, __ATOMIC_ACQUIRE) || __atomic_load_n(&u->pack, __ATOMIC_ACQUIRE)) {
             if (got && runs[got - 1][1] == seg_lo) runs[got - 1][1] = seg_hi;
             else runs[got][0] = seg_lo, runs[got][1] = seg_hi, ++got;
         }
@@ -992,6 +1133,9 @@ void plat_mem_early_hold_hook(void (*fn)(uint64_t addr, size_t n)) {
 }
 void plat_mem_frozen_hook(int (*fn)(uint64_t addr)) {
     __atomic_store_n(&g_frozen_hook, fn, __ATOMIC_RELEASE);
+}
+void plat_mem_frozen_ms_hook(uint32_t (*fn)(uint64_t addr)) {
+    __atomic_store_n(&g_frozen_ms_hook, fn, __ATOMIC_RELEASE);
 }
 
 uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uint64_t *scanned_bytes, int cache) {
@@ -1043,6 +1187,252 @@ uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uint64_t *scanned_bytes, 
     }
     if (scanned_bytes) *scanned_bytes = scanned;
     return reclaimed;
+}
+
+// MKW_PACK: plat_mem_pack and its census. The governor's thread only, but for the summary (the census's thread).
+enum { SK_GPU, SK_EARLY, SK_YOUNG, SK_RATIO, SK_RATIO_KNOWN, SK_STORE, SK_OTHER, PK_SKIPS };
+static ZSTD_CCtx *pk_cctx;
+static uint8_t *pk_copy, *pk_cbuf;
+static size_t pk_cbound;
+static uint64_t pk_cursor;                        // where the last pass stopped: the next starts there
+static uint64_t pk_pass_skip[PK_SKIPS], pk_pass_frozen;   // the pass running
+static uint64_t pk_last_skip[PK_SKIPS], pk_last_frozen;   // the last pass's, for the summary
+// Since the last summary (exchanged there).
+static uint64_t pk_packs, pk_zeros, pk_raw_in, pk_comp_out, pk_pack_ns, pk_passes;
+
+static bool pk_init(void) {
+    static int state;   // 1 ready, -1 failed
+    if (state) return state > 0;
+    state = -1;
+    size_t dsz = ZSTD_estimateDCtxSize();
+    for (int i = 0; i < PK_DCTX; i++) {
+        void *m = malloc(dsz);
+        if (!m || !(pk_dctx[i].d = ZSTD_initStaticDCtx(m, dsz))) return false;
+    }
+    pk_cbound = ZSTD_compressBound(PS5_MEM_UNIT);
+    pk_cctx = ZSTD_createCCtx();
+    pk_copy = malloc(PS5_MEM_UNIT);
+    pk_cbuf = malloc(pk_cbound);
+    if (!pk_cctx || !pk_copy || !pk_cbuf) return false;
+    // The decompression contexts (~94 KiB each) and the packer's buffers are the store's too.
+    __atomic_add_fetch(&pk_store_bytes, PK_DCTX * dsz + PS5_MEM_UNIT + pk_cbound, __ATOMIC_RELAXED);
+    state = 1;
+    return true;
+}
+
+// Under the unit's lock: -1 when the unit can be packed in freeze fz, else why not. Every page read-only and the region
+// still in freeze fz, at the copy and again at the release, means nothing wrote the unit in between: a thaw makes the
+// pages read-write under this lock before any write, and freezing them again takes a new number (memory.c).
+static int pk_check_locked(const Ps5MixedBlock *u, int (*frozen_fn)(uint64_t), uint32_t fz) {
+    uint64_t a = u->backing.address;
+    if (!u->backing.committed || !u->live_pages || u->pack || (uint32_t)frozen_fn(a) != fz) return SK_OTHER;
+    if (prot_watch_has_gpu(a, PS5_MEM_UNIT)) return SK_GPU;
+    for (size_t p = 0; p < PS5_MEM_UNIT / PAGE; ++p)
+        if (u->pages[p] != PS5_GUEST_READ) return SK_OTHER;
+    for (uint64_t off = 0; off < PS5_MEM_UNIT; off += PS5_MEM_PAGE)
+        if (prot_watch_is_early(a + off)) return SK_EARLY;
+    return -1;
+}
+
+static void pk_skip(int why) { pk_pass_skip[why]++; }
+
+// One unit; 1 stops the pass (the store is full).
+static int pk_unit(Ps5MixedBlock *u, RangeKind kind, const PlatPackParams *pp, int (*frozen_fn)(uint64_t),
+                   uint32_t (*since_fn)(uint64_t), uint32_t now_ms, uint64_t *freed) {
+    if (!__atomic_load_n(&u->backing.committed, __ATOMIC_ACQUIRE) || __atomic_load_n(&u->pack, __ATOMIC_RELAXED))
+        return 0;
+    uint64_t a = u->backing.address;
+    uint32_t fz = (uint32_t)frozen_fn(a);
+    if (!fz) return 0;
+    pk_pass_frozen++;
+    // Compressed too little in this freeze: the same bytes now (a write thaws, and a new freeze has a new number).
+    if (__atomic_load_n(&u->pk_fail_freeze, __ATOMIC_RELAXED) == fz) return pk_skip(SK_RATIO_KNOWN), 0;
+    if (prot_watch_has_gpu(a, PS5_MEM_UNIT)) return pk_skip(SK_GPU), 0;
+    // Signed: a time made odd (| 1) may be 1 ms ahead of now_ms.
+    uint32_t since = since_fn(a), up = __atomic_load_n(&u->pk_unpack_ms, __ATOMIC_RELAXED);
+    if (!since || (int32_t)(now_ms - since) < (int32_t)pp->cold_ms ||
+        (up && (int32_t)(now_ms - up) < (int32_t)pp->cold_ms))
+        return pk_skip(SK_YOUNG), 0;
+    uint64_t need = sizeof(PackBlob) + pk_cbound + (pp->verify ? PS5_MEM_UNIT : 0);
+    if (__atomic_load_n(&pk_store_bytes, __ATOMIC_RELAXED) + need > pp->store_cap) return pk_skip(SK_STORE), 1;
+
+    // The copy under the lock (another thread may release the unit), the compression outside it.
+    unit_lock(u);
+    int why = pk_check_locked(u, frozen_fn, fz);
+    if (why < 0) memcpy(pk_copy, (const void *)(uintptr_t)a, PS5_MEM_UNIT);
+    unit_unlock(u);
+    if (why >= 0) return pk_skip(why), 0;
+    const uint64_t *q = (const uint64_t *)pk_copy;
+    bool zero = true;
+    for (size_t k = 0; k < PS5_MEM_UNIT / sizeof *q && zero; ++k) zero = !q[k];
+    PackBlob *b = NULL;
+    size_t c = 0;
+    if (!zero) {   // all zero: released with no blob, as the zero reclaim does; it commits again zero-filled
+        uint64_t t0 = plat_now_ns();
+        c = ZSTD_compressCCtx(pk_cctx, pk_cbuf, pk_cbound, pk_copy, PS5_MEM_UNIT, 1);
+        __atomic_add_fetch(&pk_pack_ns, plat_now_ns() - t0, __ATOMIC_RELAXED);
+        if (ZSTD_isError(c) || c * 100 > (size_t)PS5_MEM_UNIT * PK_MAX_PCT) {
+            __atomic_store_n(&u->pk_fail_freeze, fz, __ATOMIC_RELAXED);
+            return pk_skip(SK_RATIO), 0;
+        }
+        b = malloc(sizeof *b + c);
+        uint8_t *raw = pp->verify ? malloc(PS5_MEM_UNIT) : NULL;
+        if (!b || (pp->verify && !raw)) {
+            free(b), free(raw);
+            return pk_skip(SK_STORE), 1;
+        }
+        *b = (PackBlob){.raw = raw, .csize = (uint32_t)c,
+                        .bytes = (uint32_t)(sizeof *b + c + (raw ? PS5_MEM_UNIT : 0))};
+        memcpy(b->data, pk_cbuf, c);
+        if (raw) memcpy(raw, pk_copy, PS5_MEM_UNIT);
+    }
+
+    unit_lock(u);
+    why = pk_check_locked(u, frozen_fn, fz);
+    bool done = false;
+    if (why < 0) {
+        int rc = ps5_mem_decommit(&u->backing);
+        if (!u->backing.committed) {
+            done = true;
+            __atomic_store_n(&u->pack, b, __ATOMIC_RELEASE);
+            __atomic_sub_fetch(&backed_units[kind], 1, __ATOMIC_RELAXED);
+            if (b) {
+                __atomic_add_fetch(&packed_units[kind], 1, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&pk_packed_bytes, c, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&pk_store_bytes, b->bytes, __ATOMIC_RELAXED);
+            }
+        }
+        if (rc) sdk_ok("pack release", a, PS5_MEM_UNIT, rc);
+    }
+    unit_unlock(u);
+    if (!done) {
+        if (b) free(b->raw), free(b);
+        return pk_skip(why >= 0 ? why : SK_OTHER), 0;
+    }
+    *freed += PS5_MEM_UNIT;
+    if (b) {
+        __atomic_add_fetch(&pk_packs, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&pk_raw_in, PS5_MEM_UNIT, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&pk_comp_out, c, __ATOMIC_RELAXED);
+        __atomic_store_n(&pk_ever, 1, __ATOMIC_RELAXED);
+    } else __atomic_add_fetch(&pk_zeros, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+// The units of HEAP and ALIAS ranges at [lo, hi), in address order; 1 when the pass stops (target, time or store),
+// with pk_cursor where the next starts.
+static int pk_walk(uint64_t lo, uint64_t hi, const PlatPackParams *pp, int (*frozen_fn)(uint64_t),
+                   uint32_t (*since_fn)(uint64_t), uint64_t deadline, uint64_t *freed) {
+    uint32_t now_ms = (uint32_t)plat_now_ms();
+    unsigned n = 0;
+    for (VmRange *r = __atomic_load_n(&ranges, __ATOMIC_ACQUIRE); r; r = __atomic_load_n(&r->next, __ATOMIC_ACQUIRE)) {
+        if (r->base >= hi) break;
+        if (r->end <= lo || r->host || !r->chunks || (r->kind != RANGE_HEAP && r->kind != RANGE_ALIAS)) continue;
+        for (size_t c = 0; c < r->chunk_count; ++c) {
+            uint64_t cbase = r->base + ((uint64_t)c << CHUNK_SHIFT);
+            if (cbase >= hi) return 0;
+            if (cbase + CHUNK_SIZE <= lo) continue;
+            Ps5MixedBlock *chunk = __atomic_load_n(&r->chunks[c], __ATOMIC_ACQUIRE);
+            if (!chunk) continue;
+            for (size_t i = 0; i < CHUNK_UNITS; ++i) {
+                Ps5MixedBlock *u = &chunk[i];
+                uint64_t a = cbase + (uint64_t)i * PS5_MEM_UNIT;
+                if (a < lo) continue;
+                if (a >= hi || a >= r->end) break;
+                if (*freed >= pp->target_bytes || (!(++n & 63) && plat_now_ns() > deadline) ||
+                    pk_unit(u, r->kind, pp, frozen_fn, since_fn, now_ms, freed)) {
+                    pk_cursor = a + PS5_MEM_UNIT;
+                    return 1;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+uint64_t plat_mem_pack(const PlatPackParams *pp) {
+    plat_mem_pack_collect();
+    int (*frozen_fn)(uint64_t) = __atomic_load_n(&g_frozen_hook, __ATOMIC_ACQUIRE);
+    uint32_t (*since_fn)(uint64_t) = __atomic_load_n(&g_frozen_ms_hook, __ATOMIC_ACQUIRE);
+    if (!pp || !pp->target_bytes || !frozen_fn || !since_fn || !pk_init()) return 0;
+    memset(pk_pass_skip, 0, sizeof pk_pass_skip);
+    pk_pass_frozen = 0;
+    uint64_t freed = 0, t0 = plat_now_ns(), deadline = pp->budget_us ? t0 + pp->budget_us * 1000ull : UINT64_MAX;
+    // The store is the C heap, the payload's flexible memory: a floor kept for everything else that allocates there.
+    size_t flex = 0;
+    if (sceKernelAvailableFlexibleMemorySize(&flex) == 0 && flex < ((size_t)PK_FLEX_FLOOR_MIB << 20)) {
+        pk_pass_skip[SK_STORE]++;
+    } else {
+        uint64_t start = pk_cursor;
+        if (!pk_walk(start, UINT64_MAX, pp, frozen_fn, since_fn, deadline, &freed) &&
+            !pk_walk(0, start, pp, frozen_fn, since_fn, deadline, &freed))
+            pk_cursor = 0;
+    }
+    for (int i = 0; i < PK_SKIPS; i++) __atomic_store_n(&pk_last_skip[i], pk_pass_skip[i], __ATOMIC_RELAXED);
+    __atomic_store_n(&pk_last_frozen, pk_pass_frozen, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&pk_passes, 1, __ATOMIC_RELAXED);
+    return freed;
+}
+
+void plat_mem_pack_collect(void) {
+    for (PackBlob *b = __atomic_exchange_n(&pk_free, NULL, __ATOMIC_ACQUIRE), *next; b; b = next) {
+        next = b->next;
+        __atomic_sub_fetch(&pk_store_bytes, b->bytes, __ATOMIC_RELAXED);
+        free(b->raw);
+        free(b);
+    }
+}
+
+static void pk_backed_note(char *out, size_t cap) {
+    if (!cap) return;
+    out[0] = 0;
+    if (!__atomic_load_n(&pk_ever, __ATOMIC_RELAXED)) return;
+    size_t units = 0, flex = 0;
+    for (int i = 0; i < 3; i++) units += __atomic_load_n(&packed_units[i], __ATOMIC_RELAXED);
+    int frc = sceKernelAvailableFlexibleMemorySize(&flex);
+    snprintf(out, cap, ", packed %zu MiB in %.1f MiB (store %.1f MiB; flex free %zu MiB)", (units * PS5_MEM_UNIT) >> 20,
+             __atomic_load_n(&pk_packed_bytes, __ATOMIC_RELAXED) / 1048576.0,
+             __atomic_load_n(&pk_store_bytes, __ATOMIC_RELAXED) / 1048576.0, frc == 0 ? flex >> 20 : 0);
+}
+
+void plat_mem_pack_summary(char *out, size_t cap) {
+    if (!cap) return;
+    out[0] = 0;
+    if (!__atomic_load_n(&pk_ever, __ATOMIC_RELAXED) && !__atomic_load_n(&pk_passes, __ATOMIC_RELAXED)) return;
+#define X(v) __atomic_exchange_n(&(v), 0, __ATOMIC_RELAXED)
+#define L(v) (unsigned long long)__atomic_load_n(&(v), __ATOMIC_RELAXED)
+    uint64_t packs = X(pk_packs), zeros = X(pk_zeros), raw = X(pk_raw_in), comp = X(pk_comp_out), pns = X(pk_pack_ns);
+    uint64_t passes = X(pk_passes), un = X(pk_unpacks), uns = X(pk_unpack_ns), umax = X(pk_unpack_max_ns);
+    uint64_t uc[PLAT_BACK_N];
+    for (int i = 0; i < PLAT_BACK_N; i++) uc[i] = X(pk_unpack_cause[i]);
+    uint64_t vchk = X(pk_verify_checked), vbad = X(pk_verify_bad), vaddr = X(pk_verify_addr), fbad = L(pk_fill_bad);
+    size_t units = 0;
+    for (int i = 0; i < 3; i++) units += __atomic_load_n(&packed_units[i], __ATOMIC_RELAXED);
+    uint64_t pb = __atomic_load_n(&pk_packed_bytes, __ATOMIC_RELAXED);
+    int o = snprintf(out, cap,
+                     "%zu units, %.1f MiB in %.1f MiB (%.2f); since the last: %llu passes, %llu packed (%.1f -> %.1f MiB, "
+                     "%.0f us each), %llu zero released, %llu unpacked (mean %.0f us, max %.0f us; write fault %llu, read "
+                     "fault %llu, runtime read %llu, import %llu, commit %llu); last pass: %llu frozen units, skipped gpu "
+                     "%llu, early %llu, young %llu, ratio %llu (+%llu known), store %llu, other %llu; verify %llu checked, "
+                     "%llu differed (first %#llx); %llu failed to decompress; unpacked by:",
+                     units, (units * (double)PS5_MEM_UNIT) / 1048576.0, pb / 1048576.0,
+                     units ? pb / (units * (double)PS5_MEM_UNIT) : 0.0, (unsigned long long)passes,
+                     (unsigned long long)packs, raw / 1048576.0, comp / 1048576.0, packs ? pns / 1e3 / packs : 0.0,
+                     (unsigned long long)zeros, (unsigned long long)un, un ? uns / 1e3 / un : 0.0, umax / 1e3,
+                     (unsigned long long)uc[PLAT_BACK_WRITE_FAULT], (unsigned long long)uc[PLAT_BACK_READ_FAULT],
+                     (unsigned long long)uc[PLAT_BACK_RT_READ], (unsigned long long)uc[PLAT_BACK_IMPORT],
+                     (unsigned long long)uc[PLAT_BACK_COMMIT], L(pk_last_frozen), L(pk_last_skip[SK_GPU]),
+                     L(pk_last_skip[SK_EARLY]), L(pk_last_skip[SK_YOUNG]), L(pk_last_skip[SK_RATIO]),
+                     L(pk_last_skip[SK_RATIO_KNOWN]), L(pk_last_skip[SK_STORE]), L(pk_last_skip[SK_OTHER]),
+                     (unsigned long long)vchk, (unsigned long long)vbad, (unsigned long long)vaddr,
+                     (unsigned long long)fbad);
+    for (int i = 0; i < PK_THREADS && o > 0 && (size_t)o < cap; i++) {
+        if (!__atomic_load_n(&pk_thr[i].tid, __ATOMIC_ACQUIRE)) break;
+        uint64_t n = X(pk_thr[i].n);
+        if (n) o += snprintf(out + o, cap - (size_t)o, " %s %llu", pk_thr[i].name, (unsigned long long)n);
+    }
+#undef X
+#undef L
 }
 
 uint64_t plat_mem_backed_bytes(uint64_t addr, uint64_t size) {

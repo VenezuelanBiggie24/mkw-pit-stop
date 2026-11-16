@@ -108,6 +108,8 @@ void flag_names(uint32_t f, char *buf, size_t n) {
 
 
 
+#define GROW_TOP 8
+
 static void log_mem_census(uint64_t frame, int force) {
     static uint64_t window_start, window_ns;
     if (!force) {
@@ -126,10 +128,31 @@ static void log_mem_census(uint64_t frame, int force) {
     Group g[64];
     int ng = 0;
     uint64_t total[4] = {0}, count[4] = {0}, cna_total = 0, cna_backed = 0;
+    // The pools whose backed bytes grew most since the previous census, and the growth of all of them: the guest's
+    // backed memory rose by ~870 MiB over three races in run nocache (16/11/2026), most of it in CPU_CACHED|GPU_CACHED
+    // pools, and these lines name which.
+    typedef struct { uint64_t lo, size, before, after; uint32_t flags; int used; } Grow;
+    Grow top[GROW_TOP];
+    int ntop = 0;
+    int64_t grew = 0, shrank = 0;
     plat_mutex_lock_shared(&pool_lock);
     for (int i = 0; i < pool_index.n; i++) {
-        const PoolRec *r = pool_index.e[i].buf;
+        PoolRec *r = pool_index.e[i].buf;
         uint64_t b = r->kind != POOL_VIRT ? plat_mem_backed_bytes(r->lo, r->size) : 0;
+        uint64_t was = r->census_backed;
+        r->census_backed = b;
+        if (b > was) grew += (int64_t)(b - was);
+        else shrank += (int64_t)(was - b);
+        int k = -1;
+        if (b > was && ntop < GROW_TOP) k = ntop++;
+        else if (b > was && b - was > top[GROW_TOP - 1].after - top[GROW_TOP - 1].before) k = GROW_TOP - 1;
+        if (k >= 0) {
+            top[k] = (Grow){r->lo, r->size, was, b, r->flags, r->used != 0};
+            for (; k > 0 && top[k].after - top[k].before > top[k - 1].after - top[k - 1].before; k--) {
+                Grow t = top[k];
+                top[k] = top[k - 1], top[k - 1] = t;
+            }
+        }
         int j = 0;
         while (j < ng && (g[j].kind != r->kind || g[j].flags != r->flags)) j++;
         if (j == ng && ng < 64) g[ng++] = (Group){r->kind, r->flags, 0, 0, 0};
@@ -139,6 +162,35 @@ static void log_mem_census(uint64_t frame, int force) {
             cna_total += r->size, cna_backed += b;
     }
     plat_mutex_unlock_shared(&pool_lock);
+    char gb[384];   // with MKW_PACK's ", packed ..." note
+    plat_mem_backed_summary(gb, sizeof gb);
+    if (gb[0]) rt_log("mem: guest %s", gb);
+    char pk[1024];   // MKW_PACK: what is packed, and the packs, unpacks and skips since the last census
+    plat_mem_pack_summary(pk, sizeof pk);
+    if (pk[0]) rt_log("mem: pack %s", pk);
+    rt_log("mem: pools' backed bytes since the last census: +%.1f MiB, -%.1f MiB; most grown:", grew / 1048576.0,
+           shrank / 1048576.0);
+    for (int k = 0; k < ntop; k++) {
+        char f[160];
+        flag_names(top[k].flags, f, sizeof f);
+        rt_log("mem:   pool %#llx %.1f MiB %s%s: backed %.1f -> %.1f MiB", (unsigned long long)top[k].lo,
+               top[k].size / 1048576.0, f, top[k].used ? "" : " (never resolved by the GPU)", top[k].before / 1048576.0,
+               top[k].after / 1048576.0);
+        // What a big pool holds: run memgrow (16/11/2026) found one 2427 MiB pool behind half the guest's growth.
+        if (top[k].size >= (64ull << 20)) {
+            VkTexRange t;
+            vk_texture_range_census(top[k].lo, top[k].lo + top[k].size, &t);
+            const double M = 1048576.0;
+            rt_log("mem:     its textures: %llu storages %.1f MiB (backed %.1f MiB of the pool's %.1f); entries %llu live "
+                   "(%llu idle) %llu released, %llu never uploaded, %llu sparse; device memory %.1f MiB: ASTC->BC7 %llu, "
+                   "%.1f MiB from %.1f stored; ASTC->RGBA8 %llu, %.1f MiB from %.1f; other %llu, %.1f MiB from %.1f",
+                   (unsigned long long)t.n, t.storage / M, t.backed / M, top[k].after / M, (unsigned long long)t.live,
+                   (unsigned long long)t.idle, (unsigned long long)t.released, (unsigned long long)t.never_up,
+                   (unsigned long long)t.sparse_n, t.vk_bytes / M, (unsigned long long)t.astc_bc7_n, t.astc_bc7_vk / M,
+                   t.astc_bc7_storage / M, (unsigned long long)t.astc_rgba_n, t.astc_rgba_vk / M,
+                   t.astc_rgba_storage / M, (unsigned long long)t.other_n, t.other_vk / M, t.other_storage / M);
+        }
+    }
     rt_log("mem: census at frame %llu: import %llu pools %.1f MiB (%d without a GPU buffer), physical %llu pools %.1f MiB, "
            "virtual %llu pools %.1f MiB of address space",
            (unsigned long long)frame, (unsigned long long)count[POOL_IMPORT], total[POOL_IMPORT] / 1048576.0,

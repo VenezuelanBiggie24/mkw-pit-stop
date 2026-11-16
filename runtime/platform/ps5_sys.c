@@ -515,13 +515,20 @@ PlatFile *plat_fs_create(const char *path, int *err) {
     return f;
 }
 
+// The kernel reads the buffer, which can be guest memory (a save's write, fs_host.c write_file): a unit with no backing
+// (never touched, or packed by MKW_PACK, plat_mem_pack) answers EFAULT instead of faulting, so its units are backed
+// first, as plat_file_pread does, and backed again on an EFAULT.
 int64_t plat_file_pwrite(PlatFile *f, const void *buf, uint32_t n, uint64_t off) {
     if (!f) return -1;
+    if (!plat_mem_back((uintptr_t)buf, n)) return -1;
     const uint8_t *p = buf;
     size_t done = 0;
+    int efault_retries = 0;
     while (done < n) {
         ssize_t k = pwrite(f->fd, p + done, n - done, (off_t)(off + done));
         if (k < 0 && errno == EINTR) continue;
+        if (k < 0 && errno == EFAULT && efault_retries++ < 3 && plat_mem_back((uintptr_t)(p + done), n - done))
+            continue;
         if (k < 0) return -1;
         done += (size_t)k;
     }

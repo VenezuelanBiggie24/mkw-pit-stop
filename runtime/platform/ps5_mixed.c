@@ -80,12 +80,17 @@ int ps5_mixed_commit_lazy(Ps5MixedBlock *block, size_t offset) {
     return 0;
 }
 
-int ps5_mixed_back_report(Ps5MixedBlock *block, Ps5MemCommitReport *report) {
+int ps5_mixed_back_fill(Ps5MixedBlock *block, Ps5MemCommitReport *report, int (*fill)(void *ctx, void *unit),
+                        void *ctx) {
     if (!block->backing.reserved || !block->live_pages || block->backing.committed ||
         block->backing.allocated || block->backing.relocated)
         return PS5_MEM_BAD_REQUEST;
     int result = ps5_mem_commit(&block->backing, report);
     if (result) return result;
+    if (fill && (result = fill(ctx, (void *)block->backing.address)) != 0) {
+        int cleanup = ps5_mem_decommit(&block->backing);
+        return cleanup ? cleanup : result;
+    }
     for (size_t g = 0; g < PS5_MEM_UNIT / PS5_MEM_PAGE; ++g) {
         size_t first = g * GUEST_PER_NATIVE;
         bool any_rw = false, any_read = false;
@@ -106,6 +111,10 @@ int ps5_mixed_back_report(Ps5MixedBlock *block, Ps5MemCommitReport *report) {
         }
     }
     return 0;
+}
+
+int ps5_mixed_back_report(Ps5MixedBlock *block, Ps5MemCommitReport *report) {
+    return ps5_mixed_back_fill(block, report, NULL, NULL);
 }
 
 int ps5_mixed_back(Ps5MixedBlock *block) { return ps5_mixed_back_report(block, NULL); }

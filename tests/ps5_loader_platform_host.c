@@ -1,6 +1,7 @@
 // Linux memory mappings model the SDK's 16 KiB protection and 64 KiB backing.
 #include <assert.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -313,6 +314,86 @@ static void test_backing_release(uint64_t addr) {
     puts("GPU-only backing: zero reclaimed for imported units; one eligible unit reclaimed exactly 65536 bytes");
 }
 
+// MKW_PACK: frozen units packed (compressible), released (zero) or skipped (random bytes, GPU-imported); a read
+// unpacks the same bytes; a page decommitted while packed reads zero once committed again; a unit decommitted whole drops
+// its blob.
+static uint64_t pack_lo, pack_hi;
+static uint32_t pack_since;
+static int pack_frozen(uint64_t a) { return a >= pack_lo && a < pack_hi ? 7 : 0; }
+static uint32_t pack_frozen_ms(uint64_t a) { return pack_frozen(a) ? pack_since : 0; }
+uint32_t plat_thread_id(void) { return 1; }
+int plat_sample_self_name(char *out, size_t cap) {
+    snprintf(out, cap, "test");
+    return 1;
+}
+
+static void fill_text(uint8_t *p, uint32_t seed) {
+    for (size_t i = 0; i < UNIT; i++) p[i] = (uint8_t)("packed guest unit "[(i + seed) % 18] + (i / 4096));
+}
+
+static void test_pack(uint64_t addr) {
+    static uint8_t want[4][UNIT];
+    fill_text(want[0], 0);                                       // packs
+    memset(want[1], 0, UNIT);                                    // released, no blob
+    for (size_t i = 0; i < UNIT; i++) want[2][i] = (uint8_t)(rand() >> 7);   // does not compress: kept
+    fill_text(want[3], 5);                                       // GPU-imported: kept, then packed once released
+    assert(plat_mem_commit(addr, 4 * UNIT) && plat_mem_back(addr, 4 * UNIT) && allocations == 4);
+    for (int u = 0; u < 4; u++) memcpy((void *)(uintptr_t)(addr + u * UNIT), want[u], UNIT);
+    assert(plat_mem_protect(addr, 4 * UNIT, PLAT_PROT_READ));   // as a freeze leaves them
+    plat_mem_gpu_import(addr + 3 * UNIT, UNIT, 1);
+    pack_lo = addr, pack_hi = addr + 4 * UNIT;
+    pack_since = ((uint32_t)plat_now_ms() - 10000) | 1;          // frozen 10 s ago
+    plat_mem_frozen_hook(pack_frozen);
+    plat_mem_frozen_ms_hook(pack_frozen_ms);
+    PlatPackParams pp = {.target_bytes = 64 * UNIT, .store_cap = 64ull << 20, .cold_ms = 5000, .verify = 1};
+    char line[1024];
+    plat_mem_pack_summary(line, sizeof line);                    // nothing yet: no pass ran
+    assert(!line[0]);
+    assert(plat_mem_pack(&pp) == 2 * UNIT && allocations == 2);
+    plat_mem_pack_summary(line, sizeof line);
+    assert(strstr(line, "1 units, 0.1 MiB") && strstr(line, "1 packed") && strstr(line, "1 zero released"));
+    assert(strstr(line, "4 frozen units, skipped gpu 1") && strstr(line, "ratio 1 "));
+    uint64_t runs[4][2];
+    // The packed unit holds data, the released zero unit does not.
+    assert(plat_mem_populated(addr, 4 * UNIT, runs, 4) == 2 && runs[0][0] == addr && runs[0][1] == addr + UNIT &&
+           runs[1][0] == addr + 2 * UNIT && runs[1][1] == addr + 4 * UNIT);
+    // A read of the packed unit faults and unpacks it; the zero unit commits zero-filled.
+    for (int u = 0; u < 3; u++) assert(!memcmp((void *)(uintptr_t)(addr + u * UNIT), want[u], UNIT));
+    assert(allocations == 4);
+    plat_mem_pack_summary(line, sizeof line);
+    assert(strstr(line, "0 units") && strstr(line, "1 unpacked") && strstr(line, "read fault 1") &&
+           strstr(line, "1 checked, 0 differed") && strstr(line, "0 failed") && strstr(line, "test 1"));
+    // Just unpacked: young again. The zero unit is packed again (released), the random one is known not to compress.
+    assert(plat_mem_pack(&pp) == UNIT && allocations == 3);
+    plat_mem_pack_summary(line, sizeof line);
+    assert(strstr(line, "young 1") && strstr(line, "(+1 known)"));
+    // Released by the GPU: packs; a page decommitted while packed reads zero once committed again, the rest unpacks.
+    plat_mem_gpu_import(addr + 3 * UNIT, UNIT, 0);
+    assert(plat_mem_pack(&pp) == UNIT && allocations == 2);
+    assert(plat_mem_decommit(addr + 3 * UNIT + PAGE, PAGE) && plat_mem_commit(addr + 3 * UNIT + PAGE, PAGE));
+    assert(plat_mem_back(addr + 3 * UNIT, UNIT) && allocations == 3);   // a runtime path unpacks too
+    memset(want[3] + PAGE, 0, PAGE);
+    assert(!memcmp((void *)(uintptr_t)(addr + 3 * UNIT), want[3], UNIT));
+    plat_mem_pack_summary(line, sizeof line);
+    assert(strstr(line, "runtime read 1") && strstr(line, "1 checked, 0 differed"));
+    // Packed, then decommitted whole: the blob goes, nothing is unpacked.
+    pack_since = ((uint32_t)plat_now_ms() - 10000) | 1;
+    PlatPackParams young = pp;
+    young.cold_ms = 0;
+    plat_sleep_ns(3000000);   // the unpack times are made odd, up to 1 ms ahead
+    assert(plat_mem_pack(&young) >= UNIT);
+    plat_mem_pack_summary(line, sizeof line);
+    assert(strstr(line, "1 packed"));
+    assert(plat_mem_decommit(addr, 4 * UNIT));
+    plat_mem_pack_collect();
+    plat_mem_pack_summary(line, sizeof line);
+    assert(strstr(line, "0 units") && strstr(line, "0 unpacked") && !allocations);
+    plat_mem_frozen_hook(NULL);
+    plat_mem_frozen_ms_hook(NULL);
+    puts("pack: compressible unit packed and read back, zero unit released, random and GPU units kept; zeroed page and "
+         "whole decommit honoured");
+}
+
 static void test_memory(void) {
     uint64_t boundary = sample + UNIT, tail = boundary - PAGE;
     uint64_t alias_end = RT_ALIAS_BASE + RT_ALIAS_SIZE;
@@ -323,6 +404,7 @@ static void test_memory(void) {
     assert(plat_mem_reserve(RT_LOW_BASE, RT_LOW_SIZE, 1));
     test_early_batch(RT_ALIAS_BASE);
     test_backing_release(RT_ALIAS_BASE + 4 * UNIT);
+    test_pack(RT_ALIAS_BASE + 8 * UNIT);
     assert(!allocations && !plat_mem_reserve(sample, UNIT, 0));
     assert(!plat_mem_reserve(hint, UNIT, 0));
     assert(!plat_mem_reserve(unexpected, UNIT, 0) && !plat_mem_commit(unexpected, PAGE));
