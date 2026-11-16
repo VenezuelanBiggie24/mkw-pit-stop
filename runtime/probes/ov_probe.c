@@ -1,5 +1,5 @@
-// --probe-services: every override of ov_system.c, ov_input.c, ov_media.c, swkbd.c and
-// ov_gfx.c called the way guest code calls it: by its synthetic address through rt_call / rt_dispatch, with AAPCS64
+// --probe-services: every override of ov_system.c, ov_input.c, ov_media.c, swkbd.c,
+// ov_gfx.c and nvn2.c's native images called the way guest code calls it: by its synthetic address through rt_call / rt_dispatch, with AAPCS64
 // arguments, on the guest main thread. Checks that each one matches a relocation of the loaded modules, then the
 // values: language, operation mode, notification messages, account, time round trips, controllers, codec state,
 // graphics records, the system events behind nfp and vi, the software keyboard with arguments built by the guest SDK
@@ -22,6 +22,7 @@
 #include "kernel.h"
 #include "ov.h"
 #include "platform/platform.h"
+#include "players.h"
 #include "utf16.h"
 #include "ui_text.h"
 #include "ov_probe.h"
@@ -56,6 +57,8 @@ static Ov ovs[] = {
     {"prepo.AddInternetConnectionStatus", "_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_"},
     {"nfp.Mount", "_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountTargetE"},
     {"err.ShowError", "_ZN2nn3err9ShowErrorENS_6ResultE"},
+    {"err.ShowErrorVariant", "_ZN2nn3err9ShowErrorERKNS0_18ErrorResultVariantE"},
+    {"crypto.GenerateCryptographicallyRandomBytes", "_ZN2nn6crypto36GenerateCryptographicallyRandomBytesEPvm"},
     // SDK-internal (section 5.2)
     {"nndiagStartup", "nndiagStartup"},
     {"aoc.Initialize", "_ZN2nn3aoc10InitializeEv"},
@@ -101,6 +104,7 @@ static Ov ovs[] = {
     {"hid.GetNpadStates.Handheld", "_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj"},
     {"hid.SetNpadJoyHoldType", "_ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE"},
     {"hid.DisconnectNpad", "_ZN2nn3hid14DisconnectNpadERKj"},
+    {"hid.SwapNpadAssignment", "_ZN2nn3hid18SwapNpadAssignmentERKjS2_"},
     {"hid.ShowControllerSupport",
      "_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE"},
     {"hid.GetVibrationDeviceHandles",
@@ -145,7 +149,26 @@ static Ov ovs[] = {
     {"vi.CreateLayer", "_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE"},
     {"vi.GetNativeWindow", "_ZN2nn2vi15GetNativeWindowEPPvPNS0_5LayerE"},
     {"vi.GetDisplayVsyncEvent", "_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE"},
+    {"vi.QueryDisplayHdrStatus", "_ZN2nn2vi21QueryDisplayHdrStatusEPbPNS0_15HdrOutputFormatEPtPKNS0_7DisplayE"},
+    {"vi.QueryDisplayHdrPaperWhite", "_ZN2nn2vi25QueryDisplayHdrPaperWhiteEPtPKNS0_7DisplayE"},
+    {"vi.SetLayerNextHdrStandard", "_ZN2nn2vi52SetLayerNextHdrStandardContentLuminanceRangeMetadataEPNS0_5LayerEtt"},
+    {"vi.SetLayerNextHdrExtended", "_ZN2nn2vi52SetLayerNextHdrExtendedContentLuminanceRangeMetadataEPNS0_5LayerEtt"},
+    {"vi.QueryDisplayVrrSupported", "_ZN2nn2vi24QueryDisplayVrrSupportedEPbPKNS0_7DisplayE"},
+    {"vi.SetDisplayVrrCapability", "_ZN2nn2vi23SetDisplayVrrCapabilityEPNS0_7DisplayEb"},
+    {"vi.SetLayerExtendedSwapInterval", "_ZN2nn2vi28SetLayerExtendedSwapIntervalEPNS0_5LayerEii"},
+    {"vi.ClearLayerExtendedSwapInterval", "_ZN2nn2vi30ClearLayerExtendedSwapIntervalEPNS0_5LayerE"},
     {"nvnBootstrapLoader", "nvnBootstrapLoader", 1},
+    // nvn2.c: native images
+    {"nimg.SetDefaults", "_Z32nvnNativeImageBuilderSetDefaultsP21NVNnativeImageBuilder"},
+    {"nimg.SetDevice", "_Z30nvnNativeImageBuilderSetDeviceP21NVNnativeImageBuilderP9NVNdevice"},
+    {"nimg.SetFormat", "_Z30nvnNativeImageBuilderSetFormatP21NVNnativeImageBuilder9NVNformat"},
+    {"nimg.SetMemoryPermission",
+     "_Z40nvnNativeImageBuilderSetMemoryPermissionP21NVNnativeImageBuilder30NVNnativeImageMemoryPermission"},
+    {"nimg.SetNativeImageHandle",
+     "_Z41nvnNativeImageBuilderSetNativeImageHandleP21NVNnativeImageBuilderN2nn2gs17NativeImageHandleE"},
+    {"nimg.Initialize", "_Z24nvnNativeImageInitializeP14NVNnativeImagePK21NVNnativeImageBuilder"},
+    {"nimg.Finalize", "_Z22nvnNativeImageFinalizeP14NVNnativeImage"},
+    {"nimg.TextureInitialize", "_Z35nvnTextureInitializeFromNativeImageP10NVNtextureP14NVNnativeImage"},
 #define OV(key, name) {key, name},
 #include "ov_mkw_list.h"
 #undef OV
@@ -168,6 +191,7 @@ static const struct { const char *child, *key, *fatal, *env; } fatals[] = {
     OTHER_CODEC("codec::InitializeAv1Decoder"), OTHER_CODEC("codec::InitializeAv1Decoder(work)"),
     OTHER_CODEC("codec::InitializeVp8Decoder"), OTHER_CODEC("codec::InitializeVp8Decoder(work)"),
 #undef OTHER_CODEC
+    {"native-image", "nimg.TextureInitialize", "FATAL: nvn2: TextureInitializeFromNativeImage with an uninitialized"},
 };
 #define NFATAL ((int)(sizeof fatals / sizeof *fatals))
 
@@ -257,11 +281,13 @@ static void set_env(const char *name, const char *value) { plat_setenv(name, val
 static void probe_oe(void) {
     char *keep_lang = cfg_get("MKW_LANG") ? strdup(cfg_get("MKW_LANG")) : NULL;
     char *keep_locale = cfg_get("MKW_LOCALE") ? strdup(cfg_get("MKW_LOCALE")) : NULL;
+    char *keep_menu = cfg_get("MKW_MENU_LANG") ? strdup(cfg_get("MKW_MENU_LANG")) : NULL;
+    set_env("MKW_MENU_LANG", NULL);   // the locale cases: a menu language from mkw.ini would decide instead
     static const struct { const char *lang, *locale, *want; } cases[] = {
         {NULL, "en-US", "en-US"}, {NULL, "be-BY", "en-US"}, {NULL, "xx", "en-US"},     {NULL, "ja-JP", "ja"},
         {NULL, "fr-CA", "fr-CA"}, {NULL, "es-MX", "es-419"}, {NULL, "es_ES", "es"},     {NULL, "zh-Hant-TW", "zh-Hant"},
         {NULL, "zh-CN", "zh-Hans"}, {NULL, "en-GB", "en-GB"}, {NULL, "ru", "ru"},       {"ja", "fr-FR", "ja"},
-        {"en-US", NULL, "en-US"}};
+        {"en-US", NULL, "en-US"}, {NULL, "ca-ES", "es"}, {NULL, "eu", "es"},       {NULL, "pl-PL", "en-US"}, {"ca", NULL, "es"}};
     int bad = 0;
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
         set_env("MKW_LANG", cases[i].lang);
@@ -273,6 +299,22 @@ static void probe_oe(void) {
                    cases[i].locale ? cases[i].locale : "", got, cases[i].want);
         }
     }
+    // Automatic follows a menu language the game ships; the menu's "en" keeps the locale's English
+    static const struct { const char *menu, *locale, *want; } menus[] = {
+        {"ja", "en-US", "ja"}, {"en", "en-GB", "en-GB"}, {"en", "de-DE", "en-US"}, {"tr", "de-DE", "de"},
+        {"zh-Hant", "en-US", "zh-Hant"}, {"pt-BR", "pt-PT", "pt-BR"}, {"ca", "en-US", "es"}};
+    set_env("MKW_LANG", NULL);
+    for (size_t i = 0; i < sizeof menus / sizeof *menus; i++) {
+        set_env("MKW_MENU_LANG", menus[i].menu);
+        set_env("MKW_LOCALE", menus[i].locale);
+        const char *got = lang();
+        if (strcmp(got, menus[i].want)) {
+            bad++;
+            printf("  FAIL: language for MKW_MENU_LANG=%s MKW_LOCALE=%s is %s, not %s\n", menus[i].menu,
+                   menus[i].locale, got, menus[i].want);
+        }
+    }
+    set_env("MKW_MENU_LANG", NULL);
     set_env("MKW_LANG", NULL);
     set_env("MKW_LOCALE", NULL);
     char sys[16];
@@ -282,12 +324,14 @@ static void probe_oe(void) {
     snprintf(def, sizeof def, "%s", lang());
     set_env("MKW_LANG", keep_lang);
     set_env("MKW_LOCALE", keep_locale);
+    set_env("MKW_MENU_LANG", keep_menu);
     free(keep_lang);
     free(keep_locale);
+    free(keep_menu);
     checks++;
     failures += bad > 0;
-    printf("oe: language %s by default (en-US locale), %s for this Windows user locale; %d locale/MKW_LANG cases %s\n",
-           def, sys, (int)(sizeof cases / sizeof *cases), bad ? "FAILED" : "ok");
+    printf("oe: language %s by default (en-US locale), %s for this Windows user locale; %d locale, MKW_LANG and menu cases %s\n",
+           def, sys, (int)(sizeof cases / sizeof *cases + sizeof menus / sizeof *menus), bad ? "FAILED" : "ok");
 
     CALL("oe.Initialize", 0);
     CALL("oe.SetCpuBoostMode", 0);
@@ -353,6 +397,12 @@ static void probe_applet(void) {
     uint8_t handles[64] = {0};
     CHECK((uint32_t)CALL("nfp.Mount", U(handles), 0, 0) == 0x8073, "nfp Mount: not device-not-found");
     CALL("err.ShowError", 0x2a8);
+    uint32_t variant[3] = {2, 2306, 501};   // an ErrorCode, as the wireless menu passes
+    CALL("err.ShowErrorVariant", U(variant));
+    uint8_t rnd[2][32] = {{0}};
+    CALL("crypto.GenerateCryptographicallyRandomBytes", U(rnd[0]), sizeof rnd[0]);
+    CALL("crypto.GenerateCryptographicallyRandomBytes", U(rnd[1]), sizeof rnd[1]);
+    CHECK(memcmp(rnd[0], rnd[1], sizeof rnd[0]) && memcmp(rnd[0], (uint8_t[32]){0}, 32), "crypto random bytes: zero or repeated");
     CALL("nndiagStartup", 0);
     CALL("aoc.Initialize", 0);
 
@@ -373,7 +423,17 @@ static void probe_account(void) {
     CHECK(uid[0] == direct[0] && uid[1] == direct[1], "GetUserId differs from account_uid");
     CHECK(CALL("account.GetUserExistence", U(&exists), U(uid)) == 0 && exists == 1, "GetUserExistence");
     CHECK(CALL("account.GetUserExistence", U(&exists), U(other)) == 0 && exists == 0, "GetUserExistence (other)");
-    CHECK(CALL("account.GetNickname", U(nick), U(uid)) == 0 && !strcmp(nick, "Local"), "GetNickname");
+    char name[PLAYER_NAME_BYTES];
+    // a name as the console takes it: trimmed, no control characters, 10 characters, whole UTF-8 sequences
+    player_name_clean("  Ab\x01" "cdefghijklm  ", name);
+    CHECK(!strcmp(name, "Abcdefghij"), "player_name_clean: '%s'", name);
+    player_name_clean("\xe3\x83\x9e\xe3\x83\xaa\xe3\x82\xaa\xe3\x83\xab\xe3\x82\xa4\xe3\x83\xbc\xe3\x82\xb8"
+                      "\xe3\x83\x9e\xe3\x83\xaa\xe3\x82\xaa\xe3\x83\xab\xe3\x82\xa4", name);   // 11 kana, 33 bytes
+    CHECK(strlen(name) == 30, "player_name_clean on 3-byte characters: %zu bytes", strlen(name));
+    player_name_clean(" \x80\xff ", name);
+    CHECK(!name[0], "player_name_clean of nothing usable: '%s'", name);
+    player_name(rt_config()->profile, name);
+    CHECK(CALL("account.GetNickname", U(nick), U(uid)) == 0 && !strcmp(nick, name), "GetNickname: %s, not %s", nick, name);
     CALL("account.CloseUser", U(h));
     CHECK(CALL("account.GetUserId", U(uid), U(h)) != 0, "GetUserId on a closed handle");
     probe_uid[0] = direct[0];
@@ -421,6 +481,9 @@ static void probe_time(void) {
           "local calendar time does not round trip (offset %d, day of week %d)", info.utc_offset, info.day_of_week);
     int64_t neg = -1;
     CHECK(CALL("time.ToCalendarTime", U(&local), U(&info), U(&neg)) != 0, "ToCalendarTime of an invalid time succeeded");
+    // past year 3000: the Windows CRT's localtime_s ends the process on it (an invalid parameter, #310) unless checked
+    int64_t far = PLAT_TIME_MAX + 1;
+    CHECK(CALL("time.ToCalendarTime", U(&local), U(&info), U(&far)) != 0, "ToCalendarTime after year 3000 succeeded");
 
     uint8_t *a = guest_alloc(0xd0), *b = guest_alloc(0xd0);
     memset(a, 0xaa, 0xd0);
@@ -595,6 +658,10 @@ static void probe_input(void) {
     probe_two_players(pid);
 
     probe_feedback(pid, style);
+    uint32_t swap[2] = {0, 1};   // swapped and back: player 1 keeps its controller
+    CALL("hid.SwapNpadAssignment", U(&swap[0]), U(&swap[1]));
+    CALL("hid.SwapNpadAssignment", U(&swap[0]), U(&swap[1]));
+    CHECK((uint32_t)CALL("hid.GetNpadStyleSet", U(&pid)) == style, "a swap there and back changes player 1's style set");
     CALL("hid.DisconnectNpad", U(&pid));
     CHECK((uint32_t)CALL("hid.GetNpadStyleSet", U(&pid)) == 0, "a disconnected controller keeps its style set");
     printf("hid: player 1 on a %s controller (id %#x), no buttons; player 2 on a virtual gamepad after the applet\n",
@@ -631,8 +698,51 @@ static void probe_media_gfx(void) {
     CHECK(CALL("vi.GetDisplayVsyncEvent", ev, U(display)) == 0, "GetDisplayVsyncEvent");
     int vsync = event_works(ev, 1);
     CHECK(vsync, "the vsync event does not work as an auto-clear system event");
+    // HDR: no window here, so SDR (format 0); the game's luminance ranges are taken
+    uint8_t *hdr = guest_alloc(0x10);
+    memset(hdr, 0xff, 0x10);
+    CHECK(CALL("vi.QueryDisplayHdrStatus", U(hdr), U(hdr + 4), U(hdr + 8), U(display)) == 0 && hdr[0] == 0 &&
+          !memcmp(hdr + 4, "\0\0\0\0", 4), "QueryDisplayHdrStatus without a window is not SDR");
+    CHECK(CALL("vi.QueryDisplayHdrPaperWhite", U(hdr + 10), U(display)) == 0, "QueryDisplayHdrPaperWhite");
+    CHECK(CALL("vi.SetLayerNextHdrStandard", U(layer), 0, 203) == 0 &&
+          CALL("vi.SetLayerNextHdrExtended", U(layer), 0, 1000) == 0, "SetLayerNextHdr*ContentLuminanceRangeMetadata");
+    // VRR: a display without it; the extended swap interval is taken and ignored
+    hdr[0] = 0xff;
+    CHECK(CALL("vi.QueryDisplayVrrSupported", U(hdr), U(display)) == 0 && hdr[0] == 0, "QueryDisplayVrrSupported");
+    CHECK(CALL("vi.SetDisplayVrrCapability", U(display), 1) == 0 &&
+          CALL("vi.SetLayerExtendedSwapInterval", U(layer), 1, 2) == 0 &&
+          CALL("vi.ClearLayerExtendedSwapInterval", U(layer)) == 0, "VRR capability and extended swap interval");
     printf("codec/nv/vi: Opus decoder state kept, allocators and work memory recorded, display %p layer %p window %p, "
            "vsync event %s\n", display, layer, window, vsync ? "bound (auto-clear)" : "FAILED");
+}
+
+// ---- native images (nvn2.c): the builder's fields reach the image, and a texture over it takes the size its handle
+// carries (width << 16 | height) and the builder's format, with no storage. An uninitialized image: a child's fatal.
+static uint64_t proc(const char *name, uint64_t a0) {
+    uint64_t at = nvn_proc_address(name);
+    if (!at) rt_fatal("probe-services: no NVN proc %s", name);
+    return rt_call(gc, at, 1, a0);
+}
+
+static void probe_native_images(void) {
+    enum { RGBA8 = 0x25 };
+    uint8_t *b = guest_alloc(0x80), *img = guest_alloc(0x80), *tex = guest_alloc(0x200);
+    memset(b, 0xa5, 0x80);
+    CALL("nimg.SetDefaults", U(b));
+    CALL("nimg.SetDevice", U(b), U(guest_alloc(0x10)));
+    CALL("nimg.SetFormat", U(b), RGBA8);
+    CALL("nimg.SetMemoryPermission", U(b), 1);
+    CALL("nimg.SetNativeImageHandle", U(b), 384u << 16 | 216u);
+    CHECK((uint8_t)CALL("nimg.Initialize", U(img), U(b)) == 1, "NativeImageInitialize");
+    CHECK((uint8_t)CALL("nimg.TextureInitialize", U(tex), U(img)) == 1, "TextureInitializeFromNativeImage");
+    uint64_t w = proc("nvnTextureGetWidth", U(tex)), h = proc("nvnTextureGetHeight", U(tex));
+    uint64_t fmt = proc("nvnTextureGetFormat", U(tex));
+    CHECK(w == 384 && h == 216 && fmt == RGBA8, "texture from a native image: %llux%llu format %#llx",
+          (unsigned long long)w, (unsigned long long)h, (unsigned long long)fmt);
+    proc("nvnTextureFinalize", U(tex));
+    CALL("nimg.Finalize", U(img));
+    printf("native images: a %llux%llu texture of format %#llx from the builder's handle\n", (unsigned long long)w,
+           (unsigned long long)h, (unsigned long long)fmt);
 }
 
 // ---- software keyboard (swkbd.c): ShowKeyboardArg built by the SDK's own setters, as the horse naming does
@@ -780,41 +890,36 @@ static void probe_fonts(void) {
            (unsigned long long)size, path);
 }
 
-// The host catalog (ui_text.c): every menu id has its own English and Russian text, the software keyboard keeps its
-// game-language rows, and menu_text follows MKW_MENU_LANG.
+// The host catalog (ui_text.c, generated from i18n/*.po): every language has its own text for every menu id, the
+// software keyboard keeps its game-language rows, and menu_text follows MKW_MENU_LANG in each language.
 static void probe_menu_text(void) {
-    static const char *const langs[] = {"en", "ja", "fr", "de", "it", "es", "nl", "pt", "ru", "zh-Hans", "zh-Hant", "ko"};
-    for (int id = UI_MENU_FIRST; id <= UI_MENU_LAST_ID; id++) {
-        CHECK(ui_text_defined("en", (UiTextId)id) && ui_text_defined("ru", (UiTextId)id), "menu text id %d lacks en or ru", id);
-        CHECK(*ui_text_in("en", (UiTextId)id) && *ui_text_in("ru", (UiTextId)id), "menu text id %d is empty", id);
-    }
+    static const char *const langs[] = {"en", "ja", "fr", "de", "it", "es", "nl", "pt", "pt-BR", "ru", "zh-Hans",
+                                        "zh-Hant", "ko", "es-419", "ca", "gl", "eu", "pl", "tr", "uk", "th"};
+    enum { N = sizeof langs / sizeof *langs };
+    for (size_t i = 0; i < N; i++)
+        for (int id = UI_MENU_FIRST; id <= UI_MENU_LAST_ID; id++)
+            CHECK(ui_text_defined(langs[i], (UiTextId)id) && *ui_text_in(langs[i], (UiTextId)id),
+                  "menu text id %d lacks %s", id, langs[i]);
     CHECK(!ui_text_defined("en", UI_TEXT_COUNT) && !*ui_text_in("ru", UI_TEXT_COUNT), "an id past the catalog gives text");
-    // other languages fall back to English for the menu, and keep their own keyboard texts
-    CHECK(!strcmp(ui_text_in("ja", UI_MENU_CONTINUE), ui_text_in("en", UI_MENU_CONTINUE)), "ja menu text is not English");
+    CHECK(strcmp(ui_text_in("ja", UI_MENU_CONTINUE), ui_text_in("en", UI_MENU_CONTINUE)), "ja menu text is English");
     CHECK(!strcmp(ui_text_in("ru", UI_SWKBD_DEFAULT_NAME), "Игрок") &&
           !strcmp(ui_text_in("de", UI_SWKBD_DEFAULT_NAME), "Spieler"), "keyboard texts changed");
     // language names: the same string in every row
-    for (int id = UI_MENU_LANGNAME_EN; id <= UI_MENU_LANGNAME_KO; id++)
-        for (size_t i = 1; i < sizeof langs / sizeof *langs; i++)
+    for (int id = UI_MENU_LANGNAME_EN; id <= UI_MENU_LANGNAME_LAST; id++)
+        for (size_t i = 1; i < N; i++)
             CHECK(!strcmp(ui_text_in(langs[i], (UiTextId)id), ui_text_in("en", (UiTextId)id)), "language name %d differs in %s", id, langs[i]);
     CHECK(!strcmp(ui_text_in("en", UI_MENU_LANGNAME_RU), "Русский"), "Russian is not shown as Russian");
-    // the overlay formats keep their conversions
+    // the overlay formats keep their conversions (tests/test_ui_text.py checks every entry)
     CHECK(strstr(ui_text_in("ru", UI_MENU_OV_GAME_PCT), "%.0f%%") && strstr(ui_text_in("ru", UI_MENU_OV_MAX_MS), "%.1f"),
           "overlay format lost its conversion");
-    // menu_text follows the setting live
-    cfg_set("MKW_MENU_LANG", "ru");
-    CHECK(menu_text(UI_MENU_CONTINUE) == ui_text_in("ru", UI_MENU_CONTINUE), "menu_text ignores MENU_LANG=ru");
-    cfg_set("MKW_MENU_LANG", "en");
-    CHECK(menu_text(UI_MENU_CONTINUE) == ui_text_in("en", UI_MENU_CONTINUE), "menu_text did not follow MENU_LANG=en");
-    // Spanish: every menu and start screen text, as English and Russian
-    for (int id = UI_MENU_FIRST; id <= UI_MENU_LAST_ID; id++)
-        CHECK(ui_text_defined("es", (UiTextId)id), "menu text id %d lacks es", id);
-    cfg_set("MKW_MENU_LANG", "es");
-    CHECK(menu_text(UI_LAUNCH_PLAY) == ui_text_in("es", UI_LAUNCH_PLAY), "menu_text ignores MENU_LANG=es");
+    // menu_text follows the setting live, in every language
+    for (size_t i = 0; i < N; i++) {
+        cfg_set("MKW_MENU_LANG", langs[i]);
+        CHECK(menu_text(UI_LAUNCH_PLAY) == ui_text_in(langs[i], UI_LAUNCH_PLAY), "menu_text ignores MENU_LANG=%s", langs[i]);
+    }
     cfg_set("MKW_MENU_LANG", "");
-    const char *sys = plat_ui_language();
-    const char *want = !strncmp(sys, "ru", 2) ? "ru" : !strncmp(sys, "es", 2) ? "es" : "en";
-    CHECK(menu_text(UI_LAUNCH_PLAY) == ui_text_in(want, UI_LAUNCH_PLAY), "menu_text auto ignores the system language");
+    CHECK(menu_text(UI_LAUNCH_PLAY) == ui_text_in(menu_lang(), UI_LAUNCH_PLAY), "menu_text auto differs from menu_lang");
+    printf("  menu language with the system's %s: %s\n", plat_ui_language(), menu_lang());
 }
 
 static void probe_main(Cpu *c) {
@@ -827,6 +932,7 @@ static void probe_main(Cpu *c) {
     CHECK((uint32_t)CALL("pl.GetSharedFontLoadState", 0) == 1, "shared font load state");
     probe_input();
     probe_media_gfx();
+    probe_native_images();
     probe_swkbd();
     probe_menu_text();
     probe_menu_gate();
@@ -871,6 +977,7 @@ static void child_main(Cpu *c) {
     if (!strcmp(child_mode, "opus")) CALL("codec.Decode", U(buf), U(buf + 8), U(buf + 16), U(buf + 64), 0x100, U(buf + 0x800), 16);
     else if (!strcmp(child_mode, "font-address")) CALL("pl.GetSharedFontAddress", 0);
     else if (!strcmp(child_mode, "font-size")) CALL("pl.GetSharedFontSize", 0);
+    else if (!strcmp(child_mode, "native-image")) CALL("nimg.TextureInitialize", U(buf), U(buf + 0x800));
     else if (!strncmp(child_mode, "codec::", 7)) CALL(child_mode, U(buf), U(buf + 0x100), 0x100, 0x100, 64, 64, 1, 0);
     else rt_fatal("probe-services: unknown child case %s", child_mode);
     printf("child %s: the call returned\n", child_mode);
@@ -923,10 +1030,11 @@ int probe_services(void) {
     ldr_load(rt_config()->exefs);
 
     // Names bound by the loader: each override and observer probed here must match a relocation.
-    int bound = 0, obs_bound = 0;
+    int bound = 0, obs_bound = 0, nloaded = 0;
     for (int i = 0; i < 4096; i++) {
         const char *n = hostfn_name(RT_HOSTFN_BASE + 16ull * (uint64_t)i);
         if (!n) break;
+        nloaded = i + 1;
         for (int k = 0; k < NOV; k++)
             if (!strcmp(ovs[k].name, n) && !ovs[k].bound) ovs[k].bound = 1, bound++;
         for (int k = 0; k < NOBS; k++)
@@ -939,12 +1047,19 @@ int probe_services(void) {
     CHECK(obs_bound == NOBS, "%d of %d observers match a JUMP_SLOT", obs_bound, NOBS);
 
     // Every linked override is either probed here or belongs to another probe or owner (nn::fs: fs probe, fibers: kernel probe,
-    // memcpy: the graphics write-back in nvn_api_core.c, the audio service objects: audio probe).
-    int linked = hostfn_table_size(0), others = 0;
+    // memcpy: the graphics write-back in nvn_api_core.c, the audio service objects: audio probe). One the loaded game does
+    // not import belongs to another game version (1.8.0's nn::chat and native images against a 1.0.0 dump): not this
+    // run's to probe.
+    int linked = hostfn_table_size(0), others = 0, other_version = 0;
     for (int i = 0; i < linked; i++) {
         const char *n = hostfn_table_name(0, i);
-        int mine = 0;
+        int mine = 0, imported = 0;
         for (int k = 0; k < NOV; k++) mine |= !strcmp(ovs[k].name, n);
+        for (int j = 0; j < nloaded && !imported; j++) imported = !strcmp(hostfn_name(RT_HOSTFN_BASE + 16ull * (uint64_t)j), n);
+        if (!mine && !imported) {
+            other_version++;
+            continue;
+        }
         int theirs = !strncmp(n, "_ZN2nn2fs", 9) || !strcmp(n, "memcpy") ||
                      !strcmp(n, "_ZN2nn5audio26CreateAudioRendererManagerEb") ||
                      !strcmp(n, KERN_SYM_INITIALIZE_FIBER) ||
@@ -953,8 +1068,8 @@ int probe_services(void) {
         others += theirs;
         CHECK(mine || theirs, "override %s is linked but not probed", n);
     }
-    printf("bound: %d of %d overrides and %d of %d observers match relocations of the loaded modules\n", bound, NOV,
-           obs_bound, NOBS);
+    printf("bound: %d of %d overrides and %d of %d observers match relocations of the loaded modules (%d overrides of "
+           "another game version)\n", bound, NOV, obs_bound, NOBS, other_version);
 
     bind_addresses();
     hostfn_seal();

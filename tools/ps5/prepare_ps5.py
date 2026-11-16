@@ -45,8 +45,8 @@ for _p in (ROOT / "tools/build", ROOT / "tools/prepare", ROOT / "tools/ps5", ROO
 import build  # noqa: E402
 from layout import output_lock, read_checked  # noqa: E402
 from machine import Failed, default_cc, default_glslc, mem_gb, own_children, shader_jobs, tool_env  # noqa: E402
-from nup import NupError, NupReader, is_nup  # noqa: E402
-from prepare import ROMFS_FILES, check, copy_tree, emit, run, sm86_spec  # noqa: E402
+from nup_reader import NupError, NupReader, is_nup  # noqa: E402
+from ps5_prepare_common import ROMFS_FILES, check, copy_tree, emit, run, sm86_spec  # noqa: E402
 from send_ps5 import TransferError, send_directory  # noqa: E402
 
 TITLE_ID = "PPSA99193"

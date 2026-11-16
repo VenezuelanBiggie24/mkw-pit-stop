@@ -27,20 +27,21 @@
 #include "input_map.h"
 #include "input_script.h"
 #include "input_wsys.h"
+#include "switch2.h"
 #include "nvn_api.h"
 #include "ui/menu/menu.h"
 #include "vk.h"
 #include "platform/platform.h"
 
-enum { STICK_MAX = 32767, STICK_DEAD = 2500, STICK_DIR = 16384, TRIGGER_ON = 16384, RESCAN_MS = 1000 };
+enum { STICK_MAX = 32767, STICK_DIR = 16384, TRIGGER_ON = 16384, RESCAN_MS = 1000 };
 
 static PlatMutex lock = PLAT_MUTEX_INIT;
 static int state;                    // 0 not started, 1 running, -1 disabled or SDL failed
 #ifndef MKW_PS5_NATIVE
 static SDL_Gamepad *pad;
 static uint64_t next_scan;
-static SDL_JoystickID sensor_pad;    // the gamepad whose sensors the motion thread set up, 0 none
-static int sensor_ok;                // ... and it has both sensors, enabled
+static SDL_JoystickID sensor_pad[8]; // by player: the gamepad whose sensors the motion thread set up, 0 none
+static int sensor_ok[8];             // ... and it has both sensors, enabled
 #endif
 static int pad_rumble;               // the open gamepad has rumble motors
 static volatile int32_t pad_labels[4];  // ... and the labels of its south, east, west, north buttons (PAD_LABEL_*), any thread
@@ -131,9 +132,32 @@ static void mouse_camera(int32_t out[2]) {
 }
 
 #ifndef MKW_PS5_NATIVE
-static int32_t axis(int16_t v) {
-    int32_t a = v < -STICK_MAX ? -STICK_MAX : v;
-    return a > -STICK_DEAD && a < STICK_DEAD ? 0 : a;
+static float dead_zone = -1;               // MKW_STICK_DEADZONE as a fraction of full tilt; live (cfg_version)
+static unsigned dead_zone_seen;
+
+static float dead_zone_get(void) {
+    unsigned ver = cfg_version();
+    if (dead_zone >= 0 && ver == dead_zone_seen) return dead_zone;
+    dead_zone_seen = ver;
+    double v = cfg_double("MKW_STICK_DEADZONE");
+    dead_zone = (float)(v < 0 ? 0 : v > 40 ? 0.4 : v / 100);
+    return dead_zone;
+}
+
+// A stick's two axes (SDL's, y down) as the game's (y up): a round dead zone around the centre, and the tilt past it
+// rescaled to the whole range, so a worn stick that rests off centre stays still without losing the small moves just
+// outside it (the old one was per axis, 2500 of 32767, and jumped from 0 to 2500).
+static void stick(int16_t x, int16_t y, int32_t out[2]) {
+    float fx = (x < -STICK_MAX ? -STICK_MAX : x) / (float)STICK_MAX;
+    float fy = (y < -STICK_MAX ? -STICK_MAX : y) / (float)STICK_MAX;
+    float m = sqrtf(fx * fx + fy * fy), d = dead_zone_get();
+    if (m <= d) {
+        out[0] = out[1] = 0;
+        return;
+    }
+    float s = ((m > 1 ? 1 : m) - d) / (1 - d) / m;
+    out[0] = (int32_t)lrintf(fx * s * STICK_MAX);
+    out[1] = -(int32_t)lrintf(fy * s * STICK_MAX);
 }
 
 // Players 2-8 (input_poll_player): one gamepad each, given in connection order to the first player without one; player
@@ -153,14 +177,14 @@ static void pad_adopt(void);
 // Close the gamepads that went away and open the new ones (player 1 first, then the first free player); logs each change.
 static void scan_pads(void) {
     if (pad && !SDL_GamepadConnected(pad)) {
-        SDL_CloseGamepad(pad); pad = NULL; sensor_pad = 0; sensor_ok = 0;
+        SDL_CloseGamepad(pad); pad = NULL; sensor_pad[0] = 0; sensor_ok[0] = 0;
         plat_xchg32(&pad_layout_shown, -1);
         for (int i = 0; i < 4; i++) plat_xchg32(&pad_labels[i], PAD_LABEL_NONE);
         rt_log("input: gamepad disconnected");
     }
     for (int p = 1; p < INPUT_MAX_PLAYERS; p++)
         if (extra[p] && !SDL_GamepadConnected(extra[p])) {
-            SDL_CloseGamepad(extra[p]); extra[p] = NULL;
+            SDL_CloseGamepad(extra[p]); extra[p] = NULL; sensor_pad[p] = 0; sensor_ok[p] = 0;
             rt_log("input: gamepad of player %d disconnected", p + 1);
         }
     int n = 0;
@@ -270,6 +294,7 @@ static void start(void) {
     else state = 1;
     if (state == 1) {
         attach_virtual_pads();
+        switch2_start();   // Switch 2 controllers over Bluetooth, as virtual gamepads (MKW_SWITCH2)
         scan_pads();
         if (!pad) rt_log("input: no gamepad (keyboard only until one is connected)");
     }
@@ -326,10 +351,8 @@ static void gamepad_physical(SDL_Gamepad *g, uint8_t pd[PAD_COUNT]) {
 
 static void gamepad_read(SDL_Gamepad *g, uint8_t pd[PAD_COUNT], int32_t sl[2], int32_t sr[2]) {
     gamepad_physical(g, pd);
-    sl[0] = axis(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX));
-    sl[1] = -axis(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY));
-    sr[0] = axis(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX));
-    sr[1] = -axis(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY));
+    stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX), SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY), sl);
+    stick(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX), SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY), sr);
 }
 
 static int pad_read(uint8_t pd[PAD_COUNT], int32_t sl[2], int32_t sr[2], int *back, int *touchpad) {
@@ -513,6 +536,7 @@ static int blocked(volatile int32_t *flag, uint64_t buttons) {
 }
 
 void input_poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
+    lat_input_read();   // MKW_LATENCY: the first read of each frame
     int physical_held = poll_merged(buttons, lx, ly, rx, ry);
     int text = blocked(&g_block, *buttons), menu = blocked(&g_menu, *buttons || physical_held);
     if (!text && !menu) return;
@@ -696,22 +720,22 @@ void input_motion_axes(const float a[3], const float g[3], double acc[3], double
 }
 
 #ifndef MKW_PS5_NATIVE
-// Under lock: (re)enable the sensors when the open gamepad changed; 1 if it has both and they are on.
-static int sensors_ready(void) {
-    SDL_JoystickID id = SDL_GetGamepadID(pad);
-    if (id == sensor_pad) return sensor_ok;
-    sensor_pad = id;
+// Under lock: (re)enable the sensors of player p's gamepad g when it changed; 1 if it has both and they are on.
+static int sensors_ready(int p, SDL_Gamepad *g) {
+    SDL_JoystickID id = SDL_GetGamepadID(g);
+    if (id == sensor_pad[p]) return sensor_ok[p];
+    sensor_pad[p] = id;
     // Nothing drains the SDL event queue: no event per sample (the data still updates, SDL_SendJoystickSensor)
     SDL_SetEventEnabled(SDL_EVENT_GAMEPAD_SENSOR_UPDATE, false);
-    sensor_ok =SDL_GamepadHasSensor(pad, SDL_SENSOR_GYRO) && SDL_GamepadHasSensor(pad, SDL_SENSOR_ACCEL) &&
-                SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_GYRO, true) &&
-                SDL_SetGamepadSensorEnabled(pad, SDL_SENSOR_ACCEL, true);
-    if (sensor_ok) rt_log("input: motion sensors on (gyro %.0f Hz, accelerometer %.0f Hz)",
-                          (double)SDL_GetGamepadSensorDataRate(pad, SDL_SENSOR_GYRO),
-                          (double)SDL_GetGamepadSensorDataRate(pad, SDL_SENSOR_ACCEL));
-    else rt_log("input: \"%s\" has no gyro and accelerometer: the six-axis sensor reads a controller at rest",
-                SDL_GetGamepadName(pad));
-    return sensor_ok;
+    sensor_ok[p] = SDL_GamepadHasSensor(g, SDL_SENSOR_GYRO) && SDL_GamepadHasSensor(g, SDL_SENSOR_ACCEL) &&
+                   SDL_SetGamepadSensorEnabled(g, SDL_SENSOR_GYRO, true) &&
+                   SDL_SetGamepadSensorEnabled(g, SDL_SENSOR_ACCEL, true);
+    if (sensor_ok[p]) rt_log("input: player %d motion sensors on (gyro %.0f Hz, accelerometer %.0f Hz)", p + 1,
+                             (double)SDL_GetGamepadSensorDataRate(g, SDL_SENSOR_GYRO),
+                             (double)SDL_GetGamepadSensorDataRate(g, SDL_SENSOR_ACCEL));
+    else rt_log("input: \"%s\" (player %d) has no gyro and accelerometer: its six-axis sensor reads a controller at rest",
+                SDL_GetGamepadName(g), p + 1);
+    return sensor_ok[p];
 }
 
 int input_motion_enabled(void) {
@@ -725,26 +749,33 @@ int input_motion_enabled(void) {
     return on;
 }
 
-// 250 Hz: the gamepads update (reports read, rumble expiry) and the newest gyro and accelerometer sample goes into the
-// fusion. Without a gamepad with sensors, or with motion off (MKW_MOTION=0, live), nothing is fed and the six-axis
-// sensor reads at rest.
+// 250 Hz: the gamepads update (reports read, rumble expiry) and each player's newest gyro and accelerometer sample goes
+// into that player's fusion. Players 2-8 have their own (#302: player 2's gyro did nothing). Without a gamepad with
+// sensors, or with motion off (MKW_MOTION=0, live), nothing is fed and the six-axis sensor reads at rest.
 static void motion_main(void *arg) {
     (void)arg;
+    _Static_assert(sizeof sensor_pad / sizeof sensor_pad[0] == INPUT_MAX_PLAYERS, "one sensor slot per player");
     for (;;) {
         plat_wait_ns(4000000);
-        float a[3], g[3];
-        int have = 0;
+        float a[INPUT_MAX_PLAYERS][3], g[INPUT_MAX_PLAYERS][3];
+        int have[INPUT_MAX_PLAYERS] = {0}, updated = 0;
         plat_mutex_lock(&lock);
-        if (pad && SDL_GamepadConnected(pad)) {
-            SDL_UpdateGamepads();
-            have = sensors_ready() && SDL_GetGamepadSensorData(pad, SDL_SENSOR_ACCEL, a, 3) &&
-                   SDL_GetGamepadSensorData(pad, SDL_SENSOR_GYRO, g, 3);
+        for (int p = 0; p < INPUT_MAX_PLAYERS; p++) {
+            SDL_Gamepad *gp = p ? extra[p] : pad;
+            if (!gp || !SDL_GamepadConnected(gp)) continue;
+            if (!updated) SDL_UpdateGamepads(), updated = 1;
+            have[p] = sensors_ready(p, gp) && SDL_GetGamepadSensorData(gp, SDL_SENSOR_ACCEL, a[p], 3) &&
+                      SDL_GetGamepadSensorData(gp, SDL_SENSOR_GYRO, g[p], 3);
         }
         plat_mutex_unlock(&lock);
-        if (!have || !input_motion_enabled()) continue;
-        double acc[3], gyro[3];
-        input_motion_axes(a, g, acc, gyro);
-        motion_feed(motion_global(), acc, gyro, kern_now_ns());
+        if (!input_motion_enabled()) continue;
+        uint64_t now = kern_now_ns();
+        for (int p = 0; p < INPUT_MAX_PLAYERS; p++) {
+            if (!have[p]) continue;
+            double acc[3], gyro[3];
+            input_motion_axes(a[p], g[p], acc, gyro);
+            motion_feed(motion_player(p), acc, gyro, now);
+        }
     }
 }
 

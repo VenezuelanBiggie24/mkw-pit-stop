@@ -66,9 +66,25 @@ int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end) {
 
 // Adapted from LAS Recomp runtime/platform/windows.c:40-63 @ da35b83 (MIT, Copyright (c) 2026 Peiikai): GetWriteWatch
 // with the reset flag.
+// The committed, readable runs of [addr, addr + n): Linux lists the pages that hold data (PAGEMAP_SCAN), Windows has
+// no such query, but the guest's memory is committed when first touched (plat_mem_lazy_hook), so a committed page is
+// one the game or the runtime used. A committed page never written reads as zeros, as a Linux page never touched. It
+// lets the frame capture (gfx/cap) run on Windows.
 uint64_t plat_mem_populated(uint64_t addr, uint64_t n, uint64_t (*runs)[2], uint64_t max) {
-    (void)addr, (void)n, (void)runs, (void)max;
-    return UINT64_MAX;
+    uint64_t got = 0;
+    for (uint64_t at = addr, end = addr + n; at < end && got < max;) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery((void *)(uintptr_t)at, &mbi, sizeof mbi)) return UINT64_MAX;
+        uint64_t next = (uint64_t)(uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        if (next > end) next = end;
+        DWORD p = mbi.Protect & 0xff;
+        if (mbi.State == MEM_COMMIT && !(mbi.Protect & PAGE_GUARD) && (p == PAGE_READWRITE || p == PAGE_READONLY)) {
+            if (got && runs[got - 1][1] == at) runs[got - 1][1] = next;
+            else runs[got][0] = at, runs[got][1] = next, got++;
+        }
+        at = next;
+    }
+    return got;
 }
 
 uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t max, int reset) {
@@ -83,15 +99,17 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
 }
 
 static int (*fault_hook)(uint64_t addr);
+static int (*lazy_hook)(uint64_t addr);   // plat_mem_lazy_hook: reads too
 static int (*watch_fn)(uint64_t addr, uint64_t rip);   // plat_mem_watch_hook: write watches set for diagnostics
 
 // A write access violation (ExceptionInformation[0] == 1) goes to the watch hook, then to the fault hook; registered
 // first, before the crash handler. Reads are not trapped here (plat_mem_poke cannot, so memory.c sets no read traps).
 static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *ep) {
     const EXCEPTION_RECORD *er = ep->ExceptionRecord;
-    if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2 || er->ExceptionInformation[0] != 1)
-        return EXCEPTION_CONTINUE_SEARCH;
+    if (er->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || er->NumberParameters < 2) return EXCEPTION_CONTINUE_SEARCH;
     uint64_t addr = (uint64_t)er->ExceptionInformation[1];
+    if (er->ExceptionInformation[0] <= 1 && lazy_hook && lazy_hook(addr)) return EXCEPTION_CONTINUE_EXECUTION;
+    if (er->ExceptionInformation[0] != 1) return EXCEPTION_CONTINUE_SEARCH;
     if (watch_fn && watch_fn(addr, (uint64_t)ep->ContextRecord->Rip)) return EXCEPTION_CONTINUE_EXECUTION;
     return fault_hook && fault_hook(addr) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
 }
@@ -103,6 +121,11 @@ static void fault_install(void) {
 
 _Thread_local int plat_fault_write;   // platform.h: not set here (no read traps on Windows)
 _Thread_local uint64_t plat_fault_pc, plat_fault_ret;
+
+void plat_mem_lazy_hook(int (*fn)(uint64_t addr)) {
+    lazy_hook = fn;
+    fault_install();
+}
 
 void plat_mem_fault_hook(int (*fn)(uint64_t addr)) {
     fault_hook = fn;
@@ -144,9 +167,33 @@ static LONG CALLBACK crash_veh(EXCEPTION_POINTERS *ep) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+// The C runtime's check of a call's arguments (a time out of localtime_s's range, a null stream...) ends the process
+// with 0xC0000409 and no exception the handler above sees: #310 died in ucrtbase.dll with an empty log while warming
+// up. Reported as a crash instead, at the first frame of ours on the stack (a release CRT passes no expression or
+// file), with the guest's frames.
+static void crt_invalid_parameter(const wchar_t *expr, const wchar_t *fn, const wchar_t *file, unsigned line,
+                                  uintptr_t reserved) {
+    (void)expr, (void)fn, (void)file, (void)line, (void)reserved;
+    void *frames[32];
+    USHORT n = RtlCaptureStackBackTrace(1, 32, frames, NULL);
+    HMODULE exe = GetModuleHandleW(NULL), game = GetModuleHandleW(L"mkwgame.dll"), at = NULL;
+    PlatCrash c = {"C runtime invalid parameter", 0xC0000409u, 0, 0, -1, 0, "mkw", 0};
+    for (USHORT i = 0; i < n && !c.rip; i++) {
+        uintptr_t pc = (uintptr_t)frames[i];
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                (LPCWSTR)pc, &at) || (at != exe && at != game))
+            continue;
+        MODULEINFO mi = {0};
+        GetModuleInformation(GetCurrentProcess(), at, &mi, sizeof mi);
+        c.rip = pc, c.offset = pc - (uintptr_t)mi.lpBaseOfDll, c.module = at == exe ? "mkw" : "mkwgame";
+    }
+    crash_fn(&c);
+}
+
 void plat_crash_hook(void (*fn)(const PlatCrash *c)) {
     crash_fn = fn;
     AddVectoredExceptionHandler(0, crash_veh);
+    _set_invalid_parameter_handler(crt_invalid_parameter);
 }
 
 // A fresh process gets a fresh layout: Windows places DLLs, heaps and thread stacks at random addresses. The parent

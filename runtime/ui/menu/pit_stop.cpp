@@ -19,7 +19,7 @@ extern "C" {
 #include <stdio.h>
 #include <stdlib.h>
 
-enum { HOME, ALL, DISPLAY, GRAPHICS, CONTROLS, AUDIO, GAME, MENU, ADVANCED, HACKS,
+enum { HOME, ALL, DISPLAY, GRAPHICS, CONTROLS, AUDIO, GENERAL, ADVANCED, HACKS,
        PAD_BINDS, KEY_BINDS, QUIT, RESET, RESET_BINDS, CAPTURE, PAGE_COUNT };
 
 struct Category { int tab; UiTextId title, description; };
@@ -28,8 +28,7 @@ static const Category categories[] = {
     {TAB_GRAPHICS, UI_MENU_TAB_GRAPHICS, UI_PIT_GRAPHICS_DESC},
     {TAB_CONTROLS, UI_MENU_TAB_CONTROLS, UI_PIT_CONTROLS_DESC},
     {TAB_SOUND, UI_PIT_AUDIO, UI_PIT_AUDIO_DESC},
-    {TAB_GAME, UI_MENU_TAB_GAME, UI_PIT_GAME_DESC},
-    {TAB_MENU, UI_MENU_TAB_MENU, UI_PIT_MENU_DESC},
+    {TAB_GENERAL, UI_MENU_TAB_GENERAL, UI_PIT_GAME_DESC},
     {TAB_ADVANCED, UI_MENU_TAB_ADVANCED, UI_PIT_ADV_DESC},
     {TAB_HACKS, UI_MENU_TAB_HACKS, UI_PIT_HACKS_DESC},
 };
@@ -54,7 +53,7 @@ static struct {
 static ImFont *heading_font;
 
 void pit_load_fonts(float scale) {
-    heading_font = menu_look_font_big(scale);
+    heading_font = menu_look_font_at(72.0f * scale);
 }
 
 void pit_open(void) {

@@ -74,7 +74,7 @@ uint64_t pipe_fnv(uint64_t h, const void *p, size_t n) {
 // than the lookup. Only the in-memory table uses it; the key file keeps fnv.
 uint64_t key_hash(const void *k, size_t n) { return nvn_hm_hash(k, (uint32_t)n); }
 
-// The cache file lives next to mkw, so every build dir (the main build and each private fork) has its own:
+// The cache file lives in the selected game folder, so every installation (the main build and each private fork) has its own:
 // forks that shared build\v121's cache broke each other's runs (2026-10-22).
 static void cache_path_init(void) {
     const char *cfg_path = cfg_get("MKW_PIPELINE_CACHE");
@@ -83,13 +83,7 @@ static void cache_path_init(void) {
         return;
     }
     P.cache_path[0] = 0;
-    char exe[PLAT_PATH_MAX * 2];
-    int n = plat_exe_path(exe, sizeof exe);
-    if (!n || n >= sizeof exe) return;
-    char *cut = plat_last_sep(exe);
-    if (!cut) return;
-    *cut = 0;
-    snprintf(P.cache_path, sizeof P.cache_path, "%s/pipeline-cache.bin", exe);
+    snprintf(P.cache_path, sizeof P.cache_path, "%s/pipeline-cache.bin", cfg_game_dir());
 }
 
 // The cache's own leftovers: a run killed while saving it leaves a full-size temporary file (plat_file_write_atomic).
@@ -149,6 +143,14 @@ int ensure_init(void) {
     // dynamic and their offsets go with the bind; sets are allocated, as push sets cannot be kept.
     P.draw_cache = cfg_get("MKW_DRAW_CACHE") && atoi(cfg_get("MKW_DRAW_CACHE"));
     P.max_dyn_ubo = p2.properties.limits.maxDescriptorSetUniformBuffersDynamic;
+    // MKW_VK_SHARED_LIMIT=<bytes>: less workgroup memory than the device has, to check spirv_clamp_shared's cut and
+    // wrap on a desktop GPU as on Adreno 7xx's 32 KiB
+    uint32_t sdev = p2.properties.limits.maxComputeSharedMemorySize;
+    const char *sl = cfg_get("MKW_VK_SHARED_LIMIT");
+    P.smem_limit = sl && *sl && (uint32_t)atoi(sl) && (uint32_t)atoi(sl) < sdev ? (uint32_t)atoi(sl) : sdev;
+    if (P.smem_limit != sdev)
+        rt_log("vk_pipeline: workgroup memory limited to %u bytes (MKW_VK_SHARED_LIMIT; the device has %u)", P.smem_limit,
+               sdev);
     if (P.draw_cache)
         rt_log("vk_pipeline: draw cache on (MKW_DRAW_CACHE): sets kept across frames, up to %u dynamic uniform buffers "
                "a layout", P.max_dyn_ubo);
@@ -172,7 +174,7 @@ int ensure_init(void) {
     vkGetPhysicalDeviceFeatures2(c->phys, &f2);
     P.pv_last = c->has_provoking_vertex && pvf.provokingVertexLast;
     if (!P.pv_last) rt_log("vk_pipeline: provokingVertexLast unavailable: flat outputs come from the first vertex (NVN: last)");
-    // Maxwell warps have 32 lanes; the translator assumes it (maxwell.md 3.4). Pin 32 where the driver allows it.
+    // NVIDIA warps have 32 lanes. Pin 32 where possible; the translator partitions wider subgroups when it cannot.
     if (v13.subgroupSizeControl) {
         VkPhysicalDeviceVulkan13Properties p13 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES};
         VkPhysicalDeviceProperties2 q2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &p13};
@@ -444,13 +446,23 @@ void vk_pipe_state_defaults(VkPipeState *s) {
                     NVN_STENCIL_OP_KEEP, NVN_STENCIL_OP_KEEP, NVN_STENCIL_OP_KEEP};
 }
 
-void vk_pipeline_answers(const VkPipeState *s, GfxShaderAnswers *vs) {
+// The colour targets' types: the fragment shader writes raw bits through float outputs, as SM86 does, and a float
+// output into a UINT/SINT target is undefined in Vulkan (the race's mesh draws into R8_UINT, issue #64 on Intel Arc).
+// MKW_INT_OUTPUTS=0 keeps the float outputs (to compare).
+void vk_pipeline_answers(const VkPipeState *s, int stage, GfxShaderAnswers *a) {
+    static int outs = -1;
+    if (outs < 0) outs = !cfg_get("MKW_INT_OUTPUTS") || strcmp(cfg_get("MKW_INT_OUTPUTS"), "0") != 0;
+    if (stage == GFX_STAGE_FS) {
+        for (int i = 0; outs && i < 8; i++)
+            if (s->color_fmt[i]) a->out_type[i] = (uint8_t)vk_format_numeric(target_format(s->color_fmt[i], NULL, NULL));
+        return;
+    }
     for (int i = 0; i < 16; i++) {
-        va_st a;
-        memcpy(&a, &s->vattr[i], sizeof a);
+        va_st va;
+        memcpy(&va, &s->vattr[i], sizeof va);
         int type = GFX_TYPE_FLOAT;
-        if (a.fmt) vk_vertex_format((int)a.fmt, &type);
-        vs->attr_type[i] = (uint8_t)type;
+        if (va.fmt) vk_vertex_format((int)va.fmt, &type);
+        a->attr_type[i] = (uint8_t)type;
     }
 }
 
@@ -532,6 +544,15 @@ VkShaderModule make_module(const uint32_t *w, uint64_t words) {
     uint64_t fixed_n = 0;
     uint32_t *fixed = spirv_fixup(w, words, &fixed_n);
     if (fixed) w = fixed, words = fixed_n;
+    uint32_t from = 0, to = 0, smax = P.smem_limit;
+    uint32_t *clamped = spirv_clamp_shared(w, words, smax, &fixed_n, &from, &to);
+    if (clamped) {
+        if (from != to)
+            LOG_ONCE("vk_pipeline: compute shaders declare up to %u bytes of shared memory, the limit is %u: cut to %u",
+                     from, smax, to);
+        free(fixed);
+        fixed = clamped, w = fixed, words = fixed_n;
+    }
     VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = (size_t)words * 4, .pCode = w};
     VkShaderModule m = VK_NULL_HANDLE;
     VkResult r = vkCreateShaderModule(P.device, &ci, NULL, &m);
@@ -1081,43 +1102,7 @@ AsyncBuilds A = {.idle = PLAT_COND_INIT};
 
 // ---- dynamic state
 
-void vk_pipeline_set_dynamic(VkCommandBuffer cb, const VkPipeState *s) {
-    if (!ensure_init()) return;
-    const poly_st *pl = &s->poly;
-    const ds_st *d = &s->ds;
-    // The front face maps unchanged: TotK sets the upper-left window origin, and the y-flipped viewport (y_flip) puts
-    // NDC +y at row 0 as NVN does, so the framebuffer winding Vulkan tests is the one NVN tests (MacNativeGames passes
-    // it to Metal unchanged; LAS Recomp exec.c mirrors it only for the lower-left origin).
-    int front_cw = pl->front == NVN_FRONT_FACE_CW;
-    vkCmdSetCullMode(cb, (VkCullModeFlags)(pl->cull & 3));   // NVN_FACE_* has VkCullModeFlagBits' values
-    vkCmdSetFrontFace(cb, front_cw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE);
-    vkCmdSetPrimitiveTopology(cb, vk_pipeline_topology(s->prim));
-    vkCmdSetDepthTestEnable(cb, d->dt);
-    vkCmdSetDepthWriteEnable(cb, d->dw);
-    vkCmdSetDepthCompareOp(cb, compare_op(d->df));
-    vkCmdSetStencilTestEnable(cb, d->st);
-    vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_BIT, stencil_op(d->fail_f), stencil_op(d->zpass_f), stencil_op(d->zfail_f),
-                      compare_op(d->sf_f));
-    vkCmdSetStencilOp(cb, VK_STENCIL_FACE_BACK_BIT, stencil_op(d->fail_b), stencil_op(d->zpass_b), stencil_op(d->zfail_b),
-                      compare_op(d->sf_b));
-    // NVN_POLYGON_OFFSET_ENABLE_* bit of the polygon mode in use: point 1, line 2, fill 4
-    unsigned mode = pl->mode <= NVN_POLYGON_MODE_FILL ? pl->mode : NVN_POLYGON_MODE_FILL;
-    vkCmdSetDepthBiasEnable(cb, (pl->offset_en >> mode & 1) != 0);
-    vkCmdSetRasterizerDiscardEnable(cb, s->raster_discard != 0);
-    vkCmdSetPrimitiveRestartEnable(cb, s->prim_restart != 0);
-    if (P.dyn_vi && s->vs) {
-        VtxInput v;
-        vertex_input(s, &v);
-        rec_vertex_input(P.set_vi, cb, v.n_bind, v.b, v.n_attr, v.a);
-    }
-    if (P.dyn_clamp) rec_bool(P.set_clamp, cb, s->depth_clamp != 0);
-    if (P.dyn_poly) rec_polygon_mode(P.set_poly, cb, polygon_mode(pl->mode));
-    if (P.dyn_a2c) rec_bool((PFN_vkCmdSetDepthClampEnableEXT)P.set_a2c, cb, s->ms.a2c != 0);   // the same signature
-    int n = target_count(s);
-    if (!n) return;
-    VkBool32 en[8];
-    VkColorBlendEquationEXT eq[8];
-    VkColorComponentFlags wm[8];
+static void blend_arrays(const VkPipeState *s, int n, VkBool32 *en, VkColorBlendEquationEXT *eq, VkColorComponentFlags *wm) {
     for (int i = 0; i < n; i++) {
         const blend_st *b = &s->blend[i];
         en[i] = (s->color.blend_en >> i & 1) && blendable(target_format(s->color_fmt[i], NULL, NULL));
@@ -1125,9 +1110,83 @@ void vk_pipeline_set_dynamic(VkCommandBuffer cb, const VkPipeState *s) {
                                           blend_factor(b->src_a), blend_factor(b->dst_a), blend_op(b->eq_a)};
         wm[i] = target_wmask(s, i);
     }
-    if (P.dyn_blend_en) rec_blend_enable(P.set_blend_en, cb, 0, (uint32_t)n, en);
-    if (P.dyn_blend_eq) rec_blend_equation(P.set_blend_eq, cb, 0, (uint32_t)n, eq);
-    if (P.dyn_wmask) rec_write_mask(P.set_wmask, cb, 0, (uint32_t)n, wm);
+}
+
+static unsigned offset_enabled(const poly_st *pl) {
+    // NVN_POLYGON_OFFSET_ENABLE_* bit of the polygon mode in use: point 1, line 2, fill 4
+    unsigned mode = pl->mode <= NVN_POLYGON_MODE_FILL ? pl->mode : NVN_POLYGON_MODE_FILL;
+    return pl->offset_en >> mode & 1;
+}
+
+// last: the state this command buffer's dynamic state was set from (vk_exec_draw.c keeps it across pipeline binds, as
+// every graphics pipeline lists the same dynamic states, P.dyn); each vkCmdSet* is recorded only when its value
+// differs from what last gave. NULL: all of them. A race frame on the Steam Deck (1.8.0 Grand Prix, 2 659 draws) made
+// 19 643 of these calls, of which 1 385 changed a value (MKW_DYN_CENSUS, a test build).
+void vk_pipeline_set_dynamic(VkCommandBuffer cb, const VkPipeState *s, const VkPipeState *last) {
+    if (!ensure_init()) return;
+    // a task/mesh pipeline lists fewer dynamic states (create_mesh): binding one between two others leaves those
+    // undefined, so a change of kind sets them all
+    if (last && mesh_pipe(s) != mesh_pipe(last)) last = NULL;
+    const poly_st *pl = &s->poly, *lp = last ? &last->poly : NULL;
+    const ds_st *d = &s->ds, *ld = last ? &last->ds : NULL;
+#define CHANGED(cond) (!last || (cond))
+    // The front face maps unchanged: TotK sets the upper-left window origin, and the y-flipped viewport (y_flip) puts
+    // NDC +y at row 0 as NVN does, so the framebuffer winding Vulkan tests is the one NVN tests (MacNativeGames passes
+    // it to Metal unchanged; LAS Recomp exec.c mirrors it only for the lower-left origin).
+    int front_cw = pl->front == NVN_FRONT_FACE_CW;
+    if (CHANGED((pl->cull & 3) != (lp->cull & 3)))
+        vkCmdSetCullMode(cb, (VkCullModeFlags)(pl->cull & 3));   // NVN_FACE_* has VkCullModeFlagBits' values
+    if (CHANGED(front_cw != (lp->front == NVN_FRONT_FACE_CW)))
+        vkCmdSetFrontFace(cb, front_cw ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE);
+    if (CHANGED(vk_pipeline_topology(s->prim) != vk_pipeline_topology(last->prim)))
+        vkCmdSetPrimitiveTopology(cb, vk_pipeline_topology(s->prim));
+    if (CHANGED(d->dt != ld->dt)) vkCmdSetDepthTestEnable(cb, d->dt);
+    if (CHANGED(d->dw != ld->dw)) vkCmdSetDepthWriteEnable(cb, d->dw);
+    if (CHANGED(compare_op(d->df) != compare_op(ld->df))) vkCmdSetDepthCompareOp(cb, compare_op(d->df));
+    if (CHANGED(d->st != ld->st)) vkCmdSetStencilTestEnable(cb, d->st);
+    if (CHANGED(d->fail_f != ld->fail_f || d->zpass_f != ld->zpass_f || d->zfail_f != ld->zfail_f || d->sf_f != ld->sf_f))
+        vkCmdSetStencilOp(cb, VK_STENCIL_FACE_FRONT_BIT, stencil_op(d->fail_f), stencil_op(d->zpass_f),
+                          stencil_op(d->zfail_f), compare_op(d->sf_f));
+    if (CHANGED(d->fail_b != ld->fail_b || d->zpass_b != ld->zpass_b || d->zfail_b != ld->zfail_b || d->sf_b != ld->sf_b))
+        vkCmdSetStencilOp(cb, VK_STENCIL_FACE_BACK_BIT, stencil_op(d->fail_b), stencil_op(d->zpass_b),
+                          stencil_op(d->zfail_b), compare_op(d->sf_b));
+    if (CHANGED(offset_enabled(pl) != offset_enabled(lp))) vkCmdSetDepthBiasEnable(cb, offset_enabled(pl) != 0);
+    if (CHANGED((s->raster_discard != 0) != (last->raster_discard != 0)))
+        vkCmdSetRasterizerDiscardEnable(cb, s->raster_discard != 0);
+    if (CHANGED((s->prim_restart != 0) != (last->prim_restart != 0)))
+        vkCmdSetPrimitiveRestartEnable(cb, s->prim_restart != 0);
+    // vertex_input reads the vertex shader's inputs, vattr and vstream: equal ones give the same description; other
+    // ones may too (another shader with the same inputs), compared on the descriptions themselves
+    if (P.dyn_vi && s->vs &&
+        CHANGED(last->vs != s->vs || memcmp(s->vattr, last->vattr, sizeof s->vattr) ||
+                memcmp(s->vstream, last->vstream, sizeof s->vstream))) {
+        VtxInput v, lv;
+        vertex_input(s, &v);   // it clears *v first
+        int same = 0;
+        if (last && last->vs) vertex_input(last, &lv), same = !memcmp(&v, &lv, sizeof v);
+        if (!same) rec_vertex_input(P.set_vi, cb, v.n_bind, v.b, v.n_attr, v.a);
+    }
+    if (P.dyn_clamp && CHANGED((s->depth_clamp != 0) != (last->depth_clamp != 0)))
+        rec_bool(P.set_clamp, cb, s->depth_clamp != 0);
+    if (P.dyn_poly && CHANGED(pl->mode != lp->mode)) rec_polygon_mode(P.set_poly, cb, polygon_mode(pl->mode));
+    if (P.dyn_a2c && CHANGED((s->ms.a2c != 0) != (last->ms.a2c != 0)))
+        rec_bool((PFN_vkCmdSetDepthClampEnableEXT)P.set_a2c, cb, s->ms.a2c != 0);   // the same signature
+    int n = target_count(s);
+    if (!n) return;
+    VkBool32 en[8];
+    VkColorBlendEquationEXT eq[8];
+    VkColorComponentFlags wm[8];
+    blend_arrays(s, n, en, eq, wm);
+    // the last state's targets: a target it did not have was never set, so a count above its own sets them all
+    int ln = last ? target_count(last) : 0;
+    VkBool32 len[8];
+    VkColorBlendEquationEXT leq[8];
+    VkColorComponentFlags lwm[8];
+    if (ln >= n) blend_arrays(last, n, len, leq, lwm);
+    if (P.dyn_blend_en && (ln < n || memcmp(en, len, n * sizeof *en))) rec_blend_enable(P.set_blend_en, cb, 0, (uint32_t)n, en);
+    if (P.dyn_blend_eq && (ln < n || memcmp(eq, leq, n * sizeof *eq))) rec_blend_equation(P.set_blend_eq, cb, 0, (uint32_t)n, eq);
+    if (P.dyn_wmask && (ln < n || memcmp(wm, lwm, n * sizeof *wm))) rec_write_mask(P.set_wmask, cb, 0, (uint32_t)n, wm);
+#undef CHANGED
 }
 
 // ---- statistics, persistence, teardown

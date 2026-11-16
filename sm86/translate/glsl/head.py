@@ -1,7 +1,8 @@
 """SM86 -> GLSL: the declarations before main() (version, extensions, helper functions, inputs and outputs,
 resource bindings and their reflection) and the task/mesh wrappers around the translated body."""
 
-from glsl.common import HMMA_FN, LDSM_FN, LOP3_FN, MOVM_FN, NMINMAX_FN, PRMT_FN, SHFL_FN
+from glsl.common import (HMMA_FN, LDSM_FN, LOP3_FN, MOVM_FN, NMINMAX_FN, PRMT_FN, SHFL_FN, SMEM_PORTABLE_WORDS,
+                         SMEM_WRAP_SENTINEL, WARP_FN)  # fmt: skip
 from glsl.thread import ThreadOps
 
 
@@ -44,6 +45,7 @@ def declarations(b, stage: str, shape: tuple[int, int, int, int] | None) -> list
         ]
         if b.uses_arith:
             head.append("#extension GL_KHR_shader_subgroup_arithmetic : require")  # fmt: skip
+        head.append(WARP_FN)
     if stage == "cs":
         # Workgroup and shared memory size from the program's control section (compute_shape). They were
         # specialization constants that no back end set: every dispatch ran 1x1x1 groups until 31/10/2026.
@@ -52,6 +54,14 @@ def declarations(b, stage: str, shape: tuple[int, int, int, int] | None) -> list
     if b.uses_shared:
         words = (shape[3] + 3) // 4 if shape and shape[3] else 16384
         head += [f"const uint SMEM_WORDS = {words}u;", "shared uint smem[SMEM_WORDS];"]
+        if words > SMEM_PORTABLE_WORDS:
+            # Over 32 KiB, more than some GPUs have (Adreno): the runtime cuts smem there and sets SMEM_WRAP (a
+            # sentinel constant it looks for) to the words kept, so each workgroup's window wraps inside the cut array
+            # instead of reaching past it; where the array fits it sets a power of two, a mask after compilation
+            # (vk_spirv_patch.c spirv_clamp_shared).
+            head += [f"const uint SMEM_WRAP = {SMEM_WRAP_SENTINEL:#x}u;", "#define SMEM(i) smem[(i) % SMEM_WRAP]"]
+        else:
+            head.append("#define SMEM(i) smem[i]")
         if b.uses_ldsm:
             head.append(LDSM_FN)
     if b.uses_hmma:
@@ -72,10 +82,10 @@ def declarations(b, stage: str, shape: tuple[int, int, int, int] | None) -> list
         head.append(NMINMAX_FN)
     if b.images:
         head.insert(2, "#extension GL_EXT_shader_image_load_formatted : require")
-    if b.cbufs_w:   # cbNw (mem.cb_word); scalarBlockLayout, enabled by vk_device.c
-        head.insert(2, "#extension GL_EXT_scalar_block_layout : require")
     if b.uses_shadow_lod:
         head.insert(2, "#extension GL_EXT_texture_shadow_lod : require")
+    if getattr(b, "uses_demote", False):
+        head.insert(2, "#extension GL_EXT_demote_to_helper_invocation : require")
     head += [f"layout(location = {a}) {interp(b, stage, a)}in vec4 in_attr{a};" for a in sorted(b.in_attrs)]
     if stage == "ps":
         head += [f"layout(location = {t}) out vec4 out_color{t};" for t in sorted(b.out_attrs)]
@@ -93,10 +103,20 @@ def declarations(b, stage: str, shape: tuple[int, int, int, int] | None) -> list
     nb = 1
     for n in sorted(b.cbufs):
         head.append(f"layout(std140, binding = {nb}) uniform CB{n} {{ uvec4 d[4096]; }} cb{n};")
-        if n in b.cbufs_w:   # the same buffer as words for dynamic addresses (mem.cb_word)
-            head.append(f"layout(scalar, binding = {nb}) uniform CB{n}W {{ uint w[16384]; }} cb{n}w;")
         refl["cbufs"].append({"binding": nb, "slot": n})
         nb += 1
+        if n in b.cbufs_w:
+            # The same bank as words for dynamic addresses (mem.cb_word), through a read-only storage view of its own
+            # binding (flags 2: the back end binds the bank's range to it as a storage buffer) and bounded by that
+            # range: a word past it reads 0, as the console's constant bank. Until 13/11/2026 this was a second uniform
+            # block on the bank's own binding (`scalar`, uint w[16384]), the only aliased binding of the translation,
+            # and NVIDIA (616-621, Turing to Blackwell) lost the device with "instruction pointer invalid" on draws of
+            # vertex shaders whose only difference from a sound twin was one more such read (issue #22, programs
+            # c74a0d4e / 852f48d6); the same pattern faulted in mkw-thwomp ("four reads of c9 at a computed index").
+            head.append(f"layout(std430, binding = {nb}) readonly buffer CB{n}W {{ uint w[]; }} cb{n}w;")
+            head.append(f"uint cb{n}w_at(uint i) {{ return i < uint(cb{n}w.w.length()) ? cb{n}w.w[i] : 0u; }}")
+            refl["cbufs"].append({"binding": nb, "slot": n, "flags": 2})
+            nb += 1
     for o in sorted(b.ssbos):
         head.append(f"layout(std430, binding = {nb}) buffer SB{o:x} {{ uint d[]; }} sb{o:x};")
         # flags 1: the shader stores into it. The replay copies such a range back to guest memory and keeps the CPU's

@@ -24,13 +24,15 @@
 #include "gfx_wsys.h"
 #include "hacks.h"
 #include "hangwatch.h"
+#include "host.h"
 #include "nvn_api.h"
 #include "ui/menu/boot_screen.h"
 #include "ui/menu/menu.h"
 #include "vk.h"
 #include "platform/platform.h"
 
-#define FRAMES 2
+#define FRAMES (2 * VK_FG_MAX)   // slots made: frame generation blits VK_FG_MAX at once, and reusing a slot waits for
+                                 // its fence (the present thread holding the replay's drain)
 #define MAX_IMAGES 16
 #define VSYNC_NS 1000000000ull
 #define VSYNC_HZ 60
@@ -75,11 +77,11 @@ static int g_started;
 
 void gfx_window_mark_dirty(void) { plat_xchg32(&g_dirty, 1); }
 
-// The window gained or lost the focus: the game hears it as nn::oe's focus state and a notification message.
+// The window gained or lost the focus: the game hears it as nn::oe's focus state and a notification message, from
+// its startup logo's end on (ov_system.c oe_set_focus).
 void gfx_window_focus_changed(int in) {
     plat_xchg32(&g_focused, in);
     oe_set_focus(in);                          // pinned to 1 by MKW_ASSUME_FOCUS inside
-    oe_push_message(OE_MSG_FOCUS_STATE_CHANGED);
     plat_inc32(&g_focus_msgs);
 }
 
@@ -116,13 +118,19 @@ void gfx_window_set_refresh(double hz) {
 }
 
 uint32_t gfx_window_refresh_mhz(void) { return (uint32_t)__atomic_load_n(&g_rate_mhz, __ATOMIC_RELAXED); }
+double vk_present_refresh_hz(void) { return __atomic_load_n(&g_rate_mhz, __ATOMIC_RELAXED) / 1000.0; }
 
 // ---- swapchain and present state (g_pl)
 static PlatRMutex g_pl;
 static int g_headless;
 static VkSwapchainKHR g_sc;
 static VkFormat g_sc_fmt;
+static int g_sc_hdr;   // HDR10 (gfx_hdr.c): the game's PQ picture; the menu, captures and thumbnails convert
 static VkExtent2D g_sc_ext;
+// The part of the swapchain image the window shows: all of it, except when the driver's surface is larger than the
+// window (#140, ROG Ally on Windows at 1280x720 with a 1920x1080 panel: AMD's driver gave a 1920x1080 surface for the
+// 1280x720 window and Windows showed its top-left 1280x720, so the picture fitted to 1920x1080 was cut off).
+static VkExtent2D g_sc_vis;
 static int g_scaler;                        // the last present: 0 the game image 1:1, 1 scaled by the blit, 2 by FSR
 static uint32_t g_sc_n;
 static VkImage g_sc_img[MAX_IMAGES];
@@ -140,8 +148,14 @@ static VmaAllocation g_cap_alloc;
 static uint8_t *g_cap_ptr;
 static VkDeviceSize g_cap_size;
 static int g_cap_w, g_cap_h, g_cap_valid;
-static int g_flip_on;            // vk_present_blit submitted the blit of swapchain image g_flip_idx; vk_present_flip presents it
-static uint32_t g_flip_idx;
+// The swapchain images whose blit was submitted and whose present waits, oldest first: vk_present_flip presents the
+// oldest. More than one only with frame generation (vk_present_blit_ahead).
+static uint32_t g_flip_q[MAX_IMAGES];
+static int g_flip_n;
+static float g_aspect;           // gfx_aspect_set: the ultrawide output's aspect (MKW_ASPECT), 0 at 16:9
+void gfx_aspect_set(float a) { g_aspect = a; }
+static int g_frames = 2;         // slots in use (create_swapchain): 2, FRAMES with frame generation
+static int g_ahead = 1;          // presents that may wait at once: the swapchain's images past its minimum
 
 // ---- MKW_FLIGHT thumbnails (flight.c; g_pl): each present also blits the swapchain image down into slot frame % g_th_n
 // of a host-visible ring. A slot's tag names the frame it holds complete; recording a new frame clears the tag first,
@@ -232,17 +246,19 @@ int gfx_window_focused(void) { return g_focused; }
 unsigned gfx_window_focus_messages(void) { return (unsigned)g_focus_msgs; }
 
 // Present path (g_pl held): a settings change (cfg_version) reaches the window thread, which applies a changed size or
-// fullscreen; a changed MKW_VK_PRESENT rebuilds the swapchain at this present.
+// fullscreen; a changed MKW_VK_PRESENT, or frame generation turned on or off (its spare images), rebuilds the
+// swapchain at this present.
 static void window_settings_live(void) {
     static unsigned seen;
-    static int started;
+    static int started, fg;
     static char present[16];   // the MKW_VK_PRESENT the swapchain was made with
     unsigned v = cfg_version();
     if (started && v == seen) return;
     seen = v;
     const char *e = cfg_value("MKW_VK_PRESENT");
-    if (!started || strncmp(e, present, sizeof present - 1)) {
+    if (!started || strncmp(e, present, sizeof present - 1) || fg != vk_fg_wanted()) {
         snprintf(present, sizeof present, "%s", e);
+        fg = vk_fg_wanted();
         if (started) plat_xchg32(&g_dirty, 1);
     }
     if (started) gfx_window_apply_settings();
@@ -263,31 +279,45 @@ static VkPresentModeKHR pick_present_mode(VkPhysicalDevice pd) {
     vkGetPhysicalDeviceSurfacePresentModesKHR(pd, g_surface, &n, m);
     VkPresentModeKHR got = VK_PRESENT_MODE_FIFO_KHR;
     for (uint32_t i = 0; i < n; i++) if (m[i] == want) got = want;
+    // Mailbox missing (several AMD drivers): relaxed FIFO, where a frame that misses its vblank is shown at once (a
+    // tear) instead of waiting for the next one, which halves a 60 fps game near its budget (NX2navi's idea).
+    for (uint32_t i = 0; got != want && want == VK_PRESENT_MODE_MAILBOX_KHR && i < n; i++)
+        if (m[i] == VK_PRESENT_MODE_FIFO_RELAXED_KHR) got = m[i];
     const char *name = got == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : got == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" : "fifo";
     __atomic_store_n(&g_present_got, name, __ATOMIC_RELEASE);
     static int logged = -1;   // the mode last logged: a change from the menu shows in the log
     if ((int)got != logged) {
         logged = (int)got;
-        rt_log("gfx: present mode %s (MKW_VK_PRESENT=%s)", name, e);
+        rt_log("gfx: present mode %s%s (MKW_VK_PRESENT=%s)", name, got == VK_PRESENT_MODE_FIFO_RELAXED_KHR ? " relaxed" : "", e);
     }
     return got;
 }
 
 const char *gfx_window_present_mode(void) { return __atomic_load_n(&g_present_got, __ATOMIC_ACQUIRE); }
 
-// Queues the present of a blit vk_present_blit left waiting (g_pl held). A swapchain rebuild and the next blit flush it
-// first; the device release drops it.
-static void flip_locked(void) {
-    if (!g_flip_on) return;
-    g_flip_on = 0;
-    if (!g_sc) return;
-    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
-                           .pWaitSemaphores = &g_render_done[g_flip_idx], .swapchainCount = 1, .pSwapchains = &g_sc,
-                           .pImageIndices = &g_flip_idx};
+// Queues the oldest present a blit left waiting (g_pl held). Returns its present id (MKW_LATENCY), else 0.
+static uint64_t flip_one_locked(void) {
+    if (!g_flip_n) return 0;
+    uint32_t idx = g_flip_q[0];
+    g_flip_n--;
+    memmove(g_flip_q, g_flip_q + 1, (size_t)g_flip_n * sizeof *g_flip_q);
+    if (!g_sc) return 0;
+    uint64_t id = vk_lat_next_id();
+    VkPresentIdKHR pid = {.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR, .swapchainCount = 1, .pPresentIds = &id};
+    VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .pNext = id ? &pid : NULL,
+                           .waitSemaphoreCount = 1, .pWaitSemaphores = &g_render_done[idx], .swapchainCount = 1,
+                           .pSwapchains = &g_sc, .pImageIndices = &idx};
     vk_queue_lock();
     VkResult r = vkQueuePresentKHR(vk_ctx()->gfx_queue, &pi);
     vk_queue_unlock();
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
+    return id;
+}
+
+// Queues every waiting present (g_pl held). A swapchain rebuild and the next blit (not an ahead one) flush them first;
+// the device release drops them.
+static void flip_locked(void) {
+    while (g_flip_n) flip_one_locked();
 }
 
 static void free_capture(void) {
@@ -377,16 +407,25 @@ static int create_swapchain(void) {
     if (nf > 64) nf = 64;
     vkGetPhysicalDeviceSurfaceFormatsKHR(c->phys, g_surface, &nf, fmts);
     if (!nf) return 0;
-    // UNORM: the blit writes the bytes the game wrote (no sRGB encode).
+    // UNORM: the blit writes the bytes the game wrote (no sRGB encode); in HDR10 the game's own PQ picture.
     VkSurfaceFormatKHR sf = fmts[0];
-    int found = 0;
+    int found = gfx_hdr_pick(fmts, nf, &sf);
     for (uint32_t i = 0; i < nf && !found; i++)
         if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; found = 1; }
     for (uint32_t i = 0; i < nf && !found; i++)
         if (fmts[i].format == VK_FORMAT_R8G8B8A8_UNORM && fmts[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) { sf = fmts[i]; found = 1; }
-    uint32_t count = caps.minImageCount + 1;
+    // one image past the minimum; with frame generation one for each frame of a game frame, all acquired at once
+    uint32_t count = caps.minImageCount + (vk_fg_wanted() ? VK_FG_MAX : 1);
     if (caps.maxImageCount && count > caps.maxImageCount) count = caps.maxImageCount;
     if (count > 8) count = 8;
+    g_ahead = count > caps.minImageCount ? (int)(count - caps.minImageCount) : 1;
+    // Slots in use: 2 without frame generation, as before it existed, so the pacing of the present thread (its fence
+    // waits) is unchanged where RADV hangs on it (#43, #50); the device is idle below, so no slot is in flight.
+    g_frames = vk_fg_wanted() ? FRAMES : 2;
+    static int warned;
+    if (vk_fg_wanted() && g_ahead < 2 && !warned++)
+        rt_log("gfx: frame generation is on but the swapchain allows no spare image (max %u): no frames are made",
+               caps.maxImageCount);
 
     vk_queue_lock();
     vkDeviceWaitIdle(c->device);
@@ -399,7 +438,9 @@ static int create_swapchain(void) {
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE, .preTransform = caps.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = pick_present_mode(c->phys), .clipped = VK_TRUE,
         .oldSwapchain = old};
+    vk_lat_swapchain(1, VK_NULL_HANDLE);   // MKW_LATENCY: no present wait on the swapchain this retires
     VkResult r = vkCreateSwapchainKHR(c->device, &ci, NULL, &g_sc);
+    vk_lat_swapchain(0, r == VK_SUCCESS ? g_sc : old);
     if (r != VK_SUCCESS) {
         rt_log("gfx: vkCreateSwapchainKHR failed (%d)", (int)r);
         g_sc = old;
@@ -412,8 +453,18 @@ static int create_swapchain(void) {
         g_sc_view[i] = VK_NULL_HANDLE;
     }
     if (old) vkDestroySwapchainKHR(c->device, old, NULL);
+    gfx_hdr_metadata(g_sc);
     g_sc_fmt = sf.format;
-    g_sc_ext = ext;
+    g_sc_hdr = sf.colorSpace == VK_COLOR_SPACE_HDR10_ST2084_EXT;
+    g_sc_ext = g_sc_vis = ext;
+    if (cw > 0 && ch > 0 && ((uint32_t)cw < ext.width || (uint32_t)ch < ext.height)) {
+        g_sc_vis = (VkExtent2D){(uint32_t)cw < ext.width ? (uint32_t)cw : ext.width,
+                                (uint32_t)ch < ext.height ? (uint32_t)ch : ext.height};
+        static int logged;
+        if (!logged++)
+            rt_log("gfx: the driver's surface is %ux%u for a %dx%d window: the picture goes in the window's part", ext.width,
+                   ext.height, cw, ch);
+    }
     g_sc_n = MAX_IMAGES;
     vkGetSwapchainImagesKHR(c->device, g_sc, &g_sc_n, g_sc_img);
     VkSemaphoreCreateInfo semi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -496,12 +547,14 @@ static int ensure_thumbs(void) {
         }
         g_th_ptr = info.pMappedData;
     }
-    if (g_th_img && g_th_fmt != g_sc_fmt) {
+    // an HDR10 swapchain blits into RGBA8: its PQ codes in 8 bits, turned into sRGB when read (vk_thumbs_read)
+    VkFormat tf = g_sc_hdr ? VK_FORMAT_R8G8B8A8_UNORM : g_sc_fmt;
+    if (g_th_img && g_th_fmt != tf) {
         vmaDestroyImage(c->vma, g_th_img, g_th_img_alloc);   // the previous present's fence was waited for: idle
         g_th_img = VK_NULL_HANDLE;
     }
     if (!g_th_img) {
-        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = g_sc_fmt,
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = tf,
                                 .extent = {FLIGHT_THUMB_W, FLIGHT_THUMB_H, 1}, .mipLevels = 1, .arrayLayers = 1,
                                 .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
                                 .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
@@ -513,7 +566,7 @@ static int ensure_thumbs(void) {
             rt_log("gfx: flight thumbnails off: no %ux%u image", FLIGHT_THUMB_W, FLIGHT_THUMB_H);
             return 0;
         }
-        g_th_fmt = g_sc_fmt;
+        g_th_fmt = tf;
     }
     return 1;
 }
@@ -554,10 +607,18 @@ int vk_thumbs_read(uint64_t frame, uint8_t *rgba) {
             VkCtx *c = vk_ctx();
             vmaInvalidateAllocation(c->vma, g_th_alloc, TH_BYTES * ring, TH_BYTES);
             memcpy(rgba, g_th_ptr + TH_BYTES * ring, TH_BYTES);
-            ok = g_th_fmt == VK_FORMAT_B8G8R8A8_UNORM || g_th_fmt == VK_FORMAT_B8G8R8A8_SRGB ? 2 : 1;
+            ok = g_th_fmt == VK_FORMAT_B8G8R8A8_UNORM || g_th_fmt == VK_FORMAT_B8G8R8A8_SRGB ? 2 : g_sc_hdr ? 3 : 1;
         }
     }
     plat_rmutex_unlock(&g_pl);
+    if (ok == 3) {   // 8-bit PQ codes: back to 10 bits, then to sRGB at paper white
+        for (size_t i = 0; i < TH_BYTES; i += 4) {
+            uint32_t v = (uint32_t)rgba[i] * 1023 / 255 | ((uint32_t)rgba[i + 1] * 1023 / 255) << 10 |
+                         ((uint32_t)rgba[i + 2] * 1023 / 255) << 20;
+            memcpy(rgba + i, &v, 4);
+        }
+        gfx_hdr_to_srgb8(rgba, rgba, TH_BYTES / 4, 0);
+    }
     if (ok == 2)
         for (size_t i = 0; i < TH_BYTES; i += 4) {
             uint8_t t = rgba[i];
@@ -581,13 +642,24 @@ int vk_present_captured(const uint8_t **px, int *w, int *h, VkFormat *fmt) {
     return ok;
 }
 
+// ctl "screen PATH": the next present saves its swapchain image as the menu's test shots do
+static char g_screen_path[512];
+static volatile int32_t g_screen_on;
+void vk_present_screen_shot(const char *path) {
+    plat_rmutex_lock(&g_pl);
+    snprintf(g_screen_path, sizeof g_screen_path, "%s", path);
+    plat_rmutex_unlock(&g_pl);
+    __atomic_store_n(&g_screen_on, 1, __ATOMIC_RELEASE);
+}
+
 // The captured swapchain image as a PNG (the menu's test hook), RGBA with opaque alpha.
 static void save_capture(const char *path) {
     size_t n = (size_t)g_cap_w * (size_t)g_cap_h * 4;
     uint8_t *px = malloc(n);
     if (!px) return;
     int bgra = g_sc_fmt == VK_FORMAT_B8G8R8A8_UNORM || g_sc_fmt == VK_FORMAT_B8G8R8A8_SRGB;
-    for (size_t i = 0; i < n; i += 4) {
+    if (g_sc_hdr) gfx_hdr_to_srgb8(g_cap_ptr, px, n / 4, g_sc_fmt == VK_FORMAT_A2R10G10B10_UNORM_PACK32);
+    else for (size_t i = 0; i < n; i += 4) {
         px[i] = g_cap_ptr[i + (bgra ? 2 : 0)];
         px[i + 1] = g_cap_ptr[i + 1];
         px[i + 2] = g_cap_ptr[i + (bgra ? 0 : 2)];
@@ -595,7 +667,7 @@ static void save_capture(const char *path) {
     }
     rt_write_png(path, px, (uint32_t)g_cap_w, (uint32_t)g_cap_h);
     free(px);
-    rt_log("gfx: menu test shot %s (%dx%d)", path, g_cap_w, g_cap_h);
+    rt_log("gfx: swapchain shot %s (%dx%d)", path, g_cap_w, g_cap_h);
 }
 
 // The rectangle {x, y, w, h} of a dw x dh swapchain image the cw x ch picture goes into: the whole image with
@@ -612,16 +684,19 @@ void gfx_fit_rect(int cw, int ch, int dw, int dh, int out[4]) {
     out[0] = (dw - out[2]) / 2, out[1] = (dh - out[3]) / 2;
 }
 
+// defer: 0 present now, 1 leave the present waiting for vk_present_flip, 2 the same without queueing the presents
+// already waiting first (vk_present_blit_ahead); allow_blank_overlay: the menu overlay drawn without a game image
 static void present_image_ex(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4], int defer,
                              int allow_blank_overlay) {
     int general = layout == VK_IMAGE_LAYOUT_GENERAL;
     gfx_window_start();
     VkCtx *c = vk_ctx();
     plat_rmutex_lock(&g_pl);
-    flip_locked();
+    if (defer != 2 || g_flip_n >= g_ahead) flip_locked();   // (no more acquired images than the swapchain spares)
     if (g_headless) {
         if ((!g_sc_n || plat_cas32(&g_dirty, 0, 0)) && !create_headless_targets(0, 0)) goto out;
     } else {
+        if (gfx_hdr_cfg_changed()) plat_xchg32(&g_dirty, 1);   // MKW_HDR switched in the menu: HDR10 or SDR from now on
         if (!g_sc || plat_cas32(&g_dirty, 0, 0)) {
             if (!wsys_minimized() && !create_swapchain() && !g_sc) goto out;
         }
@@ -629,7 +704,7 @@ static void present_image_ex(VkImage src, VkImageLayout layout, VkFormat fmt, in
     }
     if (!g_capture && turbo_drop_present(kern_now_ns())) goto out;   // turbo: the window shows at most 60 a second
 
-    unsigned slot = g_frame % FRAMES;
+    unsigned slot = g_frame % g_frames;
     const char *prev_f = hang_mark_val("present: vkWaitForFences", g_frame);
     VkResult wr = vkWaitForFences(c->device, 1, &g_fence[slot], VK_TRUE, 5000000000ull);
     hang_mark(prev_f);
@@ -655,7 +730,15 @@ static void present_image_ex(VkImage src, VkImageLayout layout, VkFormat fmt, in
             if (!create_swapchain()) goto out;
             r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
         }
-        if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) goto out;     // lost, not ready: skip the frame
+        static int acquire_fails;   // in a row: a timeout or a failure that keeps coming means the swapchain went bad
+        if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {             // lost, not ready: skip the frame
+            if (++acquire_fails == 3) {
+                rt_log("gfx: three acquires failed in a row (%d): making the swapchain again", (int)r);
+                plat_xchg32(&g_dirty, 1);
+            }
+            goto out;
+        }
+        acquire_fails = 0;
         if (r == VK_SUBOPTIMAL_KHR) plat_xchg32(&g_dirty, 1);
     }
     vkResetFences(c->device, 1, &g_fence[slot]);
@@ -670,13 +753,18 @@ static void present_image_ex(VkImage src, VkImageLayout layout, VkFormat fmt, in
     if (cy < 0) cy = 0;
     if (cx + cw > w) cw = w - cx;
     if (cy + ch > h) ch = h - cy;
+    // A full-screen movie (the cups') on an ultrawide output (MKW_ASPECT): its middle 16:9 between black bars, as the
+    // console shows it; the 2D keeps the movie there (patches.c host_ui_proj)
+    if (g_aspect && ov_movie_playing() && ch * 16 / 9 < cw) cx += (cw - ch * 16 / 9) / 2, cw = ch * 16 / 9;
     window_settings_live();
     // The menu overlay: laid out before recording (its first frame starts the ImGui back end and uploads the font)
     const char *menu_shot = NULL;
-    MenuTarget mt = {c->instance, c->phys, c->device, c->gfx_family, c->gfx_queue, g_sc_fmt, g_sc_ext.width,
+    MenuTarget mt = {c->instance, c->phys, c->device, c->gfx_family, c->gfx_queue,
+                     g_sc_hdr ? VK_FORMAT_R8G8B8A8_UNORM : g_sc_fmt, g_sc_ext.width,
                      g_sc_ext.height, cw, ch, g_scaler};
     int overlay = (src || allow_blank_overlay) && g_sc_view[idx] &&
                   menu_overlay_frame(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), &mt, &menu_shot);
+    if (!menu_shot && __atomic_exchange_n(&g_screen_on, 0, __ATOMIC_ACQ_REL)) menu_shot = g_screen_path;
     int cap = (src || (allow_blank_overlay && overlay)) && (g_capture || menu_shot) && ensure_capture_buffer();
     int thumb = src && g_th_n && ensure_thumbs();
 
@@ -686,11 +774,14 @@ static void present_image_ex(VkImage src, VkImageLayout layout, VkFormat fmt, in
                                    .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     vkBeginCommandBuffer(cb, &bi);
     VkImage dst = g_sc_img[idx];
+    // #43 and #50 (RADV) hung on this thread's submission with every earlier mark finished: this one says whether the
+    // GPU reached it and got through the swapchain image's transition and clear
+    uint32_t prep = vk_crumb_op(cb, "present: swapchain image transition", g_sc_ext.width, g_sc_ext.height);
     sync_barrier(cb, dst, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT, 0,
                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     const int rect[4] = {cx, cy, cw, ch};
     int to[4];   // where the picture goes in the swapchain image: {x, y, w, h}
-    gfx_fit_rect(cw, ch, (int)g_sc_ext.width, (int)g_sc_ext.height, to);
+    gfx_fit_rect(cw, ch, (int)g_sc_vis.width, (int)g_sc_vis.height, to);
     if (!src || to[2] != (int)g_sc_ext.width || to[3] != (int)g_sc_ext.height) {   // black bars, or all black
         VkClearColorValue black = {.float32 = {0, 0, 0, 1}};
         VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
@@ -699,6 +790,7 @@ static void present_image_ex(VkImage src, VkImageLayout layout, VkFormat fmt, in
                      VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                      VK_ACCESS_2_TRANSFER_WRITE_BIT);
     }
+    vk_crumb_end(cb, VK_CRUMB_OP, prep);
     // FSR (MKW_UPSCALER) when the picture's rectangle is larger than the crop; else the bilinear blit
     uint32_t crumb = src ? vk_crumb_op(cb, "present scaling", (uint32_t)to[2], (uint32_t)to[3]) : 0;
     int fsr = src && general && vk_fsr_record(cb, slot, src, fmt, w, h, rect, dst, to[0], to[1], (uint32_t)to[2], (uint32_t)to[3]);
@@ -717,22 +809,30 @@ static void present_image_ex(VkImage src, VkImageLayout layout, VkFormat fmt, in
                          VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0);
     }
     vk_crumb_end(cb, VK_CRUMB_OP, crumb);
+    uint32_t tail = vk_crumb_op(cb, "present: overlay and hand-off to the display", g_sc_ext.width, g_sc_ext.height);
     // last: the image's layout, and the stage and access of its last write, as each step leaves it
     VkImageLayout last = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     VkPipelineStageFlags2 last_stage = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
     VkAccessFlags2 last_write = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    // On an HDR10 swapchain the menu draws into an RGBA8 image cleared to 0, then goes onto the PQ picture at paper
+    // white (vk_hdr_ui.c): its sRGB bytes straight into a PQ image would put its white at 10 000 nits
+    VkImageView menu_view = overlay && g_sc_hdr ? vk_hdr_ui_target(cb, g_sc_ext.width, g_sc_ext.height) : VK_NULL_HANDLE;
+    if (overlay && g_sc_hdr && !menu_view) overlay = 0;
     if (overlay) {
         sync_barrier(cb, dst, last, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, last_stage, last_write,
                      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                      VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
-        VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_sc_view[idx],
+        VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                        .imageView = menu_view ? menu_view : g_sc_view[idx],
                                         .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+                                        .loadOp = menu_view ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+                                        .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
         VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, g_sc_ext}, .layerCount = 1,
                               .colorAttachmentCount = 1, .pColorAttachments = &ca};
         vkCmdBeginRendering(cb, &ri);
         menu_overlay_draw(cb);
         vkCmdEndRendering(cb);
+        if (menu_view) vk_hdr_ui_compose(cb, g_sc_view[idx], g_sc_fmt, g_sc_ext.width, g_sc_ext.height);
         last = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         last_stage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
         last_write = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
@@ -756,6 +856,7 @@ static void present_image_ex(VkImage src, VkImageLayout layout, VkFormat fmt, in
         last_write = 0;
         record_thumb(cb, dst, slot);
     }
+    vk_crumb_end(cb, VK_CRUMB_OP, tail);
     sync_barrier(cb, dst, last, g_headless ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                  last_stage, last_write, VK_PIPELINE_STAGE_2_NONE, 0);
     vkEndCommandBuffer(cb);
@@ -776,12 +877,21 @@ static void present_image_ex(VkImage src, VkImageLayout layout, VkFormat fmt, in
     vk_queue_unlock();
     if (sr == VK_SUCCESS) {
         if (!g_headless) {
-            g_flip_on = 1;
-            g_flip_idx = idx;
+            g_flip_q[g_flip_n++] = idx;   // (at most g_ahead: flushed above)
             if (!defer) flip_locked();
         }
     } else {
+        // The fence was reset and the acquire semaphore is signaled: without a batch that waits on the one and
+        // signals the other, this slot's next fence wait times out every time and the picture stays frozen
+        // (NX2navi's idea). The image acquired goes unpresented, so the swapchain is made again.
         rt_log("gfx: present submit failed (%d)", (int)sr);
+        VkSubmitInfo2 empty = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .waitSemaphoreInfoCount = g_headless ? 0u : 1u,
+                               .pWaitSemaphoreInfos = &wait};
+        vk_queue_lock();
+        VkResult re = vkQueueSubmit2(c->gfx_queue, 1, &empty, g_fence[slot]);
+        vk_queue_unlock();
+        if (re != VK_SUCCESS) rt_log("gfx: the empty batch after it failed too (%d)", (int)re);
+        plat_xchg32(&g_dirty, 1);
     }
     g_frame++;
     if (cap) {
@@ -847,10 +957,17 @@ void vk_present_blit(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int
     present_image(src, layout, fmt, w, h, crop, 1);
 }
 
-void vk_present_flip(void) {
+void vk_present_blit_ahead(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]) {
+    present_image(src, layout, fmt, w, h, crop, 2);
+}
+
+int vk_present_ahead_max(void) { return __atomic_load_n(&g_ahead, __ATOMIC_RELAXED); }
+
+uint64_t vk_present_flip(void) {
     plat_rmutex_lock(&g_pl);
-    flip_locked();
+    uint64_t id = flip_one_locked();
     plat_rmutex_unlock(&g_pl);
+    return id;
 }
 
 void gfx_window_resize(int cw, int chh) {
@@ -870,9 +987,11 @@ void gfx_window_release_vk(void) {
         vk_queue_lock();
         vkDeviceWaitIdle(c->device);
         vk_queue_unlock();
-        g_flip_on = 0;   // its blit is done (device idle); the swapchain goes away unpresented
+        g_flip_n = 0;   // their blits are done (device idle); the swapchain goes away unpresented
         menu_vk_release();
         vk_fsr_release();
+        vk_hdr_ui_release();
+        vk_fg_release();
         free_capture();
         free_thumbs();
         for (int i = 0; i < FRAMES; i++) {
@@ -889,7 +1008,9 @@ void gfx_window_release_vk(void) {
             }
         }
         if (g_pool) vkDestroyCommandPool(c->device, g_pool, NULL);
+        vk_lat_swapchain(1, VK_NULL_HANDLE);
         if (g_sc) vkDestroySwapchainKHR(c->device, g_sc, NULL);
+        vk_lat_swapchain(0, VK_NULL_HANDLE);
         if (g_surface) vkDestroySurfaceKHR(c->instance, g_surface, NULL);
         g_sc = VK_NULL_HANDLE; g_surface = VK_NULL_HANDLE; g_pool = VK_NULL_HANDLE; g_sc_n = 0;
         g_started = 0;     // the window and its thread stay; the next gfx_window_start makes a new surface

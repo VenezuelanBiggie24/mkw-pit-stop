@@ -1,4 +1,4 @@
-"""Tests for the clean-room NUP v1 reader (tools/prepare/nup.py)."""
+"""Tests for the PS5 builder's clean-room NUP v1 reader (tools/ps5/nup_reader.py)."""
 
 from compression import zstd
 import hashlib
@@ -10,8 +10,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools/prepare"))
-import nup  # noqa: E402
-import prepare  # noqa: E402
+sys.path.insert(0, str(ROOT / "tools/ps5"))
+import nup_reader as nup  # noqa: E402
+import ps5_prepare_common as prepare  # noqa: E402
 
 
 def _build_nup(

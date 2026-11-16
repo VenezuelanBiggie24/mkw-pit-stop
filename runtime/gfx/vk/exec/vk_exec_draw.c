@@ -63,7 +63,7 @@ void vk_exec_draw_new_cb(void) {
 void vk_exec_draw_forget(void) {
     vk_exec_draw_thread();
     B.pipe[0] = B.pipe[1] = VK_NULL_HANDLE;
-    B.st_valid = B.vb_valid = B.res_valid = 0;
+    B.st_valid = B.dyn_valid = B.vb_valid = B.res_valid = 0;
     B.ds_layout = VK_NULL_HANDLE;
     B.ds_bound[0] = B.ds_bound[1] = VK_NULL_HANDLE;
     B.ds_pushed[0] = B.ds_pushed[1] = 0;
@@ -124,16 +124,33 @@ int find_stage(const prog_t *p, int nvn_stage, const uint8_t **ctl, const uint8_
     return 1;
 }
 
-// *present: the program has this stage. Returns NULL when it has not or it has no prepared SPIR-V.
-const GfxShader *shader_for(VkExec *ex, int st, int *present) {
-    const uint8_t *ctl, *code;
-    uint32_t len;
-    *present = 0;
-    if (!ex->prog || !find_stage(ex->prog, st, &ctl, &code, &len)) return NULL;
-    *present = 1;
-    // the vertex stage's attribute types pick its integer-input variant (gfx_shader.c); other stages have none
-    GfxShaderAnswers a = {0};
-    if (st == NVN_STAGE_VS) vk_pipeline_answers(&ex->pipe, &a);
+// Which TEX/IMG bindings of a compute program have an integer-format view bound: the translator reads them as float
+// and takes the bits (floatBitsToUint), as SM86 does; in Vulkan a float image over an integer view is undefined
+// (format-07753): AMD and NVIDIA return the bits, Intel Arc drew the race black (issue #64). Array and buffer
+// bindings are left as they are. MKW_INT_IMAGES=0 keeps the float images (to compare). s: the program's base shader.
+static void cs_answers(VkExec *ex, const GfxShader *s, GfxShaderAnswers *a) {
+    static int on = -1;
+    if (on < 0) on = !cfg_get("MKW_INT_IMAGES") || strcmp(cfg_get("MKW_INT_IMAGES"), "0") != 0;
+    if (!on) return;
+    for (int img = 0; s && img < 2; img++) {
+        const GfxShaderRes *res;
+        int n = gfx_shader_resources(s, img ? GFX_RES_IMG : GFX_RES_TEX, &res);
+        for (int i = 0; i < n; i++) {
+            const GfxShaderRes *r = &res[i];
+            if (r->count > 1 || r->binding >= 64 || r->slot < 0 || (r->type & 0xff) == 2) continue;
+            uint64_t h = img ? (r->slot < 32 ? ex->img[NVN_STAGE_CS][r->slot] : 0)
+                             : (r->slot < 128 ? ex->tex[NVN_STAGE_CS][r->slot] : 0);
+            int t = vk_exec_res_numeric(h, r, img);
+            if (t == GFX_TYPE_UINT) a->img_uint |= 1ull << r->binding;
+            else if (t == GFX_TYPE_SINT) a->img_sint |= 1ull << r->binding;
+        }
+    }
+}
+
+// The shader of stage st of the bound program for the answers a, from this thread's table: gfx_shader_get keys the
+// program by hashing its whole code, too slow for every draw and dispatch.
+static const GfxShader *cached_shader(VkExec *ex, int st, const uint8_t *ctl, const uint8_t *code, const GfxShaderAnswers *a0) {
+    GfxShaderAnswers a = *a0;
     uint64_t serial = ex->prog->serial;
     ShaderEnt *set = NULL;
     if (serial) {
@@ -153,11 +170,36 @@ const GfxShader *shader_for(VkExec *ex, int st, int *present) {
     const GfxShader *s = gfx_shader_get(ctl, code, &a);
     if (!s) warn_once(W_SHADER, "a stage %d shader of program %llu has no prepared SPIR-V: draws with it are skipped", st,
                       (unsigned long long)serial);
-    else if (set) {   // in front, the least recently used way drops out
+    // in front, the least recently used way drops out. A program without prepared SPIR-V is kept too (s NULL): each of
+    // its draws hashed its code and looked for the file again: 4.9 us each on the replay thread (a capture replayed
+    // with a tenth of the programs removed, 11/11/2026), and a run with 19 programs missing did it 4 000 times a frame
+    // (fg3, 11/11/2026)
+    if (set) {
         memmove(&set[1], &set[0], (SHADER_WAYS - 1) * sizeof *set);
         set[0] = (ShaderEnt){.serial = serial, .stage = st, .used = 1, .a = a, .s = s};
     }
     return s;
+}
+
+// *present: the program has this stage. Returns NULL when it has not or it has no prepared SPIR-V.
+const GfxShader *shader_for(VkExec *ex, int st, int *present) {
+    const uint8_t *ctl, *code;
+    uint32_t len;
+    *present = 0;
+    if (!ex->prog || !find_stage(ex->prog, st, &ctl, &code, &len)) return NULL;
+    *present = 1;
+    // the vertex stage's attribute types pick its integer-input variant (gfx_shader.c), the fragment stage's target
+    // formats its integer-output variant, the compute stage's bound image formats its integer-image variant, read
+    // from the base shader's resources; other stages have none
+    GfxShaderAnswers a = {0};
+    if (st == NVN_STAGE_VS) vk_pipeline_answers(&ex->pipe, GFX_STAGE_VS, &a);
+    else if (st == NVN_STAGE_FS) vk_pipeline_answers(&ex->pipe, GFX_STAGE_FS, &a);
+    else if (st == NVN_STAGE_CS) {
+        const GfxShader *base = cached_shader(ex, st, ctl, code, &a);
+        cs_answers(ex, base, &a);
+        if (!(a.img_uint | a.img_sint)) return base;
+    }
+    return cached_shader(ex, st, ctl, code, &a);
 }
 
 // The values the GPU reads for s's fixed-address constant words idx[0..n) (all words when idx is NULL) in this draw
@@ -366,9 +408,9 @@ static uint32_t feedback_prepare(VkExec *ex, const GfxShader *fs) {
 }
 
 // MKW_PIPE_SKIP: which draws are skipped, rather than waited for, while their shaders or pipeline build.
-// strict (0): only draws whose pass targets were all rendered in the previous presented frame; a pass with a target
+// strict (0): only draws whose pass targets were all rendered in the last frames (RECENT_FRAMES); a pass with a target
 //   that was not counts as one-shot and waits.
-// any (1): also draws in a pass with at least one target rendered in the previous frame (a per-frame depth
+// any (1): also draws in a pass with at least one target rendered in the last frames (a per-frame depth
 //   buffer or g-buffer with a colour target the frame before did not use: half-resolution effect buffers in fights).
 //   Passes with none (volumes, LUTs, shadow layers seen for the first time) still wait.
 // fullscreen (2, default): as any, and full-screen draws into such passes are skipped instead of waiting from their
@@ -386,6 +428,44 @@ static int pipe_skip_mode(void) {
         rt_log("vk_exec: draws skipped while their pipeline builds: %s", what[mode]);
     }
     return mode;
+}
+
+// MKW_SKIP_PROGRAMS=<hex>[,<hex>...] (diagnosis): draws whose vertex or fragment program key (the 64 hex digits of
+// the breadcrumb and "last programs" lines) starts with one of these are left out, each one logged the first time.
+// Why: issue #22's NVIDIA faults ("instruction pointer invalid") were each narrowed to one program by skipping it on a
+// reporter's debug branch (c74a0d4e at Star High Sundae, 1c7a765b in the Shell Cup); in the release every reporter can.
+#define SKIP_PROGS 16
+static struct { int n; uint8_t key[SKIP_PROGS][32]; uint8_t len[SKIP_PROGS]; int logged[SKIP_PROGS]; } SP = {.n = -1};
+static int hexval(char c) { return c >= '0' && c <= '9' ? c - '0' : (c | 32) >= 'a' && (c | 32) <= 'f' ? (c | 32) - 'a' + 10 : -1; }
+
+static int skip_listed(const GfxShader *vs, const GfxShader *fs) {
+    if (SP.n < 0) {
+        int n = 0;
+        for (const char *p = cfg_get("MKW_SKIP_PROGRAMS"); p && *p && n < SKIP_PROGS;) {
+            int len = 0;
+            memset(SP.key[n], 0, 32);
+            for (; hexval(*p) >= 0 && len < 64; p++, len++) SP.key[n][len / 2] |= (uint8_t)(hexval(*p) << (len & 1 ? 0 : 4));
+            if (len) SP.len[n++] = (uint8_t)len;
+            while (*p && hexval(*p) < 0) p++;
+        }
+        __atomic_store_n(&SP.n, n, __ATOMIC_RELEASE);
+        if (n) rt_log("vk_exec: draws with %d listed programs are skipped (MKW_SKIP_PROGRAMS, a diagnosis)", n);
+    }
+    for (int i = 0; i < SP.n; i++)
+        for (int s = 0; s < 2; s++) {
+            const GfxShader *g = s ? fs : vs;
+            if (!g) continue;
+            const uint8_t *k = gfx_shader_key(g);
+            int len = SP.len[i], ok = !memcmp(k, SP.key[i], (size_t)len / 2);
+            if (ok && len & 1) ok = (k[len / 2] >> 4) == (SP.key[i][len / 2] >> 4);
+            if (!ok) continue;
+            if (!__atomic_exchange_n(&SP.logged[i], 1, __ATOMIC_RELAXED))
+                rt_log("vk_exec: frame %llu: first draw skipped by MKW_SKIP_PROGRAMS entry %d (%s program)",
+                       (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1, i + 1,
+                       s ? "fragment" : "vertex");
+            return 1;
+        }
+    return 0;
 }
 
 // The previous draw's shaders, kept while its program and bound pipeline state stay the same: shader_for reads nothing
@@ -432,11 +512,11 @@ static int pipe_memo_on(void) {
 
 static _Thread_local uint64_t pd_t;
 _Thread_local uint64_t pd_tsc[PD_N], pd_n;
-#define PD_MARK(i) do { if (pd_on) { uint64_t t_ = __rdtsc(); pd_tsc[i] += t_ - pd_t; pd_t = t_; } } while (0)
+#define PD_MARK(i) do { if (pd_on) { uint64_t t_ = plat_cycles(); pd_tsc[i] += t_ - pd_t; pd_t = t_; } } while (0)
 
 int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) {
     pd_on = (rt_trace & RT_TRACE_DRAW) != 0;
-    if (pd_on) pd_t = __rdtsc(), pd_n++;
+    if (pd_on) pd_t = plat_cycles(), pd_n++;
     if (ex->render_disabled) {
         if (vk_cond_trace > 0) {
             int has_vs;
@@ -483,11 +563,12 @@ int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) 
             memo_key(ex, &SM.k), SM.vs = vs, SM.fs = fs, SM.has_fs = has_fs, SM.valid = 1;
     }
     if (!has_vs) return vk_exec_frame.skip[VK_SKIP_NO_VS]++, warn_once(W_NO_VS, "a draw with a program that has no vertex stage is skipped"), 0;
-    // A draw into a target the previous frame did not render (or into none) waits for a pending pipeline: one-shot
+    // A draw into a target not rendered in the last RECENT_FRAMES (vk_exec_rt.c; or into none) waits for a pending pipeline: one-shot
     // draws (volumes and LUTs generated once, later only sampled) would leave their target empty for the session. A
     // draw into per-frame targets is skipped until it is ready and comes back next frame.
     int oneshot = -1, skip = pipe_skip_mode();   // -1: not looked up
     if (!vs || (has_fs && !fs)) return vk_exec_frame.skip[VK_SKIP_SHADER_MISSING]++, 0;
+    if (SP.n && skip_listed(vs, has_fs ? fs : NULL)) return 0;
     PD_MARK(PD_SHADER);
     uint32_t fbl = feedback_prepare(ex, fs);
     if (ru_cap) ru_note_fbl(fbl);
@@ -572,11 +653,15 @@ int prepare_draw_ex(VkExec *ex, int prim, int32_t count, int restart, int mesh) 
     PD_MARK(PD_PIPE);
     bind_pipeline(ex, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
     recent_note(vs, fs);
-    vk_crumb_draw(ex->cb, gfx_shader_key(vs), fs ? gfx_shader_key(fs) : NULL);
+    vk_crumb_draw(ex->cb, gfx_shader_key(vs), fs ? gfx_shader_key(fs) : NULL, (uint32_t)count);
     if (!B.st_valid || memcmp(&B.st, &s, sizeof s)) {
-        vk_pipeline_set_dynamic(ex->cb, &s);
+        // MKW_DYN_DIFF (default 1; "ab": in the B blocks): only the dynamic states whose value changed since they were
+        // set in this command buffer, pipeline binds between them or not; 0: all of them after a bind or a change
+        static int diff = -1;
+        if (diff < 0) diff = rt_knob("DYN_DIFF", "1");
+        vk_pipeline_set_dynamic(ex->cb, &s, RT_KNOB_ON(diff) && B.dyn_valid ? &B.st : NULL);
         ex->recorded++;
-        B.st = s, B.st_valid = 1;
+        B.st = s, B.st_valid = B.dyn_valid = 1;
     }
     record_fixed(ex);
     repeat_stats(ex, info);

@@ -115,6 +115,19 @@ static int submit_on = -1;
 static _Thread_local int in_flush, is_submitter;
 static uint64_t pend_by_thread, pend_by_other, pend_ns;   // queue lock: parts sent by each, time in vkQueueSubmit2
 
+// What the submission side is doing, for the line a fence wait that reaches its limit logs (stall_log, #138): since
+// when a vkQueueSubmit2 has been running, and the completion thread waiting for the GPU or running a callback (which
+// fn); 0 when not.
+static int64_t qsub_since, comp_gpu_since, comp_cb_since;
+static void (*comp_cb_fn)(void *);
+
+static VkResult queue_submit(VkQueue q, const VkSubmitInfo2 *si) {
+    __atomic_store_n(&qsub_since, (int64_t)kern_now_ns(), __ATOMIC_RELAXED);
+    VkResult r = vkQueueSubmit2(q, 1, si, VK_NULL_HANDLE);
+    __atomic_store_n(&qsub_since, 0, __ATOMIC_RELAXED);
+    return r;
+}
+
 static void part_sent(uint64_t fence, VkResult r) {   // queue lock held
     vk_tl_queue_submit(fence);
     __atomic_store_n(&queued, fence, __ATOMIC_RELEASE);
@@ -131,7 +144,7 @@ void vk_sync_parts_flush(void) {
         PendPart *p = &parts[pend_head];
         uint64_t t0 = kern_now_ns();
         const char *prev = hang_mark_val("parts flush: vkQueueSubmit2", p->fence);
-        VkResult r = vkQueueSubmit2(q, 1, &p->si, VK_NULL_HANDLE);
+        VkResult r = queue_submit(q, &p->si);
         hang_mark(prev);
         if (r == VK_SUCCESS && p->order_sig) vk_sparse_order_submitted(p->order_sig);
         pend_ns += kern_now_ns() - t0;
@@ -215,8 +228,43 @@ static void cb_log(uint64_t values) {
     memset(cb_cost, 0, sizeof cb_cost), cb_values = 0;
 }
 
+// A slow load can leave the timeline still for seconds; if it finishes, the report below says it was slow. The report
+// has to come before the kernel resets the GPU: under amdgpu's lockup_timeout (5 s for gfx on the Steam Deck, SteamOS's
+// amdgpu.lockup_timeout=5000,...) a 5 s report lost that race and mkw ended without a line (three hangs on
+// 13-14/11/2026, "ring gfx_0.0.0 timeout ... Process mkw"). So on amdgpu it comes after two fifths of the gfx
+// timeout (2 s on the Deck, at least 1 s), and elsewhere after 5 s as #297 validated it for NVIDIA (Xid 109).
+// An unavailable, empty or zero parameter leaves the kernel default unknown: current upstream uses 2 s, older kernels
+// used 10 s (docs.kernel.org/gpu/amdgpu/module-parameters.html and docs.kernel.org/5.16/gpu/amdgpu.html). Use 1 s then
+// so the report precedes the shortest documented default, even though slow loads may produce more reports.
+// MKW_GPU_HANG_MS sets it (0: no report).
+static uint64_t hang_ns(const VkCtx *c) {
+    const char *e = cfg_get("MKW_GPU_HANG_MS");
+    if (e && *e) return strtoull(e, NULL, 10) * 1000000ull;
+    uint64_t ms = 5000;
+#if defined(__linux__)
+    if (c->props.vendorID == 0x1002) {
+        FILE *f = fopen("/sys/module/amdgpu/parameters/lockup_timeout", "r");
+        long t = 0;   // the gfx timeout in ms is the first of the list; a negative value means no kernel timeout
+        int read = f ? fscanf(f, "%ld", &t) : 0;
+        if (read != 1 || t == 0) {
+            ms = 1000;
+            rt_log("vk: hang report after %llu ms (amdgpu lockup_timeout unavailable or default)",
+                   (unsigned long long)ms);
+        } else if (t > 0 && (uint64_t)t * 2 / 5 < ms) {
+            ms = (uint64_t)t * 2 / 5 < 1000 ? 1000 : (uint64_t)t * 2 / 5;
+            rt_log("vk: hang report after %llu ms (amdgpu lockup_timeout %ld ms)", (unsigned long long)ms, t);
+        }
+        if (f) fclose(f);
+    }
+#else
+    (void)c;
+#endif
+    return ms * 1000000ull;
+}
+
 static void completion_main(void *arg) {
     VkCtx *c = arg;
+    const uint64_t hang = hang_ns(c);
     plat_mutex_lock(&st_lock);
     for (;;) {
         while (!stop && done == issued && !(qn && queue[qhead].fence <= done))
@@ -229,11 +277,31 @@ static void completion_main(void *arg) {
             VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
                                       .pSemaphores = &c->timeline, .pValues = &want};
             hang_mark_val("completion: waiting for the GPU", want);
+            __atomic_store_n(&comp_gpu_since, (int64_t)kern_now_ns(), __ATOMIC_RELAXED);
             VkResult r = vkWaitSemaphores(c->device, &wi, 100000000ull);   // 100 ms: stop is checked between waits
+            __atomic_store_n(&comp_gpu_since, 0, __ATOMIC_RELAXED);
             hang_mark(NULL);
             if (r == VK_ERROR_DEVICE_LOST) vk_exec_recent_log();
             if (r != VK_SUCCESS && r != VK_TIMEOUT) rt_fatal("vk: vkWaitSemaphores failed (%d; device lost?)", (int)r);
             vkGetSemaphoreCounterValue(c->device, c->timeline, &reached);
+            // A hang the driver never reports as a lost device (NVIDIA 620.70.06 on Linux, Xid 109 "CTX SWITCH
+            // TIMEOUT", six times on 13/11/2026: this wait timed out for ever and the log named nothing; #13, #206):
+            // after `hang` without the timeline moving, the breadcrumbs say what the GPU had started and not finished.
+            // Once per stuck episode: a false report during a long load does not use up a later real one.
+            static uint64_t stuck_since;   // this thread only
+            static int hang_logged;
+            if (reached >= want) {
+                if (hang_logged)   // a long submission, not a hang: 4 of 22 Deck runs (0.1.11, 2 s), all in loads
+                    rt_log("vk: the GPU finished submission %llu after %.1f s: it was slow, not hung",
+                           (unsigned long long)want, (kern_now_ns() - stuck_since) / 1e9);
+                stuck_since = 0, hang_logged = 0;
+            } else if (!stuck_since) stuck_since = kern_now_ns();
+            else if (hang && !hang_logged && kern_now_ns() - stuck_since >= hang) {
+                rt_log("vk: the GPU has not finished submission %llu in %.1f s and the driver reports no device loss",
+                       (unsigned long long)want, hang / 1e9);
+                vk_crumbs_report_hang();
+                hang_logged = 1;
+            }
             plat_mutex_lock(&st_lock);
             if (reached > issued) reached = issued;
             if (reached > done) vk_tl_reached(done, reached, 0);
@@ -243,6 +311,8 @@ static void completion_main(void *arg) {
             qn--;
             plat_mutex_unlock(&st_lock);
             hang_mark("completion: running a side effect (slot_reap takes sp_lock)");
+            __atomic_store_n(&comp_cb_fn, p.fn, __ATOMIC_RELAXED);
+            __atomic_store_n(&comp_cb_since, (int64_t)kern_now_ns(), __ATOMIC_RELAXED);
             if (vk_tl_on() > 0) {
                 uint64_t t0 = kern_now_ns();
                 p.fn(p.arg);
@@ -251,6 +321,7 @@ static void completion_main(void *arg) {
                 p.fn(p.arg);
             }
             hang_mark(NULL);
+            __atomic_store_n(&comp_cb_since, 0, __ATOMIC_RELAXED);
             plat_mutex_lock(&st_lock);
         }
         if (reached > done) {
@@ -427,11 +498,27 @@ VkCommandBuffer vk_sync_split_with(const VkCommandBuffer *extra, int nextra) {
     int ss = (rt_trace & RT_TRACE_PERF) != 0;
     uint64_t q0 = ss ? kern_now_ns() : 0, q1;
     rec_end();   // every command of the part is in cb
-    vk_ts_end(nextra ? extra[nextra - 1] : cb, cur_fence);   // the part's GPU time spans the chunks after it
-    int cb_bad = vkEndCommandBuffer(cb) != VK_SUCCESS;
-    for (int i = 0; i < nextra; i++)
-        if (vkEndCommandBuffer(extra[i]) != VK_SUCCESS) cb_bad = 1;
-    if (cb_bad) {
+    // The extra command buffers (MKW_REPLAY_PAR's chunks) come from the pools of the threads that recorded them, and
+    // those threads ended them: this thread must not record into them or end them, because their thread may already be
+    // recording its next chunk from the same pool, and a VkCommandPool is used by one thread at a time (Vulkan's
+    // external synchronization). Doing it here made the validation layer report "THREADING ERROR: VkCommandPool is
+    // simultaneously used" in vkCmdWriteTimestamp and vkEndCommandBuffer, and amdvlk64.dll crash (c0000005) after ~3
+    // minutes of race (RX 7900 GRE, AMD 26.10.1, 11/11/2026). The part's GPU time still spans the chunks after it: its
+    // end timestamp goes into a command buffer of this thread's own pool, submitted after them.
+    VkCommandBuffer tail = VK_NULL_HANDLE;
+    if (nextra && vk_ts_pending()) {
+        int ti = claim_slot(c, cur_fence);   // first, on its own: it may move slots (cb was read before)
+        tail = slots[ti].cb;
+        VkCommandBufferBeginInfo tbi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
+        vkBeginCommandBuffer(tail, &tbi);
+        if (vk_guard_on()) vk_guard_cb_begin(tail);
+        vk_ts_end(tail, cur_fence);
+        vkEndCommandBuffer(tail);
+    } else {
+        vk_ts_end(cb, cur_fence);   // with chunks but untimed, this only forgets the part's (unused) pair
+    }
+    if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
         static int warned;
         if (!warned++) rt_log("vk: split command buffer recording failed: part skipped");
         if (ss) q1 = kern_now_ns(), ss_ns[SS_SPLIT_END] += q1 - q0, q0 = q1;
@@ -444,13 +531,15 @@ VkCommandBuffer vk_sync_split_with(const VkCommandBuffer *extra, int nextra) {
     vk_upload_flush(0);   // the uploads this part asked for precede it in queue order
     VkCommandBuffer pro = prologue(c, cur_fence);
     if (ss) q1 = kern_now_ns(), ss_ns[SS_SPLIT_PRO] += q1 - q0, q0 = q1;
-    VkCommandBufferSubmitInfo cbi[2 + VK_SPLIT_EXTRA] = {
+    VkCommandBufferSubmitInfo cbi[3 + VK_SPLIT_EXTRA] = {
         {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = pro},
         {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = cb}};
     if (nextra > VK_SPLIT_EXTRA) rt_fatal("vk: %d command buffers after a part (at most %d)", nextra, VK_SPLIT_EXTRA);
     for (int i = 0; i < nextra; i++)
         cbi[2 + i] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = extra[i]};
-    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = (pro ? 2u : 1u) + (uint32_t)nextra,
+    if (tail) cbi[2 + nextra] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = tail};
+    VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+                        .commandBufferInfoCount = (pro ? 2u : 1u) + (uint32_t)nextra + (tail ? 1u : 0u),
                         .pCommandBufferInfos = pro ? cbi : cbi + 1};
     VkSemaphoreSubmitInfo sig[2] = {{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = part_sem,
                                      .value = part_val + 1, .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT}};
@@ -471,7 +560,7 @@ VkCommandBuffer vk_sync_split_with(const VkCommandBuffer *extra, int nextra) {
                    so.ssem ? so.signal : 0);
     } else {
         const char *prev = hang_mark_val("replay part: vkQueueSubmit2", cur_fence);
-        VkResult r = vkQueueSubmit2(c->gfx_queue, 1, &si, VK_NULL_HANDLE);
+        VkResult r = queue_submit(c->gfx_queue, &si);
         hang_mark(prev);
         if (r == VK_SUCCESS && so.ssem) vk_sparse_order_submitted(so.signal);
         part_sent(cur_fence, r);
@@ -568,7 +657,7 @@ uint64_t vk_sync_submit(const uint64_t *handles, int n) {
     if (!so.ssem) si.signalSemaphoreInfoCount = 2;
     if (so.wsem && (so.wait || so.wsem != so.ssem)) si.waitSemaphoreInfoCount = 1, si.pWaitSemaphoreInfos = &bw;
     const char *prev = hang_mark_val("replay submission: vkQueueSubmit2", fence);
-    VkResult r = vkQueueSubmit2(c->gfx_queue, 1, &si, VK_NULL_HANDLE);
+    VkResult r = queue_submit(c->gfx_queue, &si);
     hang_mark(prev);
     if (r == VK_SUCCESS && so.ssem) vk_sparse_order_submitted(so.signal);
     vk_queue_unlock();
@@ -656,10 +745,42 @@ int vk_sync_fence_wait(uint64_t value, uint64_t timeout_ns) {
     return ok;
 }
 
+// A wait that reached its limit (100 ms or more): where the value is (reserved by the replay, handed to the queue,
+// reached by the GPU, released to waiters) and what the submission side was doing, to tell a GPU that has not finished
+// from a submission held up (by the driver, a callback or the replay). The first 20, then one in 50.
+static void stall_log(uint64_t value, uint64_t waited_ns, uint64_t res, uint64_t iss, uint64_t dn) {
+    static unsigned n;
+    unsigned k = __atomic_add_fetch(&n, 1, __ATOMIC_RELAXED);
+    if (k > 20 && k % 50) return;
+    VkCtx *c = vk_ctx();
+    uint64_t gpu = 0;
+    vkGetSemaphoreCounterValue(c->device, c->timeline, &gpu);
+    int64_t now = (int64_t)kern_now_ns();
+    int64_t qs = __atomic_load_n(&qsub_since, __ATOMIC_RELAXED), gs = __atomic_load_n(&comp_gpu_since, __ATOMIC_RELAXED);
+    int64_t cs = __atomic_load_n(&comp_cb_since, __ATOMIC_RELAXED);
+    void (*fn)(void *) = __atomic_load_n(&comp_cb_fn, __ATOMIC_RELAXED);
+    unsigned inflight;
+    int building;
+    vk_pipeline_async_busy(&inflight, &building);
+    char sub[48] = "idle", comp[96] = "idle";
+    if (qs) snprintf(sub, sizeof sub, "in vkQueueSubmit2 for %.1f ms", (double)(now - qs) / 1e6);
+    if (cs)
+        snprintf(comp, sizeof comp, "in the callback build/mkw+%#llx for %.1f ms",
+                 (unsigned long long)((uintptr_t)fn - plat_exe_base()), (double)(now - cs) / 1e6);
+    else if (gs)
+        snprintf(comp, sizeof comp, "waiting for the GPU for %.1f ms", (double)(now - gs) / 1e6);
+    rt_log("vk: fence wait %u for %llu gave up after %.1f ms: reserved %llu issued %llu queued %llu gpu %llu done %llu, "
+           "parts waiting %d; submit %s; completion thread %s; pipelines %u queued or building, %d workers busy", k,
+           (unsigned long long)value, (double)waited_ns / 1e6, (unsigned long long)res, (unsigned long long)iss,
+           (unsigned long long)vk_sync_fence_queued(), (unsigned long long)gpu, (unsigned long long)dn,
+           __atomic_load_n(&pend_n, __ATOMIC_ACQUIRE), sub, comp, inflight, building);
+}
+
 static int fence_wait_impl(uint64_t value, uint64_t timeout_ns, uint64_t *replay_ns) {
     vk_sync_start();
     plat_mutex_lock(&st_lock);
     int ok;
+    uint64_t waited = 0, res = 0, iss = 0, dn = 0;
     *replay_ns = 0;
     if (value > issued && value > reserved) {
         ok = 0;   // never submitted nor queued: never reached (as in the null back end)
@@ -682,8 +803,10 @@ static int fence_wait_impl(uint64_t value, uint64_t timeout_ns, uint64_t *replay
                 *replay_ns = sub_ns[value & 1023] - t0;
         }
         ok = done >= value;
+        if (!ok) waited = kern_now_ns() - t0, res = reserved, iss = issued, dn = done;
     }
     plat_mutex_unlock(&st_lock);
+    if (!ok && waited >= 100000000ull) stall_log(value, waited, res, iss, dn);
     return ok;
 }
 

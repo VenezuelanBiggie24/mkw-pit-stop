@@ -18,7 +18,8 @@ typedef struct __attribute__((aligned(16))) Cpu {
     uint64_t fpcr;           // 320: guest FPCR/FPSR (portable FP/SIMD lowering only; the asm path uses the host's)
     uint64_t fpsr;           // 328
     uint64_t excl_val_hi;    // 336: upper half of a 128-bit exclusive pair (LDXP/LDAXP of two X registers)
-    uint8_t _pad[512 - 344];
+    void *sj;                // 344: the newest live setjmp owner of this guest thread (cpu/sjlj.c)
+    uint8_t _pad[512 - 352];
     __uint128_t v[32];       // 512
 } Cpu;
 
@@ -33,6 +34,7 @@ typedef void (*GuestFn)(Cpu *);
 
 // ---- runtime services (runtime/*.c)
 void rt_dispatch(Cpu *c);                 // call function at c->pc
+void rt_sj_owner(Cpu *c, GuestFn body, uint64_t lo, uint64_t hi);   // a setjmp caller's body (cpu/sjlj.c)
 void rt_spin_gate(Cpu *c, uint64_t head);  // a pass of a spin wait loop (kernel.c, recomp/patches.py `spin`)
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
@@ -43,19 +45,23 @@ void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
 #define RT_TICK_NS 32u
 uint64_t rt_ticks(void);
 
-#if defined(__aarch64__)
-static inline uint64_t rt_get_fpcr(void) { uint64_t v; __asm__ volatile("mrs %0, fpcr" : "=r"(v)); return v; }
-static inline uint64_t rt_get_fpsr(void) { uint64_t v; __asm__ volatile("mrs %0, fpsr" : "=r"(v)); return v; }
-static inline void rt_set_fpcr(uint64_t v) { __asm__ volatile("msr fpcr, %0" :: "r"(v)); }
-static inline void rt_set_fpsr(uint64_t v) { __asm__ volatile("msr fpsr, %0" :: "r"(v)); }
-static inline void rt_fpcr_sync(const Cpu *c) { (void)c; }
-#else
-// Host FP state is not the guest's here: code lifted with --simd=c keeps FPCR/FPSR in Cpu (c->fpcr, zeroed
-// with the Cpu), so the host-side reset in thread start-up has nothing to do.
+// Host FP state is not the guest's: code lifted with --simd=c keeps FPCR/FPSR in Cpu (c->fpcr, zeroed with the
+// Cpu), so the host-side reset in thread start-up has nothing to do. Every host, AArch64 too, runs the --simd=c code.
 static inline uint64_t rt_get_fpcr(void) { return 0; }
 static inline uint64_t rt_get_fpsr(void) { return 0; }
 static inline void rt_set_fpcr(uint64_t v) { (void)v; }
 static inline void rt_set_fpsr(uint64_t v) { (void)v; }
+#if defined(__aarch64__)
+// The host FPCR of a thread running guest code mirrors c->fpcr's FZ (bit 24 on both; the host's FZ flushes inputs and
+// results as the guest's does) with RMode = nearest; the slow paths of runtime/simd.h switch RMode around one
+// operation, as on x86. Set wherever FPCR or the host FP context changes (see the x86 note below).
+static inline void rt_fpcr_sync(const Cpu *c) {
+    uint64_t cur, want;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(cur));
+    want = (cur & ~((1ull << 24) | (3ull << 22))) | (c->fpcr & (1ull << 24));
+    if (cur != want) __asm__ volatile("msr fpcr, %0" ::"r"(want));
+}
+#else
 // The MXCSR of a host thread running guest code mirrors c->fpcr: FTZ|DAZ = FPCR.FZ, RC = nearest (FPCR.RMode takes
 // the slow paths of runtime/simd.h, which switch RC around one operation). The FP helpers rely on it without checking,
 // so it is set wherever FPCR or the host FP context changes: MSR FPCR (recomp/lifter.py), rt_call (thread and fiber
@@ -349,6 +355,12 @@ static inline uint64_t clz64(uint64_t v) { return v ? __builtin_clzll(v) : 64; }
 static inline uint32_t clz32(uint32_t v) { return v ? __builtin_clz(v) : 32; }
 static inline uint64_t cls64(uint64_t v) { return clz64(v ^ (uint64_t)((int64_t)v >> 1)) - 1; }
 static inline uint32_t cls32(uint32_t v) { return clz32(v ^ (uint32_t)((int32_t)v >> 1)) - 1; }
+// PACGA's 32-bit code (lifter.py): a fixed mix of the value and the modifier. Real pointer authentication uses a key
+// the console never reveals; the game only compares codes it computed itself, so any deterministic function works.
+static inline uint32_t rt_pacga(uint64_t v, uint64_t mod) {
+    uint64_t h = (v ^ (mod * 0x9E3779B97F4A7C15ull)) * 0xC2B2AE3D27D4EB4Full;
+    return (uint32_t)((h ^ h >> 29) >> 32);
+}
 static inline uint64_t rbit64(uint64_t v) { return __builtin_bitreverse64(v); }
 static inline uint32_t rbit32(uint32_t v) { return __builtin_bitreverse32(v); }
 static inline uint32_t rev16_32(uint32_t v) { return ((v & 0x00ff00ffu) << 8) | ((v >> 8) & 0x00ff00ffu); }
@@ -371,8 +383,7 @@ static inline uint32_t sdiv32(uint32_t a, uint32_t b) {
     return (uint32_t)((int32_t)a / (int32_t)b);
 }
 
-// Portable FP/SIMD helpers for code lifted with --simd=c (default off AArch64; gen.py includes simd.h itself
-// in that mode, so AArch64 hosts can build it too).
-#if !defined(__cplusplus) && !defined(__aarch64__)
+// Portable FP/SIMD helpers for code lifted with --simd=c (gen.py includes simd.h itself as well).
+#if !defined(__cplusplus)
 #include "simd.h"
 #endif

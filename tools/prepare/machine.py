@@ -6,19 +6,36 @@ Why apart: prepare.py holds the steps; this is what they run with. Not run on it
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/build"))
-import build  # (mem_total_gb)
+import build  # (mem_total_gb, windows_memory_gb)
+
+
+def emit(*words: object) -> None:
+    """One event for the start screen (stdout) and the same line for logs/setup.log (stderr)."""
+    print(*words, flush=True)
+    print(*words, file=sys.stderr)
 
 
 class Failed(Exception):
-    """A step that cannot go on: its message is for the player."""
+    """A step that cannot go on: its message is for the player. code names it for the start screen, which shows its own
+    translated text for it with detail inside (launcher.cpp setup_error_text); without a detail, the message."""
+
+    def __init__(self, message: str, code: str = "failed", detail: str | None = None) -> None:
+        super().__init__(message)
+        self.code, self.detail = code, message if detail is None else detail
 
 
 # ---- the package's tools (setup/ next to the executable), else the system's
 def package_dir(game: Path) -> Path:
+    # In a release the sources live in setup/src. Tools stay there when the player chooses another installation
+    # folder; resolving this file also follows the AppImage's setup symlink into its current mount.
+    bundled = Path(__file__).resolve().parents[3]
+    if (bundled / "src/tools/prepare/machine.py").is_file():
+        return bundled
     return game / "setup"
 
 
@@ -32,7 +49,7 @@ def default_cc(game: Path, target: str) -> list[str]:
         if not (lib / "std/std.zig").is_file():
             raise Failed(f"{lib} is incomplete: extract the release again")
         os.environ["ZIG_LIB_DIR"] = str(lib)
-        return [str(zig), "cc", "-target", "x86_64-windows-gnu" if target == "windows" else "x86_64-linux-gnu"]
+        return [str(zig), "cc", "-target", "x86_64-windows-gnu" if target == "windows" else f"{build.ARCH}-linux-gnu"]
     return ["clang"]
 
 
@@ -112,14 +129,10 @@ def own_children() -> None:
 def mem_available_gb() -> float:
     """Memory free for new work now (MemAvailable on Linux, ullAvailPhys on Windows); 8 when unknown."""
     if os.name == "nt":
-        import ctypes
-
-        class Status(ctypes.Structure):  # MEMORYSTATUSEX
-            _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32), ("total", ctypes.c_uint64),
-                        ("avail", ctypes.c_uint64), ("rest", ctypes.c_uint64 * 5)]  # fmt: skip
-
-        st = Status(length=ctypes.sizeof(Status))
-        return st.avail / 2**30 if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)) else 8.0
+        try:
+            return build.windows_memory_gb()[1]
+        except OSError:
+            return 8.0
     try:
         with open("/proc/meminfo") as f:
             for line in f:
@@ -133,7 +146,8 @@ def mem_available_gb() -> float:
 def shader_jobs() -> int:
     """Every core, as far as memory goes: a worker and its glslc take ~0.25 GB (four took 1.0 GB, 06/11/2026) and up
     to 0.75 GB on the largest programs (translate.py). Half the cores, as before, left 8 of 12 idle: 40 min."""
-    return max(1, min(os.cpu_count() or 1, int(mem_available_gb() / 0.75)))
+    cores = min(os.cpu_count() or 1, 61) if os.name == "nt" else os.cpu_count() or 1  # Windows' pool limit (#222)
+    return max(1, min(cores, int(mem_available_gb() / 0.75)))
 
 
 def mem_gb() -> float:
@@ -141,3 +155,17 @@ def mem_gb() -> float:
         return build.mem_total_gb()
     except OSError:
         return 8.0
+
+
+def run(cmd: list[str], env: dict[str, str] | None = None, progress_prefix: str = "") -> None:
+    """A tool's run; its 'progress n total' lines (translate.py) pass through, the rest goes to stderr."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
+    tail = []
+    for line in p.stdout:
+        if progress_prefix and line.startswith(progress_prefix):
+            emit(line.strip())
+        else:
+            sys.stderr.write(line)
+            tail = (tail + [line.strip()])[-5:]
+    if p.wait():
+        raise Failed(f"{Path(cmd[1] if len(cmd) > 1 else cmd[0]).name} failed: {' / '.join(tail)}")

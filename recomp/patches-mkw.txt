@@ -139,6 +139,31 @@ set output MKW_OUTPUT_PATCH 0
 site output main cf3574 d281400a @page:x10 f947e94a   # mov x10, #0xa00 -> adrp x10, page; ldr x10, [x10, #0xfd0]
 site output main cf3578 f2c0b40a d503201f            # movk x10, #0x5a0, lsl #32 -> nop
 
+# Camera aspect (MKW_ASPECT, Screen tab): main+0x460c10 stores each camera's aspect, its viewport's width / height, at
+# [x8+0xb0] with these two divisions. host_aspect (patches.c) divides and widens a 16:9 view, or an 8:9 one (half of a
+# two-player split), to the output's aspect, as the 32:9 mod of issue #77 does. The bl overwrites x30, which the
+# function's prologue saved (main+0x460c18).
+set aspect MKW_ASPECT_PATCH 0
+site aspect main 460d40 1e211800 94bec090   # fdiv s0, s0, s1 -> bl host_aspect (patch page + 0xf80)
+site aspect main 460dfc 1e211800 94bec061   # same
+# The 2D layouts (menus, HUD): the two draw constant-buffer setups of nn::ui2d take DrawInfo's projection with its
+# getter (main+0x1682c9c); host_ui_proj copies it and narrows a full-screen 16:9 orthographic one to the middle 16:9.
+site aspect main 1689110 97ffe6e3 94761f98   # bl getter -> bl host_ui_proj (patch page + 0xf70)
+site aspect main 169aeb0 97ff9f7b 9475d830   # same
+# A view-projection product made on the CPU (main+0x168a22c) reads the projection's rows itself: host_ui_rows loads
+# them with the x row narrowed. The bl overwrites x30, which the function's prologue saved.
+site aspect main 168a624 ad408e82 94761a4f   # ldp q2, q3, [x20, #0x10] -> bl host_ui_rows (patch page + 0xf60)
+
+# LAN play (MKW_LAN=1): the title menu's fourth entry is Wireless Play (ldn, the console's radio, which a PC does not
+# have) or LAN Play, after L+R and a left stick click on it. The page keeps that choice in a byte at +0x77c: its setup
+# (main+0xbf1cf8) clears it, picks the entry's label from it (main+0xbf21a0: message 2104 or 2106 "LAN Play"), and the
+# entry's decision copies it to the menu context (+0x70, main+0xc6cfc0), which takes the menu to the LanLobby state,
+# the LAN session (network mode 3) and nn::socket (ov_socket.c). The combo does not switch the entry here yet, so this
+# set opens the menu with LAN Play chosen: the setup stores w21, 1 since main+0xbf1d2c, instead of zero.
+# Tested: lan19c, 12/11/2026: the entry reads "Mode LAN", and creating a group reaches the character select.
+set lan MKW_LAN 0
+site lan main bf1d44 391df27f 391df275   # strb wzr, [x19, #0x77c] -> strb w21: LAN Play chosen
+
 # Cascaded shadow map size (MKW_SHADOW_SIZE): the game fixes 3072 docked / 2048 handheld
 # in code before this call; main+0x233358 creates the gsys RenderBuffer and reads its width and height from [x0+0x68]
 # and [x0+0x88], as do later passes (shadow_map_reduce_depth). The host function sets them and calls it.

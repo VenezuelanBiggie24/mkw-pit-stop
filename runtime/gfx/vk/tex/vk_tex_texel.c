@@ -73,9 +73,23 @@ int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, 
         log_limited(&n_ds, "texels of packed depth-stencil format %#x are not copied", e->t.d.format);
         return 0;
     }
+    Region gd;   // vk_tex_image.c tex_drop: image level = NVN level - drop
+    if (e->pub.drop) {
+        if (g->level < e->pub.drop) return write;   // a write to a level the image leaves out: done; a read: nothing
+        gd = *g, gd.level -= e->pub.drop, g = &gd;
+    }
     if (g->level >= e->pub.levels) return 0;
     uint32_t w = (uint32_t)r->width, h = (uint32_t)r->height;
     int rgb = e->f.expand_rgb, astc = e->f.astc_bw != 0, agpu = astc && write && vk_astc_gpu();
+    // The staging rows hold whole blocks (g->wb bytes, g->hb rows of blocks); Vulkan wants the extent in whole blocks
+    // too, or reaching the level's edge (VUID 00207/00208): MKW writes 1019x1023 texels of BC7 into a 1024x1024 level.
+    if (!astc && (g->bw > 1 || g->bh > 1)) {
+        uint32_t lw = e->pub.width >> g->level, lh = e->pub.height >> g->level;
+        uint32_t rw = (uint32_t)(g->wb / (size_t)g->bpb) * (uint32_t)g->bw, rh = (uint32_t)g->hb * (uint32_t)g->bh;
+        lw = lw ? lw : 1, lh = lh ? lh : 1;
+        w = rw < lw - (uint32_t)r->xoffset ? rw : lw - (uint32_t)r->xoffset;
+        h = rh < lh - (uint32_t)r->yoffset ? rh : lh - (uint32_t)r->yoffset;
+    }
     size_t texels = (size_t)w * h, ib = agpu ? 0 : astc ? 4 : rgb ? (size_t)g->bpb / 3 * 4 : 0;
     size_t slice = ib ? texels * ib : g->wb * g->hb;   // agpu: the raw blocks, decoded by vk_astc_record
     // A write goes into the open upload batch, its staging freed with it, and leaves without waiting: the next
@@ -122,7 +136,8 @@ int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, 
             VkAstcRegion *ar = calloc((size_t)g->nz, sizeof *ar);
             for (int z = 0; z < g->nz; z++)
                 ar[z] = (VkAstcRegion){.src = slice * (size_t)z, .w = w, .h = h, .slices = 1, .level = rg[z].imageSubresource.mipLevel,
-                                       .layer = rg[z].imageSubresource.baseArrayLayer, .offset = rg[z].imageOffset};
+                                       .layer = rg[z].imageSubresource.baseArrayLayer, .offset = rg[z].imageOffset,
+                                       .lw = e->pub.width >> g->level, .lh = e->pub.height >> g->level};
             uint64_t a0 = perf_begin();
             vk_astc_tag(e->pub.addr, 3);
             done = vk_astc_record(cb, sb, slice * (size_t)g->nz, ar, g->nz, e->f.astc_bw, e->f.astc_bh, e->f.astc_srgb,
@@ -238,10 +253,11 @@ static void write_back(Tex *e) {
     uint32_t levels = linear ? 1 : e->pub.levels, layers = linear || is3d ? 1 : e->pub.layers;
     for (uint32_t lv = 0; lv < levels; lv++)
         for (uint32_t ly = 0; ly < layers; ly++) {
-            view_t v = {.set_levels = 1, .set_layers = 1, .base_level = (uint8_t)lv, .min_layer = (uint16_t)ly};
-            NVNcopyRegion r = {.width = (int)mip(d->width, lv),
-                               .height = d->target == 0 || d->target == 3 ? 1 : (int)mip(d->height, lv),
-                               .depth = is3d ? (int)mip(d->depth, lv) : 1};
+            uint32_t nl = lv + e->pub.drop;   // the NVN level of image level lv
+            view_t v = {.set_levels = 1, .set_layers = 1, .base_level = (uint8_t)nl, .min_layer = (uint16_t)ly};
+            NVNcopyRegion r = {.width = (int)mip(d->width, nl),
+                               .height = d->target == 0 || d->target == 3 ? 1 : (int)mip(d->height, nl),
+                               .depth = is3d ? (int)mip(d->depth, nl) : 1};
             Region g;
             if (!region_of(&e->t, &v, &r, 0, 0, &g)) continue;
             uint8_t *buf = malloc(g.img * (size_t)g.nz);
@@ -342,6 +358,12 @@ void vk_texture_write_back(uint64_t addr, uint64_t size) {
 // itself). On the Switch the bytes are there once the frame's fence has passed. So when the
 // CPU waits for a fence, mirrored targets up to WB_SMALL bytes rendered by work up to that fence go back to their
 // storage, unless the CPU rewrote it since. Larger targets still go back on an invalidate, memcpy or ReadTexels.
+// Pitch textures go back at the fence whatever their size (wb_at_fence). MKW fills, on the GPU, three pitch RGBA16F
+// textures for each animation of its instanced characters (scale, rotation, translation: 8x1218 texels, 0x80 bytes a
+// row, 152 KiB each) and its CPU code reads the pool bytes with plain loads, every frame, for each bone (1.8.0:
+// main+0x42bea0). Left on the GPU, the storage stayed as the heap had it: zeros gave the bones scale 0 and stale bytes
+// gave huge matrices, the giant triangles over Shy Guy Bazaar (#72; free roam there, the same drive: 17 of 600 frames
+// wrong, then 0).
 int vk_texture_small_dirty(void) { return __atomic_load_n(&small_pending, __ATOMIC_ACQUIRE); }
 
 void vk_texture_write_back_small(uint64_t fence) {
@@ -349,13 +371,13 @@ void vk_texture_write_back_small(uint64_t fence) {
     __atomic_store_n(&small_pending, 0, __ATOMIC_RELAXED);
     plat_mutex_lock_shared(&owned_lock);
     int n = 0, later = 0;
-    for (int i = 0; i < nowned; i++) n += owned[i]->gpu_dirty && owned[i]->t.L.size <= WB_SMALL;
+    for (int i = 0; i < nowned; i++) n += owned[i]->gpu_dirty && wb_at_fence(&owned[i]->t.d, owned[i]->t.L.size);
     Tex **hit = n ? malloc(sizeof *hit * (size_t)n) : NULL;
     if (n && !hit) rt_fatal("vk: out of memory for a texture write-back");
     n = 0;
     for (int i = 0; i < nowned; i++) {
         Tex *e = owned[i];
-        if (!e->gpu_dirty || e->t.L.size > WB_SMALL) continue;
+        if (!e->gpu_dirty || !wb_at_fence(&e->t.d, e->t.L.size)) continue;
         if (e->gpu_fence > fence) later = 1;
         else hit[n++] = e;
     }
@@ -375,6 +397,12 @@ void vk_texture_write_back_small(uint64_t fence) {
     for (int i = 0; i < k; i++) write_back(hit[i]);
     for (int i = 0; i < k; i++) perf_count(PERF_CNT_WB);
     for (int i = k; i < n; i++) perf_count(PERF_CNT_WB_SKIP);
+    static volatile int32_t n_pitch;
+    for (int i = 0; i < k; i++)
+        if (hit[i]->t.L.size > WB_SMALL)
+            log_limited(&n_pitch, "pitch texture %#llx %ux%u format %#x (%llu bytes) written back to its storage at fence %llu",
+                        (unsigned long long)hit[i]->pub.addr, hit[i]->t.d.width, hit[i]->t.d.height, hit[i]->t.d.format,
+                        (unsigned long long)hit[i]->t.L.size, (unsigned long long)fence);
     free(hit);
     unlock();
 }

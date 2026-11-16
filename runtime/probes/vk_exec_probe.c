@@ -3,7 +3,9 @@
 // the completion thread; a guest-memory word a callback writes is visible once fence_wait returns; finish drains every
 // submission; a present of a cleared vk_texture.c image (layout GENERAL) reads back exactly through the swapchain
 // capture. Clear part: a hand-built op stream (SET_RT to an RGBA8 and a D32 texture, whole-target clears,
-// then scissored clears) through submit reads back exactly with read_texels.
+// then scissored clears) through submit reads back exactly with read_texels. Rtstats part: MKW_RTSTATS's rules on
+// cleared targets (test_rtstats). Target history part: which targets count as rendered recently (test_recent).
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,6 +17,7 @@
 #include "nvn_tex.h"
 #include "vk.h"
 #include "vk_exec.h"
+#include "vk_exec_internal.h"
 #include "platform/platform.h"
 
 #define SUBMITS 100
@@ -48,6 +51,24 @@ static void write_word(void *arg) {
 }
 
 static long ran_now(void) { return __atomic_load_n(&nran, __ATOMIC_ACQUIRE); }
+
+// Target history (vk_exec_rt.c): which draws wait for a pending pipeline as one-shot and which are skipped. A target
+// rendered every frame and one whose layers take turns (one of 12 a frame) are recent; one rendered once long ago, or
+// never, is not.
+static int test_recent(void) {
+    VkExecTarget every = {.image = (VkImage)(uintptr_t)0x1000}, turn = {.image = (VkImage)(uintptr_t)0x2000, .base_layer = 5};
+    VkExecTarget once = {.image = (VkImage)(uintptr_t)0x3000}, never = {.image = (VkImage)(uintptr_t)0x4000};
+    tfr_note(&every, 99), tfr_note(&every, 100);
+    tfr_note(&turn, 88), tfr_note(&turn, 100);
+    tfr_note(&once, 40), tfr_note(&once, 100);
+    CHECK(tfr_recent(&every, 100), "a target rendered in the previous frame is not recent");
+    CHECK(tfr_recent(&turn, 100), "a layer rendered 12 frames before (one layer of 12 a frame) is not recent");
+    CHECK(tfr_recent(&turn, 112), "a layer rendered 12 frames before, not yet in this frame, is not recent");
+    CHECK(!tfr_recent(&once, 100), "a target last rendered 60 frames before is recent");
+    CHECK(!tfr_recent(&once, 200), "a target last rendered 100 frames before is recent");
+    CHECK(!tfr_recent(&never, 100), "a target never rendered is recent");
+    return 0;
+}
 
 static int test_sync(const GfxBackend *b, uint8_t *guest, uint64_t *first, uint64_t *last) {
     // An empty recording as the front end hands it over: {OP_BEGIN, OP_END}.
@@ -372,7 +393,8 @@ static int test_c0(void) {
     CHECK(a == 0x55660000 && u[0] == 0x100, "c0 0x250 (uniform slot 4) is {%#llx, %#x}", (unsigned long long)a, u[0]);
     for (int i = 0; i < 16; i++) CHECK(!bank[0x310 + i], "c0 0x310 (unbound storage slot 0) byte %d is %02x", i, bank[0x310 + i]);
     CHECK(!bank[0x644] && !bank[0x610], "c0 of a compute stage has graphics words");
-    // NVN2 compute: the program's packed table (2 uniform, 2 storage, 1 texture, 1 image entries from 0x10)
+    // NVN2 compute: the program's packed table (2 uniform, 2 storage, 1 texture, 1 image entries from 0x10, no push
+    // constant words: vk_c0_fill reads the fifth count too, and a 4-byte table let it read whatever byte came next)
     static uint64_t tex[128], img[32];
     static const uint8_t table[5] = {2, 2, 1, 1, 0};
     tex[0] = 0xab00012, img[0] = 0xcd00034, ubo[1] = (p_bind_buf){5, 1, 0x77880000, 0x40};
@@ -393,6 +415,52 @@ static int test_c0(void) {
     CHECK(ps == 2047.0f && u[0] == 61, "vertex c0: point size %g at 0x610, base instance %u at 0x644", ps, u[0]);
     memcpy(&a, bank + 0x120, 8);
     CHECK(a == 0x12340000 && !bank[0x200], "vertex c0: storage slot 1 at 0x120 is %#llx", (unsigned long long)a);
+    return 0;
+}
+
+// ---- pitch part: a pitch texture the GPU writes holds the texels in its storage once the CPU has waited for the
+// fence, as the pool memory does on the console. The shape is that of MKW's animation textures (RGBA16F 8x1218, 0x80
+// bytes a row, 0x26100 bytes: over the small-target limit), which its CPU code reads in place.
+#define PT_W 8
+#define PT_H 1218
+
+static int test_pitch(const GfxBackend *b, uint8_t *guest, int *bytes) {
+    pool_t pool = {.magic = NVN_POOL_MAGIC, .flags = 0x22, .mem = guest + 0x800000, .size = 0x100000,
+                   .game_mem = guest + 0x800000};
+    CHECK(b->pool_init(&pool), "pool_init of a CPU-visible pool for the pitch part");
+    uint8_t *m = pool.mem;
+    static tex_t t;   // the payload's texture pointer lives as long as the submission
+    init_tex(&t, &pool, 0x40000, NVN_FORMAT_RGBA16F);
+    t.d.width = PT_W, t.d.height = PT_H, t.d.flags = NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET;
+    nvn_tex_layout(&t.d, &t.L);
+    t.serial = 301;
+    uint32_t stride = nvn_tex_linear_stride(&t.d);
+    CHECK(stride == 0x80 && t.L.size == (uint64_t)stride * PT_H && t.L.size > (64u << 10) && t.L.size <= 0x40000,
+          "pitch texture layout: %#x bytes a row, %#llx bytes", stride, (unsigned long long)t.L.size);
+    uint16_t *src = (uint16_t *)m;   // the texels as a tight buffer, 64 bytes a row
+    for (int i = 0; i < PT_W * PT_H * 4; i++) src[i] = (uint16_t)(i * 31 + 7);
+    memset(t.mem, 0, t.L.size);
+
+    static _Alignas(8) uint8_t stream[512];
+    uint8_t *p = put(stream, OP_BEGIN, NULL, 0);
+    p_copy_b2t up;
+    memset(&up, 0, sizeof up);
+    up.src = (uint64_t)(uintptr_t)m, up.tex = &t, up.r = (NVNcopyRegion){0, 0, 0, PT_W, PT_H, 1};
+    p = put(p, OP_COPY_B2T, &up, sizeof up);
+    p = put(p, OP_END, NULL, 0);
+    CHECK(p <= stream + sizeof stream, "pitch op stream overflow");
+    uint64_t handle = (uint64_t)(uintptr_t)stream;
+    uint64_t f = b->submit(&handle, 1);
+    CHECK(b->fence_wait(f, 5000000000ull), "fence_wait of the pitch submission timed out");
+    b->cpu_synced(f);   // as nvnSyncWait after its wait
+    int y = 0;
+    while (y < PT_H && !memcmp(t.mem + (size_t)y * stride, src + (size_t)y * PT_W * 4, PT_W * 8)) y++;
+    uint16_t got = y < PT_H ? *(const uint16_t *)(t.mem + (size_t)y * stride) : 0;
+    b->texture_release(&t);   // before the check: a failed probe leaves nothing allocated for the shutdown
+    b->pool_fini(&pool);
+    CHECK(y == PT_H, "row %d of the pitch texture's storage does not hold what the GPU copied into it (first word %#x, "
+          "expected %#x)", y, got, src[(size_t)y * PT_W * 4]);
+    *bytes = PT_W * PT_H * 8;
     return 0;
 }
 
@@ -570,8 +638,97 @@ static int test_mirror(const GfxBackend *b, uint8_t *guest, int *bytes) {
     return 0;
 }
 
+// MKW_RTSTATS (diag/vk_rtstats.c), on for this part only, every frame: an RGBA16F target cleared to grey with a NaN
+// rectangle cleared in a pass breaks the nan rule and not the constant one; the same target cleared twice to grey
+// breaks the constant one. Each rule is counted from what the part adds.
+static int test_rtstats(const GfxBackend *b, uint8_t *guest) {
+    pool_t pool = {.magic = NVN_POOL_MAGIC, .flags = 0x22, .mem = guest + 0xE00000, .size = 0x100000,
+                   .game_mem = guest + 0xE00000};
+    CHECK(b->pool_init(&pool), "pool_init of a CPU-visible pool for the rtstats part");
+    static tex_t t;
+    init_tex(&t, &pool, 0, NVN_FORMAT_RGBA16F);
+    t.serial = 501;
+    CHECK(t.L.size <= 0x100000, "rtstats texture exceeds its pool");
+    vk_rtstats_every(1);
+    uint64_t nan0 = vk_rtstats_hits(VK_RTSTATS_NAN), inf0 = vk_rtstats_hits(VK_RTSTATS_INF);
+    uint64_t const0 = vk_rtstats_hits(VK_RTSTATS_CONST);
+    for (int k = 0; k < 2; k++) {   // 0: NaN rectangle, 1: grey everywhere
+        static _Alignas(8) uint8_t stream[1024];
+        uint8_t *p = put(stream, OP_BEGIN, NULL, 0);
+        p_set_rt rt;
+        memset(&rt, 0, sizeof rt);
+        rt.n = 1, rt.color[0] = &t;
+        p = put(p, OP_SET_RT, &rt, sizeof rt);
+        const p_clear_color grey = {0, 0xf, {0.5f, 0.5f, 0.5f, 1.0f}}, nan = {0, 0xf, {NAN, NAN, NAN, NAN}};
+        p = put(p, OP_CLEAR_COLOR, &grey, sizeof grey);   // outside a pass: not checked
+        const p_scissor sc = {SC_X, SC_Y, SC_W, SC_H}, full = {0, 0, 1 << 20, 1 << 20};
+        p = put(p, OP_SCISSOR, &sc, sizeof sc);
+        p = put(p, OP_CLEAR_COLOR, k ? &grey : &nan, sizeof grey);   // in a pass, checked at its end
+        p = put(p, OP_SCISSOR, &full, sizeof full);
+        CHECK(xf_submit(b, stream, p), "fence_wait of rtstats submission %d timed out", k);
+        vk_rtstats_flush();
+        uint64_t dn = vk_rtstats_hits(VK_RTSTATS_NAN) - nan0, dc = vk_rtstats_hits(VK_RTSTATS_CONST) - const0;
+        CHECK(dn == 1 && dc == (uint64_t)k, "after submission %d: nan rule hit %llu times, constant %llu (expected 1, %d)",
+              k, (unsigned long long)dn, (unsigned long long)dc, k);
+    }
+    CHECK(vk_rtstats_hits(VK_RTSTATS_INF) == inf0, "inf rule hit on targets without an infinity");
+    b->texture_release(&t);
+    b->pool_fini(&pool);
+    return 0;
+}
+
+
+// A sparse virtual pool starts without mapped texels. Its privately backed small mips must not expose an old image's bytes.
+static int test_sparse_tail_zero(const GfxBackend *b) {
+    static uint8_t pixels[64 * 64 * 2 * 4];
+    for (unsigned round = 0; round < 12; round++) {
+        pool_t pool = {.magic = NVN_POOL_MAGIC,
+                      .flags = NVN_MEMORY_POOL_FLAGS_VIRTUAL | NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS | NVN_MEMORY_POOL_FLAGS_GPU_CACHED,
+                      .mem = (uint8_t *)(uintptr_t)(RT_GPU_VA_BASE + 0x10000000ull + round * 0x1000000ull), .size = 0x1000000};
+        CHECK(b->pool_init(&pool), "sparse tail virtual pool init");
+        tex_t t;
+        init_tex(&t, &pool, 0, NVN_FORMAT_RGBA8);
+        t.d.target = NVN_TEXTURE_TARGET_2D_ARRAY;
+        t.d.width = t.d.height = 512, t.d.depth = 2, t.d.levels = 10;
+        t.d.flags = NVN_TEXTURE_FLAGS_SPARSE;
+        nvn_tex_layout(&t.d, &t.L);
+        t.serial = 10000 + round;
+        const VkTexImage *image = vk_texture_get(&t);
+        CHECK(image, "sparse tail probe did not create an image");
+        if (!vk_sparse_is(image->image)) {
+            b->texture_release(&t); b->pool_fini(&pool);
+            puts("probe-vkexec: sparse tail check skipped (sparse images unavailable)");
+            return 0;
+        }
+        view_t v = {.set_levels = 1, .base_level = 3, .nlevels = 1};
+        NVNcopyRegion region = {0, 0, 0, 64, 64, 2};
+        memset(pixels, 0xcd, sizeof pixels);
+        b->read_texels(&t, &v, &region, pixels, 64 * 4, 64 * 64 * 4);
+        int first = -1; unsigned byte = 0;
+        for (unsigned i = 0; i < sizeof pixels; i++) if (pixels[i]) {first = (int)i; byte = pixels[i]; break;}
+        // Poison the tail before releasing it: a later same-size allocation can reuse this device memory.
+        memset(pixels, 0xa5, sizeof pixels);
+        b->write_texels(&t, &v, &region, pixels, 64 * 4, 64 * 64 * 4);
+        b->finish();
+        b->read_texels(&t, &v, &region, pixels, 64 * 4, 64 * 64 * 4);
+        int changed = -1;
+        for (unsigned i = 0; i < sizeof pixels; i++) if (pixels[i] != 0xa5) {changed = (int)i; break;}
+        b->texture_release(&t); b->pool_fini(&pool);
+        for (int k = 0; k < 3; k++) b->submit(NULL, 0);
+        b->finish();
+        CHECK(first < 0, "unwritten sparse tail round %u byte %d is %#x, expected zero", round, first, byte);
+        CHECK(changed < 0, "written sparse tail round %u byte %d was lost", round, changed);
+    }
+    puts("probe-vkexec: sparse tails start at zero across dirty memory reuse");
+    return 0;
+}
+
 int probe_vkexec(void) {
     main_tid = plat_thread_id();
+    // The exact colour checks need the plain picture, whatever mkw.ini says: the SDR swapchain (HDR10, MKW_HDR auto on an
+    // HDR screen, encodes them in PQ) and no performance overlay (it draws over the top right corner)
+    plat_setenv("MKW_HDR", "off");
+    plat_setenv("MKW_PERF_OVERLAY", "off");
     const GfxBackend *b = &gfx_vulkan_backend;
     uint64_t heap = 0;
     CHECK(mem_set_heap_size(16ull << 20, &heap) == 0 && heap, "SetHeapSize 16 MiB");
@@ -579,15 +736,20 @@ int probe_vkexec(void) {
     uint64_t first = 0, last = 0;
     int w = 0, h = 0, inside = 0, xfer_bytes = 0;
     int bad = test_c0();   // CPU only: before the device checks
+    if (!bad) bad = test_recent();
     if (!bad) bad = test_sync(b, guest, &first, &last) || test_present(b, guest, &w, &h);
     int sync_bad = bad;
     if (!bad) bad = test_clear(b, guest, &inside);
     if (!bad) bad = test_xfer(b, guest, &xfer_bytes);
+    int pitch_bytes = 0;
+    if (!bad) bad = test_pitch(b, guest, &pitch_bytes);
     int zero_bytes = 0;
     if (!bad) bad = test_zero(b, guest, &zero_bytes);
+    if (!bad) bad = test_sparse_tail_zero(b);
     int nvnx_bytes = 0, mirror_bytes = 0;
     if (!bad) bad = test_nvnx(b, guest, &nvnx_bytes);
     if (!bad) bad = test_mirror(b, guest, &mirror_bytes);
+    if (!bad) bad = test_rtstats(b, guest);
     b->finish();
     vk_pipeline_shutdown();   // the pipelines and the replay's stand-ins go before the device
     vk_exec_draw_shutdown();
@@ -610,12 +772,18 @@ int probe_vkexec(void) {
            "texture exact, CLEAR_TEX exact, event WRITE + ADD, timestamp and samples-passed reports in guest memory after "
            "fence_wait, %d bytes compared, 0 validation errors)\n",
            XF_W, XF_H, xfer_bytes);
+    printf("probe-vkexec: pitch part passed (a %dx%d RGBA16F LINEAR_RENDER_TARGET texture filled by a buffer copy holds the "
+           "texels in its pool bytes after the fence wait, %d bytes compared)\n", PT_W, PT_H, pitch_bytes);
     printf("probe-vkexec: nvnx part passed (ClearBuffer then ReportValue in GPU order, a CPU-invisible pool fill copied out, "
            "Downsample 64x64 -> 32x32 within 1 of the 2x2 average, stencil view aspect of D24S8, %d bytes compared)\n",
            nvnx_bytes);
     printf("probe-vkexec: c0 and zero parts passed (c0 tables, dispatch size, point size and base instance at their offsets, "
            "unbound slots zero; %d bytes of an unwritten physical-pool texture read zero, MKW_FIX_ZERO=%s)\n",
            zero_bytes, cfg_value("MKW_FIX_ZERO"));
+    printf("probe-vkexec: rtstats part passed (MKW_RTSTATS: a NaN rectangle in a %dx%d RGBA16F target hit the nan rule "
+           "only, the same target all grey the constant rule only, no inf)\n", TEX_W, TEX_H);
+    printf("probe-vkexec: target history part passed (a target rendered the frame before and a layer rendered 12 frames "
+           "before are recent; one last rendered 60 frames before and one never rendered are not)\n");
     if (vk_mirror_on)
         printf("probe-vkexec: mirror part passed (B2B and fill in a VRAM mirror written back by the fence, a CPU write "
                "between submissions mirrored, CPU bytes beside a fill kept, %d bytes compared)\n", mirror_bytes);

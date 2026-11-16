@@ -3,6 +3,7 @@
 // 575ad88e02f9a89a9a885d90039d48af33c982f4, MIT, Copyright (c) 2026 Revivedx and the Savage Wind Recomp contributors,
 // Copyright (c) 2026 Peiikai).
 #include <stdlib.h>
+#include <string.h>
 
 #include "ui/menu/menu_look.h"
 
@@ -50,17 +51,25 @@ void menu_look_style(ImGuiStyle &s) {
     c[ImGuiCol_Separator] = ImVec4(0.30f, 0.36f, 0.30f, 1);
 }
 
-// Roboto Medium (Latin, Cyrillic, dashes and quotes) at 26 px per 1080 lines, with the glyphs of the Japanese, Korean
-// and Chinese language names merged in from a system font when there is one (each language is named in its own script).
-static const ImWchar kRanges[] = {0x0020, 0x00FF, 0x0400, 0x052F, 0x2010, 0x2027, 0};
+// Roboto Medium (Latin with Latin Extended-A for Polish, Turkish and Catalan, Cyrillic, dashes and quotes) at 26 px
+// per 1080 lines, with the glyphs of the Japanese, Korean and Chinese language names merged in from a system font when
+// there is one (each language is named in its own script).
+static const ImWchar kRanges[] = {0x0020, 0x017F, 0x0400, 0x052F, 0x2010, 0x2027, 0};
 static const struct { const char *lang; UiTextId name; } kCjk[] = {
     {"ja", UI_MENU_LANGNAME_JA}, {"ko", UI_MENU_LANGNAME_KO}, {"zh-Hans", UI_MENU_LANGNAME_ZH_HANS},
-    {"zh-Hant", UI_MENU_LANGNAME_ZH_HANT},
+    {"zh-Hant", UI_MENU_LANGNAME_ZH_HANT}, {"th", UI_MENU_LANGNAME_TH},
 };
 
+static const char *g_font_lang;                        // the menu language the atlas was built for
+static ImVector<ImWchar> g_ranges[sizeof kCjk / sizeof *kCjk];   // read when the texture is built, after this returns
+
+int menu_look_fonts_stale(void) { return g_font_lang != menu_lang(); }
+
+// A CJK menu language takes the glyphs of its whole catalog from the system font; the other rows only the names of
+// the CJK languages in the language lists. Without the system font the CJK menu shows boxes.
 void menu_look_fonts(float scale) {
     enum { N = sizeof kCjk / sizeof *kCjk };
-    static ImVector<ImWchar> ranges[N];   // read when the texture is built, after this returns
+    g_font_lang = menu_lang();
     ImFontAtlas *fa = ImGui::GetIO().Fonts;
     fa->Clear();
     ImFontConfig fc;
@@ -75,18 +84,35 @@ void menu_look_fonts(float scale) {
         merged++;
         ImFontGlyphRangesBuilder b;
         b.AddText(ui_text_in("en", kCjk[i].name));
-        ranges[i].clear();
-        b.BuildRanges(&ranges[i]);
+        if (!strcmp(kCjk[i].lang, g_font_lang))
+            for (int id = 0; id < UI_TEXT_COUNT; id++) b.AddText(ui_text_in(g_font_lang, (UiTextId)id));
+        g_ranges[i].clear();
+        b.BuildRanges(&g_ranges[i]);
         ImFontConfig mc;
         mc.MergeMode = true;   // the atlas frees data (IM_FREE is free by default)
-        fa->AddFontFromMemoryTTF(data, (int)size, 26.0f * scale, &mc, ranges[i].Data);
+        fa->AddFontFromMemoryTTF(data, (int)size, 26.0f * scale, &mc, g_ranges[i].Data);
     }
-    rt_log("menu: font atlas at %.1f px, language names from %d of %d system fonts", 26.0f * scale, merged, (int)N);
+    rt_log("menu: font atlas at %.1f px for menu language %s, CJK glyphs from %d of %d system fonts", 26.0f * scale,
+           g_font_lang, merged, (int)N);
 }
 
-ImFont *menu_look_font_big(float scale) {
+// The launcher's other sizes: Roboto, with the system font of a CJK or Thai menu language merged in like the main
+// font, or its titles and buttons show "?" for every glyph (discussion #193). Call after menu_look_fonts.
+ImFont *menu_look_font_at(float px) {
+    ImFontAtlas *fa = ImGui::GetIO().Fonts;
     ImFontConfig fc;
     fc.FontDataOwnedByAtlas = false;
-    return ImGui::GetIO().Fonts->AddFontFromMemoryTTF((void *)roboto_ttf, (int)sizeof roboto_ttf, 72.0f * scale, &fc,
-                                                      kRanges);
+    ImFont *font = fa->AddFontFromMemoryTTF((void *)roboto_ttf, (int)sizeof roboto_ttf, px, &fc, kRanges);
+    for (size_t i = 0; i < sizeof kCjk / sizeof *kCjk; i++) {
+        char path[512];
+        uint64_t size = 0;
+        uint8_t *data;
+        if (!g_font_lang || strcmp(kCjk[i].lang, g_font_lang) || g_ranges[i].empty() ||
+            !plat_font_path(kCjk[i].lang, path, sizeof path) || !(data = plat_file_read(path, &size)))
+            continue;
+        ImFontConfig mc;
+        mc.MergeMode = true;   // the atlas frees data
+        fa->AddFontFromMemoryTTF(data, (int)size, px, &mc, g_ranges[i].Data);
+    }
+    return font;
 }

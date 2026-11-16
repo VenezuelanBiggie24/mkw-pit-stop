@@ -83,7 +83,7 @@ static int kern_svc_impl(Cpu *c, uint32_t imm) {
     switch (imm) {
     case 0x08: {   // CreateThread(-> w1 handle; x1 entry, x2 arg, x3 stack top, w4 priority, w5 core)
         int prio = (int)x[4], core = (int)x[5];
-        if (!x[1] || !x[3] || prio < 28 || prio > 59 || core < -3 || core > 2) {
+        if (!x[1] || !x[3] || prio < 28 || prio > 59 || core < -3 || core >= NCORE) {
             x[0] = R_BAD_STATE;
             return 1;
         }
@@ -204,14 +204,24 @@ static int kern_svc_impl(Cpu *c, uint32_t imm) {
         unlock();
         return 1;
     }
-    case 0x0F: {   // SetThreadCoreMask(w0 handle, w1 ideal core, x2 mask): -1 process default, -2/-3 keep the ideal core
+    case 0x0F: {   // SetThreadCoreMask(w0 handle, w1 ideal core, x2 mask): -1 don't care, -2 the process's, -3 no update
         lock();
         RtThread *t = h_get((uint32_t)x[0], O_THREAD);
+        int core = (int)x[1];
+        uint64_t mask = core == -2 ? 1ull << MAIN_CORE : x[2];   // -2: the process's ideal core, alone
+        if (core == -2) core = MAIN_CORE;
+        // the checks of Atmosphère's kern_svc_thread.cpp SetThreadCoreMask (-1/-3: svc_types_common.hpp)
+        int keep = core == -3 && t ? t->core : core;   // no update: the ideal core stays and must be in the mask
+        uint32_t bad = (mask & ~APP_MASK) || core < -3 || core >= NCORE ? R_INVALID_CORE
+                       : !mask || (keep >= 0 && !(mask >> keep & 1)) ? R_INVALID_COMBINATION : R_OK;
+        if (t && bad) {
+            x[0] = bad;
+            unlock();
+            return 1;
+        }
         if (t) {
-            int core = (int)x[1];
-            if (core >= 0) t->core = core;
-            else if (core == -1) t->core = MAIN_CORE;
-            if (x[2]) t->mask = x[2];
+            if (core >= 0) t->core = core;   // -1: no ideal core; ours stays a hint, core_take checks the mask
+            t->mask = mask;
             if (t == tcur && t->cur_core >= 0 && !core_allowed(t, t->cur_core)) {   // move off a forbidden core
                 core_put(t);
                 core_take(t);
@@ -314,19 +324,24 @@ static int kern_svc_impl(Cpu *c, uint32_t imm) {
         return 1;
     }
 
-    case 0x34: {   // WaitForAddress(x0 address, w1 type, w2 value, x3 timeout): 0 if less, 1 decrement if less, 2 if equal
+    case 0x34: {   // WaitForAddress(x0 address, w1 type, x2 value, x3 timeout): 0 if less, 1 decrement if less, 2 if
+                   // equal, 3 if the 64-bit word is equal (nn::os::WaitForAddress(long const*, long))
         RtThread *t = cur(imm);
         uint64_t addr = x[0];
         int type = (int)x[1];
         int32_t val = (int32_t)x[2];
-        if (type < 0 || type > 2) {
+        if (addr & (type == 3 ? 7 : 3)) {   // Atmosphère's kern_svc_address_arbiter.cpp checks this first
+            x[0] = KERN_R_INVALID_ADDRESS;
+            return 1;
+        }
+        if (type < 0 || type > 3) {
             x[0] = R_INVALID_ENUM;
             return 1;
         }
         AddrQueue q = addr_queue(addr);
         plat_mutex_lock(q.m);
         uint32_t r, v = ld32(addr);
-        int ok = type == 2 ? (int32_t)v == val : (int32_t)v < val;
+        int ok = type == 3 ? ld64(addr) == x[2] : type == 2 ? (int32_t)v == val : (int32_t)v < val;
         if (ok && type == 1)
             while (!cas32(addr, &v, v - 1))
                 if (!((int32_t)v < val)) {

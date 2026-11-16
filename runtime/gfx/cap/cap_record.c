@@ -192,7 +192,7 @@ static void maybe_start(void) {
     CapMeta m = {CAP_MAGIC, CAP_VERSION, (uint32_t)nvn_depth_minus_w(), presents + 1, (uint64_t)want_frames,
                  L->heap.base, 0, L->alias.base, L->stack.base};
     cap_out(out, CAP_META, &m, sizeof m, NULL, 0);
-    if (!cap_mem_snapshot(out)) rt_fatal("cap: this platform cannot list populated guest pages (Linux only)");
+    if (!cap_mem_snapshot(out)) rt_fatal("cap: this platform cannot list populated guest pages");
     uint64_t mem = cap_out_bytes(out);
     write_state();
     int ngpu = 0;
@@ -225,7 +225,10 @@ static int w_pool_init(pool_t *p) {
         pools = grow(pools, &cap_pools, npools + 1, sizeof *pools);
         pools[npools++] = p;
         if (out) {
-            uint64_t a = (uintptr_t)p;
+            // The pool object first: the replay reads its storage and size from guest memory, and the game wrote it in
+            // this frame, after the last memory delta (#26: a pool made at frame 4102 read mem 0 and committed page 0).
+            uint64_t a = (uintptr_t)p, m[2] = {a, sizeof *p};
+            cap_out(out, CAP_MEM, m, sizeof m, p, sizeof *p);
             cap_out(out, CAP_POOL_INIT, &a, sizeof a, NULL, 0);
         }
     }

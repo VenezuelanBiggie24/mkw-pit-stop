@@ -111,6 +111,21 @@ void plat_yield(void);                    // gives the rest of the time slice to
 static inline void plat_pause(void) {     // spin-wait hint
 #if defined(__x86_64__) || defined(_M_X64)
     _mm_pause();
+#elif defined(__aarch64__)
+    __asm__ volatile("yield");
+#endif
+}
+// A cheap cycle-like counter for diagnostic timings (ratios between parts of one operation): the TSC on x86-64, the
+// generic timer's virtual count on AArch64 (CNTVCT_EL0, tens of MHz: coarser, the same use).
+static inline uint64_t plat_cycles(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    return __rdtsc();
+#elif defined(__aarch64__)
+    uint64_t v;
+    __asm__ volatile("isb\n\tmrs %0, cntvct_el0" : "=r"(v));
+    return v;
+#else
+    return 0;
 #endif
 }
 
@@ -313,6 +328,10 @@ uint64_t plat_mem_populated(uint64_t addr, uint64_t n, uint64_t (*runs)[2], uint
 // the write should run again, 0 to let the fault go on (to the crash handler). One hook per process. On Linux reads
 // that fault on an inaccessible page go to fn too (memory.c read traps).
 void plat_mem_fault_hook(int (*fn)(uint64_t addr));
+// A read or a write that faulted on a reserved, uncommitted page goes to fn before anything else (Windows' lazy commit,
+// memory.c lazy_fault): 1 when fn committed it and the access should run again. Not called on Linux, which commits on
+// touch by itself.
+void plat_mem_lazy_hook(int (*fn)(uint64_t addr));
 // The fault the hook is called for, on its thread (Linux; MKW_EARLY_READ tells reads from writes and names the code):
 // a write, and the faulting instruction's address.
 extern _Thread_local int plat_fault_write;
@@ -349,6 +368,9 @@ uint64_t plat_process_cpu_ns(void);
 uint64_t plat_process_uptime_ns(void);
 uint64_t plat_unix_time_ns(void);         // wall clock, ns since 1970
 void plat_local_time(struct tm *out);      // the wall clock now in the local time zone
+// The range of the Windows CRT's localtime_s and gmtime_s (1970 to 3000), which glibc exceeds: the game's time
+// service reports times outside it as invalid on both hosts.
+#define PLAT_TIME_MAX 32535215999ll
 int plat_localtime(int64_t unix_s, struct tm *out);   // a POSIX time in the local time zone; 0 out of range
 int plat_gmtime(int64_t unix_s, struct tm *out);      // the same in UTC
 long plat_tz_west(void);                  // the local zone's standard offset, seconds west of UTC (UTC-5: 18000)
@@ -357,6 +379,16 @@ long plat_tz_west(void);                  // the local zone's standard offset, s
 // expect the child to stop with a fatal. Its stdout and stderr go into out (NUL-terminated, the rest discarded); waits
 // at most timeout_ms (0: no limit) and kills it after that. Returns the exit code, -1 when it could not start.
 int plat_run_self(const char *env_name, const char *env_value, char *out, size_t cap, uint32_t timeout_ms);
+
+// ---- local IPC: a byte stream to another program on this machine (Discord's Rich Presence). Windows: the named pipe
+// \\.\pipe\<name>; elsewhere the Unix socket <name> in $XDG_RUNTIME_DIR, $TMPDIR or /tmp, or in the app/
+// com.discordapp.Discord/ (Flatpak) or snap.discord/ (Snap) folder under them. One thread uses a connection at a time.
+typedef struct PlatIpc PlatIpc;
+PlatIpc *plat_ipc_open(const char *name);   // NULL when nobody listens; never waits for a busy server
+int plat_ipc_send(PlatIpc *c, const void *data, size_t n);   // blocks until all n bytes are written; 1 on success
+// What has arrived, without waiting: bytes read (at most cap), 0 when nothing is there, -1 when the connection is gone.
+long plat_ipc_recv(PlatIpc *c, void *buf, size_t cap);
+void plat_ipc_close(PlatIpc *c);
 
 // ---- randomness
 int plat_random(void *out, size_t n);     // cryptographically random bytes; 1 on success
@@ -390,6 +422,9 @@ static inline int64_t plat_ftell64(FILE *f) { return (int64_t)ftello(f); }
 void plat_file_delete(const char *path);
 int64_t plat_file_size(const char *path);                 // bytes of a file, -1 when missing or unreadable
 int plat_file_set_readonly(const char *path, int on);     // sets or clears the read-only attribute; 1 on success
+// An exclusive lock on path (created if missing), held until the process ends: 1 taken, 0 when another process holds
+// it, -1 when the file cannot be opened. The OS drops it when the process dies, however it dies.
+int plat_file_lock(const char *path);
 // A file that only grows and other processes may read meanwhile: each write lands whole at its end, from any thread,
 // and reaches the file even if the process dies right after (no user-space buffer, no flush to the disk).
 typedef struct PlatAppend PlatAppend;
@@ -422,13 +457,18 @@ enum { PLAT_FS_MISSING = -1, PLAT_FS_FILE, PLAT_FS_DIR, PLAT_FS_LINK };   // pla
                                                                          // reparse point, never followed
 int plat_fs_kind(const char *path);
 int plat_fs_mkdir(const char *path);                      // PLAT_FS_EXISTS when something is there
-int plat_fs_rmdir(const char *path);                      // an empty directory, or a link to one
+int plat_fs_os_error(void);   // the OS error code (GetLastError, errno) of this thread's last failed plat_fs_* call
+int plat_fs_rmdir(const char *path);                      // an empty directory (a read-only one too), or a link to one
 int plat_fs_unlink(const char *path);                     // a file or a link; a read-only one too
 // Renames a file or directory; never replaces (PLAT_FS_EXISTS). durable: the change is on the disk at return.
 int plat_fs_rename(const char *from, const char *to, int durable);
 int plat_fs_link(const char *existing, const char *path); // a hard link
 int plat_fs_links(const char *path);                      // the file's hard link count, 0 when unknown
 void plat_fs_sync_dir(const char *path);                  // a directory's entries to the disk, as far as the FS allows
+// Why dir could not be renamed, for the log: into out "no permission to rename it" when this process may not delete
+// it, else the programs holding a file under it ("explorer.exe 1234, ..."), else an empty string. Windows refuses to
+// rename a directory with any file open under it; elsewhere out is always empty.
+void plat_fs_busy_reason(const char *dir, char *out, size_t cap);
 // cb(name, kind, size, ctx) for each entry of dir but "." and ".."; cb returns 0 to stop. The listing's error.
 int plat_fs_list(const char *dir, int (*cb)(const char *name, int kind, uint64_t size, void *ctx), void *ctx);
 // The same where the listing itself does not carry sizes (POSIX readdir): the kind from the entry's type, the size
@@ -465,7 +505,7 @@ const char *plat_user_locale(void);
 uint32_t plat_thread_id(void);                            // id of the calling thread, for unique file names
 // The host's time zone as an IANA name ("Europe/Madrid") into out; 0 when the system gives none.
 int plat_time_zone(char *out, size_t cap);
-// A system font file with the glyphs of a catalog language ("ja", "ko", "zh-Hans", "zh-Hant"): the menu shows each
+// A system font file with the glyphs of a language ("ja", "ko", "zh-Hans", "zh-Hant", "th"): the menu shows each
 // language's name in its own script. Copies the UTF-8 path into out; 0 when the system has none.
 int plat_font_path(const char *lang, char *out, size_t cap);
 // The operating system and its build ("Windows 10.0.28000") into out; 0 when unknown.
@@ -481,6 +521,9 @@ int plat_open_folder(const char *path);                   // shows the folder in
 // trusted so KDE and GNOME start it without asking, with a copy in ~/.local/share/applications for the menu. Writes the
 // shortcut's path to out. 1 on success.
 int plat_desktop_shortcut(const char *name, const char *exe, const char *dir, char *out, size_t cap);
+// Makes exe the user's handler of scheme: URLs (GameBanana's 1-Click), run as `exe arg URL`; only rewritten when it
+// differs. 1 when registered.
+int plat_url_scheme(const char *scheme, const char *label, const char *exe, const char *arg);
 
 // ---- dynamic libraries: a library some machines lack (a GPU vendor's), loaded at run time. A bare name is searched
 // in the system directories only. NULL when missing.
@@ -500,6 +543,10 @@ void plat_cpu_load(PlatLoad *l, float *total_pct, float *proc_pct, float *temp_c
 // Since the previous call on l: the busiest GPU engine type in percent (as Task Manager shows it), and the adapter's
 // dedicated memory in use in MB. Any GPU vendor.
 void plat_gpu_load(PlatLoad *l, float *load_pct, float *vram_used_mb);
+// The GPU's own memory in MiB (an integrated GPU's carve-out, set in the firmware: memory the system does not count as
+// its RAM), for the adapter with Vulkan's vendor and device ids (Linux: amdgpu's mem_info_vram_total) or deviceLUID
+// (Windows: DXGI's DedicatedVideoMemory). 0 when unknown.
+uint64_t plat_gpu_vram_mib(uint32_t vendor, uint32_t device, const uint8_t *luid);
 // Physical memory in MB: in use and installed on the machine, and this process's working set.
 void plat_mem_info(float *used_mb, float *total_mb, float *proc_mb);
 // This process's memory in bytes: resident (the working set) and private (Windows: committed private bytes; Linux: the

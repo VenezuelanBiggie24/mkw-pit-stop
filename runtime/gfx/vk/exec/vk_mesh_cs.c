@@ -111,21 +111,25 @@ int vk_mesh_cs_alloc(uint64_t fence, VkDeviceSize size, VkBuffer *buf, VkDeviceS
 
 // Task/mesh draws go through the compute passes on a device without VK_EXT_mesh_shader, and with MKW_MESH_COMPUTE=1
 // on one with it (to compare both forms of the same frame); MKW_MESH_COMPUTE=0 leaves them undrawn there.
+// AMD's own driver also takes the compute passes by default: on Windows 26.10.x (RX 7600 to 9070 XT, issues #88 #91
+// #67 #76 #83) the device is lost ~5 s into the title, Radeon GPU Detective showing a DispatchMesh that never launched
+// its workgroups and no page fault; MKW_MESH_COMPUTE=1 runs past it (#88, 11/11/2026). RADV too: the 8 logs with the
+// mesh shaders native (#4 RX 7900 GRE, #43 RX 6650 XT, #50 890M, #225 RX 9070; Mesa 25.2.8 to 26.2.6) lose the device
+// at the title ~70 log lines after the first task/mesh pipeline, the kernel naming a read fault of the command
+// processor (CPG) in RADV's 32-bit window after a barrier; with MKW_MESH_COMPUTE=1 they all run past it (13/11/2026).
 //
 // On PS5 (__PROSPERO__), RADV's VK_EXT_mesh_shader task shaders use ACE (AMD_IP_COMPUTE) gang submissions
 // (radv_update_gang_preambles), which radv_ps5_cs_submit() rejects with VK_ERROR_FEATURE_NOT_PRESENT
 // (radv_ps5_cs.c:540: submit->ip_type != AMD_IP_GFX). Run 1 hung the GPU right after the first task+mesh
 // pipeline at ~frame 150 with GPU_FAULT_SUSPENDPOINT_TIMEOUT_IN_RUN_ASYNC; Run 2 with MESH_COMPUTE=1 passed
-// frame 150 and reached frame 229. Default PS5 to the compute path when MKW_MESH_COMPUTE is unset.
+// frame 150 and reached frame 229. The PS5's RADV takes the compute path with the rest of RADV above.
 int vk_mesh_cs_on(void) {
     static int on = -1;
     if (on < 0) {
         const char *e = cfg_get("MKW_MESH_COMPUTE");
-#ifdef __PROSPERO__
-        on = e && *e ? atoi(e) != 0 : 1;
-#else
-        on = e && *e ? atoi(e) != 0 : !vk_ctx()->has_mesh;
-#endif
+        on = e && *e ? atoi(e) != 0
+                     : !vk_ctx()->has_mesh || vk_caps.driver_id == VK_DRIVER_ID_AMD_PROPRIETARY ||
+                           vk_caps.driver_id == VK_DRIVER_ID_MESA_RADV;
         on = on && vk_ctx()->has_buffer_device_address;
         rt_log("vk: task/mesh draws %s", on ? "as compute passes and an indexed draw (MKW_MESH_COMPUTE)"
                                              : vk_ctx()->has_mesh ? "as mesh shaders" : "not drawn (no mesh shaders, no buffer addresses)");

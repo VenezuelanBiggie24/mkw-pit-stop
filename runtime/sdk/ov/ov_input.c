@@ -19,6 +19,8 @@
 #include "input.h"
 #include "ov.h"
 #include "platform/platform.h"
+#include "ui/menu/menu.h"
+#include "ui_text.h"
 
 typedef struct { int64_t sampling; uint64_t buttons; int32_t lx, ly, rx, ry; uint32_t attributes, pad; } NpadState;
 
@@ -34,6 +36,7 @@ static PlatMutex lock = PLAT_MUTEX_INIT;
 static uint32_t styles = STYLE_FULL_KEY;
 static uint32_t supported = ~0u, disconnected;   // id bits: SetSupportedNpadIdType, DisconnectNpad
 static int enabled, multi;                      // multi: the applet handed out two or more players
+static int8_t assigned[8] = {0, 1, 2, 3, 4, 5, 6, 7};   // the player whose controller each id reads (SwapNpadAssignment)
 static int64_t sample;
 
 // Player 1 on the handheld controller: handheld mode, until the applet hands out more than one player. Under lock.
@@ -45,6 +48,7 @@ static int id_bit(uint32_t id) { return id == ID_HANDHELD ? BIT_HANDHELD : id < 
 static int id_player(uint32_t id, uint32_t *style) {
     int bit = id_bit(id), player = on_handheld() ? (id == ID_HANDHELD ? 0 : -1) : (id < 8 ? (int)id : -1);
     if (player < 0 || !enabled || !(supported >> bit & 1) || (disconnected >> bit & 1)) return -1;
+    player = assigned[player];
     if (player && !(input_player_mask() >> player & 1)) return -1;
     if (style) *style = on_handheld() ? STYLE_HANDHELD : STYLE_FULL_KEY;
     return player;
@@ -128,6 +132,18 @@ static void ov_hold_type(Cpu *c) {
     if (t < 0 || t > 1) rt_fatal("nn::hid::SetNpadJoyHoldType: invalid hold type %lld", (long long)t);
 }
 
+// void SwapNpadAssignment(const NpadIdType &a, const NpadIdType &b): the two ids trade controllers (the game calls it
+// when players swap seats in the menus; on the host it reached nn::sm through the hid service, issue #123)
+static void ov_swap_assignment(Cpu *c) {
+    uint32_t a = *need_id(c, 0, "SwapNpadAssignment"), b = *need_id(c, 1, "SwapNpadAssignment");
+    if (a >= 8 || b >= 8) return;   // the handheld id has a single controller
+    plat_mutex_lock(&lock);
+    int8_t t = assigned[a];
+    assigned[a] = assigned[b], assigned[b] = t;
+    plat_mutex_unlock(&lock);
+    rt_log("hid: controller ids %u and %u swapped controllers", a, b);
+}
+
 // void DisconnectNpad(const NpadIdType &id) (handheld mode disconnects player 1's id 0): until the controller applet
 // connects the controllers again
 static void ov_disconnect(Cpu *c) {
@@ -157,6 +173,11 @@ static void ov_controller_support(Cpu *c) {
     plat_mutex_unlock(&lock);
     rt_log("hid: controller applet asks for %d-%d players, %d with a controller: %d players%s", arg[0], arg[1], have,
            players, players ? "" : " (connect more controllers: the game takes it as closed)");
+    if (!players) {   // the game goes back to its title without a word (#106, #160): say why on screen
+        char text[256];
+        snprintf(text, sizeof text, menu_text(UI_NOTICE_PADS_MISSING), lo, have);
+        menu_notice(text, 8);
+    }
     if (out) *out = (ControllerSupportResult){.players = (int8_t)players, .selected = selected};
     ret_x(c, 0);
 }
@@ -425,32 +446,36 @@ static void ov_vib_permit(Cpu *c) {
     ret_x(c, 0);
 }
 
-static volatile int32_t six_running;   // StartSixAxisSensor .. StopSixAxisSensor
+static volatile int32_t six_running[INPUT_MAX_PLAYERS];   // by player: StartSixAxisSensor .. StopSixAxisSensor
 
-static int six_axis_ours(const uint32_t *h, const char *fn) {
+// The player whose controller's sensor h names, -1 for another device or a player without a controller.
+static int six_axis_player(const uint32_t *h, const char *fn) {
     uint32_t v = *need_handle(h, fn);
-    if ((v >> 16 & 0xff) == SIX_AXIS_DEVICE && handle_player(v) == 0) return 1;
+    int p = (v >> 16 & 0xff) == SIX_AXIS_DEVICE ? handle_player(v) : -1;
+    if (p >= 0 && p < INPUT_MAX_PLAYERS) return p;
     static volatile int32_t warned;
-    once(&warned, "hid: six-axis call for handle %#x, not the connected controller's sensor: reads at rest", v);
-    return 0;
+    once(&warned, "hid: six-axis call for handle %#x, not a connected controller's sensor: reads at rest", v);
+    return -1;
 }
 
 // Result detail::StartSixAxisSensor(const SixAxisSensorHandle &): angle and direction start over
 static void ov_six_start(Cpu *c) {
     const uint32_t *h = arg_p(c, 0);
-    if (six_axis_ours(h, "StartSixAxisSensor")) {
-        static volatile int32_t logged;
-        once(&logged, "hid: the game started the six-axis sensor (handle %#x)", *h);
-        motion_restart(motion_global());
+    int p = six_axis_player(h, "StartSixAxisSensor");
+    if (p >= 0) {
+        static volatile int32_t logged[INPUT_MAX_PLAYERS];
+        once(&logged[p], "hid: the game started a six-axis sensor (handle %#x)", *h);
+        motion_restart(motion_player(p));
         input_motion_start();
-        plat_xchg32(&six_running, 1);
+        plat_xchg32(&six_running[p], 1);
     }
     ret_x(c, 0);
 }
 
 // Result detail::StopSixAxisSensor(const SixAxisSensorHandle &)
 static void ov_six_stop(Cpu *c) {
-    if (six_axis_ours(arg_p(c, 0), "StopSixAxisSensor")) plat_xchg32(&six_running, 0);
+    int p = six_axis_player(arg_p(c, 0), "StopSixAxisSensor");
+    if (p >= 0) plat_xchg32(&six_running[p], 0);
     ret_x(c, 0);
 }
 
@@ -460,15 +485,16 @@ static void ov_six_stop(Cpu *c) {
 static int six_fill(MotionState *s, int max, const uint32_t *h, const char *fn) {
     if (max <= 0) return 0;
     if (!s) rt_fatal("nn::hid::detail::%s: null output", fn);
-    int live = six_axis_ours(h, fn) && six_running && input_motion_enabled();
-    int n = live ? motion_read(motion_global(), s, max, kern_now_ns()) : 0;
+    int p = six_axis_player(h, fn);
+    int live = p >= 0 && six_running[p] && input_motion_enabled();
+    int n = live ? motion_read(motion_player(p), s, max, kern_now_ns()) : 0;
     if (!n) {
         static const MotionState rest = {.acc = {0, 0, -1}, .dir = {1, 0, 0, 0, 1, 0, 0, 0, 1}};
         for (int i = 0; i < max; i++) s[i] = rest;
     } else
         for (int i = n; i < max; i++) s[i] = s[n - 1];
     static volatile int32_t first_rest, first_live;
-    if (!n && six_running) once(&first_rest, "hid: six-axis read with no motion samples: at rest (%u states)", (uint32_t)max);
+    if (!n && live) once(&first_rest, "hid: six-axis read with no motion samples: at rest (%u states)", (uint32_t)max);
     if (n) once(&first_live, "hid: first six-axis read with live motion (%u samples)", (uint32_t)n);
     return max;
 }
@@ -498,6 +524,7 @@ HOST_OVERRIDE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", ov_stat
 HOST_OVERRIDE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", ov_states_handheld);
 HOST_OVERRIDE("_ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE", ov_hold_type);
 HOST_OVERRIDE("_ZN2nn3hid14DisconnectNpadERKj", ov_disconnect);
+HOST_OVERRIDE("_ZN2nn3hid18SwapNpadAssignmentERKjS2_", ov_swap_assignment);
 HOST_OVERRIDE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE",
               ov_controller_support);
 HOST_OVERRIDE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_"
@@ -521,3 +548,41 @@ HOST_OVERRIDE("_ZN2nn3hid6detail22GetSixAxisSensorStatesEPiPNS0_18SixAxisSensorS
               ov_six_states);
 HOST_OVERRIDE("_ZN2nn3hid6detail21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE",
               ov_six_state);
+
+// ---- 1.8.0's mouse APIs (none in 1.0.0): the Joy-Con 2 as a mouse (Jcms) and a USB mouse (Nmouse). A PC is a
+// console with neither attached: Jcms handles exist but report no samples, and there is no mouse. Their SDK versions
+// open the hid server through sm (svc 0x1f, IPC), which this runtime does not have: the first 1.8.0 boot stopped in
+// nn::hid::InitializeJcms (main+0x412728).
+static void ov_mouse_nothing(Cpu *c) { ret_x(c, 0); }
+// JcmsHandle GetJcmsHandle(const NpadId &, const JcmsType &): a u32 (main+0x2590f30 stores w0); id << 8 | type
+static void ov_jcms_handle(Cpu *c) {
+    const uint32_t *id = arg_p(c, 0);
+    const uint8_t *type = arg_p(c, 1);
+    ret_x(c, (id ? *id : 0) << 8 | (type ? *type : 0));
+}
+// int GetNmouseStates(int *count, NmouseState *, int max, NmouseHandle): no samples
+static void ov_nmouse_states(Cpu *c) {
+    int32_t *count = arg_p(c, 0);
+    if (count) *count = 0;
+    ret_x(c, 0);
+}
+// void GetNmouseTypeSet(BitFlagSet<32, NmouseType> *, NmouseHandle): no type
+static void ov_nmouse_types(Cpu *c) {
+    uint32_t *set = arg_p(c, 0);
+    if (set) *set = 0;
+}
+HOST_OVERRIDE("_ZN2nn3hid14InitializeJcmsEPvm", ov_mouse_nothing);
+HOST_OVERRIDE("_ZN2nn3hid12FinalizeJcmsEv", ov_mouse_nothing);
+HOST_OVERRIDE("_ZN2nn3hid13GetJcmsHandleERKjRKNS0_8JcmsTypeE", ov_jcms_handle);
+HOST_OVERRIDE("_ZN2nn3hid9StartJcmsERKNS0_10JcmsHandleE", ov_mouse_nothing);
+HOST_OVERRIDE("_ZN2nn3hid8StopJcmsERKNS0_10JcmsHandleE", ov_mouse_nothing);
+HOST_OVERRIDE("_ZN2nn3hid13GetJcmsStatesEPNS0_9JcmsStateEiRKNS0_10JcmsHandleE", ov_mouse_nothing);   // 0 samples
+HOST_OVERRIDE("_ZN2nn3hid16InitializeNmouseEPvmii", ov_mouse_nothing);
+HOST_OVERRIDE("_ZN2nn3hid14FinalizeNmouseEv", ov_mouse_nothing);
+HOST_OVERRIDE("_ZN2nn3hid16GetNmouseHandlesEPNS0_12NmouseHandleEij", ov_mouse_nothing);   // 0 mice
+HOST_OVERRIDE("_ZN2nn3hid15GetNmouseStatesEPiPNS0_11NmouseStateEiNS0_12NmouseHandleE", ov_nmouse_states);
+HOST_OVERRIDE("_ZN2nn3hid16GetNmouseTypeSetEPNS_4util10BitFlagSetILi32ENS0_10NmouseTypeEEENS0_12NmouseHandleE",
+              ov_nmouse_types);
+HOST_OVERRIDE("_ZN2nn3hid19EnableNmousePointerENS0_12NmouseHandleEb", ov_mouse_nothing);
+HOST_OVERRIDE("_ZN2nn3hid22SetNmousePointerRangesEii", ov_mouse_nothing);
+HOST_OVERRIDE("_ZN2nn3hid24SetNmousePointerPositionENS0_12NmouseHandleEii", ov_mouse_nothing);

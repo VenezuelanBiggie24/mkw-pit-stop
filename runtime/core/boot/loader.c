@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "version.h"
 #include "host.h"
 #include "gamelib.h"
 #include "platform/platform.h"
@@ -276,6 +277,22 @@ static uint64_t decode_ctor_flag(const Mod *m) {
     return 0;
 }
 
+// The enabled code mods' bytes for module name (RtGame.image_patches) over its .text image at text (mem_off text_off,
+// size text_size): the generated code was lifted with them, so what the code reads of itself agrees.
+static int image_patches(const char *name, uint8_t *text, uint64_t text_off, uint64_t text_size) {
+    const RtGame *g = rt_game();
+    int n = 0;
+    for (int i = 0; i < g->nimage_patches; i++) {
+        const RtImagePatch *p = &g->image_patches[i];
+        if (strcmp(p->module, name)) continue;
+        if (p->off < text_off || p->off + p->n > text_off + text_size)
+            rt_fatal("loader: a mod's code patch at %s+%#llx lies outside .text", name, (unsigned long long)p->off);
+        memcpy(text + (p->off - text_off), p->bytes, p->n);
+        n++;
+    }
+    return n;
+}
+
 static void load_module(Mod *m, const char *dir, const RtGameModule *lay) {
     size_t len;
     uint8_t *raw = ldr_read_verified(dir, lay->name, &len);
@@ -293,6 +310,9 @@ static void load_module(Mod *m, const char *dir, const RtGameModule *lay) {
         m->seg_size[i] = seg[i].size;
     }
     free(raw);
+    int patched = image_patches(lay->name, (uint8_t *)(uintptr_t)(lay->base + seg[0].mem_off), seg[0].mem_off,
+                                seg[0].size);
+    if (patched) rt_log("loader: %s: %d code patches of the enabled mods", lay->name, patched);
     m->pub.name = lay->name;
     m->pub.base = lay->base;
     m->pub.size = size;
@@ -328,7 +348,16 @@ static Res resolve(Mod *m, uint32_t si, int jump) {
     Res *cache = jump ? &m->res_jump[si] : &m->res_plain[si];
     if (cache->kind != RES_UNSET) return *cache;
     const char *name = sym_name(m, si);
-    uint64_t guest = sym_defined(m, si) ? m->pub.base + m->syms[si].value : find_symbol(name, NULL);
+    // A module's reference to a symbol it defines itself binds, as rtld does, to the first definition in load order
+    // when the symbol is global with default visibility: main's operator new/delete (sead's heaps) stand in for the
+    // sdk's own, and a singleton two modules share is one object. 1.8.0's sdk has 62 such references (operator
+    // new/delete, RTTI, movie::detail::HeapMemoryManager's instance); binding them to its own definitions made the
+    // sdk's operator delete(void *, size_t), which main imports, free sead's blocks with the SDK heap
+    // (CentralHeap::Free: NotNMallocPtrError at the first file load). Local and hidden/protected symbols stay local.
+    int own = sym_defined(m, si);
+    int interposable = own && (m->syms[si].info >> 4) != 0 && (m->syms[si].other & 3) == 0;
+    uint64_t first = interposable ? find_symbol(name, NULL) : 0;
+    uint64_t guest = own ? (first ? first : m->pub.base + m->syms[si].value) : find_symbol(name, NULL);
     GuestFn f;
     Res r;
     if (jump && (f = hostfn_observer(name))) {
@@ -594,6 +623,7 @@ static void check_segments(const char *dir) {
             uint8_t *buf = malloc(seg[s].size ? seg[s].size : 1);
             if (!buf) rt_fatal("probe: allocation");
             nso_segment(raw, &seg[s], buf, m->pub.name, s);
+            if (s == 0) image_patches(m->pub.name, buf, seg[0].mem_off, seg[0].size);   // as load_module wrote it
             if (memcmp(buf, (const void *)(uintptr_t)(m->pub.base + seg[s].mem_off), seg[s].size)) same = 0;
             free(buf);
         }
@@ -657,7 +687,10 @@ int probe_loader(void) {
     const RtConfig *cfg = rt_config();
     hostfn_add_override(PROBE_SYMBOL, probe_override);
     ldr_load(cfg->exefs);
-    if (nmods != (int)(sizeof expect / sizeof *expect)) {
+    // The reference numbers are 1.0.0's; another version's are printed, not compared.
+    int ref = rt_version()->number == 100;
+    if (!ref) printf("probe-loader: no reference numbers for game version %s: printed, not checked\n", rt_version()->display);
+    if (ref && nmods != (int)(sizeof expect / sizeof *expect)) {
         printf("probe-loader: FAILED (%d modules, expected 3)\n", nmods);
         return 1;
     }
@@ -673,6 +706,7 @@ int probe_loader(void) {
                "%u\n", m->pub.name, (unsigned long long)m->pub.base, (unsigned long long)m->pub.size, m->init_off,
                (unsigned long long)(m->pub.init_array_size / 8), (unsigned long long)m->pub.init_array_size,
                m->imports, to, m->weak_unresolved);
+        if (!ref) continue;
         CHECK(!strcmp(m->pub.name, expect[i].name), "module %d is %s", i, m->pub.name);
         CHECK(m->imports == expect[i].imports && m->weak_unresolved == expect[i].weak &&
               !memcmp(m->import_to, expect[i].to, sizeof m->import_to), "%s import table differs from MKW 1.0.0's",
@@ -689,8 +723,8 @@ int probe_loader(void) {
                (unsigned long long)m->kinds[K_ABS64], (unsigned long long)m->kinds[K_GLOB_DAT],
                (unsigned long long)m->kinds[K_JUMP_SLOT], (unsigned long long)total,
                (unsigned long long)m->sym_import, (unsigned long long)m->sym_own);
-        CHECK(!memcmp(m->kinds, expect[i].kinds, sizeof m->kinds) && total == expect[i].total &&
-              m->sym_import == expect[i].sym_import && m->sym_own == expect[i].sym_own,
+        CHECK(!ref || (!memcmp(m->kinds, expect[i].kinds, sizeof m->kinds) && total == expect[i].total &&
+              m->sym_import == expect[i].sym_import && m->sym_own == expect[i].sym_own),
               "%s relocations differ from MKW 1.0.0's", m->pub.name);
     }
     printf("constructors:\n");

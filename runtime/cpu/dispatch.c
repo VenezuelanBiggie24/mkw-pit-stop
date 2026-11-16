@@ -47,6 +47,13 @@ void rt_fatal(const char *fmt, ...) {
     rt_vlogf(fmt, ap);
     rt_log_raw("\n", 1);
     va_end(ap);
+    // whether the system was out of memory then: a fatal from a failed allocation reads the same otherwise
+    uint64_t res, prv;
+    float used, total, proc;
+    plat_process_memory(&res, &prv);
+    plat_mem_info(&used, &total, &proc);
+    rt_log("FATAL: memory: process %.0f MiB resident, %.0f MiB private; system %.0f of %.0f MiB in use", res / 1048576.0,
+           prv / 1048576.0, used, total);
     rt_log_flush();   // the log thread may not run again before _Exit
     fflush(stdout);
     fflush(stderr);
@@ -186,6 +193,7 @@ __attribute__((noinline, noreturn, cold)) static void dispatch_fail(Cpu *c) {
 // Host functions, and the fatal error. A separate tail call keeps the fast path below free of a stack frame.
 __attribute__((noinline)) static void dispatch_slow(Cpu *c) {
     GuestFn f = g_ready ? host_lookup(c->pc) : NULL;
+    if (!f) rt_sj_resume(c);   // a guest longjmp back into a live setjmp owner does not return (sjlj.c)
     if (!f) dispatch_fail(c);
     __attribute__((musttail)) return f(c);
 }

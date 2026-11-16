@@ -16,7 +16,7 @@ Exit codes: 0 done, 1 failed.
 
 Usage: python -I update.py check --version VER [--os linux|windows]
        python -I update.py fetch --tag TAG --dest DIR [--os linux|windows]
-       python -I update.py clean --game DIR
+       python -I update.py clean --game DIR [--previous VERSION]
 MKW_UPDATE_REPO=owner/name (default adriadam10/mkw-recomp) and MKW_UPDATE_AS=<version> (compare as that version: a
 test) change what is asked.
 """
@@ -25,6 +25,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import shutil
 import ssl
@@ -38,26 +39,38 @@ from pathlib import Path
 REPO = os.environ.get("MKW_UPDATE_REPO") or "adriadam10/mkw-recomp"
 CHECK_TIMEOUT = 5  # s: the start screen waits for nothing, but a hung request should not linger
 FETCH_TIMEOUT = 30
-ASSET_SUFFIX = {"linux": "-x86_64.AppImage", "windows": "-windows-x64.zip"}  # tools/build/release.py's names
+ASSET_SUFFIX = {  # tools/build/release.py's names
+    "linux": "-x86_64.AppImage",
+    "linux-aarch64": "-aarch64.AppImage",
+    "windows": "-windows-x64.zip",
+}
 CLEAN_WAIT = 20  # s
 OLD_SUFFIX = ".old"  # what the launcher renames the replaced files to (Windows: a running exe cannot be removed)
+PREVIOUS = "update-previous"  # the version an update replaced, kept for the Tools page's Undo (launcher_update.h)
 
 
 def emit(*words: object) -> None:
     print(*words, flush=True)
 
 
+def ca_file() -> str | None:
+    """pip's bundled CA file when the system's store is empty to this Python, else None (python-build-standalone
+    ships no certifi; a minimal Linux running the AppImage may have no /etc/ssl, and NixOS keeps its bundle where this
+    OpenSSL does not look, issue #102)."""
+    if os.environ.get("SSL_CERT_FILE") or ssl.create_default_context().cert_store_stats().get("x509_ca"):
+        return None
+    for pat in (
+        "lib*/python3*/site-packages/pip/_vendor/certifi/cacert.pem",
+        "Lib/site-packages/pip/_vendor/certifi/cacert.pem",
+    ):
+        for pem in Path(sys.prefix).glob(pat):
+            return str(pem)
+    return None
+
+
 def ssl_context() -> ssl.SSLContext:
-    """The system's CA store; else pip's bundled one (python-build-standalone ships no certifi, and a minimal Linux
-    running the AppImage may have no /etc/ssl)."""
-    ctx = ssl.create_default_context()
-    if ctx.cert_store_stats().get("x509_ca"):
-        return ctx
-    for pem in Path(sys.prefix).glob("lib*/python3*/site-packages/pip/_vendor/certifi/cacert.pem"):
-        return ssl.create_default_context(cafile=str(pem))
-    for pem in Path(sys.prefix).glob("Lib/site-packages/pip/_vendor/certifi/cacert.pem"):
-        return ssl.create_default_context(cafile=str(pem))
-    return ctx
+    """The system's CA store; else pip's bundled one (ca_file)."""
+    return ssl.create_default_context(cafile=ca_file())
 
 
 def get(url: str, timeout: int) -> urllib.request.addinfourl:
@@ -136,18 +149,27 @@ def fetch(args: argparse.Namespace) -> None:
 
 
 def clean(args: argparse.Namespace) -> None:
-    """The old program may still be closing when the new one starts this (Windows refuses to remove a running exe):
-    each entry is tried again for CLEAN_WAIT seconds."""
+    """The files the update replaced: with --previous (the version they are), kept in PREVIOUS under their own names so
+    Undo can put them back, the version before replaced; without, removed. The old program may still be closing when
+    the new one starts this (Windows refuses to move or remove a running exe): each entry is tried again for CLEAN_WAIT
+    seconds."""
     game, n = args.game.resolve(), 0
-    for p in game.iterdir():
-        if not p.name.endswith(OLD_SUFFIX):
-            continue
+    olds = [p for p in game.iterdir() if p.name.endswith(OLD_SUFFIX)]
+    keep = game / PREVIOUS
+    if args.previous and olds:
+        shutil.rmtree(keep, ignore_errors=True)
+        keep.mkdir()
+        (keep / "version").write_text(f"{args.previous}\n", encoding="utf-8")
+    for p in olds:
         for _ in range(CLEAN_WAIT):
             try:
-                shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink()
+                if args.previous:
+                    p.rename(keep / p.name.removesuffix(OLD_SUFFIX))
+                else:
+                    shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink()
                 n += 1
                 break
-            except PermissionError:
+            except OSError:   # a running exe on Windows; in keep/, a leftover entry the previous clean-up left
                 time.sleep(1)
     shutil.rmtree(game / "update", ignore_errors=True)
     emit("cleaned", n)
@@ -156,7 +178,8 @@ def clean(args: argparse.Namespace) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    host = "windows" if os.name == "nt" else "linux"
+    # the package's own Python runs natively, so its machine is the package's: an AArch64 AppImage updates to the same
+    host = "windows" if os.name == "nt" else "linux-aarch64" if platform.machine() in ("aarch64", "arm64") else "linux"
     c = sub.add_parser("check")
     c.add_argument("--version", required=True, help="this program's (rt_port_version)")
     c.add_argument("--os", choices=ASSET_SUFFIX, default=host)
@@ -166,6 +189,7 @@ def main() -> None:
     f.add_argument("--os", choices=ASSET_SUFFIX, default=host)
     k = sub.add_parser("clean")
     k.add_argument("--game", type=Path, required=True)
+    k.add_argument("--previous", help="the version the replaced files are: kept for Undo instead of removed")
     args = ap.parse_args()
     try:
         {"check": check, "fetch": fetch, "clean": clean}[args.cmd](args)

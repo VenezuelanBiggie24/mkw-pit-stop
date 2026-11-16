@@ -23,6 +23,8 @@
 #include <sys/prctl.h>
 #include <sys/random.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
@@ -117,6 +119,19 @@ int plat_font_path(const char *lang, char *out, size_t cap) {
         "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     };
+    // Thai is not in the CJK collection: Noto Sans Thai (the variable font or the static one), then Tahoma-compatible
+    static const char *thai[] = {
+        "/usr/share/fonts/noto/NotoSansThai-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansThai[wdth,wght].ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+        "/usr/share/fonts/google-noto/NotoSansThai-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansThai-Regular.otf",
+    };
+    if (!strcmp(lang, "th")) {
+        for (size_t i = 0; i < sizeof thai / sizeof *thai; i++)
+            if (plat_file_exists(thai[i])) return snprintf(out, cap, "%s", thai[i]) < (int)cap;
+        return 0;
+    }
     if (strcmp(lang, "ja") && strcmp(lang, "ko") && strcmp(lang, "zh-Hans") && strcmp(lang, "zh-Hant")) return 0;
     for (size_t i = 0; i < sizeof files / sizeof *files; i++)
         if (plat_file_exists(files[i])) return snprintf(out, cap, "%s", files[i]) < (int)cap;
@@ -212,10 +227,6 @@ void plat_local_time(struct tm *out) {
     localtime_r(&t, out);
 }
 
-// The range of the Windows CRT's localtime_s and gmtime_s (1970 to 3000), which glibc exceeds: the game's time
-// service reports times outside it as invalid on both hosts.
-#define PLAT_TIME_MAX 32535215999ll
-
 int plat_localtime(int64_t unix_s, struct tm *out) {
     time_t t = (time_t)unix_s;
     return unix_s >= 0 && unix_s <= PLAT_TIME_MAX && localtime_r(&t, out) != NULL;
@@ -291,6 +302,60 @@ int plat_random(void *out, size_t n) {
         p += k, n -= (size_t)k;
     }
     return 1;
+}
+
+// ---- local IPC: a Unix stream socket. Reads with MSG_DONTWAIT, writes with MSG_NOSIGNAL (a closed peer is an error,
+// not SIGPIPE).
+
+struct PlatIpc { int fd; };
+
+PlatIpc *plat_ipc_open(const char *name) {
+    const char *dirs[4] = {getenv("XDG_RUNTIME_DIR"), getenv("TMPDIR"), getenv("TMP"), "/tmp"};
+    static const char *const subs[] = {"", "app/com.discordapp.Discord/", "snap.discord/"};
+    for (size_t d = 0; d < 4; d++) {
+        if (!dirs[d] || !*dirs[d]) continue;
+        for (size_t s = 0; s < sizeof subs / sizeof *subs; s++) {
+            struct sockaddr_un a = {.sun_family = AF_UNIX};
+            int n = snprintf(a.sun_path, sizeof a.sun_path, "%s/%s%s", dirs[d], subs[s], name);
+            if (n <= 0 || (size_t)n >= sizeof a.sun_path) continue;
+            int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+            if (fd < 0) return NULL;
+            if (!connect(fd, (struct sockaddr *)&a, sizeof a)) {
+                PlatIpc *c = malloc(sizeof *c);
+                if (!c) return close(fd), NULL;
+                c->fd = fd;
+                return c;
+            }
+            close(fd);
+        }
+    }
+    return NULL;
+}
+
+int plat_ipc_send(PlatIpc *c, const void *data, size_t n) {
+    for (const char *p = data; n;) {
+        ssize_t r = send(c->fd, p, n, MSG_NOSIGNAL);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) return 0;
+        p += r, n -= (size_t)r;
+    }
+    return 1;
+}
+
+long plat_ipc_recv(PlatIpc *c, void *buf, size_t cap) {
+    for (;;) {
+        ssize_t r = recv(c->fd, buf, cap, MSG_DONTWAIT);
+        if (r > 0) return (long)r;
+        if (r == 0) return -1;   // the peer closed
+        if (errno == EINTR) continue;
+        return errno == EAGAIN || errno == EWOULDBLOCK ? 0 : -1;
+    }
+}
+
+void plat_ipc_close(PlatIpc *c) {
+    if (!c) return;
+    close(c->fd);
+    free(c);
 }
 
 // ---- desktop
@@ -384,6 +449,32 @@ static void find_gpu(char *out, size_t cap) {
         if (!out[0] || used > best) snprintf(out, cap, "%s", dev), best = used;
     }
     closedir(d);
+}
+
+uint64_t plat_gpu_vram_mib(uint32_t vendor, uint32_t device, const uint8_t *luid) {
+    (void)luid;
+    uint64_t mib = 0;
+    DIR *d = opendir("/sys/class/drm");
+    if (!d) return 0;
+    for (struct dirent *e; (e = readdir(d));) {
+        if (strncmp(e->d_name, "card", 4) || strchr(e->d_name, '-')) continue;
+        char path[300];
+        unsigned v = 0, id = 0;
+        uint64_t bytes;
+        snprintf(path, sizeof path, "/sys/class/drm/%s/device/vendor", e->d_name);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        int ok = fscanf(f, "%x", &v) == 1;
+        fclose(f);
+        snprintf(path, sizeof path, "/sys/class/drm/%s/device/device", e->d_name);
+        if (!ok || v != vendor || !(f = fopen(path, "r"))) continue;
+        ok = fscanf(f, "%x", &id) == 1;
+        fclose(f);
+        snprintf(path, sizeof path, "/sys/class/drm/%s/device/mem_info_vram_total", e->d_name);
+        if (ok && id == device && read_u64_file(path, &bytes)) mib = bytes >> 20;
+    }
+    closedir(d);
+    return mib;
 }
 
 PlatLoad *plat_load_open(const uint8_t *gpu_luid) {
@@ -552,5 +643,33 @@ int plat_desktop_shortcut(const char *name, const char *exe, const char *dir, ch
         write_desktop_entry(menu, name, exe, dir);
     }
     if (out && cap) snprintf(out, cap, "%s", path);
+    return 1;
+}
+
+// ---- a URL scheme (GameBanana's 1-Click: "scheme:https://gamebanana.com/mmdl/...") opening exe with arg and the URL:
+// ~/.local/share/applications/<scheme>-url.desktop with x-scheme-handler/<scheme>, made the default for it in
+// ~/.config/mimeapps.list through xdg-mime; rewritten only when it differs (the AppImage moved).
+int plat_url_scheme(const char *scheme, const char *label, const char *exe, const char *arg) {
+    const char *home = getenv("HOME");
+    if (!home || strpbrk(exe, "\"\\`$")) return 0;
+    char dir[PATH_MAX], path[PATH_MAX + 64], want[PATH_MAX * 2];
+    snprintf(dir, sizeof dir, "%s/.local/share/applications", home);
+    plat_file_mkdir_p(dir);
+    snprintf(path, sizeof path, "%s/%s-url.desktop", dir, scheme);
+    snprintf(want, sizeof want,
+             "[Desktop Entry]\nType=Application\nName=%s\nExec=\"%s\" %s %%u\nNoDisplay=true\nTerminal=false\n"
+             "MimeType=x-scheme-handler/%s;\n", label, exe, arg, scheme);
+    uint64_t n = 0;
+    char *have = (char *)plat_file_read(path, &n);
+    int same = have && n == strlen(want) && !memcmp(have, want, n);
+    free(have);
+    if (same) return 1;
+    if (!plat_file_write_atomic(path, want, strlen(want))) return 0;
+    char mime[96], file[96];
+    snprintf(mime, sizeof mime, "x-scheme-handler/%s", scheme);
+    snprintf(file, sizeof file, "%s-url.desktop", scheme);
+    pid_t pid;
+    char *argv[] = {"xdg-mime", "default", file, mime, NULL};
+    if (!posix_spawnp(&pid, "xdg-mime", NULL, NULL, argv, environ)) waitpid(pid, NULL, 0);
     return 1;
 }

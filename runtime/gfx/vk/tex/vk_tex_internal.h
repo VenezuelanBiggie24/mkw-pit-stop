@@ -42,7 +42,11 @@ typedef struct Tex {
     uint8_t up_pending;           // an upload deferred for want of staging memory: the storage counts as changed
     uint64_t up_fail_frame;       // the frame of that failure: tried again from the next frame on
     struct Tex *rel_prev, *rel_next;   // while released: the list of released entries, oldest first
+    uint64_t rel_bytes;           // while released: its own memory, counted in released_bytes
+    uint64_t shash;               // XXH3 of the storage at the last upload (same_storage: no write watch)
+    uint32_t shash_epoch;         // submit_epoch of the last hash check
     uint8_t sparse;               // a Vulkan sparse image whose tiles follow the game's MapVirtual (vk_sparse.c)
+    VkSparseTail sparse_tail;      // privately backed small mips; zeroed at image initialization, without touching shared tiles
     uint64_t use;                 // MKW_GPU_GUARD: newest submission part that looked it up (vk_guard_note)
 } Tex;
 
@@ -72,6 +76,7 @@ extern TexSlot *tslots;
 extern int ntslots;
 extern SampSlot *sslots;
 extern int nsslots, nreleased;
+extern uint64_t released_bytes;   // own memory of the released entries (vk_tex_evict.c sweep_released)
 extern Tex *rel_head, *rel_tail;
 extern uint64_t n_uploads, n_reuploads, ru_n, ru_bytes, ru_ns, ru_wt_n, ru_wt_bytes, ru_wt_ns;
 // MKW_TRACE=perf: where upload() spends its time (tex_lock), per perf line: the precomputed-texture path (hash and
@@ -154,6 +159,10 @@ int tracing(uint64_t addr);
 
 // vk_tex_alias.c: aliases (MKW_TEX_ALIAS) and GPU writes into mirrored storage
 enum { WB_SMALL = 64 << 10 };
+// What goes back to its storage when the CPU waits for a fence (vk_texture_write_back_small): targets up to WB_SMALL
+// bytes, and pitch (LINEAR, LINEAR_RENDER_TARGET) textures of any size: that layout is asked for so that the CPU reads
+// the texels in place.
+static inline int wb_at_fence(const nvn_texdesc *d, uint64_t size) { return size <= WB_SMALL || nvn_tex_is_linear(d); }
 extern int small_pending;
 Tex *entry_of(const tex_t *t);
 Tex *entries_at(uint64_t addr);   // the first entry at that storage address; the rest by next_at

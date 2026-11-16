@@ -23,23 +23,40 @@ void gfx_window_placeholder_present(void);                 // presents the PS5 p
 // One boot screen frame (ui/menu/boot_screen.cpp) over black; 0, presenting nothing, once the game has presented.
 int gfx_window_boot_present(void);
 void gfx_vsync_bind(uint64_t system_event);                // nn::vi vsync event; signalled at 60 Hz
+int gfx_hdr_output(uint16_t *peak, uint16_t *white);       // 1: the window shows HDR10 (peak, paper white nits)
+void gfx_hdr_to_srgb8(const uint8_t *in, uint8_t *out, size_t px, int a2r);   // 10-bit PQ to sRGB bytes at paper white
 int gfx_window_focused(void);
 int gfx_window_lines(void);   // lines of the picture the window will show (monitor in fullscreen); 0 unknown
+int gfx_window_shape(int *w, int *h);   // its width and lines; 0 unknown (w and h then untouched)
 
 // ---- prepared shaders (gfx_shader.c)
 enum { GFX_STAGE_VS, GFX_STAGE_TCS, GFX_STAGE_TES, GFX_STAGE_GS, GFX_STAGE_FS, GFX_STAGE_CS };
 enum { GFX_MESH_NONE, GFX_MESH_TASK, GFX_MESH_MESH };      // gfx_shader_mesh_kind
 enum { GFX_TYPE_FLOAT, GFX_TYPE_SINT, GFX_TYPE_UINT };
-typedef struct {                                           // what a draw's state says of its vertex program
+typedef struct {                                           // what a draw's state says of its program
     uint8_t attr_type[16];                                 // GFX_TYPE_* of each vertex attribute's format: integer
                                                            // ones get an integer-input variant (int_input_variant)
+    uint8_t out_type[8];                                   // fragment: GFX_TYPE_* of each colour target's format,
+                                                           // integer ones an integer-output variant (int_output_variant)
+    uint64_t img_uint, img_sint;                           // compute: bindings (bit = binding) of the TEX/IMG whose
+                                                           // bound view has a uint / sint format (int_image_variant)
 } GfxShaderAnswers;
 typedef struct GfxShader GfxShader;                        // SPIR-V words + parsed reflection; owned by the cache
 // The prepared SPIR-V of a program (tools/shaders/translate.py), as its integer-input variant for the attribute types
 // in a; NULL when the program has none (logged). Loads it on its first use.
 const GfxShader *gfx_shader_get(const uint8_t *control, const uint8_t *code, const GfxShaderAnswers *a);
-// The integer-input variant of a prepared vertex shader for the attribute types in a, or s (pipeline key records).
+// The integer variant of a prepared vertex or fragment shader for the attribute or target types in a, or s (pipeline
+// key records).
 const GfxShader *gfx_shader_int_variant(const GfxShader *s, const GfxShaderAnswers *a);
+// gfx_spirv_io.c: w with the variables of storage class sc (1 Input, 3 Output) at the Locations in umask / smask
+// retyped to uvec4 / ivec4, each load bitcast back to float and each stored value to the integer type
+// (int_input_variant, int_output_variant); NULL when it cannot. The words are malloc'd.
+uint32_t *spirv_int_io(const uint32_t *w, uint64_t n, uint32_t umask, uint32_t smask, uint32_t sc, uint64_t *out_n);
+// gfx_spirv_img.c: w with the image bindings in umask / smask retyped to uint / int images (int_image_variant); NULL
+// when it cannot (logged by the caller). The words are malloc'd. why, when supplied, receives a static failure reason;
+// out_n is zero on failure. Neither diagnostic changes the input module.
+uint32_t *spirv_int_images(const uint32_t *w, uint64_t n, uint64_t umask, uint64_t smask, uint64_t *out_n,
+                           const char **why);
 uint64_t gfx_shader_count(void);                           // shaders in memory (MKW_TRACE=perf, flight recorder)
 const uint8_t *gfx_shader_key(const GfxShader *s);          // the 32-byte cache key (program key; variants their own)
 const uint8_t *gfx_shader_input_id(const GfxShader *s);     // the 32-byte id in pipeline key records: the program key
@@ -57,7 +74,8 @@ typedef struct {
     uint16_t type;              // TEX/IMG: Ryujinx SamplerType: 1 1D, 2 buffer, 3 2D, 4 3D, 5 cube | 0x100 array,
                                 // 0x200 multisample, 0x400 shadow
     uint8_t format;             // IMG: declared format as a GfxShaderAnswers.img_format code, 0 unknown
-    uint8_t flags;              // SSBO: 1 written; TEX/IMG: Ryujinx TextureUsageFlags (4 image store, 8 coherent)
+    uint8_t flags;              // SSBO: 1 written; UBO: 2 the bank's word view, bound as a storage buffer (cbNw);
+                                // TEX/IMG: Ryujinx TextureUsageFlags (4 image store, 8 coherent)
     int8_t cbuf_slot;           // TEX/IMG: constant buffer of the handle (-1: bound texture buffer); SSBO: of its address
     uint16_t handle;            // TEX/IMG: raw handle (word offset; separate: texture | sampler << 14); SSBO: address offset
     uint16_t count;             // descriptors (array length)
@@ -109,8 +127,8 @@ typedef struct {
     void (*write_texels)(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, uint64_t row, uint64_t img);
     void (*guest_written)(uint64_t addr, uint64_t size);   // host wrote pool storage (3.2)
     void (*guest_read)(uint64_t addr, uint64_t size);      // the CPU reads pool storage: GPU-written texels go there first
-    // The CPU waited for fence: small render targets written by work up to it go to their storage (vk_texture.c
-    // vk_texture_write_back_small).
+    // The CPU waited for fence: small render targets and pitch textures written by work up to it go to their storage
+    // (vk_texture.c vk_texture_write_back_small).
     void (*cpu_synced)(uint64_t fence);
 } GfxBackend;
 extern const GfxBackend gfx_null_backend, gfx_vulkan_backend;

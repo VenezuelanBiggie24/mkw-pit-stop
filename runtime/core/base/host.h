@@ -17,7 +17,7 @@
 
 // ---- logging and results
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));   // "[host] <msg>\n" to the log, one write
-// The log is stderr plus, in a game run whose stderr is not a file, logs\mkw.log next to mkw (main.c log_open).
+// The log is stderr plus, in a game run whose stderr is not a file, logs\mkw.log in the game folder (main.c log_open).
 // rt_logf and rt_log_raw write to both without the prefix and the newline: crash reports, fatal errors, guest output.
 void rt_logf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void rt_vlogf(const char *fmt, va_list ap);
@@ -156,6 +156,9 @@ uint32_t mem_map_physical(uint64_t a, uint64_t n);                              
 uint32_t mem_unmap_physical(uint64_t a, uint64_t n);                            // 0x2D
 int mem_info(uint32_t id, uint64_t *out);                  // GetInfo memory ids 2-7, 12-17, 21, 22, 28; 0 if not a memory id
 void *mem_kernel_alloc(uint64_t size, uint64_t align);     // zeroed, guest-visible, in the kernel region; align <= 64 KiB
+uint64_t mem_runtime_alloc(uint64_t size, const char *what);   // committed, guest-visible, write-watched memory of the
+                                                           // runtime's own above the game's heap (2 MiB multiples,
+                                                           // never freed); 0 with a log line when it does not fit
 uint64_t mem_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max);
                                                            // GetWriteWatch(RESET): fills pages[] (4 KiB addresses)
                                                            // with the pages of [addr, addr+size) written since the
@@ -172,7 +175,12 @@ int mem_freeze(uint64_t a);                                // makes the 2 MiB re
 int mem_frozen(uint64_t a);                                // the 2 MiB region of a is frozen: no page in it changed
                                                            // since its freeze; nonzero is that freeze's number
 void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen regions over [a, a+n) writable again;
-                                                           // before a kernel write (file read) into guest memory
+                                                           // before a kernel write (file read) into guest memory;
+                                                           // commits the range first (mem_commit_range)
+void mem_commit_range(uint64_t a, uint64_t n);             // Windows' lazy commit (MKW_LAZY_COMMIT): the game's
+                                                           // pages of [a, a+n) committed now, before something that
+                                                           // does not fault into the handler reads or writes them
+                                                           // (the kernel, a driver import); a no-op elsewhere
 void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws);
                                                            // regions frozen now; freezes and thaws since the last call
 int mem_trap(uint64_t a, uint64_t n, const void *src);     // [a, a+n) (watched) takes the n bytes at src: the whole
@@ -182,6 +190,10 @@ int mem_trap(uint64_t a, uint64_t n, const void *src);     // [a, a+n) (watched)
 void mem_untrap(uint64_t a, uint64_t n);                   // fills the trapped pages of [a, a+n) and forgets the
                                                            // sources inside it (before src goes)
 int mem_trapped(uint64_t a);                               // the page of a is trapped (its bytes are still the source's)
+void mem_hold_layout(void);                                // no commit, decommit or protection change until
+void mem_release_layout(void);                             // mem_release_layout (a scan reading committed pages); a
+                                                           // fault on a frozen page waits for it, so no trapped page
+                                                           // may be read in between
 // Base traps (memory_btrap.c): pages of a range standing for the shadow's merge base until something writes them.
 void mem_base_hook(void (*fn)(uint64_t page));             // called under frz_lock before a base-trapped page changes
 int mem_base_trap(uint64_t lo, uint64_t hi, uint64_t *bits);   // whole pages of [lo, hi) (page aligned) read-only;
@@ -241,6 +253,7 @@ int64_t seqwatch_since_us(void);                         // since MKW_SEQ_UNTIL'
 int seqwatch_hold(void);                                   // a MKW_SEQ_HOLD node is active: no input script presses
 void seqwatch_movie_end(void);                              // a video reached its end of stream (ov_codec.c)
 void seqwatch_log_active(void);                            // ctl seq: the active sequence nodes
+int seqwatch_probe(void);                                  // inside a MKW_PROBE window: a probe logs every call
 uint64_t ldr_symbol(const char *name);                     // exported definition, 0 if none
 uint64_t ldr_plt_stub(const char *module, const char *name); // PLT stub whose GOT slot holds name, 0 if none
 const char *ldr_describe(uint64_t a, char *buf, int n);    // "main+0x1234 (symbol+0x10)", "host <name>", or the address
@@ -308,6 +321,8 @@ int64_t frame_step_world_us(void);                         // game time since th
 void ctl_init(void);                                       // MKW_CTL=<fifo>: commands to the running game (ctl.c)
 void ctl_run(char *line);                                  // one ctl command now (MKW_SEQ_CTL, seqwatch.c)
 void rt_shot_request(const char *path);                    // the next presented frame to path, full size (boot.c)
+void gfx_aspect_set(float a);  // gfx_present.c, from patches.c: MKW_ASPECT's width / height when wider than 16:9, else 0
+int ov_movie_playing(void);  // ov_codec.c: a full-screen movie (1280 wide or more) gave a frame in the last half second
 uint64_t frame_step_ticks(void);                           // game time since the first present in 60 Hz ticks (input scripts)
 // In-launch A/B measurement: MKW_AB=<seconds> splits the world clock (frame_step_world_us) into blocks of that much
 // game time in the order A B B A (repeated; B A A B with MKW_AB_INVERT=1); rt_ab() is 1 in the B blocks, 0 in A
@@ -321,11 +336,40 @@ int rt_knob(const char *name, const char *def);
 extern volatile uint64_t nvn_timestamp_last; // nvn_ext.c: the counter timestamp the game read last (ticks)
 void frame_step_present(uint64_t display_ns, int interval); // nvnQueuePresentTexture: the frame's display time and
                                                            // present interval (60 Hz ticks)
+int frame_present_interval(void);   // the interval of the game's last present (1-4), any thread: frame generation's rate
+// MKW_FPS=auto (fps_auto.c): the present interval 1-4 from each frame's measured time, with hysteresis
+#define FPS_AUTO_MAX 4
+#define FPS_AUTO_HIST 120
+typedef struct {
+    double hist[FPS_AUTO_HIST], real[8];
+    unsigned head, n, since, n_real, hold, hold_s;
+    int iv, downed;
+    double stall_ms;   // how long the frames have been slower than any interval holds (fps_auto.c)
+    int fits;          // the last frames before it fitted the interval
+} FpsAuto;
+void fps_auto_reset(FpsAuto *a);                           // interval 1, no history
+int fps_auto_step(FpsAuto *a, double measured_ms, double real_ms);   // a frame's game measure and real period in,
+                                                                     // the interval to use out
+int probe_discord(void);                                   // discord_probe.c: Rich Presence against the local Discord
+int probe_fps(void);                                       // fps_probe.c: the controller on synthetic frame times
+void lat_input_read(void);                                 // vk_latency.c MKW_LATENCY: the game read the controller
+void lat_game_present(uint64_t slot);                      // ... and presented the frame shown at slot (pacer, ns)
+void lat_mark(const char *what);                           // ... a frame event, logged in MKW_PROBE's window
+// MKW_LOW_LATENCY (frame_jit.c): acquires wait until the next slot minus the frame's measured work
+void frame_jit_present(uint64_t slot, uint64_t acquired);  // nvnQueuePresentTexture: the frame's slot, its acquire (ns)
+void frame_jit_slack(uint64_t slot, int64_t slack);        // present thread: slot minus GPU done (< 0: not ready)
+uint64_t frame_jit_start(uint64_t next_slot);              // acquire: the time to wait until, 0 none
 void frame_rate_host(uint64_t patch_page);                 // game.c MKW_FPS: register its host function (patches.c)
 void frame_rate_init(uint64_t patch_page);                 // and point the frame object's vtable slot at it
+void race_scene_host(uint64_t patch_page);                 // race_scene.c: register its host function (patches.c)
+void race_scene_init(uint64_t patch_page);                 // point the race nodes' start slots at it (after seqwatch)
+int race_scene_on(void);                                   // the game is in a race (game.c: 20 and 15 fps only there)
 // ---- boot (boot.c, main.c)
-typedef struct { const char *exefs, *romfs, *profile; int boot; double seconds; const char *shot, *gpu; } RtConfig;
-                                                           // romfs: the dump's loose romfs/ directory;
+typedef struct { const char *exefs, *romfs, *profile; int boot; double seconds; const char *shot, *gpu, *profile_base; } RtConfig;
+                                                           // profile: the player's folder (core/base/players.h);
+                                                           // profile_base: the folder the players live in
+                                                           // romfs: the dump's loose romfs/ directory or
+                                                           // its .nup package;
                                                            // frames: --frames N (0 = no limit); shot: --shot
                                                            // PATH; gpu: MKW_GPU
 const RtConfig *rt_config(void);
@@ -342,5 +386,6 @@ int probe_nvn(void), probe_nvn_tex(void);                  // nvn_probe.c, nvn_t
 int probe_window(void);                                    // gfx_window_probe.c
 int probe_vkmem(void), probe_vkexec(void), probe_astc(void);                 // tex_probe.c, vk_exec_probe.c, astc_probe.c
 int probe_texpre(void);                                    // texpre_probe.c: GPU BC7 against bc7enc on game textures
+int probe_framegen(void);                                  // fg_probe.c: frame generation on two pictures
 
 int vk_texpre_encode(void);                                  // vk_texpre.c: --texpre (BC7 of the recorded ASTC textures)

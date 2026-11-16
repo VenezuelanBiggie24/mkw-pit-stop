@@ -251,6 +251,10 @@ void vk_exec_pass_begin(VkExec *ex) {
     ex->in_pass = 1;
 }
 
+// Set while a pass ends only to resume (maybe_split's new command buffer, an inline command such as MKW_DUMP_DRAWS's
+// snapshots or MKW_TEX_ALIAS's copies): the targets are half drawn, MKW_RTSTATS leaves them for the real end of the pass.
+static _Thread_local int split_ending;
+
 void vk_exec_pass_end(VkExec *ex) {
     if (!ex->in_pass) return;
     vk_exec_oq_pass_end(ex);
@@ -263,6 +267,7 @@ void vk_exec_pass_end(VkExec *ex) {
     ex->in_pass = 0;
     vk_ind_read_pass_end(ex);
     if (vk_dump_armed) vk_dump_pass_end(ex);
+    if (vk_rtstats_on && !split_ending) vk_rtstats_pass_end(ex);
     uint64_t stamp = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) + 1;
     for (int i = 0; i < 8; i++)
         if (ex->color[i].image) {
@@ -280,7 +285,9 @@ VkCommandBuffer vk_exec_inline_begin(int *reopen) {
     *reopen = 0;
     if (!ex || !ex->cb) return VK_NULL_HANDLE;
     *reopen = ex->in_pass;
+    split_ending = ex->in_pass;
     vk_exec_barrier(ex);   // ends the pass; feedback-layout targets go back to GENERAL
+    split_ending = 0;
     return ex->cb;
 }
 
@@ -378,7 +385,7 @@ static void maybe_split(VkExec *ex) {
     split_draws = 0;
     if (ex->recorded == part_start) return;
     int reopen = ex->in_pass;
-    if (reopen) vk_exec_pass_end(ex), n_in_pass++;
+    if (reopen) split_ending = 1, vk_exec_pass_end(ex), split_ending = 0, n_in_pass++;
     ex->cb = vk_sync_split();
     part_start = ex->recorded;
     part_t0 = kern_now_ns();
@@ -403,7 +410,7 @@ static const char *opx_name(int i) {
 
 void vk_exec_op_timing_log(void) {
     if (op_timing <= 0) return;
-    uint64_t t = __rdtsc(), ns = kern_now_ns(), span = op_t0 ? t - op_t0 : 0, all = 0;
+    uint64_t t = plat_cycles(), ns = kern_now_ns(), span = op_t0 ? t - op_t0 : 0, all = 0;
     double us_per_tick = span ? (double)(ns - op_ns0) / 1e3 / (double)span : 0;   // the TSC's rate, from this span
     op_t0 = t, op_ns0 = ns;
     int ord[OPX_N];
@@ -481,10 +488,7 @@ int vk_exec_state_op(VkExec *ex, uint32_t op, const void *a) {
 // the other had set). A queue first seen in the submission starts from the state the replay is at, as every
 // submission does. The switch ends the pass and puts a full barrier between the two queues' work: the wait it stands
 // for orders the other queue's writes before what follows.
-#define QS_MAX 4
-static struct { uint64_t id; VkExec st; } qs[QS_MAX];
-static int nqs;
-static uint64_t qs_cur;
+static VkExecQueues QS;
 
 // MKW_QORDER_LOG=N (diagnosis): the first N queue switches, each with what the queue before it ran since its turn
 // began (draws, dispatches, ops), to tell which stages the queues pass each other.
@@ -494,30 +498,27 @@ static void queue_switch_log(uint64_t id) {
     if (left < 0) left = cfg_get("MKW_QORDER_LOG") ? atoi(cfg_get("MKW_QORDER_LOG")) : 0;
     if (!left) return;
     left--;
-    if (!qs_cur) o0 = 0;   // (op positions count from the submission's start)
+    if (!QS.cur) o0 = 0;   // (op positions count from the submission's start)
     rt_log("vk: queue %#llx after %#llx: %llu draws, %llu dispatches, %llu ops in its turn (fence %llu)",
-           (unsigned long long)id, (unsigned long long)qs_cur,
+           (unsigned long long)id, (unsigned long long)QS.cur,
            (unsigned long long)(vk_exec_frame.draws_seen - d0), (unsigned long long)(vk_exec_frame.dispatches - c0),
            (unsigned long long)(x_pos - o0), (unsigned long long)vk_exec_recording_fence());
     d0 = vk_exec_frame.draws_seen, c0 = vk_exec_frame.dispatches, o0 = x_pos;
 }
 
-static void queue_switch(VkExec *ex, uint64_t id) {
-    if (id == qs_cur) return;
-    queue_switch_log(id);
-    vk_exec_pass_end(ex);
-    vk_exec_barrier(ex);
+int vk_exec_queue_swap(VkExecQueues *t, VkExec *ex, uint64_t id) {
+    if (id == t->cur) return 0;
     int from = -1, to = -1;
-    for (int i = 0; i < nqs; i++) {
-        if (qs[i].id == qs_cur) from = i;
-        if (qs[i].id == id) to = i;
+    for (int i = 0; i < t->n; i++) {
+        if (t->q[i].id == t->cur) from = i;
+        if (t->q[i].id == id) to = i;
     }
-    if (qs_cur && from < 0 && nqs < QS_MAX) from = nqs++, qs[from].id = qs_cur;
-    if (from >= 0) qs[from].st = *ex;
-    qs_cur = id;
-    if (to < 0) return;
+    if (t->cur && from < 0 && t->n < VK_EXEC_QUEUES) from = t->n++, t->q[from].id = t->cur;
+    if (from >= 0) t->q[from].st = *ex;
+    t->cur = id;
+    if (to < 0) return 1;   // a queue first seen goes on from ex
     VkExec keep = *ex;
-    *ex = qs[to].st;
+    *ex = t->q[to].st;
     // What belongs to the command buffer being recorded, not to the queue: kept.
     ex->cb = keep.cb, ex->fence = keep.fence, ex->recorded = keep.recorded, ex->in_pass = 0;
     ex->views = keep.views, ex->nviews = keep.nviews, ex->cap_views = keep.cap_views;
@@ -527,6 +528,15 @@ static void queue_switch(VkExec *ex, uint64_t id) {
     ex->nfbl = keep.nfbl, ex->fbl_mask = keep.fbl_mask, ex->fb_dirty = keep.fb_dirty, ex->fb_fs = NULL;
     ex->tex_serial = keep.tex_serial + 1, ex->pass_serial = keep.pass_serial + 1;
     ex->dirty = VK_EXEC_DIRTY_ALL, ex->rt_resolved = 0;
+    return 2;
+}
+
+static void queue_switch(VkExec *ex, uint64_t id) {
+    if (id == QS.cur) return;
+    queue_switch_log(id);
+    vk_exec_pass_end(ex);
+    vk_exec_barrier(ex);
+    if (vk_exec_queue_swap(&QS, ex, id) < 2) return;
     dc_drop("a queue switch");
     vk_exec_draw_new_cb();
 }
@@ -542,7 +552,12 @@ int vk_exec_op(VkExec *ex, const op_hdr *h) {
     case OP_SET_RT: set_rt(ex, a); break;
     case OP_CLEAR_COLOR: clear_color(ex, a); break;
     case OP_CLEAR_DS: clear_ds(ex, a); break;
-    case OP_BARRIER: vk_exec_barrier(ex); break;
+    case OP_BARRIER: {   // #43: the GPU hung between marks, where only barriers and such were recorded
+        uint32_t crumb = vk_crumb_op(ex->cb, "barrier", 0, 0);
+        vk_exec_barrier(ex);
+        vk_crumb_end(ex->cb, VK_CRUMB_OP, crumb);
+        break;
+    }
     case OP_DRAW_MESH:   // task/mesh pipelines (VK_EXT_mesh_shader) with MKW_MESH=1; else counted, not drawn
         vk_exec_frame.draws_seen++;
         if (mesh_on()) vk_exec_op_draw(ex, h->op, a);
@@ -594,7 +609,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         if (h->size < sizeof *h || (h->size & 7) || h->op >= OP_COUNT_)
             rt_fatal("vk: corrupt command record at %p: op %u size %u", (const void *)h, h->op, h->size);
         const void *a = nvn_op_payload(h);
-        uint64_t c0 = op_timing ? __rdtsc() : 0;
+        uint64_t c0 = op_timing ? plat_cycles() : 0;
         int drew = 0;
         switch (h->op) {
         case OP_END: return;
@@ -608,7 +623,7 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         }
         if (op_timing && h->op != OP_CALL) {
             int k = op_hit ? op_hit : (int)h->op;
-            uint64_t dt = __rdtsc() - c0;
+            uint64_t dt = plat_cycles() - c0;
             op_tsc[k] += dt, op_cnt[k]++, op_hit = 0;
             if (drew && op_dump) fprintf(op_dump, "%llu %llu %d %llu\n", (unsigned long long)op_sub,
                                          (unsigned long long)x_pos, k, (unsigned long long)dt);
@@ -616,9 +631,9 @@ static void walk(VkExec *ex, const op_hdr *h, int depth) {
         // After a draw or dispatch only: asked after every op once past split_n, the part's clock check (maybe_split)
         // took 22 % of the race's wall clock (rt-h5: 1.4 million calls of 0.36 us).
         if (drew && ++split_draws >= split_n) {
-            uint64_t s0 = op_timing ? __rdtsc() : 0;
+            uint64_t s0 = op_timing ? plat_cycles() : 0;
             maybe_split(ex);
-            if (op_timing) op_tsc[OPX_SPLIT] += __rdtsc() - s0, op_cnt[OPX_SPLIT]++;
+            if (op_timing) op_tsc[OPX_SPLIT] += plat_cycles() - s0, op_cnt[OPX_SPLIT]++;
         }
         h = nvn_op_next(h);
     }
@@ -678,7 +693,7 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
     uint64_t sl0 = sublog_on ? kern_now_ns() : 0;
     uint64_t sld = vk_exec_frame.draws_seen;
     VkExec *ex = &X;
-    if (!x_ready) state_reset(ex), vk_dump_init(), x_ready = 1;
+    if (!x_ready) state_reset(ex), vk_dump_init(), vk_rtstats_init(), x_ready = 1;
     vk_exec_draw_thread();
     ex->cb = cb;
     ex->fence = fence;
@@ -695,20 +710,20 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
     part_t0 = kern_now_ns();
     x_cur = x_here_ex = ex;
     x_pos = 0;
-    nqs = 0, qs_cur = 0;   // queue states live within one submission (queue_switch)
-    uint64_t b0 = op_timing > 0 ? __rdtsc() : 0;
+    QS.n = 0, QS.cur = 0;   // queue states live within one submission (queue_switch)
+    uint64_t b0 = op_timing > 0 ? plat_cycles() : 0;
     if (n && rec_diff_on > 0) rec_diff_begin();
     if (n) ru_submission(ex);
     if (n) vk_mem_mirror_begin(), vk_usnap_begin(handles, n, fence);
     if (pt_on < 0) pt_on = vk_pt_on();
     if (pt_on > 0 && n) vk_pt_submit_begin(ex->cb);
-    if (op_timing > 0) op_tsc[OPX_BEGIN] += __rdtsc() - b0, op_cnt[OPX_BEGIN]++;
+    if (op_timing > 0) op_tsc[OPX_BEGIN] += plat_cycles() - b0, op_cnt[OPX_BEGIN]++;
     for (int i = 0; i < n; i++)
         if (!handles[i]) rt_fatal("vk: command handle %d of a submission is null", i);
     if (n && vk_exec_par(ex, handles, n, op_timing > 0 || pt_on > 0)) part_start = ex->recorded;   // chunks submitted
     else
         for (int i = 0; i < n; i++) walk(ex, nvn_op_first(handles[i]), 0);
-    b0 = op_timing > 0 ? __rdtsc() : 0;
+    b0 = op_timing > 0 ? plat_cycles() : 0;
     vk_exec_pass_end(ex);
     x_cur = x_here_ex = NULL;
     if (ex->recorded) vk_exec_barrier(ex);   // later submissions see this one's writes
@@ -717,7 +732,7 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
     if (n && rec_diff_on > 0) rec_diff_end();
     views_release(ex);
     ex->cb = VK_NULL_HANDLE;
-    if (op_timing > 0) op_tsc[OPX_END] += __rdtsc() - b0, op_cnt[OPX_END]++;
+    if (op_timing > 0) op_tsc[OPX_END] += plat_cycles() - b0, op_cnt[OPX_END]++;
     if (sl0 && nsublog < SUBLOG_N)
         sublog[nsublog++] = (typeof(sublog[0])){(uint32_t)((sl0 - sublog_t0) / 1000), (uint32_t)((kern_now_ns() - sl0) / 1000),
                                                 (uint32_t)(vk_exec_frame.draws_seen - sld), plat_thread_id()};

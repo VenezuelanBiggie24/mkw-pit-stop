@@ -351,15 +351,16 @@ class MemOps:
 
     def cb_word(self, bank: int, base: str, off: int) -> str:
         """The word at byte base + off of a constant bank, base dynamic and off a constant multiple of 4: through the
-        bank's scalar-layout view (head.py), as (base >> 2) + off / 4 with an arithmetic shift, so a negative base
-        still lands where base + off does. Through the std140 `.d[A >> 4][(A >> 2) & 3]` RADV paid ~4 VALU per load
-        (add, and -16, bfe, lshl_add) that it never folds into A & ~3; this way the shift is shared by the loads with
-        one base and the offset goes into the load's immediate (pt4)."""
+        bank's bounded word view (head.py cbNw_at: 0 past the bound range), as (base >> 2) + off / 4 with an
+        arithmetic shift, so a negative base still lands where base + off does. Through the std140
+        `.d[A >> 4][(A >> 2) & 3]` RADV paid ~4 VALU per load (add, and -16, bfe, lshl_add) that it never folds into
+        A & ~3; this way the shift is shared by the loads with one base and the offset goes into the load's immediate
+        (pt4)."""
         if off & 3:
             a = f"({base} + {off}u)"
             return f"cb{bank}.d[{a} >> 4][({a} >> 2) & 3u]"
         self.cbufs_w.add(bank)
-        return f"cb{bank}w.w[uint(int({base}) >> 2) + {off >> 2}u]"
+        return f"cb{bank}w_at(uint(int({base}) >> 2) + {off >> 2}u)"
 
     def shared_mem(self, i: Insn) -> str:
         """LDS/STS: byte address Ra * stride (X1/X4/X8/X16) [+ URb] + offset into shared memory (words); LDS of 8/16
@@ -381,11 +382,11 @@ class MemOps:
             if n == RZ:
                 return ""
             self.regs.add(n)
-            w, sh, (bits, signed) = f"smem[{addr} >> 2]", f"int(({addr} & 3u) * 8u)", sub
+            w, sh, (bits, signed) = f"SMEM({addr} >> 2)", f"int(({addr} & 3u) * 8u)", sub
             v = f"uint(bitfieldExtract(int({w}), {sh}, {bits}))" if signed else f"bitfieldExtract({w}, {sh}, {bits})"
             return f"r{n} = {v};"
         for k in range(words):
-            w = f"smem[({addr} >> 2) + {k}u]"
+            w = f"SMEM(({addr} >> 2) + {k}u)"
             if i.op == "LDS":
                 n = i.v("Rd")
                 if n != RZ:

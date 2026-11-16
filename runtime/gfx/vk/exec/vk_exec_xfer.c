@@ -332,8 +332,10 @@ static void report_counter(VkExec *ex, const p_report_counter *p) {
         ReportCb *r = malloc(sizeof *r);
         if (!r) rt_fatal("vk: out of memory");
         *r = (ReportCb){p->addr, 0, NULL};
-        if (nvn_report_at_submit() && gpu_end_mode()) {   // the value the submit wrote (nvn_api_cmd.c)
-            r->ts = __atomic_load_n((const uint64_t *)(uintptr_t)(p->addr + 8), __ATOMIC_RELAXED);
+        uint64_t ts = nvn_report_at_submit() && gpu_end_mode()   // the value the submit wrote (nvn_api_cmd.c)
+                          ? __atomic_load_n((const uint64_t *)(uintptr_t)(p->addr + 8), __ATOMIC_RELAXED) : 0;
+        if (ts) {   // 0: no submit wrote it (a stream replayed without the front end): there is no time to move
+            r->ts = ts;
             if (!group_cur || group_cur->fence != ex->fence) {
                 group_cur = calloc(1, sizeof *group_cur);
                 if (!group_cur) rt_fatal("vk: out of memory");
@@ -491,6 +493,10 @@ static int sub_resolve(const tex_t *t, const view_t *v, int has_v, const NVNcopy
     }
     s->level = has_v && v->set_levels ? v->base_level : 0;
     s->layer0 = has_v && v->set_layers ? v->min_layer : 0;
+    if (img->drop) {   // vk_tex_image.c tex_drop: the level is not in the image
+        if (s->level < img->drop) return 0;
+        s->level -= img->drop;
+    }
     uint32_t lw = max1(img->width >> s->level), lh = max1(img->height >> s->level);
     s->x = r->xoffset, s->y = r->yoffset, s->z = r->zoffset;
     s->nz = r->depth > 0 ? (uint32_t)r->depth : 1;
@@ -521,6 +527,20 @@ static VkExtent3D sub_extent(const Sub *s) {
     return (VkExtent3D){s->w, s->h, s->img->type == VK_IMAGE_TYPE_3D ? s->nz : 1};
 }
 
+// A compressed buffer copy covers whole blocks (buffer_side counts them rounded up); Vulkan wants the extent in whole
+// blocks too, or reaching the level's edge (VUID 00207/00208): MKW copies 511x511 texels of BC7 into a 512x512 level.
+// Not for texture copies: rounding each side against its own level made equal regions differ, and the copy a blit.
+static VkExtent3D sub_extent_blocks(const Sub *s) {
+    VkExtent3D e = sub_extent(s);
+    if (s->astc_bw || (s->bw == 1 && s->bh == 1)) return e;
+    uint32_t bw = (uint32_t)s->bw, bh = (uint32_t)s->bh, rw = (s->w + bw - 1) / bw * bw, rh = (s->h + bh - 1) / bh * bh;
+    uint32_t lw = s->img->width >> s->level, lh = s->img->height >> s->level;
+    lw = lw ? lw : 1, lh = lh ? lh : 1;
+    e.width = rw < lw - (uint32_t)s->x ? rw : lw - (uint32_t)s->x;
+    e.height = rh < lh - (uint32_t)s->y ? rh : lh - (uint32_t)s->y;
+    return e;
+}
+
 // Buffer side of a texture <-> buffer copy: bytes covered, pitches, Vulkan buffer span (a VRAM mirror when the pool
 // has one).
 static int buffer_side(const VkExec *ex, const Sub *s, uint64_t addr, uint64_t *size, VkBufferImageCopy *c,
@@ -544,7 +564,7 @@ static int buffer_side(const VkExec *ex, const Sub *s, uint64_t addr, uint64_t *
     *span = m;
     *c = (VkBufferImageCopy){.bufferOffset = m.offset, .bufferRowLength = (uint32_t)(row / (uint64_t)s->bpb) * (uint32_t)s->bw,
                              .bufferImageHeight = hb * (uint32_t)s->bh, .imageSubresource = sub_layers(s),
-                             .imageOffset = sub_offset(s), .imageExtent = sub_extent(s)};
+                             .imageOffset = sub_offset(s), .imageExtent = sub_extent_blocks(s)};
     return 1;
 }
 
@@ -588,7 +608,7 @@ static int astc_into_sparse(const p_copy_t2t *p) {
     uint32_t w = p->sr.width > 0 ? (uint32_t)p->sr.width : lw - x, h = p->sr.height > 0 ? (uint32_t)p->sr.height : lh - y;
     uint32_t n = p->sr.depth > 0 ? (uint32_t)p->sr.depth : 1, dl0 = d.layer0 + (uint32_t)d.z;
     if (level >= p->src->d.levels || x + w > lw || y + h > lh || w != d.w || h != d.h) return 0;
-    if (!vk_texture_astc_copy(p->src, level, layer, n, x, y, w, h, d.img->image, d.aspect, d.level, dl0, d.x, d.y, 1))
+    if (!vk_texture_astc_copy(p->src, level, layer, n, x, y, w, h, d.img, d.aspect, d.level, dl0, d.x, d.y, 1))
         return 0;
     vk_texture_gpu_written(p->dst);
     vk_sparse_written(d.img->image, d.level, dl0, n, d.x, d.y, w, h);
@@ -663,7 +683,7 @@ static const char *copy_t2t_do(VkExec *ex, const p_copy_t2t *p) {
     if (s.astc_bw && s.astc_bw == d.astc_bw && s.astc_bh == d.astc_bh && s.img->format != df) {
         uint32_t dl0 = d.layer0 + (uint32_t)d.z;
         if (vk_texture_astc_copy(p->src, s.level, s.layer0 + (uint32_t)s.z, s.nz, (uint32_t)s.x, (uint32_t)s.y, s.w, s.h,
-                                 d.img->image, d.aspect, d.level, dl0, d.x, d.y, to_bc)) {
+                                 d.img, d.aspect, d.level, dl0, d.x, d.y, to_bc)) {
             vk_texture_gpu_written(p->dst);
             vk_sparse_written(d.img->image, d.level, dl0, s.nz, d.x, d.y, s.w, s.h);
             return "ASTC decoded from storage";
@@ -827,19 +847,6 @@ static void clear_buf(VkExec *ex, const p_clear_buf *p) {
 
 // ---- texture clears
 
-static int int_format(VkFormat f) {
-    switch (f) {
-    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R8_SINT:
-    case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_R16_UINT: case VK_FORMAT_R16G16_UINT:
-    case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_SINT:
-    case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32G32_UINT:
-    case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32G32_SINT:
-    case VK_FORMAT_R32G32B32A32_SINT: case VK_FORMAT_A2B10G10R10_UINT_PACK32:
-        return 1;
-    default: return 0;
-    }
-}
-
 // Whole levels only (vkCmdClear*Image has no rectangle); partial regions, channel masks and a view that reinterprets
 // the format are skipped (MacNativeGames does not replay them either, nvn_mtl.m).
 static void clear_tex(VkExec *ex, const p_clear_tex *p) {
@@ -861,7 +868,7 @@ static void clear_tex(VkExec *ex, const p_clear_tex *p) {
     if (img->aspect & VK_IMAGE_ASPECT_COLOR_BIT) {
         rng.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         VkClearColorValue cv;
-        if (int_format(img->format) != (p->is_uint != 0)) {
+        if ((vk_format_numeric(img->format) != GFX_TYPE_FLOAT) != (p->is_uint != 0)) {
             warn_once(W_CLEAR, "texture clear value kind (uint %d) does not match format %d: skipped", p->is_uint, (int)img->format);
             return;
         }
@@ -882,7 +889,22 @@ static void clear_tex(VkExec *ex, const p_clear_tex *p) {
     vk_texture_gpu_written(t);
 }
 
+static void xfer_op(VkExec *ex, uint32_t op, const void *payload);
+
 void vk_exec_op_xfer(VkExec *ex, uint32_t op, const void *payload) {
+    // Why: issues #43 and #50 (RADV) hung with every marked pass, dispatch, clear, copy and present step finished: the
+    // GPU was in commands between them. The ops without a mark of their own get one around them (and their barriers).
+    if (op == OP_COPY_B2B || op == OP_CLEAR_TEX || op == OP_CLEAR_BUF || op == OP_REPORT_COUNTER ||
+        op == OP_RESET_COUNTER) {
+        uint32_t crumb = vk_crumb_op(ex->cb, nvn_op_name(op), 0, 0);
+        xfer_op(ex, op, payload);
+        vk_crumb_end(ex->cb, VK_CRUMB_OP, crumb);
+        return;
+    }
+    xfer_op(ex, op, payload);
+}
+
+static void xfer_op(VkExec *ex, uint32_t op, const void *payload) {
     switch (op) {
     case OP_COPY_B2B: copy_b2b(ex, payload); break;
     case OP_COPY_B2T: copy_buffer_image(ex, payload, 1); break;

@@ -55,6 +55,14 @@ static int alias_copy(Tex *e, const Tex *src) {
     int reopen;
     VkCommandBuffer cb = vk_exec_inline_begin(&reopen);
     if (!cb) return 0;
+    if (e->pub.drop != src->pub.drop) {   // vk_tex_image.c tex_drop: the levels do not line up; not copied
+        static volatile int32_t n_drop;
+        if (plat_inc32(&n_drop) <= 8)
+            rt_log("vk: alias copy %#llx: levels dropped %u and %u differ: not copied", (unsigned long long)e->pub.addr,
+                   e->pub.drop, src->pub.drop);
+        vk_exec_inline_end(reopen);
+        return 1;
+    }
     int bw, bh, bpb = img_block(e, &bw, &bh);
     uint32_t levels = e->pub.levels < src->pub.levels ? e->pub.levels : src->pub.levels;
     uint32_t layers = e->pub.layers < src->pub.layers ? e->pub.layers : src->pub.layers, n = levels * layers, k = 0;
@@ -171,8 +179,8 @@ const VkTexImage *vk_texture_get(const tex_t *t) {
     return e ? &e->pub : NULL;
 }
 
-// Small render targets the CPU reads without NVN's invalidate (vk_texture_write_back_small); small_pending: one may be
-// dirty.
+// Small render targets and pitch textures the CPU reads without NVN's invalidate (vk_texture_write_back_small);
+// small_pending: one may be dirty.
 int small_pending;
 
 // Without creating an entry (entry_of would: a capture asked about every registered texture and made images for
@@ -214,7 +222,7 @@ void vk_texture_gpu_written(const tex_t *t) {
             storage_rewritten(e, 0, &e->gpu_gen);   // CPU writes up to here are older than this render
             e->gpu_seq = ++gpu_writes;
             e->gpu_fence = vk_exec_recording_fence();
-            if (e->t.L.size <= WB_SMALL) __atomic_store_n(&small_pending, 1, __ATOMIC_RELEASE);
+            if (wb_at_fence(&e->t.d, e->t.L.size)) __atomic_store_n(&small_pending, 1, __ATOMIC_RELEASE);
             own_add(e);
         }
     }

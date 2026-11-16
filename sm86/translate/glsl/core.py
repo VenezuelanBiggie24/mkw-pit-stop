@@ -19,6 +19,7 @@ import struct
 import flow
 from program import Insn, Sph
 
+from glsl import subroutines
 from glsl.alu import AluOps
 from glsl.common import FMUL_SCALE, MUFU, PT, RZ, TURNS, URZ, Unsupported, pred, reg
 from glsl.head import (
@@ -57,9 +58,11 @@ class Builder(AluOps, MemOps, TexOps, ThreadOps):
         self.uses_nminmax = False
         self.txq_tex: set[tuple[int, int]] = set()  # textures TXQ reads the size of (txqsz_* functions)
         self.uses_shadow_lod = False
+        self.uses_demote = False
         self.lmem_bytes = 0  # local memory (LDL/STL): the furthest constant extent, 0 = none
         self.task = False  # a task program (VS header, ISBEWR to its payload): set by translate()
         self.mesh = False  # a mesh program (ISBEWR.SKEW per-vertex writes): set by translate()
+        self.zombie = False  # a compute program with BAR: a predicated EXIT keeps the lane going (exited): translate()
         self.images: dict[tuple[int, int], str] = {}
         self.ssbos: set[int] = set()  # driver bank 0 offsets of the storage buffer addresses read
         self.ssbos_written: set[int] = set()  # those a STG, ATOMG or RED stores into (reflection flag 1)
@@ -250,7 +253,12 @@ class Builder(AluOps, MemOps, TexOps, ThreadOps):
         if op == "PLOP3":
             return self.plop3(i)
         if op == "KILL":
-            return f"if ({pred(i.v('Pp'), i.v('Pp@not'))}) discard;"
+            # Demote, not discard (OpKill): the lane stays a helper to the end, as eden-nx2 emits KIL
+            # (emit_spirv_control_flow.cpp), DXVK and Dawn their discard. OpKill ends it inside divergent flow, and
+            # every NVIDIA 616-621 hang of #22 ("instruction pointer invalid" after 1-1.5 s of a stuck pass) drew
+            # with a fragment stage that kills: 8 of 8 pairs, against 2176 of the 7262 fragment stages (30 %).
+            self.uses_demote = True
+            return f"if ({pred(i.v('Pp'), i.v('Pp@not'))}) demote;"
         if op == "LEA":
             return self.lea(i)
         if op == "USHF":
@@ -273,7 +281,7 @@ class Builder(AluOps, MemOps, TexOps, ThreadOps):
         if op in ("ISBEWR", "ISBERD") and self.mesh:
             return self.mesh_isbe(i)
         if op == "EXIT":
-            return self.exit()
+            return self.exit(i)
         raise Unsupported(i.cls)
 
 
@@ -327,7 +335,9 @@ def brx_targets(insns: list[Insn], c1: bytes) -> set[int]:
         if i.op not in ("BRX", "BRXU"):
             continue
         ra, off = (i.v("URa"), i.sv("UR_offset")) if i.op == "BRXU" else (i.v("Ra"), i.sv("Ra_offset"))
-        src = next((p for p in reversed(insns[:k]) if p.v("Rd", None) == ra), None) if i.op == "BRX" else None
+        # the latest writer of Ra; an instruction without Rd (DEPBAR.LE in two of 1.8.0's programs) writes none.
+        # p.v("Rd", None) raised there: a default of None is "no default" for v()
+        src = next((p for p in reversed(insns[:k]) if "Rd" in p.f and p.v("Rd") == ra), None) if i.op == "BRX" else None
         iv = next((v for n, v in src.f.items() if n.startswith("ConstBankAddress")), None) if src and src.op == "LDC" else None
         if not iv or next(v for _, v in iv.slot_values) != 1:
             return pcs
@@ -347,6 +357,11 @@ def compute_shape(control: bytes) -> tuple[int, int, int, int]:
     return x or 1, y or 1, z or 1, smem
 
 
+# What an exited lane of a program with BAR must not do (Builder.zombie): the writes others see. Its registers, local
+# memory and the loads stay: robustBufferAccess keeps its out-of-range reads harmless.
+ZOMBIE_SKIPS = frozenset({"STG", "STS", "ATOMG", "ATOMS", "ATOM", "RED", "SUST", "SURED", "SUATOM"})
+
+
 def translate(
     sph: Sph | None, insns: list[Insn], stage: str, shape: tuple[int, int, int, int] | None = None, c1: bytes = b""
 ) -> tuple[str, dict]:
@@ -360,6 +375,11 @@ def translate(
     # a VS header with payload writes only (no per-vertex SKEW writes, no index bytes) is a task program
     b.task = stage == "vs" and bool(writes) and all(i.sym("base") == "ATTR" and i.sym("skew") != "SKEW" for i in writes)
     b.mesh = any(i.sym("skew") == "SKEW" for i in writes)
+    # On the console a warp that exited no longer counts for BAR.SYNC; in Vulkan a hardware thread whose lanes all
+    # returned never reaches the barrier and the workgroup waits for it forever (#174: Intel hung at the title in the
+    # skinning programs, `if (gid >= count) return;` before a loop with barrier()). There a predicated EXIT marks the
+    # lane exited instead: it goes on through the barriers with its stores and atomics skipped, and out of the votes.
+    b.zombie = stage == "cs" and any(i.op == "BAR" for i in insns)
     if stage == "tes?" and not b.mesh:
         raise Unsupported(f"stage {stage}")
     targets = {0}
@@ -382,7 +402,15 @@ def translate(
     # A CALL in a program without RET never comes back: a jump (DrivePassShaderDefault 294, 256 KB, whose switch form
     # took RADV 4 GB to compile in run92). Structured like a BRA then.
     call_jumps = not any(i.op == "RET" for i in insns)
-    structurable = not any(i.op in ("RET", "BRX", "BRXU") or (i.op == "CALL" and not call_jumps) for i in insns)
+    # Subroutines called from several places: a copy in each call in the structured form (glsl/subroutines.py)
+    inline = subroutines.calls(insns) or {}
+    rets = {r for _, r in inline.values()}
+    structurable = not any(
+        i.op in ("BRX", "BRXU")
+        or (i.op == "RET" and k not in rets)
+        or (i.op == "CALL" and not call_jumps and k not in inline)
+        for k, i in enumerate(insns)
+    )
     index = {i.pc: k for k, i in enumerate(insns)}
     for i in insns:
         if i.pc in targets:
@@ -448,6 +476,8 @@ def translate(
             for n in {int(x) for x in re.findall(r"\br(\d+) = ", stmt or "")} - b.fold_new:
                 b.fold.pop(n, None)  # written outside dst() (pairs, vectors): no longer what the fold knew
         if stmt:
+            if b.zombie and i.op in ZOMBIE_SKIPS:
+                stmt = f"if (!exited) {{ {stmt} }}"
             if i.v("Pg", PT) != PT or i.v("Pg@not", 0):
                 stmt = f"if ({pred(i.v('Pg'), i.v('Pg@not'))}) {{ {stmt} }}"
             elif i.v("UPg", PT) != PT or i.v("UPg@not", 0):
@@ -455,6 +485,11 @@ def translate(
             body.append(f"        {stmt}")
         stmts.append(stmt if i.op not in ("BRA", "CALL") or len(stmts) not in branches else "")
     structured = None
+    if structurable and inline:
+        if subroutines.returns(insns, stmts, inline):
+            stmts, branches = subroutines.splice(stmts, branches, inline)
+        else:
+            structurable = False  # a RET that may go elsewhere: only the switch follows it
     if structurable and branches:
         try:
             structured = flow.structure(stmts, branches)
@@ -471,8 +506,15 @@ def translate(
     # computing one position (a depth pre-pass and an EQUAL colour pass) must get the same bits, as on the console;
     # fused differently, the MKW bushes failed the EQUAL test and stayed black (01/11/2026).
     decl = [f"    precise uint {regs};", f"    bool {preds};", "    uint loops = 0u;"]
+    if b.zombie:
+        decl.append("    bool exited = false;")
     if stage == "vs" and not (b.task or b.mesh):
         decl.append("    gl_PointSize = support.point_size;")   # first: a program that writes its own overrides it
+        # The position components a program does not write are (0, 0, 0, 1) on the console; Vulkan leaves them
+        # undefined. MKW's full-screen passes write only x and y (or x, y, z): with w undefined, Intel (ANV) and Adreno
+        # (Turnip) interpolated the texture coordinates with a garbage 1/w, so the race's tonemap read a magnified,
+        # stale corner of the scene and the frame came out black, and menus split along the triangle's diagonal (#26).
+        decl.append("    gl_Position = vec4(0.0, 0.0, 0.0, 1.0);")
     head_cs = None   # task/mesh: the same body under the compute wrappers (b.reflection["cs_glsl"])
     if b.task:
         head_cs, tail_cs = task_head_cs(head), TASK_MAIN_CS

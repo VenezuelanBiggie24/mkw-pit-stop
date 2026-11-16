@@ -41,6 +41,7 @@ enum { MR_BUDGET, MR_UNTRACKED, MR_OVERLAP, MR_ALLOC, MR_N };
 int vk_mirror_on;
 int mirror_verify;
 int mirror_gap = 2;             // pre-snap: hot pools at most this many 2 MiB regions apart share one query
+int mirror_cpu_gen = 1;         // MKW_MIRROR_CPU_GEN (default 1; "ab"): sync by the CPU stamps only (vk_mem_gen.c)
 static PoolRec **mlist;                // pool_lock: mirrored pools by import_lo
 static int nm, mcap;
 static uint32_t msub;                  // replay: number of the submission being recorded
@@ -48,13 +49,18 @@ static uint32_t mepoch;                // replay: its write-watch snapshot epoch
 typedef struct { PoolRec *r; uint64_t off, size; } MRange;
 static MRange *pend, *wbl;             // replay: copies for the next prologue; GPU writes into mirrors this submission
 static int npend, cpend, nwbl, cwbl;
+// MKW_MIRROR_REUP=1 (diagnosis, replay only): the GPU writes of the last submission, to count the pages the next sync
+// uploads again although only the GPU wrote them since (NX2navi 6c971b7 saved 57 of 60 MiB a frame that way; here the
+// write-back is a GPU copy that stamps no page, so the count should stay near zero; mir-reup, 14/11/2026).
+static MRange *wbprev;
+static int nwbprev, cwbprev, reup_diag = -1;
 static VkBufferCopy *mregions;         // replay: vkCmdCopyBuffer regions
 static int cregions;
 static PlatMutex flush_lock = PLAT_MUTEX_INIT;
 
 typedef struct {
     uint64_t subs, syncs, upload_bytes, upload_copies, first_n, first_bytes, wb_bytes, wb_copies, wb_ranges;
-    uint64_t presnap_queries, sync_queries, presnap_t, sync_t, prologues, presnap_bytes;
+    uint64_t presnap_queries, sync_queries, presnap_t, sync_t, prologues, presnap_bytes, reup_bytes, gpu_kept_bytes;
 } MirrorAcc;
 static MirrorAcc mrep;                 // replay: this submission
 static MirrorAcc macc;                 // mirror_stat_lock: since the last summary
@@ -259,9 +265,24 @@ static void mirror_sync(PoolRec *r) {
         if (b > hi) b = hi;
         const uint32_t *ch = gen_chunk[a >> GEN_CHUNK_SHIFT];   // a 2 MiB region lies in one chunk
         if (!ch) continue;
+        // pages only the GPU wrote since the last sync (their fence stamped gen_chunk, not cpu_gen_chunk) are in the
+        // mirror already; a chunk without a CPU stamp ever has none to copy
+        const uint32_t *cc = RT_KNOB_ON(mirror_cpu_gen) ? cpu_gen_chunk[a >> GEN_CHUNK_SHIFT] : ch;
         for (uint64_t x = a; x < b; x += 1ull << GEN_PAGE_SHIFT)
-            if (ch[(x >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)] > since)
+            if (ch[(x >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)] > since) {
+                if (!cc || cc[(x >> GEN_PAGE_SHIFT) & (GEN_PER_CHUNK - 1)] <= since) {
+                    mrep.gpu_kept_bytes += 1ull << GEN_PAGE_SHIFT;
+                    continue;
+                }
                 range_add(&pend, &npend, &cpend, r, x - lo, 1ull << GEN_PAGE_SHIFT);
+                if (reup_diag > 0)
+                    for (int i = 0; i < nwbprev; i++)
+                        if (wbprev[i].r == r && wbprev[i].off < x - lo + (1ull << GEN_PAGE_SHIFT) &&
+                            wbprev[i].off + wbprev[i].size > x - lo) {
+                            mrep.reup_bytes += 1ull << GEN_PAGE_SHIFT;
+                            break;
+                        }
+            }
     }
     r->mgen = gen_now;
     if (excl) plat_mutex_unlock(&gen_lock);
@@ -458,11 +479,28 @@ int vk_mem_mirror_pending(void) { return npend; }
 
 void vk_mem_mirror_prologue(VkCommandBuffer cb) {
     if (!npend) return;
+    // A shadowed pool's mirror is copied from its shadow, which holds the writes stamped up to its sgen only. A pool
+    // already synced for this submission (by the early thread or an earlier part) is not synced again, so the shadow
+    // keeps the bytes of that sync, but the mirror sync's query stamps the writes made since and listed them, and its
+    // mgen claimed them: they were never copied again (#61, the menu labels drew another frame's glyphs). Measured
+    // after the shadow sync: 1,242-2,101 of every ~200,000 mirror pages copied had a stamp above their pool's sgen; at
+    // the mirror sync, ~3,400 listed pages per 20,000 syncs were of pools already synced for the submission and none of
+    // a pool left untouched (g61d, g61h, 13/11/2026). Capped here, those pages go again at the next mirror sync, once
+    // the shadow has them.
+    gen_lock_x();
+    for (int i = 0; i < npend; i++) {
+        PoolRec *r = pend[i].r;
+        if (r->smap && r->mgen > r->sgen) r->mgen = r->sgen;
+    }
+    plat_mutex_unlock(&gen_lock);
+    // #43 (RX 6650 XT, a discrete card: mirror mode) hung after every marked command had finished
+    uint32_t crumb = vk_crumb_op(cb, "mirror copies at the submission's start", (uint32_t)npend, 0);
     mbarrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_2_COPY_BIT,
              VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
     copy_ranges(cb, pend, npend, 1, &mrep.upload_bytes, &mrep.upload_copies);
     mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
              VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    vk_crumb_end(cb, VK_CRUMB_OP, crumb);
     npend = 0;
     mrep.prologues++;
 }
@@ -565,6 +603,15 @@ int vk_mem_mirror_end(VkCommandBuffer cb, uint64_t fence) {
         for (int i = 0; i < nwbl; i++) wbl[i].r->wb_sub = msub;
         mrep.wb_ranges += (uint64_t)nwbl;
         rec += copy_ranges(cb, wbl, nwbl, 0, &mrep.wb_bytes, &mrep.wb_copies) + 2;
+        if (reup_diag < 0) {
+            const char *e = cfg_get("MKW_MIRROR_REUP");
+            reup_diag = e && *e && strcmp(e, "0") != 0;
+        }
+        if (reup_diag) {
+            while (cwbprev < nwbl) vk_mem_grow((void **)&wbprev, &cwbprev, sizeof *wbprev);
+            memcpy(wbprev, wbl, (size_t)nwbl * sizeof *wbl);
+            nwbprev = nwbl;
+        }
         mbarrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                  VK_PIPELINE_STAGE_2_HOST_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                  VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
@@ -599,12 +646,14 @@ void mirror_log(uint64_t frame) {
     rt_log("mem: mirror frame %llu: pools %lld, %.1f MiB device-local; stay imported: budget %lld (%.1f MiB), untracked "
            "%lld, overlapping %lld, failed %lld; per frame: submits %.2f, syncs %.1f, upload %.3f MiB in %.1f ranges, "
            "first use %.2f pools %.3f MiB, write-back %.3f MiB in %.1f ranges, flush calls %.1f (%.3f MiB), queries "
-           "%.1f pre-snap (%.1f MiB) + %.1f sync, prologues %.2f, tracking cpu %.3f ms (pre-snap %.3f, syncs %.3f)%s",
+           "%.1f pre-snap (%.1f MiB) + %.1f sync, prologues %.2f, tracking cpu %.3f ms (pre-snap %.3f, syncs %.3f)%s"
+           "; GPU-written kept %.3f MiB%s%.3f MiB uploaded again after only the GPU wrote them (MKW_MIRROR_REUP)",
            (unsigned long long)frame, (long long)m_live_n, m_live_bytes / M, (long long)m_refused_n[MR_BUDGET],
            m_refused_bytes[MR_BUDGET] / M, (long long)m_refused_n[MR_UNTRACKED], (long long)m_refused_n[MR_OVERLAP],
            (long long)m_refused_n[MR_ALLOC], a.subs / f, a.syncs / f, a.upload_bytes / f / M, a.upload_copies / f,
            a.first_n / f, a.first_bytes / f / M, a.wb_bytes / f / M, a.wb_copies / f, fc / f, fb / f / M,
            a.presnap_queries / f, a.presnap_bytes / f / M, a.sync_queries / f, a.prologues / f, qpc_ms(a.presnap_t + a.sync_t) / f,
-           qpc_ms(a.presnap_t) / f, qpc_ms(a.sync_t) / f, ver);
+           qpc_ms(a.presnap_t) / f, qpc_ms(a.sync_t) / f, ver, a.gpu_kept_bytes / f / M, reup_diag > 0 ? "; " : "",
+           a.reup_bytes / f / M);
 }
 

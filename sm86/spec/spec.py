@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import sys
+import platform
 import tarfile
 import tempfile
 import urllib.request
@@ -41,6 +42,12 @@ PINS = {  # tool: (package path under REDIST, sha256), from NVIDIA's redistrib_1
                      "8ac63f4079c47707ec958af3a97ceeb18194e16827a2766058f5872f6c3412ae"),
         "ptxas": ("cuda_nvcc/linux-x86_64/cuda_nvcc-linux-x86_64-12.8.93-archive.tar.xz",
                   "9961b3484b6b71314063709a4f9529654f96782ad39e72bf1e00f070db8210d3"),
+    },
+    "linux-aarch64": {  # NVIDIA's "sbsa" packages: the same tools for AArch64 Linux
+        "nvdisasm": ("cuda_nvdisasm/linux-sbsa/cuda_nvdisasm-linux-sbsa-12.8.90-archive.tar.xz",
+                     "250ae30e878b0c4c1553e7c7f28c2c763902c807b5f493ebc16e6e10c71213f2"),
+        "ptxas": ("cuda_nvcc/linux-sbsa/cuda_nvcc-linux-sbsa-12.8.93-archive.tar.xz",
+                  "dc0b713ce69fd921aa53ac68610717d126fc273a3c554b0465cf44d7e379f467"),
     },
     "windows": {
         "nvdisasm": ("cuda_nvdisasm/windows-x86_64/cuda_nvdisasm-windows-x86_64-12.8.90-archive.zip",
@@ -65,18 +72,44 @@ PTX = """.version 8.7
 """
 
 
-def fetch(rel: str, want: str, cache: Path) -> Path:
-    dst = cache / rel.rsplit("/", 1)[1]
-    if not dst.is_file():
-        part = dst.with_name(dst.name + ".part")
-        with urllib.request.urlopen(f"{REDIST}/{rel}") as r, open(part, "wb") as f:
+FETCH_TRIES = 3
+
+
+def download(url: str, part: Path) -> str:
+    """The file at url into part; a short read or a broken connection is the reason, else ""."""
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r, open(part, "wb") as f:
+            size = int(r.headers.get("Content-Length") or 0)
             shutil.copyfileobj(r, f)
-        part.replace(dst)
-    got = hashlib.sha256(dst.read_bytes()).hexdigest()
-    if got != want:
-        dst.unlink()
-        sys.exit(f"{dst.name}: sha256 {got}, expected {want}")
-    return dst
+    except OSError as e:
+        return f"download stopped ({e})"
+    got = part.stat().st_size
+    return f"{got} of {size} bytes arrived" if size and got != size else ""
+
+
+def fetch(rel: str, want: str, cache: Path) -> Path:
+    """The pinned package, downloaded again when it arrives short or with another sha256: each try of #207 got a
+    different checksum, which a connection cut or rewritten on the way gives and NVIDIA's file (checked) does not."""
+    dst = cache / rel.rsplit("/", 1)[1]
+    if dst.is_file() and hashlib.sha256(dst.read_bytes()).hexdigest() == want:
+        return dst
+    dst.unlink(missing_ok=True)
+    part = dst.with_name(dst.name + ".part")
+    why = ""
+    for n in range(1, FETCH_TRIES + 1):
+        why = download(f"{REDIST}/{rel}", part)
+        if not why:
+            got = hashlib.sha256(part.read_bytes()).hexdigest()
+            if got == want:
+                part.replace(dst)
+                return dst
+            why = f"{part.stat().st_size} bytes with sha256 {got}, expected {want}"
+        print(f"{dst.name}: try {n} of {FETCH_TRIES}: {why}", file=sys.stderr)
+    part.unlink(missing_ok=True)
+    sys.exit(
+        f"{dst.name}: the download from NVIDIA arrived damaged {FETCH_TRIES} times ({why}); an antivirus, proxy, "
+        f"VPN or unstable connection on this PC changes or cuts it: pause them and run the setup again"
+    )
 
 
 def tool(name: str, cache: Path) -> Path:
@@ -84,7 +117,8 @@ def tool(name: str, cache: Path) -> Path:
     exe = cache / "bin" / (name + ".exe" if WINDOWS else name)
     if exe.is_file():
         return exe
-    rel, want = PINS["windows" if WINDOWS else "linux"][name]
+    host = "windows" if WINDOWS else "linux-aarch64" if platform.machine() in ("aarch64", "arm64") else "linux"
+    rel, want = PINS[host][name]
     archive = fetch(rel, want, cache)
     exe.parent.mkdir(parents=True, exist_ok=True)
     if WINDOWS:
@@ -196,28 +230,38 @@ def run_nvdisasm(nvdisasm: Path, lib: Path, cubin: Path) -> bytes:
 
 
 def capture(nvdisasm: Path, lib: Path, work: Path, out: Path) -> str:
-    """One interception of nvdisasm, cut and parsed into out/; the parser's complaint, or '' when the spec is good."""
+    """One interception of nvdisasm, cut and parsed into out/; the parser's complaint, or '' when the spec is good.
+
+    It parses in work/spec and moves the result to out/ only when the parser accepts it: a rejected capture left a
+    broken instructions.json in out/ that every later setup reused, since the shaders step only checks that it exists
+    (issue #325)."""
     dump = run_nvdisasm(nvdisasm, lib, work / "sm_86.cubin")
     (work / "sm_86_intercept.txt").write_text(strings(dump), encoding="ascii")
     p = subprocess.run([sys.executable, str(HERE / "funnel.py"), str(work / "sm_86_intercept.txt")],
                        capture_output=True, text=True)  # fmt: skip
     if p.returncode:
         return f"funnel.py: {p.stderr[-2000:]}"
-    out.mkdir(parents=True, exist_ok=True)
+    stage = work / "spec"
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir()
     for name in ("sm_86_instructions.txt", "sm_86_latencies.txt"):
-        shutil.move(work / name, out / name)
+        shutil.move(work / name, stage / name)
     # Windows' text sometimes puts two rows of a table on one line ("0 0 -> 0          0 1 -> 1"), and the parser then
     # orders the table's rows differently: one row per line, as in Linux's text (a no-op there).
-    spec_txt = out / "sm_86_instructions.txt"
+    spec_txt = stage / "sm_86_instructions.txt"
     text = spec_txt.read_text(encoding="ascii")
     spec_txt.write_text(re.sub(r"(-> \S+)[ \t]{2,}(?=\d)", r"\1\n          ", text), encoding="ascii")
     # Exit 1 means "something was reported", not "no spec": the one known report (a missing separator in
     # f2f_f32_upconvert__RCR_RCR) is repaired by the parser itself, so anything beyond it fails.
-    p = subprocess.run([sys.executable, str(HERE / "parse_sidl.py"), str(spec_txt), "-o", str(out)],
+    p = subprocess.run([sys.executable, str(HERE / "parse_sidl.py"), str(spec_txt), "-o", str(stage)],
                        capture_output=True, text=True)  # fmt: skip
-    (out / "parse.log").write_text(p.stdout + p.stderr)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "parse.log").write_text(p.stdout + p.stderr)  # the last try's, accepted or not, for a report
     if p.returncode > 1 or not re.search(r"^unparsed / suspect items: [01]$", p.stdout, re.M):
         return f"parse_sidl.py: {p.stdout[-2000:]}{p.stderr[-2000:]}"
+    for f in stage.iterdir():
+        (out / f.name).unlink(missing_ok=True)  # Windows' rename refuses an existing target
+        shutil.move(f, out / f.name)
     return ""
 
 

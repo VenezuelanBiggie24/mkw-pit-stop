@@ -11,7 +11,7 @@
 #include "gfx.h"       // GfxShader, GfxShaderRes, GfxShaderAnswers (pipelines block)
 
 // Required (device choice fails without them): Vulkan 1.3; VK_KHR_swapchain, VK_KHR_push_descriptor,
-// VK_EXT_depth_clip_control, VK_EXT_external_memory_host; features timelineSemaphore, dynamicRendering,
+// VK_EXT_depth_clip_control (VK_EXT_external_memory_host when offered); features timelineSemaphore, dynamicRendering,
 // synchronization2, shaderStorageImageWriteWithoutFormat, depthClipControl, shaderInt64, samplerAnisotropy,
 // independentBlend, geometryShader, textureCompressionBC.
 // Optional (flag set in VkCtx when enabled): the has_* members.
@@ -42,7 +42,10 @@ typedef struct VkCtx {
         has_mesh,                           // VK_EXT_mesh_shader with taskShader and meshShader (MKW's 25 task/mesh)
         has_astc_ldr,                       // textureCompressionASTC_LDR (enabled when reported)
         has_calibrated,                     // VK_KHR_calibrated_timestamps, with MKW_TRACE_TL=1 only
-        has_placed;                         // VK_EXT_map_memory_placed with unmap-reserve: pools as driver memory
+        has_emh,                            // VK_EXT_external_memory_host: pools imported when a shadow does not fit
+        has_placed,                         // VK_EXT_map_memory_placed with unmap-reserve: pools as driver memory
+        has_colorspace,                     // VK_EXT_swapchain_colorspace (instance): HDR10 swapchains (gfx_hdr.c)
+        has_hdr_metadata;                   // VK_EXT_hdr_metadata: the HDR10 swapchain's mastering metadata
                                             // mapped at their guest address (vk_memory.c placed_pool)
     // Feedback loops (maxwell.md 1.9, vk_exec_draw.c feedback_prepare): a draw samples a target of its open pass that
     // an earlier draw of the pass wrote. MKW_FEEDBACK=0: VK_FEEDBACK_OFF (sampled in GENERAL without a barrier, the
@@ -61,7 +64,9 @@ typedef struct {
     uint32_t sbuf_align;               // nonzero: storage buffers bind at their address rounded down to this
     uint32_t sg_size;                  // requiredSubgroupSize on sg_pin_stages (32)
     VkShaderStageFlags sg_pin_stages;  // 0: no pin, stages run at the device's subgroupSize
+    uint32_t cs_wide;                  // requiredSubgroupSize for game compute shaders without the pin (0: none)
     int gpl;                           // VK_EXT_graphics_pipeline_library enabled with fast linking (MKW_GPL=0: off)
+    VkDriverId driver_id;              // VkPhysicalDeviceDriverProperties.driverID
 } VkCaps;
 extern VkCaps vk_caps;
 void vk_caps_features(VkPhysicalDeviceFeatures *f);   // before vkCreateDevice (MKW_VK_NO_FLOAT64 clears shaderFloat64)
@@ -93,7 +98,44 @@ void vk_present_blit(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int
 int vk_fsr_record(VkCommandBuffer cb, unsigned slot, VkImage src, VkFormat fmt, int sw, int sh, const int crop[4],
                   VkImage dst, int dx, int dy, uint32_t dw, uint32_t dh);
 void vk_fsr_release(void);   // before the device goes away
-void vk_present_flip(void);
+// The F1 menu on an HDR10 swapchain (vk_hdr_ui.c): vk_hdr_ui_target is the RGBA8 image of w x h the menu draws into
+// (COLOR_ATTACHMENT_OPTIMAL, to be cleared to 0; VK_NULL_HANDLE when it cannot be made), vk_hdr_ui_compose blends it
+// onto dst_view, a swapchain image of format fmt in COLOR_ATTACHMENT_OPTIMAL, at the system's paper white.
+VkImageView vk_hdr_ui_target(VkCommandBuffer cb, uint32_t w, uint32_t h);
+void vk_hdr_ui_compose(VkCommandBuffer cb, VkImageView dst_view, VkFormat fmt, uint32_t w, uint32_t h);
+void vk_hdr_ui_release(void);   // before the device goes away
+// Queues the oldest present vk_present_blit or vk_present_blit_ahead left waiting; its present id (MKW_LATENCY with
+// present wait), else 0.
+uint64_t vk_present_flip(void);
+// ---- MKW_LATENCY (vk_latency.c): controller read to screen
+int vk_lat_on(void);
+uint64_t vk_lat_next_id(void);                                   // the next host present's id, 0 without present wait
+void vk_lat_flip(uint64_t slot, int first, int game, uint64_t id);   // a host present of the frame shown at slot
+void vk_lat_swapchain(int begin, VkSwapchainKHR sc);             // around vkCreateSwapchainKHR (it retires the old)
+void vk_lat_device(VkDevice device, int has_present_wait);                        // after the device: starts the present wait thread
+// vk_present_blit for frame generation: presents already waiting stay waiting, so the frames of one game frame are
+// all blitted at once and each vk_present_flip then queues the next at its time.
+void vk_present_blit_ahead(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]);
+int vk_present_ahead_max(void);       // presents that may wait at once (the swapchain's spare images), at least 1
+double vk_present_refresh_hz(void);   // the window's monitor, 0 unknown
+// ---- frame generation (vk_framegen.c), the present thread
+#define VK_FG_MAX 4   // frames shown per game frame at most
+int vk_fg_wanted(void);   // MKW_FRAMEGEN is not off: the swapchain keeps spare images for it
+// One game frame: copies the crop rectangle {x, y, w, h} of src (GENERAL, all its writes submitted) into a picture of
+// its own and submits the frames made between the last game frame and it. out: what to show, in order (the made
+// frames, then the game's), each a GENERAL R8G8B8A8_UNORM image of *w x *h; *step: the time between two of them.
+// Returns how many; 0 = off or not possible now: the caller presents src as without it. at: the pacer's display time.
+int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkImage out[VK_FG_MAX], int *w, int *h,
+                uint64_t *step);
+// What vk_fg_frame records, into cb, with `made` frames between the last call's picture and this one (none on the
+// first call): for --probe-framegen. Returns the frames in out, 0 on failure.
+int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop[4], int made, VkImage out[VK_FG_MAX],
+                 int *ow, int *oh);
+// --probe-framegen: the vectors of the last frame made (R16G16_SFLOAT, pixels, one per 16x16 pixels; 32x32 for the
+// coarse ones), its grid's size in *gw x *gh: level 0 coarse,
+// 1 its median, 2 fine, 3 its median, 4 full size, 5 its median (what the made frames used)
+VkImage vk_fg_flow(int level, int *gw, int *gh);
+void vk_fg_release(void);   // before the device goes away
 // Every submission to ctx->gfx_queue (and xfer_queue when shared) takes this lock; vk_present_image and the swapchain
 // rebuild do. Recursive.
 void vk_queue_lock(void);
@@ -108,6 +150,7 @@ void vk_sync_parts_flush(void);   // queue lock held: the parts waiting for the 
 void gfx_fit_rect(int cw, int ch, int dw, int dh, int out[4]);
 void vk_present_capture(int on);
 int vk_present_captured(const uint8_t **px, int *w, int *h, VkFormat *fmt);
+void vk_present_screen_shot(const char *path);   // the next swapchain image to path as PNG (ctl "screen")
 
 // The window system's part of device creation (gfx_window_sdl.c): the instance
 // extensions a surface needs (their count, at most max), and whether a queue family of pd can present to it.
@@ -115,7 +158,7 @@ int gfx_window_vk_extensions(const char **out, int max);
 int gfx_window_vk_presentable(VkInstance inst, VkPhysicalDevice pd, uint32_t family);
 void gfx_window_resize(int client_w, int client_h);   // programmatic resize; returns after the swapchain is rebuilt
 void gfx_vsync_bind_counter(volatile int32_t *counter);  // host-side stand-in for a bound event: incremented per tick
-unsigned gfx_window_focus_messages(void);          // OE_MSG_FOCUS_STATE_CHANGED pushes made by the window thread
+unsigned gfx_window_focus_messages(void);          // focus changes the window thread passed to oe_set_focus
 void gfx_window_release_vk(void);                  // vk_shutdown calls it first: destroys swapchain, surface, present objects
 long vk_validation_errors_total(void);             // validation errors since the first vk_init, across vk_shutdown
 
@@ -134,15 +177,12 @@ extern uint32_t vk_tex_reg_limit;
 void vk_sampler_register(int id, const samp_par *s);                // sampler descriptor slot (copied)
 uint64_t vk_texture_trim(uint64_t bytes);      // out of memory: released and idle mirrored textures go (vk_staging)
 uint64_t vk_texture_trim_released(uint64_t keep_bytes); // shed released-texture cache down to keep_bytes
-// ASTC copied into an image of another format: decodes the source's blocks into dst as bc7 says (0 RGBA8, 1 BC7, 2 BC1;
-// vk_tex_upload.c); 0 when it cannot
-int  vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers, uint32_t x, uint32_t y,
-                          uint32_t w, uint32_t h, VkImage dst, VkImageAspectFlags aspect, uint32_t dlevel, uint32_t dlayer,
-                          int32_t dx, int32_t dy, int bc7);
 void vk_texture_release(const tex_t *t);   // TextureFinalize: the image stays for slots that still name its storage
 void vk_read_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint8_t *dst, uint64_t row, uint64_t img);
 void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, uint64_t row, uint64_t img);
 void vk_guest_written(uint64_t addr, uint64_t size);   // a host write write-watch may miss: textures there re-upload
+void vk_gpu_written_stamp(uint64_t addr, uint64_t size);   // a GPU write landed in guest memory (its fence): the same
+                                                           // stamp, but the mirror, which holds those bytes, skips it
 int vk_glyphs_due(void);      // per present: the button icon sheet's icons changed (ui/glyphs/glyphs.c); at most 10 times a second
 void vk_glyphs_redo(void);    // ... then, replays drained: it uploads again, redrawn
 int vk_pool_needs_drain(const pool_t *p);  // its GPU storage is guest memory: queued replays must be done first
@@ -252,6 +292,7 @@ int vk_mem_mirror_probe(uint64_t addr);   // --probe-vkexec: the pool at addr ge
 void vk_mem_class_log(const VkPhysicalDeviceProperties *p, const VkPhysicalDeviceMemoryProperties *m);   // once
 void vk_mem_census(uint64_t frame);               // at each present: pool census and traffic, logged at frame 1800 and,
                                                   // with MKW_TRACE=perf, every 1800 frames
+void vk_mem_replay_log(uint64_t frames);          // a capture replay's end: the mirror and shadow summaries over its frames
 // VRAM in use and its budget, summed over the DEVICE_LOCAL heaps. exact 1: VK_EXT_memory_budget (the whole process),
 // 0: this allocator's own allocations against the heap sizes. 0 when unknown.
 int vk_mem_vram(uint64_t *used, uint64_t *budget, int *exact);
@@ -265,6 +306,7 @@ void vk_dcache_dpool_stats(int *live_pools, int *retiring_pools);
 const VmaDeviceMemoryCallbacks *vk_headroom_callbacks(void);
 void vk_headroom_start(void);
 void vk_tex_pool_start(void);   // MKW_VK_TEX_POOL_MIN: texture memory made at start (vk_tex_image.c)
+void vk_tex_pool_stop(void);    // after image destruction, before destroying the VMA allocator
 void vk_headroom_stop(void);   // before vmaDestroyAllocator
 int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out);   // 1 when all of [addr, addr+size) is backed
 int vk_mem_virt_phys(uint64_t addr, uint64_t *phys);   // virtual pool page at addr: 1 and the GPU address it maps to
@@ -274,7 +316,10 @@ int vk_mem_virt_phys(uint64_t addr, uint64_t *phys);   // virtual pool page at a
 // queue lock held, before each graphics-queue submission: the changed bindings (binds), behind every earlier submission,
 // and the wait and signal of that submission on the sparse order timeline.
 void vk_texture_report(uint64_t addr);   // MKW_CTL "tex ADDR": textures over addr (vk_texture.c)
-int vk_sparse_create(const VkImageCreateInfo *ci, const nvn_texdesc *d, uint64_t addr, uint64_t size, VkImage *img);
+typedef struct { uint32_t first; VkImageAspectFlags aspect; VkDeviceSize zero_bytes; } VkSparseTail;
+int vk_sparse_create(const VkImageCreateInfo *ci, const nvn_texdesc *d, uint64_t addr, uint64_t size, VkImage *img,
+                     VkSparseTail *tail);
+void vk_sparse_shutdown(void);   // after textures, retired work and device idle; before the VMA allocator
 uint64_t vk_sparse_destroy(VkImage img);   // the submission its binds are done by (0: none)
 int vk_sparse_is(VkImage img);   // 1: img is a sparse image made by vk_sparse_create
 void vk_sparse_remap(uint64_t addr, uint64_t size);
@@ -351,8 +396,9 @@ int vk_astc_bc7(void);                  // 1: and encoded again as BC7 (MKW_ASTC
 void vk_astc_tag(uint64_t addr, int path);  // MKW_ASTC_ERRORS: the next vk_astc_record's texture and path (1 upload,
                                             // 2 astc-copy, 3 write-texels) on this thread
 // One image region decoded from raw blocks: tight rows of 16-byte blocks at byte src of the source buffer (slices one
-// after the other), w x h texels and slices deep, written at offset of level / layer.
-typedef struct { VkDeviceSize src; uint32_t w, h, slices, level, layer; VkOffset3D offset; } VkAstcRegion;
+// after the other), w x h texels and slices deep, written at offset of level / layer; lw x lh, that level's size (for
+// the BC7 copy's extent in whole blocks; 0: the region's own).
+typedef struct { VkDeviceSize src; uint32_t w, h, slices, level, layer; VkOffset3D offset; uint32_t lw, lh; } VkAstcRegion;
 // Records into cb, the open upload batch (between vk_upload_begin and vk_upload_end): src (TRANSFER_SRC, src_size
 // bytes of blocks) goes to a device-local scratch buffer, a dispatch per region decodes it, and the texels are copied
 // into img (VK_IMAGE_LAYOUT_GENERAL). The caller records its usual barriers around an image copy before and after the
@@ -409,9 +455,16 @@ typedef struct {
     uint8_t fb_usage;              // created with ATTACHMENT_FEEDBACK_LOOP usage (VK_FEEDBACK_LAYOUT, attachable images)
     uint8_t listed;                // a render target whose MUTABLE_FORMAT lists its views' formats: format and twin
     VkFormat twin;                 // its sRGB / UNORM twin, the only other format a view of it may have (listed)
+    uint8_t drop;                  // NVN levels left out at the top (vk_tex_image.c tex_drop): image level = NVN level - drop;
+                                   // copies, uploads and render targets of a dropped level are skipped
     uint8_t fb_learned;            // a draw sampled it while it was a written attachment of the open pass: its passes
                                    // attach it in ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT (vk_exec.c vk_exec_pass_begin)
 } VkTexImage;
+// ASTC copied into an image of another format: decodes the source's blocks into dst as bc7 says (0 RGBA8, 1 BC7, 2 BC1;
+// vk_tex_upload.c); 0 when it cannot
+int  vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers, uint32_t x, uint32_t y,
+                          uint32_t w, uint32_t h, const VkTexImage *dst, VkImageAspectFlags aspect, uint32_t dlevel,
+                          uint32_t dlayer, int32_t dx, int32_t dy, int bc7);
 // A copy out of a mirrored texture the CPU wrote into an image of the same VkFormat: the region read from the source's
 // storage into dst through the upload batch, the source's image left alone (vk_tex_upload.c); 0 when it cannot, *why
 // says what refused it
@@ -438,13 +491,17 @@ void vk_crumb_end(VkCommandBuffer cb, int kind, uint32_t id);
 uint32_t vk_crumb_op(VkCommandBuffer cb, const char *what, uint32_t w, uint32_t h);
 // MKW_GPU_CRUMBS_DRAW=1 (off by default: two marks per draw): each draw marked with its program keys (fs NULL for
 // none), so a loss names the program, not only the pass.
-void vk_crumb_draw(VkCommandBuffer cb, const uint8_t *vs, const uint8_t *fs);
+void vk_crumb_draw(VkCommandBuffer cb, const uint8_t *vs, const uint8_t *fs, uint32_t count);
+void vk_crumb_draw_ind(uint64_t ind, uint64_t count, uint32_t max);   // that draw was indirect: its arguments' guest addresses
+void vk_crumb_cs(uint32_t id, const uint8_t *cs);   // a dispatch mark's compute program key
 void vk_crumbs_report(void);     // at a device loss (vk_exec_recent_log), once
+void vk_crumbs_report_hang(void);   // the same marks while the GPU makes no progress and no loss is reported (vk_sync.c)
 VkFormat vk_texture_view_format(const VkTexImage *img, VkFormat want);   // a target view's format the image allows
 const VkTexImage *vk_texture_get(const tex_t *t);   // created and made current; NULL for BUFFER or unmapped formats
 // A texture slot; a slot whose texture was finalized follows the live texture at the same storage (hle_nvn.c).
 const VkTexImage *vk_texture_by_id(int id, view_t *view, int *has_view);
 VkFormat vk_srgb_twin(VkFormat f);                    // the sRGB / UNORM twin of an 8-bit colour format, else UNDEFINED
+int vk_format_numeric(VkFormat f);                    // GFX_TYPE_* its components read as in a shader
 uint32_t vk_texture_slot_format(int id, uint64_t *addr);   // NVN format the game registered in slot id (0: none)
 // The replay looks up many slots per draw: it takes the texture lock once around them (vk_texture_lock) and uses the
 // _locked lookups; vk_texture_slots_gen changes whenever a slot may resolve to another image or view.
@@ -480,7 +537,7 @@ void vk_sparse_load(const void *key, uint32_t klen, const void *p, uint64_t n);
 void vk_texture_storage_bound_locked(const VkTexImage *img);   // bound as a storage image in the recording submission
 uint64_t vk_texture_last_write(const tex_t *t);    // timeline value of the newest submission recorded to write it; 0: none
 size_t vk_texture_texel_span(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint64_t row, uint64_t img);   // bytes ReadTexels spans; 0 for a bad region
-int vk_texture_small_dirty(void);                   // a small mirrored target holds GPU texels its storage lacks
+int vk_texture_small_dirty(void);                   // a small or pitch mirrored target holds GPU texels its storage lacks
 void vk_texture_write_back_small(uint64_t fence);   // writes those rendered by work up to fence back to storage
 void vk_texture_debug(const VkTexImage *img, uint32_t *uploads, int *last_change, int *pages_written);   // vk_dump
 int vk_texture_slot_swz(int id, uint8_t swz[4]);    // vk_dump: swizzle of the descriptor in slot id
@@ -674,6 +731,9 @@ VkPipeline vk_pipeline_graphics_async(const VkPipeState *s, const VkPipeInfo **i
 VkPipeline vk_pipeline_graphics_async_low(const VkPipeState *s, const VkPipeInfo **info, int *pending);   // no wait; a miss from the low queue
 // rt_boot calls it unless --shot is given; MKW_PIPE_SYNC=1 makes it a no-op. Probes never call it.
 void vk_pipeline_async_enable(void);
+// Background pipeline work right now, read without the lock (for diagnostics): jobs queued or running, and workers
+// building (a library or a pipeline).
+void vk_pipeline_async_busy(unsigned *inflight, int *building);
 // Boot prewarm, before the guest runs (rt_boot): loads the shaders pipeline-keys.bin names, translating the ones not
 // cached under the current translator from their stored inputs, and builds every recorded pipeline, on all cores.
 // No-op without vk_pipeline_async_enable, with MKW_PIPE_PREBUILD=0 or with MKW_GPU=null.
@@ -690,10 +750,11 @@ VkPipeline vk_mesh_cs_compact_pipeline(VkPipelineLayout *layout);   // runtime/s
 // sets the rest: vkCmdSetViewportWithCount, vkCmdSetScissorWithCount, depth bias, blend constants, stencil compare and
 // write masks and references; vertex buffers with vkCmdBindVertexBuffers2 (strides NULL when
 // vk_pipeline_vertex_input_dynamic(), else from VkPipeState.vstream).
-void vk_pipeline_set_dynamic(VkCommandBuffer cb, const VkPipeState *s);
+void vk_pipeline_set_dynamic(VkCommandBuffer cb, const VkPipeState *s, const VkPipeState *last);   // last: NULL sets all
 int vk_pipeline_vertex_input_dynamic(void);    // 1: vertex input is VK_EXT_vertex_input_dynamic_state
-// The vertex attribute types of the bound state (attr_type from the vertex attribute formats).
-void vk_pipeline_answers(const VkPipeState *s, GfxShaderAnswers *vs);
+// What the bound state says of the shader of stage (GFX_STAGE_VS: attr_type from the vertex attribute formats;
+// GFX_STAGE_FS: out_type from the colour target formats).
+void vk_pipeline_answers(const VkPipeState *s, int stage, GfxShaderAnswers *a);
 uint32_t vk_pipeline_target_wmask(const VkPipeState *s, int i);   // colour write mask of target i the pipeline uses
 VkPrimitiveTopology vk_pipeline_topology(int nvn_prim);   // quads -> triangle list, line loop -> strip: the replay
                                                           // rewrites those draws; polygon -> fan

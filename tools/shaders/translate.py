@@ -8,7 +8,9 @@ Usage: uv run tools/shaders/translate.py [--shaders build/shaders] [--out build/
                                          [--dumped DIR] [--spec FILE] [--glslc PATH] [--no-validate] [--progress]
 Writes <out>/<key>.{glsl,spv,res.json,result} and <out>/failed.tsv (each failure reason with its programs). A program whose GLSL comes out the same as in the last pass keeps its
 SPIR-V and result without glslc or spirv-val (glslc is ~75 % of the time: 196 ms a program, 30/10/2026), so after a
-translator change only the programs it touched are compiled again; --full compiles everything. --dumped also takes the programs a run could not find
+translator change only the programs it touched are compiled again; --full compiles everything. The GLSL's sha256 also
+goes in <key>.done, so the shortcut holds where the GLSL was deleted after the pass (a player's setup keeps only .spv and
+.res.json: before, every translator change in an update compiled all ~11 500 programs again). --dumped also takes the programs a run could not find
 (MKW_SPIRV_DUMP=DIR): ones the game builds in play from templates in main, which no extraction can list.
 """
 
@@ -30,9 +32,11 @@ sys.path.insert(0, str(ROOT / "tools/shaders"))
 import glsl
 from extract import sph_stage, trim
 from program import Decoder
+from shaderc_lib import Shaderc
 
 GLSLC_STAGE = {"ps": "frag", "vs": "vert", "cs": "comp", "task": "task", "mesh": "mesh"}
 _dec = None
+_shaderc: Shaderc | None = None  # libshaderc in this process when found; else one glslc a program
 
 
 SPEC = ROOT / "build/sm86/instructions.json"
@@ -42,9 +46,10 @@ VALIDATE = True
 
 def init(spec: Path = SPEC, glslc: str = GLSLC, validate: bool = True) -> None:
     """Each worker: the decoder, and the compiler settings of --glslc and --no-validate (workers do not see main's)."""
-    global _dec, GLSLC, VALIDATE
+    global _dec, GLSLC, VALIDATE, _shaderc
     _dec = Decoder(spec)
     GLSLC, VALIDATE = glslc, validate
+    _shaderc = Shaderc.near(glslc)
 
 
 def translator_hash(spec: Path = SPEC) -> str:
@@ -69,24 +74,31 @@ def work(job: tuple[str, str, str, str, bool, str]) -> tuple[str, str]:
     ctl = Path(shaders, f"{sha}.ctl").read_bytes()
     key = hashlib.sha256(ctl + code).hexdigest()
     done = Path(out, f"{key}.done")
+    prev_sum = ""
     if not full and done.exists():
-        prev_th, _, why = done.read_text().partition("\n")
+        # "<translator hash>\n<verdict>[\n<GLSL sha256>]": verdicts are one line; files of older passes have no sum
+        prev_th, why, prev_sum = (done.read_text().split("\n") + [""])[:3]
         if prev_th == th and (why != "ok" or Path(out, f"{key}.spv").exists()):
             return sha, why
     c1 = Path(shaders, f"{sha}.c1")
-    why = translate_one(sha, stage, code, key, out, full, ctl, c1.read_bytes() if c1.exists() else b"")
-    done.write_text(f"{th}\n{why}")
+    why, glsl_sum = translate_one(
+        sha, stage, code, key, out, full, ctl, c1.read_bytes() if c1.exists() else b"", prev_sum
+    )
+    done.write_text(f"{th}\n{why}\n{glsl_sum}")
     return sha, why
 
 
-def translate_one(sha: str, stage: str, code: bytes, key: str, out: str, full: bool, ctl: bytes, c1: bytes = b"") -> str:
+def translate_one(
+    sha: str, stage: str, code: bytes, key: str, out: str, full: bool, ctl: bytes, c1: bytes = b"", prev_sum: str = ""
+) -> tuple[str, str]:
+    """(verdict, sha256 of the GLSL or "" when there is none)."""
     sph, insns = _dec.program(code, stage)
     try:
         src, refl = glsl.translate(sph, insns, stage, glsl.compute_shape(ctl) if stage == "cs" else None, c1)
     except glsl.Unsupported as e:
-        return f"unsupported: {e}"
+        return f"unsupported: {e}", ""
     except (KeyError, ValueError, IndexError) as e:  # a translator bug in one program must not stop the census
-        return f"error: {type(e).__name__} {e}"
+        return f"error: {type(e).__name__} {e}", ""
     cs_src = refl.pop("cs_glsl", None)
     gl, spv, res = Path(out, f"{key}.glsl"), Path(out, f"{key}.spv"), Path(out, f"{key}.result")
     if cs_src is not None:   # task/mesh as compute, for devices without mesh shaders
@@ -100,27 +112,34 @@ def translate_one(sha: str, stage: str, code: bytes, key: str, out: str, full: b
     # The reflection first: a change that touches only it (the written flag of storage buffers, 01/11/2026) leaves the
     # GLSL as it was, and the shortcut below kept the old file.
     Path(out, f"{key}.res.json").write_text(json.dumps(refl, indent=1))
-    if not full and res.exists() and spv.exists() and gl.exists() and gl.read_text() == src:
-        return res.read_text()  # same GLSL as the last pass: same SPIR-V and verdict
+    glsl_sum = hashlib.sha256(src.encode()).hexdigest()
+    same = prev_sum == glsl_sum or (gl.exists() and gl.read_text() == src)
+    if not full and res.exists() and spv.exists() and same:
+        return res.read_text(), glsl_sum  # same GLSL as the last pass: same SPIR-V and verdict
     res.unlink(missing_ok=True)  # until this pass has a verdict
     gl.write_text(src)
     why = compile_check(gl, spv, refl["stage"])
     res.write_text(why)
-    return why
+    return why, glsl_sum
 
 
 def compile_check(gl: Path, spv: Path, stage: str) -> str:
     """'ok' or why glslc or spirv-val refused the GLSL."""
-    r = subprocess.run([GLSLC, "--target-env=vulkan1.3", f"-fshader-stage={GLSLC_STAGE[stage]}", "-O", str(gl), "-o", str(spv)],
-                       capture_output=True, text=True, check=False)  # fmt: skip
-    if r.returncode:
-        first = next((ln for ln in r.stderr.splitlines() if "error" in ln), r.stderr.strip()[:120])
+    if _shaderc:
+        code, err = _shaderc.compile(gl.read_text(), stage, str(gl))
+        if code:
+            spv.write_bytes(code)
+    else:
+        r = subprocess.run([GLSLC, "--target-env=vulkan1.3", f"-fshader-stage={GLSLC_STAGE[stage]}", "-O", str(gl),
+                            "-o", str(spv)], capture_output=True, text=True, check=False)  # fmt: skip
+        err = r.stderr if r.returncode else ""
+    if err:
+        first = next((ln for ln in err.splitlines() if "error" in ln), err.strip()[:120])
         return f"glslc: {first.split(': ', 2)[-1][:100]}"
     if not VALIDATE:
         return "ok"
     v = subprocess.run(
-        # scalar layout: the word views of constant banks (sm86 mem.cb_word), enabled at device creation (vk_device.c)
-        ["spirv-val", "--target-env", "vulkan1.3", "--scalar-block-layout", str(spv)], capture_output=True, text=True, check=False
+        ["spirv-val", "--target-env", "vulkan1.3", str(spv)], capture_output=True, text=True, check=False
     )
     return "ok" if not v.returncode else f"spirv-val: {v.stderr.strip()[:100]}"
 
@@ -186,13 +205,13 @@ def main() -> None:
             jobs.append((code.stem, stage, str(args.dumped), str(args.out), args.full, th))
     # main compiles this one itself: it needs --glslc and --no-validate too, or the player's setup, which has neither
     # glslc nor spirv-val on PATH, fails here (Windows, v0.1.2 before release, 09/11/2026)
-    GLSLC, VALIDATE = args.glslc, not args.no_validate
+    init(args.spec, args.glslc, not args.no_validate)
     write_mesh_cs_vs(args.out)
     results = Counter()
     failed: dict[str, list[str]] = {}
     init_args = (args.spec, args.glslc, not args.no_validate)
     with ProcessPoolExecutor(args.jobs, initializer=init, initargs=init_args) as pool:
-        for n, (sha, why) in enumerate(pool.map(work, jobs, chunksize=4), 1):
+        for n, (sha, why) in enumerate(pool.map(work, jobs), 1):
             if args.progress and (n % 100 == 0 or n == len(jobs)):
                 print(f"progress {n} {len(jobs)}", flush=True)
             results[why] += 1

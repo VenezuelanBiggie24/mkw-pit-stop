@@ -9,7 +9,7 @@ typedef enum {
     // Menu: window, tabs, bottom row. UI_MENU_FIRST..UI_MENU_LAST_ID carry English and Russian texts.
     UI_MENU_FIRST,
     UI_MENU_TITLE = UI_MENU_FIRST,
-    UI_MENU_TAB_SCREEN, UI_MENU_TAB_GAME, UI_MENU_TAB_SOUND, UI_MENU_TAB_CONTROLS, UI_MENU_TAB_MENU,
+    UI_MENU_TAB_SCREEN, UI_MENU_TAB_SOUND, UI_MENU_TAB_CONTROLS, UI_MENU_TAB_GENERAL,
     UI_MENU_TAB_ADVANCED, UI_MENU_TAB_GRAPHICS,
     UI_MENU_CONTINUE, UI_MENU_QUIT,
     UI_MENU_ON, UI_MENU_OFF, UI_MENU_AUTO, UI_MENU_DEFAULT_MARK,      // "default" beside the default value
@@ -22,17 +22,26 @@ typedef enum {
     UI_MENU_FULLSCREEN, UI_MENU_FULLSCREEN_DESC,
     UI_MENU_WINDOW_SIZE, UI_MENU_WINDOW_SIZE_DESC,
     UI_MENU_RESOLUTION, UI_MENU_RESOLUTION_DESC, UI_MENU_RESOLUTION_ORIGINAL,
+    UI_MENU_ASPECT, UI_MENU_ASPECT_DESC, UI_MENU_ASPECT_WINDOW,
     UI_MENU_QUALITY, UI_MENU_QUALITY_DESC, UI_MENU_QUALITY_CUSTOM,
     UI_MENU_PRESENT, UI_MENU_PRESENT_DESC, UI_MENU_PRESENT_MAILBOX, UI_MENU_PRESENT_VSYNC, UI_MENU_PRESENT_IMMEDIATE,
     UI_MENU_PRESENT_IN_USE,   // "in use: %s" under the value when the swapchain got another mode than the setting
     UI_MENU_GPU, UI_MENU_GPU_DESC, UI_MENU_GPU_AUTO,
     UI_MENU_PERF_OVERLAY, UI_MENU_PERF_OVERLAY_DESC, UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL,
     UI_PERF_LINE_FPS,
+    UI_PERF_LINE_FPS_FG,   // the same with frame generation on: game frames / frames shown
     UI_MENU_FPS, UI_MENU_FPS_DESC, UI_MENU_FPS_AUTO,
+    UI_MENU_FRAMEGEN, UI_MENU_FRAMEGEN_DESC,   // values: UI_MENU_PERF_OFF, UI_MENU_FPS_AUTO, 2x..4x
+    UI_MENU_FRAMEGEN_UNEVEN, UI_MENU_VRR, UI_MENU_VRR_DESC,
+    UI_MENU_LOW_LATENCY, UI_MENU_LOW_LATENCY_DESC,
     UI_MENU_GRAPHICS,         // group heading over the picture rows
     UI_MENU_UPSCALER, UI_MENU_UPSCALER_DESC, UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR,
     UI_MENU_PICTURE_FIT, UI_MENU_PICTURE_FIT_DESC, UI_MENU_PICTURE_FIT_KEEP, UI_MENU_PICTURE_FIT_STRETCH,
+    UI_MENU_HDR, UI_MENU_HDR_DESC,   // values: UI_MENU_FPS_AUTO, UI_MENU_PERF_OFF
     UI_MENU_SHARPNESS, UI_MENU_SHARPNESS_DESC,
+    UI_MENU_SHARPNESS_FSR_ONLY,   // under Sharpness when the upscaler is not AMD FSR 1
+    UI_MENU_GROUP_RESOLUTION, UI_MENU_GROUP_PERFORMANCE,   // the Graphics tab's group headings
+    UI_MENU_AUTOSET, UI_MENU_AUTOSET_DESC, UI_MENU_AUTOSET_UNDO, UI_MENU_AUTOSET_UNDO_DESC,
 
     // Graphics
     UI_MENU_ANISO, UI_MENU_ANISO_DESC, UI_MENU_ANISO_GAME,
@@ -47,14 +56,18 @@ typedef enum {
     UI_MENU_TURBO, UI_MENU_TURBO_DESC, UI_MENU_TURBO_HOLD, UI_MENU_TURBO_TOGGLE, UI_MENU_TURBO_SPEED,
     UI_MENU_TURBO_SPEED_DESC, UI_MENU_SKIP_MOVIES, UI_MENU_SKIP_MOVIES_DESC, UI_MENU_SEED, UI_MENU_SEED_DESC,
     UI_MENU_UNLOCK_ALL, UI_MENU_UNLOCK_ALL_DESC, UI_MENU_QUICK_RACE, UI_MENU_QUICK_RACE_DESC, UI_MENU_QUICK_RACE_TT,
-    UI_MENU_QUICK_RACE_FREE, UI_MENU_FREEZE_KEYS, UI_MENU_FREEZE_KEYS_DESC,
+    UI_MENU_QUICK_RACE_GP, UI_MENU_QUICK_RACE_FREE, UI_MENU_FREEZE_KEYS, UI_MENU_FREEZE_KEYS_DESC,
+    UI_MENU_CLASSIC_GP, UI_MENU_CLASSIC_GP_DESC,
 
     // Game
     UI_MENU_GAME_LANG, UI_MENU_GAME_LANG_DESC, UI_MENU_GAME_LANG_AUTO,
     UI_MENU_OPERATION_MODE, UI_MENU_OPERATION_MODE_DESC, UI_MENU_MODE_DOCKED, UI_MENU_MODE_HANDHELD,
+    UI_MENU_LAN, UI_MENU_LAN_DESC,
 
     // Sound
     UI_MENU_VOLUME, UI_MENU_VOLUME_DESC,
+    UI_MENU_SPEAKERS, UI_MENU_SPEAKERS_DESC, UI_MENU_SPEAKERS_STEREO, UI_MENU_SPEAKERS_51,   // and UI_MENU_FPS_AUTO
+    UI_MENU_BACKGROUND_MUTE, UI_MENU_BACKGROUND_MUTE_DESC,
 
     // Controls
     UI_MENU_MOTION, UI_MENU_MOTION_DESC,
@@ -64,6 +77,8 @@ typedef enum {
     UI_MENU_PAD_LAYOUT, UI_MENU_PAD_LAYOUT_DESC, UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO,
     UI_MENU_PAD_LAYOUT_XBOX, UI_MENU_PAD_LAYOUT_IN_USE,
     UI_MENU_MOUSE_SENS, UI_MENU_MOUSE_SENS_DESC,
+    UI_MENU_STICK_DEADZONE, UI_MENU_STICK_DEADZONE_DESC,
+    UI_MENU_SWITCH2, UI_MENU_SWITCH2_DESC,
     UI_MENU_BUTTON_ICONS, UI_MENU_BUTTON_ICONS_DESC, UI_MENU_ICONS_NINTENDO, UI_MENU_ICONS_XBOX,
     UI_MENU_ICONS_PLAYSTATION, UI_MENU_ICONS_KEYBOARD, UI_MENU_ICONS_IN_USE,   // "in use: %s"
 
@@ -75,6 +90,7 @@ typedef enum {
     UI_BINDS_CANCEL_HINT,     // "Esc cancels, or wait %d s"
     UI_BINDS_TAKEN,           // "%s was taken from %s": the key, the action that lost it
     UI_BINDS_SWAPPED,         // "%s swapped with %s": the two actions
+    UI_NOTICE_PADS_MISSING,   // "%d players need a controller each: %d connected" (ov_input.c, controller applet)
     UI_BINDS_RESET, UI_BINDS_RESET_DESC,
     // the actions, in action order (input_map.h B_A .. B_SR_DOWN)
     UI_BIND_A, UI_BIND_B, UI_BIND_X, UI_BIND_Y, UI_BIND_LCLICK, UI_BIND_RCLICK, UI_BIND_L, UI_BIND_R, UI_BIND_ZL,
@@ -102,8 +118,14 @@ typedef enum {
 
     // Language names, each in its own language and the same in every row (game language and menu language lists)
     UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_JA, UI_MENU_LANGNAME_FR, UI_MENU_LANGNAME_DE, UI_MENU_LANGNAME_IT,
-    UI_MENU_LANGNAME_ES, UI_MENU_LANGNAME_NL, UI_MENU_LANGNAME_PT, UI_MENU_LANGNAME_RU, UI_MENU_LANGNAME_ZH_HANS,
-    UI_MENU_LANGNAME_ZH_HANT, UI_MENU_LANGNAME_KO,
+    UI_MENU_LANGNAME_ES, UI_MENU_LANGNAME_NL, UI_MENU_LANGNAME_PT, UI_MENU_LANGNAME_PT_BR, UI_MENU_LANGNAME_RU,
+    UI_MENU_LANGNAME_ZH_HANS, UI_MENU_LANGNAME_ZH_HANT, UI_MENU_LANGNAME_KO,
+    // menu languages the game does not ship (its texts then in es for ca, gl, eu; in English for pl, tr, uk)
+    UI_MENU_LANGNAME_ES_419, UI_MENU_LANGNAME_CA, UI_MENU_LANGNAME_GL, UI_MENU_LANGNAME_EU, UI_MENU_LANGNAME_PL,
+    UI_MENU_LANGNAME_TR, UI_MENU_LANGNAME_UK,
+    // game language added by update 1.7.0 (Polish came in 1.5.0): offered when the RomFS ships its Mals folder
+    UI_MENU_LANGNAME_TH,
+    UI_MENU_LANGNAME_LAST = UI_MENU_LANGNAME_TH,
 
     // Advanced
     UI_MENU_ADV_WARNING,
@@ -161,20 +183,66 @@ typedef enum {
     // Start screen (ui/launcher/launcher.cpp)
     UI_LAUNCH_SUBTITLE, UI_LAUNCH_PLAY, UI_LAUNCH_SETTINGS, UI_LAUNCH_FILES, UI_LAUNCH_QUIT, UI_LAUNCH_BACK,
     UI_LAUNCH_FILES_READY, UI_LAUNCH_FILES_MISSING, UI_LAUNCH_FILES_FOLDER, UI_LAUNCH_FILES_HELP,
-    UI_LAUNCH_NO_TOOLS, UI_LAUNCH_SOURCE, UI_LAUNCH_PICK, UI_LAUNCH_PICK_NUP, UI_LAUNCH_ROMFS_MODE,
-    UI_LAUNCH_ROMFS_COPY, UI_LAUNCH_ROMFS_LINK, UI_LAUNCH_SETUP, UI_LAUNCH_SETUP_AGAIN, UI_LAUNCH_CANCEL,
-    UI_LAUNCH_SETUP_DONE, UI_LAUNCH_SETUP_FAILED,   // "Set up failed: %s"
-    // the setup's steps (tools/prepare/prepare.py & tools/ps5/prepare_ps5.py STEPS), and kept mark
+    UI_LAUNCH_PICK_GAME_DIR, UI_LAUNCH_GAME_DIR_HELP, UI_LAUNCH_GAME_DIR_INVALID, UI_LAUNCH_GAME_DIR_INVALID_WIN32,
+    UI_LAUNCH_NO_TOOLS, UI_LAUNCH_SOURCE, UI_LAUNCH_PICK, UI_LAUNCH_PICK_NUP, UI_LAUNCH_ROMFS_MODE, UI_LAUNCH_ROMFS_COPY,
+    UI_LAUNCH_ROMFS_LINK, UI_LAUNCH_SETUP, UI_LAUNCH_SETUP_AGAIN, UI_LAUNCH_CANCEL, UI_LAUNCH_SETUP_DONE,
+    UI_LAUNCH_SETUP_FAILED,   // "Set up failed: %s"
+    // why it failed, by prepare.py's "error <code> <detail>" code (launcher_setup.cpp): "%s" is the detail (a folder,
+    // a build id, a file count or the failing tool's English message); STOPPED, CANCELLED and NO_SETUP have none
+    UI_SETUP_ERR_SOURCE, UI_SETUP_ERR_NOGAME, UI_SETUP_ERR_ENCRYPTED, UI_SETUP_ERR_VERSION, UI_SETUP_ERR_ROMFS,
+    UI_SETUP_ERR_FAILED, UI_SETUP_ERR_IO, UI_SETUP_ERR_STOPPED, UI_SETUP_ERR_CANCELLED, UI_SETUP_ERR_NO_SETUP,
+    UI_SETUP_ERR_MOVED,   // "... %s": the last setup's game files folder, no longer there (#188)
+    UI_SETUP_ERR_MISMATCH,   // "... %s": which version the RomFS and exefs/main are (#315)
+    // the setup's steps (tools/prepare/prepare.py & tools/ps5/prepare_ps5.py STEPS), and the mark of one an earlier setup
+    // already did
     UI_LAUNCH_STEP_CHECK, UI_LAUNCH_STEP_NUP, UI_LAUNCH_STEP_EXEFS, UI_LAUNCH_STEP_ROMFS, UI_LAUNCH_STEP_GENERATE,
     UI_LAUNCH_STEP_COMPILE, UI_LAUNCH_STEP_LINK, UI_LAUNCH_STEP_SHADERS, UI_LAUNCH_STEP_WARM,
     UI_LAUNCH_STEP_DEPLOY, UI_LAUNCH_STEP_CLEANUP, UI_LAUNCH_STEP_KEPT,
     UI_LAUNCH_PS5_HEADING, UI_LAUNCH_PS5_HELP, UI_LAUNCH_PS5_NO_TOOLS, UI_LAUNCH_PS5_IP, UI_LAUNCH_PS5_BUILD,
     UI_LAUNCH_PS5_DONE, UI_LAUNCH_PS5_FAILED,
     UI_LAUNCH_SHORTCUT, UI_LAUNCH_SHORTCUT_DONE, UI_LAUNCH_SHORTCUT_FAILED,   // DONE: "... %s" (the shortcut's path)
+    // the Mods page (ui/launcher/mods.cpp): CONFIRM and CODE_BUILD take %s (the mod's name, the build id)
+    UI_LAUNCH_MODS, UI_LAUNCH_MODS_EMPTY, UI_MOD_IMPORT_ZIP, UI_MOD_IMPORT_FOLDER, UI_MOD_NAME, UI_MOD_IMPORT,
+    UI_MOD_DELETE, UI_MOD_CONFIRM, UI_MOD_ROMFS, UI_MOD_ROMFS_1, UI_MOD_CODE_BUILD,
+    UI_MOD_CODE_PORT, UI_MOD_CODE_SWITCHES, UI_MOD_CODE_SWITCH_1, UI_MOD_MERGING, UI_MOD_CONFLICTS, UI_MOD_VANILLA, UI_MOD_IMPORTED, UI_MOD_RESOLVE, UI_MOD_OK,
+    UI_MOD_ERR_LAYOUT, UI_MOD_ERR_NAME, UI_MOD_ERR_IO, UI_MOD_ERR_NOPORT, UI_MOD_ERR_NOGAME,
+    UI_MOD_VARIANTS, UI_MOD_ERR_BIG, UI_MOD_ERR_UNPACK,
+    // the GameBanana tab (ui/launcher/mods_browse.cpp): BY "%s" (author), LICENSE "%s", INSTALL "%s" (file name),
+    // CONFIRM "%s ... %s" (file, author), PAGE "%d ... %d", ERROR "%s" (what failed)
+    UI_MOD_TAB_INSTALLED, UI_MOD_TAB_FIND, UI_GB_NOTE, UI_GB_SEARCH, UI_GB_SORT_DOWNLOADS, UI_GB_SORT_NEW,
+    UI_GB_SORT_LIKES, UI_GB_LOADING, UI_GB_NONE, UI_GB_BY, UI_GB_LICENSE, UI_GB_OPEN, UI_GB_INSTALL, UI_GB_CONFIRM,
+    UI_GB_UNSAFE, UI_GB_PAGE, UI_GB_ERROR, UI_MOD_WARN_GRAPHICS, UI_MOD_WARN_SHADERS, UI_MOD_CODE_REBUILD, UI_MOD_RISK, UI_MOD_RISK_ACK,
     // the update (ui/launcher/launcher_update.cpp): UPDATE "... %s ... %d MB" (tag, size), FETCHING "... %s" (tag),
     // FAILED "... %s" (why), UPDATED "... %s" (tag); the Menu tab's switch
-    UI_LAUNCH_UPDATE, UI_LAUNCH_UPDATE_FETCHING, UI_LAUNCH_UPDATE_FAILED, UI_LAUNCH_UPDATED,
+    UI_LAUNCH_UPDATE_FETCHING, UI_LAUNCH_UPDATE_FAILED, UI_LAUNCH_UPDATED,
+    // the update card (TITLE: the release; DETAIL: the version in use and the download's MB) and the main page's rows
+    UI_LAUNCH_UPDATE_TITLE, UI_LAUNCH_UPDATE_DETAIL, UI_LAUNCH_UPDATE_NOW, UI_LAUNCH_WHATS_NEW, UI_LAUNCH_RETRY,
+    UI_LAUNCH_FILES_READY_AS, UI_LAUNCH_PAD, UI_LAUNCH_PAD_NONE, UI_LAUNCH_CONFIGURE, UI_LAUNCH_SHORTCUT_ASK,
+    UI_LAUNCH_SHORTCUT_MAKE, UI_LAUNCH_NOT_NOW, UI_LAUNCH_KEYS,
+    UI_LAUNCH_SETTINGS_NOTE,   // beside the Settings title: changes save at once and apply when the game starts
+    // the Game files page: the setup's steps (INSTALLS_TO: "... %s", the game folder) and what a setup installed
+    UI_LAUNCH_NO_SOURCE, UI_LAUNCH_ROMFS_COPY_NOTE, UI_LAUNCH_ROMFS_LINK_NOTE, UI_LAUNCH_INSTALLS_TO,
+    UI_LAUNCH_INFO_VERSION, UI_LAUNCH_INFO_PORT, UI_LAUNCH_INFO_ROMFS, UI_LAUNCH_ROMFS_COPIED, UI_LAUNCH_ROMFS_LINKED,
+    UI_LAUNCH_OPEN_FOLDER, UI_LAUNCH_SETUP_AGAIN_HINT,
+    // the Tools page (BACKUP_NOTE: the player's name; BACKUP_DONE: the zip; VERSION, UNDO_ROW, UNDO_ASK: a version;
+    // FAILED: why)
+    UI_LAUNCH_TOOLS, UI_TOOLS_SAVES, UI_TOOLS_BACKUP, UI_TOOLS_BACKUP_NOTE, UI_TOOLS_BACKUP_DONE, UI_TOOLS_BACKUP_BUTTON,
+    UI_TOOLS_SAVES_FOLDERS, UI_TOOLS_OPEN_SAVES, UI_TOOLS_OPEN_BACKUPS, UI_TOOLS_SHORTCUTS, UI_TOOLS_STEAM,
+    UI_TOOLS_STEAM_NOTE, UI_TOOLS_ADD, UI_TOOLS_STEAM_DONE, UI_TOOLS_STEAM_RESTART, UI_TOOLS_STEAM_NONE, UI_TOOLS_UPDATES,
+    UI_TOOLS_VERSION, UI_TOOLS_CHECK, UI_TOOLS_CHECKING, UI_TOOLS_UNDO_ROW, UI_TOOLS_UNDO_NOTE, UI_TOOLS_UNDO,
+    UI_TOOLS_UNDO_ASK, UI_TOOLS_PROBLEMS, UI_TOOLS_REPORT, UI_TOOLS_REPORT_NOTE, UI_TOOLS_REPORT_BUTTON,
+    UI_TOOLS_REPORT_COPIED, UI_TOOLS_LOGS, UI_TOOLS_FAILED,
+    UI_LAUNCH_NO_GAME_DATA,   // the start screen's lower right: the player brings the game, the port ships none
+    // the last run's end (ui/launcher/launcher_lastrun.cpp): KNOWN "... #%d ..." (issue), FIXED "... %s ..." (tag),
+    // OPEN "... #%d" (issue): the buttons open the issue or the bug form
+    UI_LAUNCH_LASTRUN_KNOWN, UI_LAUNCH_LASTRUN_FIXED, UI_LAUNCH_LASTRUN_CRASH, UI_LAUNCH_LASTRUN_OPEN,
+    UI_LAUNCH_LASTRUN_REPORT, UI_LAUNCH_LASTRUN_DISMISS,
     UI_MENU_UPDATE_CHECK, UI_MENU_UPDATE_CHECK_DESC,
+    UI_MENU_DISCORD, UI_MENU_DISCORD_DESC,   // Discord Rich Presence (core/presence/presence.c)
+    // the Profiles page (ui/launcher/launcher_players.cpp): PLAYER "...: %s" (the main page's row, the name),
+    // CONFIRM "... %s ..." (the name)
+    UI_LAUNCH_PLAYERS, UI_PLAYER_NOTE, UI_PLAYER_NAME_HINT, UI_PLAYER_CHOOSE, UI_PLAYER_CHOSEN,
+    UI_PLAYER_NEW, UI_PLAYER_REMOVE, UI_PLAYER_CONFIRM, UI_PLAYER_FAILED,
     // Pit Stop overlay
     UI_PIT_TITLE,
     UI_PIT_RESUME,
@@ -225,14 +293,15 @@ typedef enum {
 
 // UTF-8 text for id in the language of ov_language(); English when the catalog has no row for that language.
 const char *ui_text(UiTextId id);
-// The same for an explicit catalog language ("en", "ja", "fr", "de", "it", "es", "nl", "pt", "ru", "zh-Hans",
-// "zh-Hant", "ko"); an empty entry gives the English text.
+// The same for an explicit catalog language ("en", "ja", "fr", "de", "it", "es", "nl", "pt", "pt-BR", "ru",
+// "zh-Hans", "zh-Hant", "ko", "es-419", "ca", "gl", "eu", "pl", "tr", "uk", "th"); an empty entry gives the English text.
 const char *ui_text_in(const char *lang, UiTextId id);
 // 1 when the row of lang has its own text for id (no fallback to English), for the probe.
 int ui_text_defined(const char *lang, UiTextId id);
 // The catalog language for a Switch language code ("en-GB" -> "en", "zh-CN" -> "zh-Hans", ...).
 const char *ui_text_lang(const char *switch_code);
 
-// Menu text: ui_text_in(menu language, id). The menu language is MKW_MENU_LANG ("en", "ru", "es"); unset, the system
-// UI language when it is one of those, else English. Follows a live change of the setting.
+// Menu text: ui_text_in(menu_lang(), id). The menu language is MKW_MENU_LANG (a catalog language); unset, the system
+// UI language when the catalog has it, else English. Follows a live change of the setting.
 const char *menu_text(UiTextId id);
+const char *menu_lang(void);

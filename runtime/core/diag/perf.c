@@ -541,11 +541,14 @@ void perf_present(uint64_t frame) {
                (span > wait_ns[PERF_PACE] ? span - wait_ns[PERF_PACE] : 0) / 1e6 / n,
                plat_xchg64(&replay_ns, 0) / 1e6 / n, (unsigned long long)ab_b, (unsigned long long)n, frame_step_world_us() / 1e6);
     if (n && span) perf_gpu_line(frame, sum / 1e6 / n, (double)wait_ns[PERF_PACE] / span, n);
-    if (frame % 120 == 0) {
-        char lbuf[1024];
-        if (plat_lock_report(0, lbuf, sizeof lbuf)) rt_log("perf: lock waits since the last line (MKW_LOCK_PROF):%s", lbuf);
-        if (plat_lock_report(1, lbuf, sizeof lbuf))
-            rt_log("perf: lock holds while waited on since the last line (MKW_LOCK_PROF):%s", lbuf);
+    // MKW_LOCK_PROF=1: the waits per lock in this window (vk_sync.c's line needs 1,200 submissions; the boot has fewer),
+    // and who held a lock while another thread waited on it
+    if (n && span) {
+        char lb[1024];
+        if (plat_lock_report(0, lb, sizeof lb))
+            rt_log("perf: frame %llu: lock waits (MKW_LOCK_PROF):%s", (unsigned long long)frame, lb);
+        if (plat_lock_report(1, lb, sizeof lb))
+            rt_log("perf: frame %llu: lock holds while waited on (MKW_LOCK_PROF):%s", (unsigned long long)frame, lb);
     }
     sum = max = n = ab_b = 0;
     memset(wait_ns, 0, sizeof wait_ns);

@@ -16,6 +16,7 @@
 #include "nvn_api.h"
 #include "nvn_pool_index.h"
 #include "platform/platform.h"
+#include "version.h"
 
 #define DEV_MAGIC MAGIC('D', 'E', 'V', 0)
 #define QUEUE_MAGIC MAGIC('Q', 'U', 'E', 'U')
@@ -168,9 +169,13 @@ static int pool_place(pool_t *o) {
 static int pool_gpu_visible(const pool_t *o) { return !(o->flags & NVN_MEMORY_POOL_FLAGS_GPU_NO_ACCESS); }
 
 // ---------- Device
-// NVN2 values of MKW's driver (MKW requires API 231.16); the Tegra X1 table of NVN1 (55.15) stays in git history.
-static const int devinfo[] = {
+// NVN2 values of the driver of each game version (tools/gpu/gen_nvn2_devinfo.py): 1.0.0 requires API 231.16, 1.8.0's
+// sdk answers 231.39 and larger limits (0x7f, 0x82, 0x98). The Tegra X1 table of NVN1 (55.15) stays in git history.
+static const int devinfo_100[] = {
 #include "nvn2_devinfo.inc"
+};
+static const int devinfo_180[] = {
+#include "nvn2_devinfo_180.inc"
 };
 
 // void nvnDeviceBuilderSetDefaults(NVNdeviceBuilder *b)
@@ -193,7 +198,10 @@ NVN_API(nvnDeviceFinalize) { ((dev_t_ *)arg_p(c, 0))->magic = 0; }
 NVN_API(nvnDeviceGetInteger) {
     unsigned w = (unsigned)arg_x(c, 1);
     int *out = arg_p(c, 2);
-    if (w >= sizeof devinfo / sizeof *devinfo) rt_fatal("nvn: unsupported NVN device property %#x", w);
+    int v180 = rt_version()->number >= 180;
+    const int *devinfo = v180 ? devinfo_180 : devinfo_100;
+    unsigned n = v180 ? sizeof devinfo_180 / sizeof *devinfo_180 : sizeof devinfo_100 / sizeof *devinfo_100;
+    if (w >= n) rt_fatal("nvn: unsupported NVN device property %#x", w);
     *out = devinfo[w];
     NVN_LOG("DeviceGetInteger %#x -> %d", w, *out);
 }
@@ -257,6 +265,33 @@ NVN_API(nvnMemoryPoolBuilderSetStorage) {
 }
 // void nvnMemoryPoolBuilderSetFlags(NVNmemoryPoolBuilder *b, int flags)
 NVN_API(nvnMemoryPoolBuilderSetFlags) { ((pool_builder_t *)arg_p(c, 0))->flags = (uint32_t)arg_x(c, 1); }
+// Storage for a GPU-only pool the game gives none (#213): at 21:9 and 2160 lines the output targets' pool (0x7d82000
+// bytes, flags 0x21) no longer fits the game's heap, its allocation returns NULL and the game initializes the pool
+// with it; every target in it was then left without an image and the screen black. Its CPU never reads such a pool,
+// so where the storage comes from does not matter to the game. Kept for the next one when the pool is finalized:
+// plat_mem_alloc never frees.
+static struct { void *mem; uint64_t size; int used; } own_storage[4];
+
+static void *own_storage_take(uint64_t size) {
+    void *m = NULL;
+    plat_mutex_lock(&pool_lock);
+    for (int i = 0; i < 4 && !m; i++)
+        if (own_storage[i].mem && !own_storage[i].used && own_storage[i].size >= size)
+            own_storage[i].used = 1, m = own_storage[i].mem;
+    for (int i = 0; i < 4 && !m; i++)
+        if (!own_storage[i].mem && (m = plat_mem_alloc((size_t)size)))
+            own_storage[i].mem = m, own_storage[i].size = size, own_storage[i].used = 1;
+    plat_mutex_unlock(&pool_lock);
+    return m;
+}
+
+static void own_storage_give_back(const void *mem) {
+    plat_mutex_lock(&pool_lock);
+    for (int i = 0; i < 4; i++)
+        if (own_storage[i].mem == mem) own_storage[i].used = 0;
+    plat_mutex_unlock(&pool_lock);
+}
+
 // NVNboolean nvnMemoryPoolInitialize(NVNmemoryPool *p, const NVNmemoryPoolBuilder *b)
 // Pool setup imports, mirrors and maps memory in the back end (the driver, VirtualAlloc): up to 20 ms on the game's
 // loader threads, which held a virtual core through it while job workers waited (MKW_CORE_DIAG). The thread gives
@@ -271,6 +306,10 @@ NVN_API(nvnMemoryPoolInitialize) {
     o->mem = o->game_mem = s->mem;
     o->size = s->size;
     int ok = pool_place(o);
+    if (ok && !o->mem && (o->flags & NVN_MEMORY_POOL_FLAGS_CPU_NO_ACCESS) && o->size &&
+        (o->mem = own_storage_take(o->size)))
+        rt_log("nvn: MemoryPoolInitialize: GPU-only pool without storage (flags %#x size %#llx): the runtime's own",
+               o->flags, (unsigned long long)o->size);
     if (ok && !o->mem) {
         rt_log("nvn: MemoryPoolInitialize: pool without storage, flags %#x size %#llx", o->flags,
                (unsigned long long)o->size);
@@ -298,6 +337,7 @@ NVN_API(nvnMemoryPoolFinalize) {
     if (pool_gpu_visible(o)) index_del(o);
     gfx_backend()->pool_fini(o);
     if (nvn_gpu_only((uintptr_t)o->mem)) gva_free((uintptr_t)o->mem);
+    if (!o->game_mem) own_storage_give_back(o->mem);
     o->mem = o->game_mem;
     o->span = 0;
     o->magic = 0;
@@ -479,6 +519,11 @@ void nvn_present_fence_note(void) {
                      __ATOMIC_RELAXED);
 }
 
+// Also, every 60 presents with waits in them (the loading screens: the loaders wait ~10 ms for each upload they
+// submit, 470 waits in the boot, boot-ht1), where the waited value was when the wait began: not yet recorded by the
+// replay (the latency is ours, the replay queue), or sent and not finished by the GPU (or its completion).
+static uint64_t sw_rep_n, sw_rep_ns, sw_gpu_n, sw_gpu_ns, sw_presents;
+
 int nvn_fence_frame_rel(uint64_t fence) {
     uint32_t at = __atomic_load_n(&present_at, __ATOMIC_RELAXED);
     int k = 0;
@@ -486,15 +531,28 @@ int nvn_fence_frame_rel(uint64_t fence) {
     return k;
 }
 
-static void sync_wait_note(uint64_t fence, uint64_t ns) {
+static void sync_wait_note(uint64_t fence, uint64_t ns, uint64_t issued_at_start) {
     static uint64_t n[4], t[4], total;
     int k = nvn_fence_frame_rel(fence);
     __atomic_fetch_add(&n[k], 1, __ATOMIC_RELAXED), __atomic_fetch_add(&t[k], ns, __ATOMIC_RELAXED);
+    if (fence > issued_at_start) __atomic_fetch_add(&sw_rep_n, 1, __ATOMIC_RELAXED), __atomic_fetch_add(&sw_rep_ns, ns, __ATOMIC_RELAXED);
+    else __atomic_fetch_add(&sw_gpu_n, 1, __ATOMIC_RELAXED), __atomic_fetch_add(&sw_gpu_ns, ns, __ATOMIC_RELAXED);
     if (__atomic_add_fetch(&total, 1, __ATOMIC_RELAXED) % 600) return;
     rt_log("nvn: blocking SyncWaits by the frame of the fence: not presented yet %llu (%.1f ms), last presented %llu "
            "(%.1f ms), the one before %llu (%.1f ms), older %llu (%.1f ms)", (unsigned long long)n[0], t[0] / 1e6,
            (unsigned long long)n[1], t[1] / 1e6, (unsigned long long)n[2], t[2] / 1e6, (unsigned long long)n[3], t[3] / 1e6);
     memset(n, 0, sizeof n), memset(t, 0, sizeof t);
+}
+
+void nvn_sync_wait_window(void) {   // from the present, MKW_TRACE=perf
+    if (++sw_presents % 60) return;
+    uint64_t rn = __atomic_exchange_n(&sw_rep_n, 0, __ATOMIC_RELAXED), rt = __atomic_exchange_n(&sw_rep_ns, 0, __ATOMIC_RELAXED);
+    uint64_t gn = __atomic_exchange_n(&sw_gpu_n, 0, __ATOMIC_RELAXED), gt = __atomic_exchange_n(&sw_gpu_ns, 0, __ATOMIC_RELAXED);
+    if (!rn && !gn) return;
+    rt_log("perf: frame %llu: blocking SyncWaits: value not yet recorded by the replay %llu (%.1f ms, %.2f each), "
+           "sent and waiting for the GPU %llu (%.1f ms, %.2f each)", (unsigned long long)sw_presents,
+           (unsigned long long)rn, rt / 1e6, rn ? rt / 1e6 / (double)rn : 0.0, (unsigned long long)gn, gt / 1e6,
+           gn ? gt / 1e6 / (double)gn : 0.0);
 }
 
 // A poll (timeout under 1 ms) of a fence not done: on the console the GPU is done with a submit within the frame, here
@@ -583,14 +641,14 @@ NVN_API(nvnSyncWait) {
     if (b->fence_done() >= s->fence) { b->cpu_synced(s->fence); ret_x(c, NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED); return; }
     if (poll && poll_wait(s->fence, c->x[30])) { b->cpu_synced(s->fence); ret_x(c, NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED); return; }
     int ok;
-    uint64_t t0 = (rt_trace & RT_TRACE_PERF) ? kern_now_ns() : 0;
+    uint64_t t0 = (rt_trace & RT_TRACE_PERF) ? kern_now_ns() : 0, iss0 = t0 ? b->fence_queued() : 0;
     {
         NVN_BLOCKING();
         ok = b->fence_wait(s->fence, timeout);
     }
     if (t0) {
         uint64_t dt = kern_now_ns() - t0;
-        sync_wait_note(s->fence, dt);
+        sync_wait_note(s->fence, dt, iss0);
         perf_fence_site("nvnSyncWait", c->x[30], nvn_fence_frame_rel(s->fence), dt);
     }
     if (ok) b->cpu_synced(s->fence);

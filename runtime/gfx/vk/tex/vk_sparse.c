@@ -43,14 +43,15 @@ int sceKernelGetPageTableStats(int *cpu_total, int *cpu_free, int *gpu_total, in
 #define SMALL_SPARSE (4u << 20)   // storage of an image that gets slots past MKW_SPARSE_MIB
 
 typedef struct SlotBlock {
-    VkBuffer buf;                 // over the whole block, for the zero fill
+    VkBuffer buf;                 // over the whole block, for the zero fill; none when no memory type serves both (#215)
     VmaAllocation alloc;
     VkDeviceMemory mem;
     VkDeviceSize base;            // offset of the block in mem
     VkDeviceSize slot_size;       // bytes of each of its slots
     uint32_t type_bits;           // memory types of the images it serves
     uint32_t used;
-    uint8_t busy[BLOCK_SLOTS];
+    uint32_t top;                 // slots handed out in order to lanes (lane_get); below it, holes are reused
+    uint8_t busy[BLOCK_SLOTS];    // 0 never used (zero from the block's fill), 1 in use, 2 freed (its texels stay)
     struct SlotBlock *next;
 } SlotBlock;
 
@@ -83,6 +84,7 @@ typedef struct SparseImg {
     // own instead (tail_*: one allocation, bound once): the race's bushes and cacti sample those levels of the terrain
     // arrays and came out black (m8, m10: still black with every tile resident).
     VmaAllocation tail_alloc;
+    VkDeviceSize va_size;   // the image's memory requirements' size: the address space it reserves
     VkDeviceMemory tail_mem;
     VkDeviceSize tail_base, tail_bytes;
     uint32_t nmips, tail_end, tail_blocks;   // levels; first Vulkan mip tail level (nmips: none); blocks a layer in
@@ -95,7 +97,6 @@ typedef struct SparseImg {
     // NVIDIA's kernel mapper then ran a queued bind of an image already destroyed: "Requested object not found" for
     // pUnmap->hVirtualMemory in mem_mapper.c, and the device lost (620.70.06, RTX 5070 Ti, 09/11/2026).
     uint64_t bind_fence;
-    VkDeviceSize va_bytes;        // vkGetImageMemoryRequirements size: the VA the driver reserves (sparse_census)
 
     uint8_t *dirty;               // bound changed since the last flush; listed in dl
     uint32_t *dl;
@@ -129,7 +130,8 @@ static VkSemaphore order_tl;      // timeline: one value per graphics-queue subm
 static VkSemaphore bind_sem;      // MKW_SPARSE_ORDER=0: binary, signalled by a bind for the next replayed submission
 static uint64_t order_val, order_submitted, bind_val;
 static int binary_pending;        // MKW_SPARSE_ORDER=0: a bind signalled bind_sem for the submission being made   // last value handed out; value of the last bind (0: none yet)
-static int64_t n_slots, n_failed, n_binds, n_images, n_blocks, n_over, n_written, n_tail_writes;
+static uint64_t sparse_va;   // address space the live sparse images reserve (their memory requirements' size)
+static int64_t n_slots, n_failed, n_binds, n_images, n_blocks, n_over, n_written, n_tail_writes, n_host_blocks;
 static VmaAllocation *dying_tails;   // tail memory of destroyed images: freed behind the next submission
 static int ndying_tails, cdying_tails, ntail_pending;
 
@@ -175,38 +177,127 @@ static int on(void) {
     return v;
 }
 
+// Sparse memory in device-local memory, or when that is full or too small in any type req allows. An APU's own is a
+// 256 MiB carve-out on Windows, and the terrain's tiles found no memory and drew black (issue #63, Ryzen 7 5700G: 57
+// failures); the rest is the same RAM.
+static VkResult alloc_local_or_any(VkCtx *c, const VkMemoryRequirements *req, VmaAllocation *a, VmaAllocationInfo *info) {
+    if (!req->memoryTypeBits) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    VmaAllocationCreateInfo aci = {.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
+    VkResult r = vmaAllocateMemory(c->vma, req, &aci, a, info);
+    if (r == VK_SUCCESS) return r;
+    aci = (VmaAllocationCreateInfo){.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
+    if ((r = vmaAllocateMemory(c->vma, req, &aci, a, info)) == VK_SUCCESS && !n_host_blocks++)
+        rt_log("vk: sparse: memory outside the GPU's own (device-local full or too small)");
+    return r;
+}
+
+// After a fill of slot memory, before anything reads or binds it (the queue order puts the upload batch first).
+static const VkMemoryBarrier2 fill_mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+                                         .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                                         .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                         .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                         .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+static const VkDependencyInfo fill_dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1,
+                                          .pMemoryBarriers = &fill_mb};
+
 static SlotBlock *new_block(VkCtx *c, uint32_t type_bits, VkDeviceSize slot_size) {
     SlotBlock *b = calloc(1, sizeof *b);
     if (!b) rt_fatal("vk: out of memory (sparse block)");
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = slot_size * BLOCK_SLOTS,
-                             .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE};
+                             .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                             .sharingMode = VK_SHARING_MODE_EXCLUSIVE};   // fills and capture readbacks
     if (vkCreateBuffer(c->device, &bi, NULL, &b->buf) != VK_SUCCESS) { free(b); return NULL; }
     VkMemoryRequirements rb;
     vkGetBufferMemoryRequirements(c->device, b->buf, &rb);
     VkMemoryRequirements req = {.size = slot_size * BLOCK_SLOTS, .alignment = slot_size > rb.alignment ? slot_size : rb.alignment,
                                 .memoryTypeBits = rb.memoryTypeBits & type_bits};
-    VmaAllocationCreateInfo aci = {.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
-    VmaAllocationInfo info;
-    if (!req.memoryTypeBits || vmaAllocateMemory(c->vma, &req, &aci, &b->alloc, &info) != VK_SUCCESS ||
-        vmaBindBufferMemory(c->vma, b->alloc, b->buf) != VK_SUCCESS) {
-        if (b->alloc) vmaFreeMemory(c->vma, b->alloc);
+    // #215 (GTX 750 Ti, 0.1.10): buffer types 0xe81, sparse image types 0x104, none in common, so every block failed
+    // and the terrain had no tile at all. Then the block takes the image's types alone and has no buffer: its slots
+    // start as the driver hands the memory out (not zero-filled here) and a reused slot keeps its last texels until
+    // the game writes it. MKW_SPARSE_NO_BUFFER=1 takes that path on any GPU, to test it where the types meet.
+    static int no_buf_env = -1;
+    if (no_buf_env < 0) no_buf_env = cfg_get("MKW_SPARSE_NO_BUFFER") && atoi(cfg_get("MKW_SPARSE_NO_BUFFER"));
+    if (!req.memoryTypeBits || no_buf_env) {
+        static int logged;
+        if (!logged++)
+            rt_log("vk: sparse: tile blocks without a buffer (buffer types %#x, image types %#x%s): slots not zero-filled",
+                   rb.memoryTypeBits, type_bits, no_buf_env ? ", MKW_SPARSE_NO_BUFFER" : "");
         vkDestroyBuffer(c->device, b->buf, NULL);
+        b->buf = VK_NULL_HANDLE;
+        req.memoryTypeBits = type_bits;
+        req.alignment = slot_size;
+    }
+    VmaAllocationInfo info;
+    VkResult r = alloc_local_or_any(c, &req, &b->alloc, &info);
+    if (r != VK_SUCCESS) {
+        // #215 (GTX 750 Ti): the first slot already failed with no slot live and VRAM to spare; the hypothesis is
+        // that the buffer's memory types and the sparse image's do not meet on that driver (an empty mask fails here)
+        static uint32_t seen[8][2];
+        static int nseen;
+        int known = 0;
+        for (int i = 0; i < nseen; i++) known |= seen[i][0] == rb.memoryTypeBits && seen[i][1] == type_bits;
+        if (!known && nseen < 8) {
+            seen[nseen][0] = rb.memoryTypeBits, seen[nseen++][1] = type_bits;
+            rt_log("vk: sparse: tile block of %llu KiB failed (%d): buffer types %#x, image types %#x, both %#x",
+                   (unsigned long long)(req.size >> 10), r, rb.memoryTypeBits, type_bits, req.memoryTypeBits);
+        }
+    }
+    if (r != VK_SUCCESS || (b->buf && vmaBindBufferMemory(c->vma, b->alloc, b->buf) != VK_SUCCESS)) {
+        if (b->alloc) vmaFreeMemory(c->vma, b->alloc);
+        if (b->buf) vkDestroyBuffer(c->device, b->buf, NULL);
         free(b);
         return NULL;
     }
     b->mem = info.deviceMemory, b->base = info.offset, b->type_bits = type_bits, b->slot_size = slot_size;
     n_blocks++;
     b->next = blocks, blocks = b;
+    if (b->buf) {   // pool memory starts zeroed: the whole block once, instead of a fill and a barrier per slot (12 288
+        VkCommandBuffer cb = vk_upload_begin();   // of them in the logo's 1 s frame, merge-on2 14/11/2026)
+        vkCmdFillBuffer(cb, b->buf, 0, VK_WHOLE_SIZE, 0);
+        vkCmdPipelineBarrier2(cb, &fill_dep);
+        vk_upload_end();
+    }
     return b;
 }
 
 // The slot of a physical page's block for an image, made (zeroed) on first use. NULL when it does not fit.
-static Slot *slot_get(VkCtx *c, const SparseImg *s, uint64_t pa, uint32_t sub) {
+// A lane: one row of Vulkan blocks of a level (layer, level, row of NVN tiles ty, row sy inside the tile) being bound
+// left to right (bind_page runs x first). Its slots come in order from one span of a block, so the row binds as one
+// (make_bind's runs): with slots taken first-free, a 2x2 tile's sub-blocks were consecutive and the next tile's came
+// 4 later, runs of 2 (merge-on1: 11 471 blocks as 4 691 binds, 427 ms). The last few lanes, round robin.
+static int merge_on(void);
+typedef struct { const SparseImg *s; uint32_t layer, l, ty, sy; SlotBlock *b; uint32_t next, end; } Lane;
+#define LANES 8
+static Lane lanes[LANES];
+static unsigned lane_at;
+
+static Lane *lane_get(const SparseImg *s, uint32_t layer, uint32_t l, uint32_t ty, uint32_t sy) {
+    for (int i = 0; i < LANES; i++)
+        if (lanes[i].s == s && lanes[i].layer == layer && lanes[i].l == l && lanes[i].ty == ty && lanes[i].sy == sy)
+            return &lanes[i];
+    Lane *L = &lanes[lane_at++ % LANES];
+    *L = (Lane){s, layer, l, ty, sy, NULL, 0, 0};
+    return L;
+}
+
+// The slot of a physical page's block for an image, made (zeroed) on first use. NULL when it does not fit. L: the
+// lane the block is in and want the blocks left in its row, for a span of consecutive slots (NULL: first free).
+static Slot *slot_get(VkCtx *c, const SparseImg *s, uint64_t pa, uint32_t sub, Lane *L, uint32_t want) {
     SlotKey k = {pa, sub, (int32_t)s->fmt};
     Slot *sl = nvn_hm_get(&slots, &k);
     if (sl) return sl;
-    SlotBlock *b = blocks;
-    while (b && (b->used == BLOCK_SLOTS || b->type_bits != s->type_bits)) b = b->next;
+    SlotBlock *b = NULL;
+    uint32_t i = 0;
+    int lane_ok = L && L->b && L->next < L->end && L->b->busy[L->next] != 1;
+    if (lane_ok) {
+        b = L->b, i = L->next;
+    } else if (L && merge_on()) {   // a block with room above its top, for a span of this row
+        for (b = blocks; b && (b->top == BLOCK_SLOTS || b->type_bits != s->type_bits); b = b->next) {}
+    }
+    if (!b) {
+        b = blocks;
+        while (b && (b->used == BLOCK_SLOTS || b->type_bits != s->type_bits)) b = b->next;
+    }
     // Small images are outside the cap: it is there for the 8192x8192x68 arrays, which fill it before the 512x512 ones
     // the game makes later (foliage maps, r8sn) get a slot, and those read as zero drew the bushes black (01/11/2026).
     // The live slots count too: a block opened past the cap for a small image is not for the arrays to fill (m3).
@@ -224,32 +315,40 @@ static Slot *slot_get(VkCtx *c, const SparseImg *s, uint64_t pa, uint32_t sub) {
                    (long long)n_slots);
         return NULL;
     }
-    uint32_t i = 0;
-    while (b->busy[i]) i++;
+    if (!lane_ok) {
+        if (L && merge_on() && b->top < BLOCK_SLOTS) {
+            uint32_t span = want < BLOCK_SLOTS - b->top ? want : BLOCK_SLOTS - b->top;
+            i = b->top, b->top += span;
+            L->b = b, L->next = i, L->end = i + span;
+        } else {
+            while (b->busy[i] == 1) i++;
+        }
+    }
+    if (L && L->b == b && L->next == i) L->next++;
+    int reused = b->busy[i] == 2;   // a freed slot keeps its last texels: zeroed again here
     b->busy[i] = 1, b->used++;
+    if (i >= b->top) b->top = i + 1;
     if (!(sl = calloc(1, sizeof *sl))) rt_fatal("vk: out of memory (sparse slot)");
     sl->key = k, sl->blk = b, sl->idx = i;
     nvn_hm_put(&slots, &k, sl);
     n_slots++;
-    VkCommandBuffer cb = vk_upload_begin();   // pool memory starts zeroed; the queue order puts it before its use
-    vkCmdFillBuffer(cb, b->buf, (VkDeviceSize)i * s->slot_size, s->slot_size, 0);
-    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-                           .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
-    VkDependencyInfo dep = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
-    vkCmdPipelineBarrier2(cb, &dep);
+    if (!b->buf) return sl;   // no buffer to fill through (new_block): neither zeros nor a capture's texels
     // A capture being replayed (runtime/gfx/cap) holds this slot's texels: they replace the zeros, each time the slot is
     // made (a slot no binding names is freed once the GPU is past it, which depends on timing, and may come back).
     uint8_t *saved = cap_pending.n ? nvn_hm_get(&cap_pending, &k) : NULL;
+    if (!reused && !saved) return sl;   // zero from the block's fill (new_block)
+    VkCommandBuffer cb = vk_upload_begin();
     if (saved) {
         VkBuffer sb;
         uint8_t *map = vk_staging(s->slot_size, &sb, NULL);
         memcpy(map, saved, s->slot_size);
         VkBufferCopy cp = {0, (VkDeviceSize)i * s->slot_size, s->slot_size};
         vkCmdCopyBuffer(cb, sb, b->buf, 1, &cp);
-        vkCmdPipelineBarrier2(cb, &dep);
         sl->written = 1;
+    } else {
+        vkCmdFillBuffer(cb, b->buf, (VkDeviceSize)i * s->slot_size, s->slot_size, 0);
     }
+    vkCmdPipelineBarrier2(cb, &fill_dep);
     vk_upload_end();
     return sl;
 }
@@ -269,7 +368,7 @@ static void slot_reap(void *arg) {
     if (!--sl->reaps && !sl->refs) {
         SlotBlock *b = sl->blk;
         nvn_hm_del(&slots, &sl->key);
-        b->busy[sl->idx] = 0, b->used--;
+        b->busy[sl->idx] = 2, b->used--;   // freed: its texels stay, zeroed again when reused
         n_slots--;
         n_written -= sl->written;
         free(sl);
@@ -299,20 +398,58 @@ static void mark_dirty(SparseImg *s, size_t i) {
     s->dl[s->ndl++] = (uint32_t)i;
 }
 
-// The bind of block i of s to what bound[] names now.
-static VkSparseImageMemoryBind make_bind(const SparseImg *s, uint32_t i) {
-    uint32_t layer = i / s->nblk, r = i % s->nblk, l = 0;
-    while (l + 1 < s->nlev && r >= s->blk0[l + 1]) l++;
-    r -= s->blk0[l];
-    uint32_t x = r % s->bx[l] * s->gw, y = r / s->bx[l] * s->gh;
+// Block i of s: its layer, level and position in blocks.
+static void blk_pos(const SparseImg *s, uint32_t i, uint32_t *layer, uint32_t *l, uint32_t *bx, uint32_t *by) {
+    uint32_t r = i % s->nblk, lv = 0;
+    *layer = i / s->nblk;
+    while (lv + 1 < s->nlev && r >= s->blk0[lv + 1]) lv++;
+    r -= s->blk0[lv];
+    *l = lv, *bx = r % s->bx[lv], *by = r / s->bx[lv];
+}
+
+// The bind of blocks i..i+run-1 of s (one row; run 1 without MKW_SPARSE_MERGE) to what bound[] names now. The blocks
+// of one bind are laid out in its memory x first (Vulkan 1.3 §33.4.4), so a run of slots contiguous in one block binds
+// as one. RADV makes one VA update (a GEM_VA ioctl, ~50 us, plus the kernel's wait for the VM) per row of blocks of
+// each bind: bind 2 of the boot, 11 471 blocks of the 8192x8192x68 arrays one by one, took 576-995 ms in
+// vkQueueBindSparse on the replay thread, the 1.5 s frame of the logo (carga-tl1, carga-io2, 14/11/2026).
+static VkSparseImageMemoryBind make_bind(const SparseImg *s, uint32_t i, uint32_t run) {
+    uint32_t layer, l, bx, by;
+    blk_pos(s, i, &layer, &l, &bx, &by);
+    uint32_t x = bx * s->gw, y = by * s->gh, w = run * s->gw;
     uint32_t lw = s->w >> l ? s->w >> l : 1, lh = s->h >> l ? s->h >> l : 1;
     const Slot *sl = s->bound[i];
     return (VkSparseImageMemoryBind){
         .subresource = {s->aspect, l, layer},
         .offset = {(int32_t)x, (int32_t)y, 0},
-        .extent = {lw - x < s->gw ? lw - x : s->gw, lh - y < s->gh ? lh - y : s->gh, 1},
+        .extent = {lw - x < w ? lw - x : w, lh - y < s->gh ? lh - y : s->gh, 1},
         .memory = sl ? sl->blk->mem : VK_NULL_HANDLE,
         .memoryOffset = sl ? sl->blk->base + (VkDeviceSize)sl->idx * s->slot_size : 0};
+}
+
+// MKW_SPARSE_MERGE (default 1; 0: one bind per block, as before 14/11/2026; "ab": in the B blocks only).
+static int merge_on(void) {
+    static int v = -1;
+    if (v < 0) v = rt_knob("SPARSE_MERGE", "1");
+    return RT_KNOB_ON(v);
+}
+
+static int by_u32(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+// How many blocks from dl[k] (sorted) on make one row run bound to contiguous slots, or all unbound: one bind.
+static int run_len(const SparseImg *s, int k) {
+    uint32_t i = s->dl[k], layer, l, bx, by;
+    blk_pos(s, i, &layer, &l, &bx, &by);
+    const Slot *sl = s->bound[i];
+    int run = 1;
+    while (k + run < s->ndl && s->dl[k + run] == i + (uint32_t)run && bx + (uint32_t)run < s->bx[l]) {
+        const Slot *nx = s->bound[i + (uint32_t)run];
+        if (sl ? !(nx && nx->blk == sl->blk && nx->idx == sl->idx + (uint32_t)run) : nx != NULL) break;
+        run++;
+    }
+    return run;
 }
 
 // Binds the Vulkan blocks inside page p of s to what the page maps now (sp_lock held).
@@ -326,18 +463,20 @@ static void bind_page(VkCtx *c, SparseImg *s, uint64_t p) {
     uint64_t pa = 0;
     int mapped = vk_mem_virt_phys(s->addr + p * PAGE, &pa);
 
-    for (uint32_t sy = 0; sy < s->nth / s->gh; sy++)
+    for (uint32_t sy = 0; sy < s->nth / s->gh; sy++) {
+        Lane *L = mapped ? lane_get(s, layer, l, ty, sy) : NULL;
         for (uint32_t sx = 0; sx < s->ntw / s->gw; sx++) {
             uint32_t x = tx * s->ntw + sx * s->gw, y = ty * s->nth + sy * s->gh;
             if (x >= lw || y >= lh) continue;
             size_t i = (size_t)layer * s->nblk + s->blk0[l] + (y / s->gh) * s->bx[l] + x / s->gw;
-            Slot *want = mapped ? slot_get(c, s, pa, sy * (s->ntw / s->gw) + sx) : NULL;
+            Slot *want = mapped ? slot_get(c, s, pa, sy * (s->ntw / s->gw) + sx, L, s->bx[l] - x / s->gw) : NULL;
             if (want == s->bound[i]) continue;
             if (want) want->refs++;
             if (s->bound[i]) slot_unref(s->bound[i]);
             s->bound[i] = want;
             mark_dirty(s, i);
         }
+    }
 }
 
 static void bind_range(VkCtx *c, SparseImg *s, uint64_t lo, uint64_t hi) {
@@ -365,9 +504,8 @@ static void tail_alloc(VkCtx *c, SparseImg *s, const VkSparseImageMemoryRequirem
                          tail_count(s) * round_up(s->tail_req.imageMipTailSize, s->slot_size);
     if (!bytes) return;
     VkMemoryRequirements req = {.size = bytes, .alignment = s->slot_size, .memoryTypeBits = types};
-    VmaAllocationCreateInfo aci = {.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT};
     VmaAllocationInfo info;
-    if (vmaAllocateMemory(c->vma, &req, &aci, &s->tail_alloc, &info) != VK_SUCCESS) {
+    if (alloc_local_or_any(c, &req, &s->tail_alloc, &info) != VK_SUCCESS) {
         s->tail_alloc = NULL;
         rt_log("vk: sparse: no memory for the %llu KiB of levels outside the tiles (%ux%u layers %u)",
                (unsigned long long)(bytes >> 10), s->w, s->h, s->layers);
@@ -584,8 +722,8 @@ static void census_locked(const char *why) {
                           (unsigned long long)slots, (unsigned long long)blocks);
         }
         rt_log("vk: sparse census (%s): %#llx %ux%u layers %u VkFormat %d: VA %llu MiB (%llu 2 MiB units)%s", why,
-               (unsigned long long)s->addr, s->w, s->h, s->layers, (int)s->fmt, (unsigned long long)(s->va_bytes >> 20),
-               (unsigned long long)((s->va_bytes + (2u << 20) - 1) >> 21), buf);
+               (unsigned long long)s->addr, s->w, s->h, s->layers, (int)s->fmt, (unsigned long long)(s->va_size >> 20),
+               (unsigned long long)((s->va_size + (2u << 20) - 1) >> 21), buf);
     }
 }
 
@@ -632,14 +770,20 @@ static void sparse_create_note_fail(uint64_t addr, uint64_t size, VkFormat fmt, 
     }
 }
 
-int vk_sparse_create(const VkImageCreateInfo *ci0, const nvn_texdesc *d, uint64_t addr, uint64_t size, VkImage *out) {
+int vk_sparse_create(const VkImageCreateInfo *ci0, const nvn_texdesc *d, uint64_t addr, uint64_t size, VkImage *out,
+                     VkSparseTail *tail) {
     VkCtx *c = vk_ctx();
     static volatile int32_t nwarn;
     *out = VK_NULL_HANDLE;
+    *tail = (VkSparseTail){0};
     if (!on() || !(d->flags & NVN_TEXTURE_FLAGS_SPARSE) || !nvn_gpu_only(addr) || ci0->imageType != VK_IMAGE_TYPE_2D ||
         ci0->samples != VK_SAMPLE_COUNT_1_BIT || !(ci0->usage & VK_IMAGE_USAGE_SAMPLED_BIT))
         return 0;
     VkImageCreateInfo ci = *ci0;
+    // Only cube targets take cube views (vk_exec_view.c). Unneeded cube compatibility on the terrain's 2D arrays
+    // makes non-base mips sample zeros on RX 570 / Windows 26.5.2 even though transfer readbacks are correct.
+    if (d->target != NVN_TEXTURE_TARGET_CUBEMAP && d->target != NVN_TEXTURE_TARGET_CUBEMAP_ARRAY)
+        ci.flags &= ~(VkImageCreateFlags)VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     ci.flags |= VK_IMAGE_CREATE_SPARSE_BINDING_BIT | VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT | VK_IMAGE_CREATE_SPARSE_ALIASED_BIT;
     ci.usage &= ~(VkImageUsageFlags)VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
     uint32_t n = 0;
@@ -678,6 +822,21 @@ int vk_sparse_create(const VkImageCreateInfo *ci0, const nvn_texdesc *d, uint64_
     else if (small_log) plat_mem_census_log("before-small-sparse-create");
     VkResult cr = vkCreateImage(c->device, &ci, NULL, &s->img);
     if (cr != VK_SUCCESS) {
+        // The virtual range of a sparse image is reserved at creation: on RADV GFX8 (Polaris, #314) the 8192x8192x68
+        // arrays failed, likely past the device's sparse address space. Its size, ours so far and the device's say.
+        if (plat_inc32(&nwarn) <= 8) {
+            VkDeviceImageMemoryRequirements q = {.sType = VK_STRUCTURE_TYPE_DEVICE_IMAGE_MEMORY_REQUIREMENTS, .pCreateInfo = &ci};
+            VkMemoryRequirements2 r2 = {.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2};
+            vkGetDeviceImageMemoryRequirements(c->device, &q, &r2);
+            plat_mutex_lock(&sp_lock);
+            uint64_t live = sparse_va;
+            plat_mutex_unlock(&sp_lock);
+            rt_log("vk: sparse: vkCreateImage failed (%d; VkFormat %d %ux%u layers %u levels %u, %llu MiB of address space; "
+                   "%llu MiB in %lld sparse images live, device sparse address space %llu MiB)", (int)cr, (int)ci.format,
+                   s->w, s->h, ci.arrayLayers, ci.mipLevels, (unsigned long long)(r2.memoryRequirements.size >> 20),
+                   (unsigned long long)(live >> 20), (long long)n_images,
+                   (unsigned long long)(c->props.limits.sparseAddressSpaceSize >> 20));
+        }
         sparse_create_note_fail(addr, size, ci.format, s->w, s->h, s->layers, cr);
         free(s);
         return 0;
@@ -686,7 +845,7 @@ int vk_sparse_create(const VkImageCreateInfo *ci0, const nvn_texdesc *d, uint64_
     else if (small_log) plat_mem_census_log("after-small-sparse-create");
     VkMemoryRequirements mr;
     vkGetImageMemoryRequirements(c->device, s->img, &mr);
-    s->va_bytes = mr.size;
+    s->va_size = mr.size;
     uint32_t nr = 1;
     VkSparseImageMemoryRequirements sr;
     vkGetImageSparseMemoryRequirements(c->device, s->img, &nr, &sr);
@@ -714,6 +873,7 @@ int vk_sparse_create(const VkImageCreateInfo *ci0, const nvn_texdesc *d, uint64_
     s->next = images, images = s;
     if (s->tail_pending) ntail_pending++;
     n_images++;
+    sparse_va += s->va_size;
     // Coarse levels first, so a full budget leaves fine detail out rather than whole layers.
     for (int l = (int)s->nlev - 1; l >= 0; l--)
         for (uint32_t y = 0; y < s->layers; y++) {
@@ -724,10 +884,19 @@ int vk_sparse_create(const VkImageCreateInfo *ci0, const nvn_texdesc *d, uint64_
     sp_give();
     if (ni <= 16 || !(ni & (ni - 1)))
         rt_log("vk: sparse image %lld: %#llx %ux%u layers %u VkFormat %d, NVN tile %ux%u (%u levels, %u pages a layer), "
-               "Vulkan block %ux%u of %llu bytes, mip tail from level %u; %lld slots live", (long long)ni,
+               "Vulkan block %ux%u of %llu bytes, mip tail from level %u, %llu MiB of address space; %lld slots live",
+               (long long)ni,
                (unsigned long long)addr, s->w, s->h, s->layers, (int)ci.format, s->ntw, s->nth, (unsigned)lay[0],
-               s->stride, s->gw, s->gh, (unsigned long long)s->slot_size, nr ? sr.imageMipTailFirstLod : 0, (long long)ns);
+               s->stride, s->gw, s->gh, (unsigned long long)s->slot_size, nr ? sr.imageMipTailFirstLod : 0,
+               (unsigned long long)(s->va_size >> 20), (long long)ns);
     *out = s->img;
+    if (s->tail_alloc) {
+        uint32_t w = s->w >> s->nlev, h = s->h >> s->nlev;
+        w = w ? w : 1, h = h ? h : 1;
+        // A whole sparse block per covered tile bounds the tight linear bytes of one layer, including compressed formats.
+        *tail = (VkSparseTail){s->nlev, s->aspect,
+                              (VkDeviceSize)((w + s->gw - 1) / s->gw) * ((h + s->gh - 1) / s->gh) * s->slot_size};
+    }
     return 1;
 }
 
@@ -744,7 +913,7 @@ uint64_t vk_sparse_destroy(VkImage img) {
         // between them would save on the PS5 (sparse_census).
         if (s->size > SMALL_SPARSE)
             rt_log("vk: sparse: destroying %#llx %ux%u layers %u VkFormat %d (VA %llu MiB); %lld images left", (unsigned long long)s->addr,
-                   s->w, s->h, s->layers, (int)s->fmt, (unsigned long long)(s->va_bytes >> 20), (long long)n_images - 1);
+                   s->w, s->h, s->layers, (int)s->fmt, (unsigned long long)(s->va_size >> 20), (long long)n_images - 1);
         for (size_t i = 0; i < (size_t)s->layers * s->nblk; i++)
             if (s->bound[i]) slot_unref(s->bound[i]);
         if (s->ndl) ndirty--;   // binds not issued yet: the image goes away first
@@ -756,6 +925,7 @@ uint64_t vk_sparse_destroy(VkImage img) {
         free(s->bound);
         free(s->dirty);
         free(s->dl);
+        sparse_va -= s->va_size;
         free(s);
         n_images--;
         destroy_gen++;
@@ -988,11 +1158,21 @@ VkSparseOrder vk_sparse_order(uint64_t fence, int binds) {
             s->tail_pending = 0;
         }
         ntail_pending = 0;
+        int blocks = 0, merge = merge_on(), run1 = 0, run_max = 0;
         for (SparseImg *s = images; s; s = s->next) {
             if (!s->ndl) continue;
-            ib[ni++] = (VkSparseImageMemoryBindInfo){.image = s->img, .bindCount = (uint32_t)s->ndl, .pBinds = bb + nb};
+            if (merge) qsort(s->dl, (size_t)s->ndl, sizeof *s->dl, by_u32);
+            int nb0 = nb;
             s->bind_fence = fence;   // submission `fence` waits for this bind (bind_sem, or order_tl)
-            for (int k = 0; k < s->ndl; k++) bb[nb++] = make_bind(s, s->dl[k]), s->dirty[s->dl[k]] = 0;
+            for (int k = 0; k < s->ndl;) {
+                int run = merge ? run_len(s, k) : 1;
+                run1 += run == 1, run_max = run > run_max ? run : run_max;
+                bb[nb++] = make_bind(s, s->dl[k], (uint32_t)run);
+                for (int j = 0; j < run; j++) s->dirty[s->dl[k + j]] = 0;
+                k += run;
+            }
+            ib[ni++] = (VkSparseImageMemoryBindInfo){.image = s->img, .bindCount = (uint32_t)(nb - nb0), .pBinds = bb + nb0};
+            blocks += s->ndl;
             s->ndl = 0;
         }
         ndirty = 0;
@@ -1017,22 +1197,24 @@ VkSparseOrder vk_sparse_order(uint64_t fence, int binds) {
         VkResult r = vkQueueBindSparse(c->gfx_queue, 1, &bi, VK_NULL_HANDLE);
         hang_mark(prev);
         if (r == VK_SUCCESS && on_) vk_sparse_order_submitted(sig);
-        double bind_ms = (double)(plat_now_ns() - t0) / 1e6;
-        if (r != VK_SUCCESS || bind_ms > 100.0)
-            rt_log("vk: sparse bind %d blocks in %d images took %.1f ms (VkResult=%d)",
-                   nb, ni, bind_ms, (int)r);
+        uint64_t dt = plat_now_ns() - t0;
+        if (r != VK_SUCCESS || dt > 100000000ull)
+            rt_log("vk: sparse bind %d blocks in %d images took %.1f ms (VkResult=%d)", blocks, ni, dt / 1e6, (int)r);
         if (r != VK_SUCCESS) {
             if (r == VK_ERROR_DEVICE_LOST) vk_exec_recent_log();
             rt_fatal("vk: vkQueueBindSparse of %d binds failed (%d)", nb, (int)r);
         }
-        n_binds += nb;
+        n_binds += blocks;
+        static uint64_t bind_ns;   // time in vkQueueBindSparse: the driver may update the page tables in the call
         int64_t calls = __atomic_add_fetch(&ncalls, 1, __ATOMIC_RELAXED);
+        bind_ns += dt;
         if (calls <= 4 || !(calls & (calls - 1)))
-            rt_log("vk: sparse bind %lld: %d blocks in %d images (%lld blocks so far, %lld slots live, %lld MiB, "
-                   "%lld written)", (long long)calls, nb, ni, (long long)n_binds, (long long)n_slots,
-                   (long long)(n_slots * 65536 >> 20), (long long)n_written);
-        if (nb >= 256) census_locked("after a bind of 256 blocks or more");
-        if (nb >= 256) log_bind = 1;
+            rt_log("vk: sparse bind %lld: %d blocks in %d images as %d binds (%d single, longest %d; %lld blocks so far, "
+                   "%lld slots live, %lld MiB, %lld written), %.1f ms in the call (%.1f so far)", (long long)calls, blocks,
+                   ni, nb, run1, run_max, (long long)n_binds, (long long)n_slots, (long long)(n_slots * 65536 >> 20),
+                   (long long)n_written, dt / 1e6, bind_ns / 1e6);
+        if (blocks >= 256) census_locked("after a bind of 256 blocks or more");
+        if (blocks >= 256) log_bind = 1;
         free(ib);
         free(bb);
         free(ob);
@@ -1063,7 +1245,7 @@ uint64_t vk_sparse_dump(void (*emit)(const void *key, uint32_t klen, const void 
     uint64_t bytes = 0;
     for (uint32_t i = 0; i < slots.cap; i++) {
         Slot *sl = slots.vals ? slots.vals[i] : NULL;
-        if (!sl || !sl->written) continue;
+        if (!sl || !sl->written || !sl->blk->buf) continue;
         VkDeviceSize n = sl->blk->slot_size;
         VkBuffer sb;
         VmaAllocation sa;
@@ -1090,4 +1272,38 @@ void vk_sparse_load(const void *key, uint32_t klen, const void *p, uint64_t n) {
     sp_take();
     free(nvn_hm_put(&cap_pending, key, copy));
     sp_give();
+}
+
+// The replay and completion threads have stopped, textures are gone and the device is idle. Slot blocks are kept for
+// reuse during play, but their buffers/allocations and the bind-order semaphores must go before their owners.
+void vk_sparse_shutdown(void) {
+    VkCtx *c = vk_ctx();
+    if (!c || !c->device) return;
+    plat_mutex_lock(&sp_lock);
+    for (uint32_t i = 0; i < slots.cap; i++) free(slots.vals ? slots.vals[i] : NULL);
+    free(slots.keys), free(slots.vals);
+    slots = (nvn_hmap){.klen = sizeof(SlotKey)};
+    for (uint32_t i = 0; i < cap_pending.cap; i++) free(cap_pending.vals ? cap_pending.vals[i] : NULL);
+    free(cap_pending.keys), free(cap_pending.vals);
+    cap_pending = (nvn_hmap){.klen = sizeof(SlotKey)};
+    while (blocks) {
+        SlotBlock *b = blocks;
+        blocks = b->next;
+        if (b->buf) vkDestroyBuffer(c->device, b->buf, NULL);
+        if (b->alloc) vmaFreeMemory(c->vma, b->alloc);
+        free(b);
+    }
+    for (int i = 0; i < ndying_tails; i++) vmaFreeMemory(c->vma, dying_tails[i]);
+    free(dying_tails), free(dying);
+    dying_tails = NULL, dying = NULL;
+    ndying_tails = cdying_tails = ndying = cdying = ndirty = ntail_pending = 0;
+    if (order_tl) vkDestroySemaphore(c->device, order_tl, NULL);
+    if (bind_sem) vkDestroySemaphore(c->device, bind_sem, NULL);
+    order_tl = bind_sem = VK_NULL_HANDLE;
+    order_val = bind_val = sparse_va = 0;
+    binary_pending = 0;
+    n_slots = n_failed = n_binds = n_images = n_blocks = n_over = n_written = n_tail_writes = n_host_blocks = 0;
+    memset(lanes, 0, sizeof lanes);
+    lane_at = 0;
+    plat_mutex_unlock(&sp_lock);
 }

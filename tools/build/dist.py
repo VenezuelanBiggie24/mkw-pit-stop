@@ -15,7 +15,8 @@ Layout of build/dist/<target>/ (after build.py --dist):
     setup/lib/crt/                  (Windows) zig's C runtime for the target, prebuilt, and link.json: windows_crt()
 The desktop shortcut is the start screen's (a .desktop on Linux, a .lnk on Windows: platform.h).
 
-Usage: uv run tools/build/dist.py [--target linux|windows] [--check]
+Usage: uv run tools/build/dist.py [--target linux|linux-aarch64|windows] [--check]
+       linux-aarch64: the AArch64 Linux package (after build.py --dist --arch aarch64), assembled on any machine.
        --check: list what would be fetched and copied, change nothing.
 """
 
@@ -23,6 +24,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -61,6 +63,28 @@ PINS = {
         "libgcc": (CONDA + "linux-64/libgcc-16.2.0-ha9f2e26_7.conda",
                    "e031634c3a928f9594eba868bc46ef5230d6571a364a0c63215b06c4563bfcea"),
     },
+    "linux-aarch64": {
+        "python": (PBS + "cpython-3.14.10%2B20261026-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz",
+                   "90f48337bc3dd4ae6eda81e001e4c981236d403b6b5a07778bbdf94ee423dc00"),
+        "zig": ("https://ziglang.org/download/0.17.1/zig-aarch64-linux-0.17.1.tar.xz",
+                "a1546d5646eb184437918d6635ca6b762a0e889eac09cef720ee7a1ed3fe7795"),
+        "numpy": (PYPI + "63/d6/34b0a2b0741386a63025a65a2c09caaaaaad6d0ca95b66cd65c30dd7fcb5/"
+                  "numpy-2.5.4-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl",
+                  "4054173604cd8658796053f1f3bc0befb68ec1c0762c57fdad61e199256a8617"),
+        "lz4": (PYPI + "67/79/a4e91872ab60f5e89bfad3e996ea7dc74a30f27253faf95865771225ccba/"
+                "lz4-4.4.5-cp314-cp314-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+                "3b84a42da86e8ad8537aabef062e7f661f4a877d1c74d65606c49d835d36d668"),
+        "shaderc": (CONDA + "linux-aarch64/shaderc-2026.4-h2d14b02_1.conda",
+                    "ec6a66f8c593745e8f4aca9ba0400e7a43fdd1a36257fdb4464c083075770259"),
+        "glslang": (CONDA + "linux-aarch64/glslang-16.6.0-ha162a40_0.conda",
+                    "095a5c3efa9f5e473899cbf36463f9024b02f0763321cfd605d289516b2dee39"),
+        "spirv-tools": (CONDA + "linux-aarch64/spirv-tools-2026.4-hde6636f_2.conda",
+                        "d058bbe500b0ef6c894762a459b51cf538d8012c1083b1fa373b3a9432f91f91"),
+        "libstdcxx": (CONDA + "linux-aarch64/libstdcxx-16.2.0-hef695bb_7.conda",
+                      "b241a3acfa9cdb1359112864a1241225533c92642de3000d52ae65ef5d3a9786"),
+        "libgcc": (CONDA + "linux-aarch64/libgcc-16.2.0-h205dda4_7.conda",
+                   "eae7a3449d5a3b5351c5427137c076cc3fc826645c7bfc42dc10772b783826f1"),
+    },
     "windows": {
         "python": (PBS + "cpython-3.14.10%2B20261026-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
                    "c1876a9795d3a94ee49a1499a69cd91e26ca3e2829593f93fa6e4db90d05402b"),
@@ -83,12 +107,18 @@ PINS = {
     },
 }  # fmt: skip
 # The sources the setup runs, from the repository (tools/prepare/prepare.py & tools/ps5/prepare_ps5.py import and run them).
-SOURCES = ["recomp", "sm86", "tools/build/build.py", "tools/prepare", "tools/ps5/prepare_ps5.py",
-           "tools/ps5/send_ps5.py", "tools/ps5/deploy.py", "tools/romfs/resolution.py",
-           "tools/shaders/extract.py", "tools/shaders/translate.py", "runtime/cpu",
-           "runtime/core/boot/gamelib.h"]  # fmt: skip
+# tools/mod: the Mods page's import, merge, GameBanana and .ips tools (the launcher runs them; tests/test_setup.py checks
+# every tool it names is here: until 13/11/2026 none was, and the page failed with "no setup tools" in every package)
+SOURCES = ["recomp", "sm86", "tools/build/build.py", "tools/prepare", "tools/mod", "tools/romfs/resolution.py",
+           "tools/i18n/catalog.py", "tools/i18n/game_texts.py", "i18n/game",
+           "tools/shaders/extract.py", "tools/shaders/translate.py", "tools/shaders/shaderc_lib.py",
+           "tools/ps5/prepare_ps5.py", "tools/ps5/ps5_prepare_common.py", "tools/ps5/nup_reader.py",
+           "tools/ps5/send_ps5.py", "tools/ps5/deploy.py",
+           "runtime/cpu",
+           "runtime/core/boot/gamelib.h",
+           "tools/github/signatures.toml"]  # fmt: skip  (the known errors tools/prepare/lastrun.py names)
 # Windows DLLs mkw.exe needs beside it (build/win/deps/bin, tools/build/windeps.py); vulkan-1.dll is the driver's.
-WIN_DLLS = ["SDL3.dll", "libopus-0.dll"]
+WIN_DLLS = ["SDL3.dll", "libopus-0.dll", "libusb-1.0.dll"]   # libusb: SDL3.dll loads it (windeps.py)
 
 
 def sha256(path: Path) -> str:
@@ -99,8 +129,9 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def fetch(url: str, want: str) -> Path:
-    path = DL / url.rsplit("/", 1)[1].replace("%2B", "+")
+def fetch(url: str, want: str, name: str = "") -> Path:
+    """url into build/dist/dl (as name when given: files of the same name from different places), checked."""
+    path = DL / (name or url.rsplit("/", 1)[1].replace("%2B", "+"))
     if not path.is_file():
         print(f"get {url}", flush=True)
         part = path.with_suffix(path.suffix + ".part")
@@ -152,22 +183,31 @@ def windows_crt(crt: Path) -> None:
     84 s on our 6-thread PC). They depend only on the target and zig's version: the Linux zig of the same release builds
     them."""
     host = DL / "zig-host"
-    unpack_top(fetch(*PINS["linux"]["zig"]), host)
+    # built on Windows itself (build.py HOST_WINDOWS): the Windows zig of the same release builds the same C runtime
+    archive = fetch(*PINS["windows" if os.name == "nt" else "linux"]["zig"])
+    stamp = host / ".from"
+    # unpacked once per zig version: a fresh unpack's file times make zig's cache build everything again (41 s)
+    if not stamp.exists() or stamp.read_text() != archive.name:
+        unpack_top(archive, host)
+        stamp.write_text(archive.name)
     shutil.rmtree(crt, ignore_errors=True)
     crt.mkdir(parents=True)
     with tempfile.TemporaryDirectory() as tmp:
         t = Path(tmp)
         (t / "probe.c").write_text("int probe(void) { return 0; }\n")
-        env = {**os.environ, "ZIG_GLOBAL_CACHE_DIR": str(t / "cache"), "ZIG_LIB_DIR": str(host / "lib"),
+        # zig's cache next to the downloads, kept between runs (release.yml caches build/dist/dl): building the C
+        # runtime was 2 of the Windows job's 4 minutes on a fresh runner, seconds when the cache has it
+        env = {**os.environ, "ZIG_GLOBAL_CACHE_DIR": str(DL / "zig-crt-cache"), "ZIG_LIB_DIR": str(host / "lib"),
                "ZIG_VERBOSE_LINK": "1"}  # fmt: skip
-        r = subprocess.run([str(host / "zig"), "cc", "-target", "x86_64-windows-gnu", "-shared", "-o",
+        r = subprocess.run([str(host / ("zig.exe" if os.name == "nt" else "zig")), "cc", "-target", "x86_64-windows-gnu", "-shared", "-o",
                             str(t / "probe.dll"), str(t / "probe.c")],
                            env=env, capture_output=True, text=True, check=True)  # fmt: skip
         (line,) = [ln.split() for ln in (r.stdout + r.stderr).splitlines() if ln.startswith("lld-link ")]
         flags, files = [], {}
         for arg in line[1:]:
-            p = Path(arg)
-            if p.is_absolute() and p.suffix in (".obj", ".lib"):
+            p = Path(arg)   # relative when zig's cache is under the working directory (build/dist/dl)
+            if p.suffix in (".obj", ".lib") and (p.is_absolute() or p.exists()):
+                p = p.resolve()
                 if p.stem == "probe" or files.get(p.name) == p:
                     continue
                 if p.name in files:
@@ -194,7 +234,7 @@ def copy_sources(src_root: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--target", choices=("linux", "windows"), default="linux")
+    ap.add_argument("--target", choices=tuple(PINS), default="linux")
     ap.add_argument("--check", action="store_true", help="list what would be fetched and copied; change nothing")
     args = ap.parse_args()
     out = ROOT / "build/dist" / args.target
@@ -205,7 +245,8 @@ def main() -> None:
         print("sources:", " ".join(SOURCES))
         return
     if not exe.is_file():
-        sys.exit(f"{exe} missing: uv run tools/build/build.py --dist --target {args.target} first")
+        how = "--arch aarch64" if args.target == "linux-aarch64" else f"--target {args.target}"
+        sys.exit(f"{exe} missing: uv run tools/build/build.py --dist {how} first")
     DL.mkdir(parents=True, exist_ok=True)
     pins = PINS[args.target]
     got = {name: fetch(url, want) for name, (url, want) in pins.items()}
@@ -235,7 +276,8 @@ def main() -> None:
     copy_sources(setup / "src")
     size = sum(p.stat().st_size for p in out.rglob("*") if p.is_file() and not p.is_symlink())
     print(f"{out}: {size / 2**20:.0f} MiB")
-    if args.target == "linux":  # the package's tools run here: a quick proof before a setup relies on them
+    if args.target == "linux" or (args.target == "linux-aarch64" and platform.machine() in ("aarch64", "arm64")):
+        # the package's tools run here: a quick proof before a setup relies on them
         subprocess.run([str(setup / "python/bin/python3"), "-I", "-c", "import numpy, lz4.block"], check=True)
         subprocess.run([str(setup / "zig/zig"), "version"], check=True)
 

@@ -184,12 +184,28 @@ void vk_dump_pass_close(VkExec *ex);   // before vkCmdEndRendering
 int vk_dump_rearm(const char *dir, int ubo, int luts, int log_n);   // MKW_CTL: dump the frame log_n + 1 ahead into dir,
                                                                    // logging the ones before; 0 while one is pending
 void vk_dump_init(void);                 // reads the environment; vk_exec_record's first call
+void vk_dump_shutdown(void);             // after completion callbacks and rtstats workers stop
 void vk_dump_pass_end(VkExec *ex);       // after vkCmdEndRendering
-void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info);   // after a draw's binds
+void vk_dump_draw(VkExec *ex, const VkPipeState *s, VkPipeline p, const VkPipeInfo *info);   // after a draw's binds;
+                                                                                           // marks the draws MKW_DUMP_DRAWS selects
+void vk_dump_draw_after(VkExec *ex);     // after vkCmdDraw*: MKW_DUMP_DRAWS copies after the actual draw
 void vk_dump_dispatch(VkExec *ex, const GfxShader *cs, VkPipeline p, const VkPipeInfo *info, const p_dispatch *d);
 void vk_trace_3d_writes(VkExec *ex, const GfxShader *cs, const VkPipeInfo *info, const p_dispatch *d);
 void vk_dump_copy(VkExec *ex, uint32_t op, const void *payload);   // before a copy or texture clear is replayed
 void vk_dump_present(uint64_t frame);    // vk_be_present: waits for the dump frame's copies and closes the logs
+
+// MKW_RTSTATS=<N> (diag/vk_rtstats.c): one frame in N, each pass's targets and each dispatch's storage images are
+// copied out and checked on a thread of their own; a NaN, an infinity or a constant target is logged once
+// ("rtstats:"). The hooks run only when vk_rtstats_on is set.
+enum { VK_RTSTATS_NAN, VK_RTSTATS_INF, VK_RTSTATS_CONST, VK_RTSTATS_RULES };
+extern int vk_rtstats_on;
+void vk_rtstats_init(void);                                   // reads the environment; vk_exec_record's first call
+void vk_rtstats_every(uint32_t n);                            // turns it on, one frame in n (--probe-vkexec)
+void vk_rtstats_pass_end(VkExec *ex);                         // after vkCmdEndRendering
+void vk_rtstats_dispatch(VkExec *ex, const VkPipeInfo *info); // after a dispatch
+void vk_rtstats_flush(void);           // waits for every submission and for the checks of their copies
+void vk_rtstats_shutdown(void);        // after completion callbacks stop: joins scan workers
+uint64_t vk_rtstats_hits(int rule);    // targets that broke the rule so far, logged or not
 
 // c0, the NVN driver constant bank of one stage (vk_exec_ubuf.c; MKW_FIX_C0=0 binds zeros instead): bank is
 // VK_C0_BYTES, stage an NVN stage (0 vertex, 1 fragment, 5 compute), ssbo and ubo the 16 bound slots of that stage.
@@ -211,6 +227,17 @@ int vk_exec_state_op(VkExec *ex, uint32_t op, const void *a);
 void vk_exec_chunk_begin(VkExec *ex, const VkImage *seen_depth, int nseen);
 void vk_exec_op_pos_set(uint64_t pos);   // a chunk's thread: the position before its first op
 void vk_exec_chunk_end(VkExec *ex);
+// The game's queues' replay states within one submission (OP_QUEUE, nvn_qorder.c): vk_exec_queue_swap saves ex as
+// the state of t->cur and loads that of queue id: 2; a queue first seen goes on from ex: 1; 0 when id is current.
+// The serial replay ends the pass and puts a full barrier first (vk_exec.c queue_switch); the chunks' walk swaps its own
+// table and cuts there, and a chunk's end is that barrier (vk_exec_par.c).
+#define VK_EXEC_QUEUES 4
+typedef struct {
+    struct { uint64_t id; VkExec st; } q[VK_EXEC_QUEUES];
+    int n;
+    uint64_t cur;
+} VkExecQueues;
+int vk_exec_queue_swap(VkExecQueues *t, VkExec *ex, uint64_t id);
 // vk_exec_par.c: called by vk_exec_record before it walks; 1 when it recorded and submitted the submission's ops as
 // chunks (ex then holds the state after the last op and a new command buffer for the rest); 0: walk as usual. diag: a
 // diagnosis that times ops or passes is on (chunks stay off). vk_exec_par_log: the perf line (MKW_TRACE=perf).

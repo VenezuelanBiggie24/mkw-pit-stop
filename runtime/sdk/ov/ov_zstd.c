@@ -1,6 +1,6 @@
 // The game's zstd decoder on the host's libzstd. Most RomFS files are zstd frames, many with a dictionary; the decoder
 // is BSD zstd linked into main. The patch set "zstd" (recomp/patches-mkw.txt) sends both calls of MKW's
-// ZSTD_decompressMultiFrame (main+0x407e00) to the host function below, on the patch page (totk-pc-recomp also patched
+// ZSTD_decompressMultiFrame (1.0.0: main+0x407e00) to the host function below, on the patch page (totk-pc-recomp also patched
 // ZSTD_decompress_usingDDict; MKW reaches it through MultiFrame). Lifted, the decoder ran its literal and match copies
 // as chains of small functions with the registers in Cpu (run50: 18.5 % of the CPU); here they decode in native code.
 //
@@ -19,10 +19,13 @@
 #include <zstd.h>
 
 #include "cfg.h"
+#include "hacks.h"
 #include "host.h"
+#include "version.h"
 #include "platform/platform.h"
 
-#define GUEST_MULTIFRAME (RT_MODULE_BASE + 0x407e00ull)   // MKW 1.0.0 main: ZSTD_decompressMultiFrame (recomp/patches-mkw.txt "zstd")
+// ZSTD_decompressMultiFrame (1.0.0: main+0x407e00, 1.8.0: main+0xe2280; version.c, the patch set "zstd")
+#define GUEST_MULTIFRAME rt_main_addr(rt_version()->zstd_multiframe)
 #define HOST_MULTIFRAME 0xff0   // offsets in the patch page
 #define AWAY_BYTES (64u << 10)
 #define MAX_DICT (64u << 20)
@@ -227,6 +230,7 @@ static void decode(Cpu *c, uint64_t dict, uint64_t dict_size, uint64_t ddict, ui
     }
     c->x[0] = r;
     count(size, r, kern_now_ns() - t0);
+    classic_seen(gp(dst), r);
 }
 
 static void host_multiframe(Cpu *c) { decode(c, c->x[5], c->x[6], c->x[7], GUEST_MULTIFRAME, 8); }
@@ -240,13 +244,13 @@ static void host_multiframe(Cpu *c) { decode(c, c->x[5], c->x[6], c->x[7], GUEST
 // +0x2c i32 staged bytes, +0x30 guest DCtx. The guest DCtx keeps only its next input size (+0x7068) up to date, the
 // one field the game reads. Streams the host could not take (a DDict it cannot copy, a full table) stay in the guest
 // decoder from their first chunk to the end; so does every stream in check mode.
-#define GUEST_STREAM (RT_MODULE_BASE + 0x6532b4ull)   // MKW 1.0.0 main (recomp/patches-mkw.txt "zstd")
+#define GUEST_STREAM rt_main_addr(rt_version()->zstd_stream)   // 1.0.0: main+0x6532b4, 1.8.0: main+0xdeca0
 #define HOST_STREAM 0xfe0
 #define NSTREAM 64
 #define DCTX_EXPECTED 0x7068
 
 static struct {
-    uint64_t obj;
+    uint64_t obj, start, size;   // start, size: the frame's output, for romfs_classic_seen
     ZSTD_DCtx *d;
 } streams[NSTREAM];
 static PlatMutex stream_lock = PLAT_MUTEX_INIT;
@@ -277,7 +281,22 @@ static ZSTD_DCtx *stream_ctx(uint64_t obj, int create) {
 static void stream_drop(uint64_t obj) {
     plat_mutex_lock(&stream_lock);
     for (int i = 0; i < NSTREAM; i++)
-        if (streams[i].obj == obj) ZSTD_freeDCtx(streams[i].d), streams[i].obj = 0, streams[i].d = NULL;
+        if (streams[i].obj == obj)
+            ZSTD_freeDCtx(streams[i].d), streams[i].obj = streams[i].start = streams[i].size = 0, streams[i].d = NULL;
+    plat_mutex_unlock(&stream_lock);
+}
+
+static void stream_output(uint64_t obj, uint64_t start, uint64_t size) {
+    plat_mutex_lock(&stream_lock);
+    for (int i = 0; i < NSTREAM; i++)
+        if (streams[i].obj == obj) streams[i].start = start, streams[i].size = size;
+    plat_mutex_unlock(&stream_lock);
+}
+
+static void stream_output_get(uint64_t obj, uint64_t *start, uint64_t *size) {
+    plat_mutex_lock(&stream_lock);
+    for (int i = 0; i < NSTREAM; i++)
+        if (streams[i].obj == obj) *start = streams[i].start, *size = streams[i].size;
     plat_mutex_unlock(&stream_lock);
 }
 
@@ -329,6 +348,7 @@ static int32_t stream_chunk(Cpu *c, uint64_t obj, const uint8_t *src, int32_t si
             h.frameContentSize >= ZSTD_CONTENTSIZE_ERROR)
             return stream_fail(obj, -1);
         wr32(obj + 0x14, (int32_t)h.frameContentSize);
+        stream_output(obj, rd64(obj + 8), h.frameContentSize);
         if (ZSTD_isError(dd ? ZSTD_decompressBegin_usingDDict(d, dd) : ZSTD_decompressBegin(d))) return stream_fail(obj, -1);
         uint64_t mem = rd64(obj + 0x18);
         wr64(obj + 0x30, mem & 7 ? 0 : mem);
@@ -369,7 +389,12 @@ static int32_t stream_chunk(Cpu *c, uint64_t obj, const uint8_t *src, int32_t si
     }
     size_t left = ZSTD_nextSrcSizeToDecompress(d);
     if (gdctx) wr64(gdctx + DCTX_EXPECTED, left);
-    if (!left) gb(obj)[0] = 4, stream_drop(obj);
+    if (!left) {
+        uint64_t start = 0, n = 0;
+        stream_output_get(obj, &start, &n);
+        gb(obj)[0] = 4, stream_drop(obj);
+        if (start && n) classic_seen(gp(start), (size_t)n);
+    }
     return rd32(obj + 0x14);
 }
 

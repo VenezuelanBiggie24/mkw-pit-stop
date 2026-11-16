@@ -8,8 +8,9 @@ before a call, an SVC, a trap, a return or a tail exit it stores the registers i
 and after an SVC it loads them all again (reload). The other registers stay in the Cpu.
 
 After a call it reloads only X0-X18 and X30: AAPCS64 has the callee preserve X19-X29 and SP, so their locals still
-hold what the Cpu holds. What would break that does not occur in the Switch 1 game: main and subsdk0 import neither longjmp nor
-the C++ unwinder, sdk's longjmp, __cxa_throw and _Unwind_* have no direct callers, and the runtime writes no register
+hold what the Cpu holds. What would break that does not occur: a guest longjmp comes back only into the function that
+called setjmp, which gen.py builds without register locals (runtime/cpu/sjlj.c); the C++ unwinder, __cxa_throw and
+_Unwind_* have no direct callers, and the runtime writes no register
 above X3 of a running thread's Cpu except X30, which rt_call restores (runtime/hostfn.c). Guest fibers each run on a host fiber of their own with their own Cpu (runtime/kernel.c),
 and ExitThread leaves by longjmp without returning. gen.py --no-callee-saved-trust reloads those registers too.
 
@@ -67,6 +68,9 @@ class Plan:
         self.local = set(regs)
         self.spill = spill   # per instruction: registers to store at its sync points
         self.kept = kept     # registers a call leaves as they were (CALLEE_SAVED, or none)
+        # the reloads depend on the function only: built once, not per instruction (a fifth of gen.py's time)
+        self.reload = ''.join(f' {name(r)} = {cpu(r)};' for r in regs)
+        self.reload_call = ''.join(f' {name(r)} = {cpu(r)};' for r in regs if r not in kept)
 
     def decl(self):
         """Locals at the top of the function, loaded from the Cpu."""
@@ -79,10 +83,10 @@ class Plan:
             return name(r) if r in self.local else m.group(0)
 
         text = REG.sub(local, text)
+        if '\x00' not in text:
+            return text
         spill = ''.join(f'{cpu(r)} = {name(r)}; ' for r in sorted(self.spill[i]))
-        reload = ''.join(f' {name(r)} = {cpu(r)};' for r in self.regs)
-        reload_call = ''.join(f' {name(r)} = {cpu(r)};' for r in self.regs if r not in self.kept)
-        return text.replace(SPILL, spill).replace(RELOAD, reload).replace(RELOAD_CALL, reload_call)
+        return text.replace(SPILL, spill).replace(RELOAD, self.reload).replace(RELOAD_CALL, self.reload_call)
 
 
 def plan(texts, succ, clean, n_locals=LOCALS, kept=CALLEE_SAVED, weight=None):

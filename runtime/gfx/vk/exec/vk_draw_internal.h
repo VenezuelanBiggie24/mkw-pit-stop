@@ -35,7 +35,9 @@ void warn_once(int key, const char *fmt, ...);   // vk_exec_draw.c
 typedef struct {
     VkPipeline pipe[2];                  // bound per bind point: 0 graphics, 1 compute
     VkPipeState st;                      // the state vk_pipeline_set_dynamic last recorded
-    int st_valid;
+    int st_valid;                        // st is what the bound pipeline was given (cleared at each graphics bind)
+    int dyn_valid;                       // st is still what the dynamic state was set from (kept across binds: every
+                                         // graphics pipeline lists the same dynamic states; MKW_DYN_DIFF)
     VkBuffer vb[17];                     // vertex buffers last bound
     VkDeviceSize vo[17], vsz[17], vstr[17];
     int vcls[17];                        // their pool class and pool record, for the census
@@ -208,6 +210,8 @@ void vk_exec_cb_shutdown(void);
 void dummies_init(void);
 void tex_info_full(VkExec *ex, const GfxShaderRes *r, uint64_t h, int storage, int separate, VkDescriptorImageInfo *out,
                    VkImage *image);
+// GFX_TYPE_* of the view TEX/IMG resource r gets for handle h (FLOAT when nothing is bound): shader_for's answers
+int vk_exec_res_numeric(uint64_t h, const GfxShaderRes *r, int storage);
 // vk_exec_draw.c
 int find_stage(const prog_t *p, int nvn_stage, const uint8_t **ctl, const uint8_t **code, uint32_t *len);
 const GfxShader *shader_for(VkExec *ex, int st, int *present);

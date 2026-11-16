@@ -23,6 +23,7 @@ extern "C" {
 int menu_is_open(void);
 void menu_toggle(void);                   // F1 / Esc on the keyboard, Start+Back on the pad
 void menu_perf_cycle(void);               // F10: the performance overlay off, fps, full
+void menu_notice(const char *text, int seconds);   // a line at the top of the picture for that long, menu closed or not
 
 // ---- events from the window adapter, used only while the menu is open. key: an ImGuiKey; coordinates in pixels of the
 // window's client area, which is the swapchain image.
@@ -64,6 +65,9 @@ int gfx_window_monitor_size(int *w, int *h);   // pixels of the monitor the wind
 // The present mode the swapchain got, as a MKW_VK_PRESENT value ("fifo" when mailbox is missing); "" before the first
 // swapchain. Any thread.
 const char *gfx_window_present_mode(void);
+// (gfx/vk/device/vk_framegen.c) a fixed frame generation factor does not split the screen's refreshes evenly at the
+// game's rate now, without MKW_VRR: the menu's note
+int vk_fg_uneven(void);
 
 #ifdef __cplusplus
 }

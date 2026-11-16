@@ -24,6 +24,7 @@
 #include "hacks.h"
 #include "host.h"
 #include "ov.h"
+#include "players.h"
 #include "platform/platform.h"
 
 #define NFP_R_DEVICE_NOT_FOUND 0x8073u     // nfp: no NFC reader on the host
@@ -74,11 +75,17 @@ static const char *switch_language(const char *tag) {
         p += k;
     }
     if (!strcmp(lang, "ja") || !strcmp(lang, "de") || !strcmp(lang, "it") || !strcmp(lang, "nl") ||
-        !strcmp(lang, "ru") || !strcmp(lang, "ko") || !strcmp(lang, "pt"))
+        !strcmp(lang, "ru") || !strcmp(lang, "ko"))
         return !strcmp(lang, "ja") ? "ja" : !strcmp(lang, "de") ? "de" : !strcmp(lang, "it") ? "it"
-             : !strcmp(lang, "nl") ? "nl" : !strcmp(lang, "ru") ? "ru" : !strcmp(lang, "ko") ? "ko" : "pt";
+             : !strcmp(lang, "nl") ? "nl" : !strcmp(lang, "ru") ? "ru" : "ko";
+    // The game ships Brazilian Portuguese too (romfs USpt, discussion #42); only Brazil's locale picks it
+    if (!strcmp(lang, "pt")) return !strcmp(region, "BR") ? "pt-BR" : "pt";
     if (!strcmp(lang, "fr")) return !strcmp(region, "CA") ? "fr-CA" : "fr";
     if (!strcmp(lang, "es")) return *region && strcmp(region, "ES") ? "es-419" : "es";
+    // Spain's other languages, which the game does not ship: its Spanish (the menu has their own rows)
+    if (!strcmp(lang, "ca") || !strcmp(lang, "gl") || !strcmp(lang, "eu")) return "es";
+    // Languages later updates added (Polish 1.5.0, Thai 1.7.0): only when this copy of the game has their texts
+    if ((!strcmp(lang, "pl") || !strcmp(lang, "th")) && romfs_has_language(lang)) return !strcmp(lang, "pl") ? "pl" : "th";
     if (!strcmp(lang, "zh"))
         return !strcmp(script, "Hant") || !strcmp(region, "TW") || !strcmp(region, "HK") || !strcmp(region, "MO")
                    ? "zh-Hant" : "zh-Hans";
@@ -88,28 +95,70 @@ static const char *switch_language(const char *tag) {
     return "en-US";
 }
 
+// Languages the game does not ship whose texts we rebuild over one it does (tools/i18n/game_texts.py): the game is told
+// the base, and romfs.c serves the rebuilt archives from <exe dir>/lang/<code>/ (ov_text_language).
+static const struct { const char *code, *base; } kRebuilt[] = {{"ca", "es"}, {"gl", "es"}, {"eu", "es"}};
+
+static const char *rebuilt_base(const char *code) {
+    for (size_t i = 0; i < sizeof kRebuilt / sizeof *kRebuilt; i++)
+        if (!strcmp(code, kRebuilt[i].code)) return kRebuilt[i].base;
+    return NULL;
+}
+
+// The locale tag MKW_LANG falls back to: a menu language chosen in Settings > Menu > Language that the game ships (or
+// rebuilds), so a player who picks Thai there gets the game in Thai too (discussion #193); else MKW_LOCALE, else the
+// system's user locale. The menu's "en" keeps an English locale's region (en-GB).
+static const char *locale_tag(char *buf, size_t cap) {
+    const char *tag = cfg_get("MKW_LOCALE");
+    if (!tag || !*tag) {
+        snprintf(buf, cap, "%s", *plat_user_locale() ? plat_user_locale() : "en-US");
+        tag = buf;
+    }
+    const char *menu = cfg_get("MKW_MENU_LANG");
+    if (!menu || !*menu || (!strcmp(menu, "en") && !strncmp(tag, "en", 2))) return tag;
+    if (strcmp(menu, "en") && !strcmp(switch_language(menu), "en-US")) return tag;   // tr, uk; pl, th before 1.5/1.7
+    return menu;
+}
+
+const char *ov_text_language(void) {
+    const char *code = cfg_get("MKW_LANG");
+    if (code && *code) return rebuilt_base(code) ? code : NULL;
+    char sys[85], lang[3] = "";
+    const char *tag = locale_tag(sys, sizeof sys);
+    if (strlen(tag) >= 2 && (!tag[2] || tag[2] == '-' || tag[2] == '_'))
+        lang[0] = (char)tolower((unsigned char)tag[0]), lang[1] = (char)tolower((unsigned char)tag[1]);
+    for (size_t i = 0; i < sizeof kRebuilt / sizeof *kRebuilt; i++)
+        if (!strcmp(lang, kRebuilt[i].code)) return kRebuilt[i].code;
+    return NULL;
+}
+
 // The game's language as a Switch language code (MKW_LANG, else MKW_LOCALE, else the Windows user locale).
 const char *ov_language(void) {
     static const char *const codes[] = {"ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru",
-                                        "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR"};
+                                        "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR", "pl", "th"};
     const char *code = cfg_get("MKW_LANG");   // no fixed default: MKW_LOCALE or the Windows user locale decides when unset
+    if (code && *code && rebuilt_base(code)) return rebuilt_base(code);
     if (code && *code) {
         for (size_t i = 0; i < sizeof codes / sizeof *codes; i++)
             if (!strcmp(code, codes[i])) return codes[i];
         rt_fatal("MKW_LANG '%s' is not a Switch language code", code);
     }
-    const char *tag = cfg_get("MKW_LOCALE");
-    char sys[85] = "en-US";
-    if (!tag || !*tag) {
-        if (*plat_user_locale()) snprintf(sys, sizeof sys, "%s", plat_user_locale());
-        tag = sys;
-    }
-    return switch_language(tag);
+    char sys[85];
+    return switch_language(locale_tag(sys, sizeof sys));
 }
 
-// LanguageCode GetDesiredLanguage(): char[8] in x0
+// LanguageCode GetDesiredLanguage(): char[8] in x0. The first answer goes to the log with where it came from: a report
+// of the game in the wrong language reads there whether the setting or the system chose it (discussion #193).
 static void ov_desired_language(Cpu *c) {
     const char *code = ov_language();
+    static int logged;
+    if (!logged) {
+        logged = 1;
+        const char *set = cfg_get("MKW_LANG");
+        char sys[85];
+        if (set && *set) rt_log("oe: game language %s (Settings > Game > Language: %s)", code, set);
+        else rt_log("oe: game language %s (automatic, from %s)", code, locale_tag(sys, sizeof sys));
+    }
     uint64_t v = 0;
     memcpy(&v, code, strlen(code));
     ret_x(c, v);
@@ -142,9 +191,13 @@ static void ov_focus_mode(Cpu *c) {
 }
 
 // FocusState GetCurrentFocusState(): 1 in focus, 2 out of focus (nn::oe::FocusState). In focus until the window
-// reports otherwise through oe_set_focus; MKW_ASSUME_FOCUS=1 (unattended runs) pins it to 1. The caller of
-// oe_set_focus also pushes OE_MSG_FOCUS_STATE_CHANGED.
-static volatile int32_t focus_state = 1;
+// reports otherwise through oe_set_focus, which also pushes OE_MSG_FOCUS_STATE_CHANGED; MKW_ASSUME_FOCUS=1 (unattended
+// runs) pins it to 1.
+// The console accepts no HOME press while its startup logo shows, so a game never hears of a focus change before
+// FinishStartupLogo; MKW handles one with a manager it makes later (main+0x26380c4 reads main+0x33e54b0, null
+// then): a window that lost the focus during the boot ended the run reading 0xd8 (issues #83 #89 #92, 11/11/2026).
+// Until the logo is done the game sees 1 and no message; the change waiting is told at FinishStartupLogo.
+static volatile int32_t focus_state = 1, focus_window = 1, logo_done;
 static int assume_focus(void) {
     static volatile int32_t v = -1;
     int32_t a = v;
@@ -155,7 +208,12 @@ static int assume_focus(void) {
     }
     return (int)a;
 }
-void oe_set_focus(int in_focus) { plat_xchg32(&focus_state, in_focus || assume_focus() ? 1 : 2); }
+void oe_set_focus(int in_focus) {
+    plat_xchg32(&focus_window, in_focus || assume_focus() ? 1 : 2);
+    if (!__atomic_load_n(&logo_done, __ATOMIC_ACQUIRE)) return;
+    plat_xchg32(&focus_state, focus_window);
+    oe_push_message(OE_MSG_FOCUS_STATE_CHANGED);
+}
 static void ov_focus_state(Cpu *c) { ret_x(c, (uint64_t)focus_state); }
 
 static volatile int32_t notify_resume, notify_operation, notify_performance;
@@ -191,7 +249,12 @@ static void ov_active_time(Cpu *c) {
 static void ov_inactivity_extended(Cpu *c) { (void)c; }
 
 // void FinishStartupLogo(): no system logo is drawn on the host
-static void ov_finish_logo(Cpu *c) { (void)c; rt_log("oe: the game finished its startup logo"); }
+static void ov_finish_logo(Cpu *c) {
+    (void)c;
+    rt_log("oe: the game finished its startup logo");
+    plat_xchg32(&logo_done, 1);
+    if (focus_window != 1) oe_set_focus(0);   // the focus lost meanwhile, told now
+}
 
 
 // Message PopNotificationMessage(): blocks like a Horizon wait, so the thread gives its virtual core up meanwhile
@@ -229,6 +292,29 @@ static void ov_show_error(Cpu *c) {
     char lr[96];
     rt_log("err: game error dialog %04u-%04u (result %#x) from %s", 2000 + (r & 0x1ff), (r >> 9) & 0x1fff, r,
            caller(c, lr, sizeof lr));
+}
+
+// void err::ShowError(const ErrorResultVariant &): the same dialog, which MKW's menus use ("Mode sans fil local"
+// crashed in applet::CreateLibraryApplet, 11/11/2026). The variant is {u32 state; then at +4 a Result (state 1) or an
+// ErrorCode {u32 category, u32 number} (state 2)}: sdk+0x378020 and +0x378038 write it.
+static void ov_show_error_variant(Cpu *c) {
+    uint32_t v[3] = {0};
+    char lr[96];
+    uint64_t p = arg_x(c, 0);
+    if (p) memcpy(v, (const void *)(uintptr_t)p, sizeof v);
+    if (v[0] == 2) rt_log("err: game error dialog %04u-%04u (error code) from %s", v[1], v[2], caller(c, lr, sizeof lr));
+    else if (v[0] == 1) rt_log("err: game error dialog %04u-%04u (result %#x) from %s", 2000 + (v[1] & 0x1ff),
+                               (v[1] >> 9) & 0x1fff, v[1], caller(c, lr, sizeof lr));
+    else rt_log("err: game error dialog without an error (state %u) from %s", v[0], caller(c, lr, sizeof lr));
+}
+
+// void crypto::GenerateCryptographicallyRandomBytes(void *out, size_t size): the SDK asks the csrng service; the host's
+// generator answers. Pia calls it when the LAN session starts (main+0x154c468; lan11, 11/11/2026: IPC fatal there).
+static void ov_random_bytes(Cpu *c) {
+    void *out = (void *)(uintptr_t)arg_x(c, 0);
+    size_t n = (size_t)arg_x(c, 1);
+    mem_commit_range((uint64_t)(uintptr_t)out, n);   // BCryptGenRandom writes it (Windows' lazy commit, memory.c)
+    if (n && (!out || !plat_random(out, n))) rt_fatal("crypto: no %zu random bytes from the system", n);
 }
 
 // ==== SDK-internal initialisation (services.c)
@@ -422,7 +508,8 @@ static void ov_user_existence(Cpu *c) {
     ret_x(c, 0);
 }
 
-// Result GetNickname(Nickname *out, const Uid &): 33 bytes, NUL-terminated UTF-8
+// Result GetNickname(Nickname *out, const Uid &): 33 bytes, NUL-terminated UTF-8; the name the launcher's Profiles
+// page gave the player (core/base/players.h), also what LAN players see
 static void ov_nickname(Cpu *c) {
     char *out = arg_p(c, 0);
     plat_mutex_lock(&account_lock);
@@ -430,8 +517,12 @@ static void ov_nickname(Cpu *c) {
     int ok = out && same_uid(arg_p(c, 1));
     plat_mutex_unlock(&account_lock);
     if (ok) {
-        memset(out, 0, 33);
-        memcpy(out, "Local", 5);
+        char name[PLAYER_NAME_BYTES];
+        player_name(rt_config()->profile, name);
+        static int logged;   // once: the game asks again on every screen that shows it
+        if (!logged++) rt_log("account: nickname '%s' (%s)", name, rt_config()->profile);
+        memset(out, 0, PLAYER_NAME_BYTES);
+        memcpy(out, name, strlen(name));
     }
     ret_x(c, ok ? 0 : ACCOUNT_R_INVALID);
 }
@@ -724,6 +815,8 @@ HOST_OVERRIDE("_ZN2nn5prepo28RequestImmediateTransmissionEv", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn5prepo27AddInternetConnectionStatusEPNS0_10PlayReportEPKcS4_S4_", ov_result_ok);
 HOST_OVERRIDE("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeENS0_11MountTargetE", ov_nfp_no_device);
 HOST_OVERRIDE("_ZN2nn3err9ShowErrorENS_6ResultE", ov_show_error);
+HOST_OVERRIDE("_ZN2nn3err9ShowErrorERKNS0_18ErrorResultVariantE", ov_show_error_variant);
+HOST_OVERRIDE("_ZN2nn6crypto36GenerateCryptographicallyRandomBytesEPvm", ov_random_bytes);
 
 HOST_OVERRIDE("nndiagStartup", ov_diag_startup);
 HOST_OVERRIDE("_ZN2nn3aoc10InitializeEv", ov_aoc_initialize);

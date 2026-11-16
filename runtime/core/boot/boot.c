@@ -6,6 +6,7 @@
 // --boot ends at the first nvnBootstrapLoader call (from main+0xcf3a5c in MKW 1.0.0), after every module's
 // constructor flag read 2; it logs the run statistics and exits 0.
 // With --seconds S the run continues past that call; rt_frame_presented ends it once the world clock passed S.
+#include <SDL3/SDL_messagebox.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,18 +18,18 @@
 #include "vk.h"
 #include "platform/platform.h"
 #include "ui/menu/boot_screen.h"
+#include "presence.h"
+#include "version.h"
 
 #define SYM_INIT_START "_ZN2nn4init5StartEmmPFvvES2_S2_"
-// MKW 1.0.0's first nvnBootstrapLoader call (main+0xcf3a5c) (graphics bring-up in main+0xcf39b4). MKW does
-// not call SetFocusHandlingMode before it (its calls sit at main+0x1d5a44 and main+0xc782e0), so that checkpoint is
-// only logged when it comes.
-#define NVN_RET 0xcf3a60ull   // return address: the call (bl) sits at main+0xcf3a5c
+// The first nvnBootstrapLoader call (version.c nvn_ret: 1.0.0 main+0xcf3a5c in the graphics bring-up main+0xcf39b4,
+// 1.8.0 main+0xdd07c8 in main+0xdd0720). MKW 1.0.0 does not call SetFocusHandlingMode before it (its calls sit at
+// main+0x1d5a44 and main+0xc782e0), so that checkpoint is only logged when it comes.
 #define CTOR_DONE 2                      // a module's constructor flag after its DT_INIT ran the init_array
 
-// The init_array sizes of MKW 1.0.0 (DT_INIT_ARRAYSZ, measured by --probe-loader); a different count means a
-// different game build.
-typedef struct { const char *name; uint64_t entries; } InitCount;
-static const InitCount expected_inits[] = {{"main", 2866}, {"subsdk0", 4}, {"sdk", 86}};
+// The init_array sizes of the game version (version.c inits: DT_INIT_ARRAYSZ, measured by --probe-loader on 1.0.0,
+// read from the NSOs for 1.8.0); a different count means a different game build. Every module of the version runs
+// its DT_INIT, in load order (1.8.0: main, subsdk0, subsdk1, sdk).
 
 static volatile int32_t inits_done, checkpoint_seen;
 uint64_t rt_guest_start_ns;
@@ -68,7 +69,9 @@ static void cb_loader_ready(Cpu *c) {
 // afterwards (MacNativeGames loader.c:458-462).
 static void cb_module_inits(Cpu *c) {
     if (plat_cas32(&inits_done, 0, 0)) rt_fatal("boot: module constructors requested twice");
-    for (unsigned k = 0; k < sizeof expected_inits / sizeof *expected_inits; k++) {
+    const RtInitCount *expected_inits = rt_version()->inits;
+    int nmods = 0;
+    for (unsigned k = 0; k < RT_MAX_MODULES && expected_inits[k].name; k++, nmods++) {
         const RtLoaded *m = module_named(expected_inits[k].name);
         uint64_t entries = m->init_array_size / 8;
         if (!m->init) rt_fatal("boot: %s has no DT_INIT", m->name);
@@ -81,6 +84,8 @@ static void cb_module_inits(Cpu *c) {
             rt_fatal("boot: %s has %llu init_array entries, this game version has %llu", m->name, (unsigned long long)entries,
                      (unsigned long long)expected_inits[k].entries);
     }
+    if (nmods != ldr_count())
+        rt_fatal("boot: %d modules loaded, game version %s has %d", ldr_count(), rt_version()->display, nmods);
     plat_xchg32(&inits_done, 1);
 }
 
@@ -108,9 +113,10 @@ void rt_boot_event(const char *what, Cpu *c, const char *detail) {
         return;
     }
     if (!strcmp(what, "nvn")) {
-        if (ret != main_mod->base + NVN_RET)
+        uint64_t nvn_ret = rt_version()->nvn_ret;
+        if (ret != main_mod->base + nvn_ret)
             rt_fatal("boot: first NVN call %s(\"%s\") from %s, expected main+%#llx", "nvnBootstrapLoader", detail, at,
-                     (unsigned long long)NVN_RET);
+                     (unsigned long long)nvn_ret);
         if (!plat_cas32(&inits_done, 0, 0)) rt_fatal("boot: first NVN call before DT_INIT");
         rt_logf("boot: first NVN call nvnBootstrapLoader(\"%s\") from main+%#llx\n", detail,
                (unsigned long long)(ret - main_mod->base));
@@ -189,9 +195,10 @@ void rt_write_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h)
 
 static void save_shot(const tex_t *t, const char *path) {
     int fmt = t->d.format;
-    int bgra = fmt == NVN_FORMAT_BGRA8 || fmt == NVN_FORMAT_BGRA8_SRGB;
-    if (!bgra && fmt != NVN_FORMAT_RGBA8 && fmt != NVN_FORMAT_RGBA8_SRGB)
-        rt_fatal("boot: --shot supports 8-bit RGBA and BGRA targets, the presented texture has NVN format %#x", fmt);
+    int bgra = fmt == NVN_FORMAT_BGRA8 || fmt == NVN_FORMAT_BGRA8_SRGB, pq = fmt == NVN_FORMAT_RGB10A2;
+    if (!bgra && !pq && fmt != NVN_FORMAT_RGBA8 && fmt != NVN_FORMAT_RGBA8_SRGB)
+        rt_fatal("boot: --shot supports 8-bit RGBA and BGRA and the HDR RGB10A2 targets, the presented texture has NVN "
+                 "format %#x", fmt);
     uint32_t w = t->d.width, h = t->d.height;
     uint8_t *px = malloc(4ull * w * h);
     if (!px) rt_fatal("boot: out of memory for the shot");
@@ -200,6 +207,28 @@ static void save_shot(const tex_t *t, const char *path) {
     NVNcopyRegion r = {.width = (int)w, .height = (int)h, .depth = 1};
     if (gfx_replay_async()) gfx_backend()->finish();   // the presented frame may still be queued for the replay
     gfx_backend()->read_texels(t, &view, &r, px, 4ull * w, 4ull * w * h);
+    if (pq) {   // the game's HDR picture (gfx_hdr.c): its code values logged, the picture saved at paper white
+        uint32_t hist[1024] = {0}, top = 0;
+        for (uint64_t i = 0; i < 4ull * w * h; i += 4) {
+            uint32_t v;
+            memcpy(&v, px + i, 4);
+            uint32_t m = v & 1023;
+            if ((v >> 10 & 1023) > m) m = v >> 10 & 1023;
+            if ((v >> 20 & 1023) > m) m = v >> 20 & 1023;
+            hist[m]++;
+            if (m > top) top = m;
+        }
+        uint64_t half = (uint64_t)w * h / 2, p99 = (uint64_t)w * h * 99 / 100, acc = 0;
+        uint32_t med = 0, hi = 0;
+        for (uint32_t k = 0; k < 1024; k++) {
+            if (acc <= half && acc + hist[k] > half) med = k;
+            if (acc <= p99 && acc + hist[k] > p99) hi = k;
+            acc += hist[k];
+        }
+        rt_log("boot: shot of RGB10A2, brightest channel of each pixel in 10-bit codes: median %u, p99 %u, max %u", med,
+               hi, top);
+        gfx_hdr_to_srgb8(px, px, (size_t)w * h, 0);
+    }
     if (bgra)
         for (uint64_t i = 0; i < 4ull * w * h; i += 4) {
             uint8_t x = px[i];
@@ -333,9 +362,26 @@ static void romfs_index_main(void *arg) {
     fs_init();
 }
 
+// One game per profile folder, whichever player: a second one (a shortcut clicked twice) would commit over the first's
+// save and double the GPU memory. Told in a box as well as in the log: the player started it and has no log open.
+static void lock_profile(void) {
+#ifdef MKW_PS5_NATIVE
+    return;   // one title process at a time on the console, and no SDL there for the box
+#else
+    char p[4200];
+    snprintf(p, sizeof p, "%s/instance.lock", rt_config()->profile_base);
+    if (plat_file_lock(p)) return;   // -1 (cannot open it): played as before, without the guard
+    const char *msg = "Mario Kart World is already running from this folder. Close it before starting it again.";
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "mkw-recomp", msg, NULL);
+    rt_fatal("boot: %s (%s is held)", msg, p);
+#endif
+}
+
 void rt_boot(void) {
+    lock_profile();
     check_npdm();
     boot_screen_start();
+    presence_start();   // core/presence: Discord Rich Presence, on a thread of its own
     if (!rt_config()->shot) vk_pipeline_async_enable();   // a --shot image must not depend on build timing
     boot_screen_task(BOOT_TASK_FILES, BOOT_TASK_RUNNING);
     if (!plat_thread_new(romfs_index_main, NULL, "romfs index")) fs_init();
@@ -346,6 +392,7 @@ void rt_boot(void) {
     ldr_load(rt_config()->exefs);
     rt_patches_init();
     seqwatch_init();
+    if (rt_game()->npatch_sets) race_scene_init(rt_game()->patch_page);   // after seqwatch: it reads those slots
     impcensus_init();
     listwatch_init();
     cb_addr[0] = hostfn_register("<rtld loader_ready>", cb_loader_ready);

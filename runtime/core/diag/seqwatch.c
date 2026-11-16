@@ -2,7 +2,8 @@
 // PartsSelectEx, WaitIntroMovie, WaitRaceStart... the game's own phases) are active, so screens are found by the game's
 // state instead of frame numbers (Adrià, 01/11/2026: scripts by frame skipped the cup movie or stalled on a screen).
 //
-// Every node class has a 12-byte virtual returning its name; build/seq_nodes.tsv (tools/analisis/seq_nodes.py) lists
+// Every node class has a small virtual returning its name; build/seq_nodes.tsv for 1.0.0 and build/seq_nodes-180.tsv
+// for 1.8.0 (tools/analisis/seq_nodes.py; the same vtable layout in both, compared with --shared on 13/11/2026) list
 // each getter and the vtable slot holding it. Measured with every slot watched (live28, 01/11/2026): slot +10 from the
 // name runs once when a node starts (TitleMenuMain at frame 466) and +12 once when it ends (TitleWait at 465); +11
 // runs while it is active, +9/+13 when the graph is built, +17 every frame for every node. A node that finishes on
@@ -29,6 +30,11 @@
 //                 one of these functions runs on another object than its previous call, so a menu cursor's move is one
 //                 line (menus driven by the log, not by screenshots). The watch goes off with
 //                 MKW_SEQ_UNTIL's event, as the nodes'. Each function logs FN_LINES lines at most.
+//   MKW_PROBE=<node>+<n>[:<frames>][,...]   with MKW_SEQ_WATCH: seqwatch_probe() is true for <frames> presents
+//                 (default 2) from n presents after each start of <node> (<node> "until": MKW_SEQ_UNTIL's event, after
+//                 which the nodes go unwatched). A probe logs every call while it is true, without deduplicating: uw18
+//                 and uw19 (11/11/2026) grouped the 2D draws by a partial key and lost the panes they were after, and
+//                 uw20 counted its own window from the wrong movie
 //   MKW_UI_FOCUS=1 with MKW_SEQ_WATCH: "ui: focus <pane path> frame N" when a menu button takes the cursor: the game
 //                 calls main+0xce8564 (slot 18 of the UIControl button vtables) on the button that takes it and
 //                 main+0x21e12f8 on the one that leaves (tt1: one pair per DOWN of the script). The button object
@@ -46,6 +52,7 @@
 #include "input.h"
 #include "nvn_api.h"
 #include "platform/platform.h"
+#include "version.h"
 
 #define MAIN_SPAN 0x10000000ull
 #define MAX_NODES 512
@@ -55,7 +62,6 @@
 #define SLOT_LEAVE 12
 #define SLOT_FN 20   // MKW_FN_WATCH
 #define SLOT_FOCUS 21   // MKW_UI_FOCUS
-#define UI_FOCUS_FN 0xce8564   // main offset, MKW 1.0.0
 #define UI_NAME_SPAN 0x1000    // bytes of the button object searched for its pane name
 #define FN_MAX 32
 #define STALE 3
@@ -84,6 +90,10 @@ static struct { uint64_t n; char cmd[200]; } seq_ctl[SEQ_CTL_MAX];   // MKW_SEQ_
 static int nseq_ctl, seq_ctl_at;
 static volatile uint64_t window_frame;     // the present count at MKW_SEQ_UNTIL's event + 1, 0 before
 static volatile uint64_t window_t0;        // kern_now_ns at MKW_SEQ_UNTIL's event, 0 before: the A/B world clock
+#define PROBE_MAX 8
+#define PROBE_UNTIL -2                     // MKW_PROBE's node "until"
+static struct { int node; uint64_t n, frames; volatile uint64_t from; } probes[PROBE_MAX];   // from: first present
+static int nprobes;
 
 #define FN_LINES 64   // lines per watched function: one called every frame on many objects goes quiet after them
 static struct { uint64_t addr, obj; int lines; } fnw[FN_MAX];   // MKW_FN_WATCH, its previous call's object
@@ -115,20 +125,19 @@ void seqwatch_init(void) {
     const char *on = cfg_get("MKW_SEQ_WATCH"), *quick = cfg_value("MKW_QUICK_RACE");
     int quick_on = strcmp(quick, "off") != 0;
     if ((!on || !*on || *on == '0') && !quick_on) return;
+    // Each version's own table: another's offsets would watch unrelated code (1.8.0 had none, so MKW_SEQ_EXIT
+    // never ended its runs; 13/11/2026)
+    char own[48];
+    snprintf(own, sizeof own, "build/seq_nodes-%d.tsv", rt_version()->number);
     const char *path = cfg_get("MKW_SEQ_NODES");
-    FILE *f = NULL;
-    if (path && *path) {
-        f = fopen(path, "r");
-    } else {
+    if (!path || !*path) path = rt_version()->number == 100 ? "build/seq_nodes.tsv" : own;
+    FILE *f = fopen(path, "r");
 #ifdef __PROSPERO__
+    if (!f && rt_version()->number == 100) {   // the title's own copy (tools/ps5/deploy.py puts it in /app0)
         path = "/app0/seq_nodes.tsv";
         f = fopen(path, "r");
-        if (!f) { path = "build/seq_nodes.tsv"; f = fopen(path, "r"); }
-#else
-        path = "build/seq_nodes.tsv";
-        f = fopen(path, "r");
-#endif
     }
+#endif
     if (!f) { rt_log("seq: no %s (uv run tools/analisis/seq_nodes.py): watch off", path); return; }
     char line[256];
     while (fgets(line, sizeof line, f) && nnodes < MAX_NODES) {
@@ -186,8 +195,21 @@ void seqwatch_init(void) {
         else rt_log("seq: MKW_FN_WATCH: %.*s is not main+<hex>", (int)n, p);
         p += n + (p[n] == ',');
     }
+    for (const char *p = cfg_get("MKW_PROBE"); p && *p && nprobes < PROBE_MAX;) {
+        size_t n = strcspn(p, ",");
+        char name[48];
+        unsigned long long at = 0, frames = 2;
+        int got = sscanf(p, "%47[^+,]+%llu:%llu", name, &at, &frames);
+        int k = got >= 2 ? (!strcmp(name, "until") ? PROBE_UNTIL : node_index(name)) : -1;
+        if (k == -1) rt_log("seq: MKW_PROBE: %.*s is not <node>+<n>[:<frames>]", (int)n, p);
+        else probes[nprobes].node = k, probes[nprobes].n = at, probes[nprobes++].frames = frames;
+        p += n + (p[n] == ',');
+    }
     const char *focus = cfg_get("MKW_UI_FOCUS");
-    if (focus && *focus && *focus != '0') watch(RT_MODULE_BASE + UI_FOCUS_FN, SLOT_FOCUS);
+    if (focus && *focus && *focus != '0') {   // version.c: 1.0.0 main+0xce8564; not found yet for 1.8.0
+        if (rt_version()->ui_focus_fn) watch(rt_main_addr(rt_version()->ui_focus_fn), SLOT_FOCUS);
+        else rt_log("seq: MKW_UI_FOCUS: no button focus function for game version %s", rt_version()->display);
+    }
     rt_log("seq: watching %d sequence nodes and %d functions (MKW_SEQ_WATCH, MKW_FN_WATCH)", nnodes, nfnw);
     seq_on = 1;
     rt_fnprof_set(1);
@@ -215,6 +237,8 @@ static void set_active(int k, uint8_t on, uint64_t frame, const char *why) {
         rt_log("seq: %s %s frame %llu at %.1f s%s", on ? "enter" : "leave", nodes[k].name, (unsigned long long)frame,
                (kern_now_ns() - rt_guest_start_ns) / 1e9, why);
         if (on) input_script_phase(nodes[k].name);   // MKW_INPUT_SCRIPT lines that wait for this phase
+        for (int i = 0; i < nprobes; i++)
+            if (on && probes[i].node == k) __atomic_store_n(&probes[i].from, frame + probes[i].n, __ATOMIC_RELEASE);
         if (until_at < nuntil && k == until_node[until_at] && on == until_on[until_at] && ++until_at == nuntil &&
             seq_on) {
             seq_on = 0;
@@ -222,6 +246,8 @@ static void set_active(int k, uint8_t on, uint64_t frame, const char *why) {
             __atomic_store_n(&window_t0, kern_now_ns(), __ATOMIC_RELEASE);
             hostfn_time_window(frame);   // the census starts here
             __atomic_store_n(&window_frame, frame + 1, __ATOMIC_RELEASE);
+            for (int i = 0; i < nprobes; i++)
+                if (probes[i].node == PROBE_UNTIL) __atomic_store_n(&probes[i].from, frame + probes[i].n, __ATOMIC_RELEASE);
             if (exit_ns) window_end = kern_now_ns() + exit_ns;
             rt_log("seq: watch off at %s %s frame %llu (MKW_SEQ_UNTIL)%s", on ? "the start of" : "the end of", nodes[k].name, (unsigned long long)frame,
                    exit_ns ? "; the run ends after MKW_SEQ_EXIT" : "");
@@ -323,6 +349,15 @@ void seqwatch_movie_end(void) {
     if (__atomic_load_n(&nheld_active, __ATOMIC_RELAXED) > 0 && !__atomic_exchange_n(&movie_ended, 1, __ATOMIC_RELAXED))
         rt_log("seq: movie ended frame %llu: MKW_SEQ_HOLD released",
                (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
+}
+
+int seqwatch_probe(void) {
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    for (int i = 0; i < nprobes; i++) {
+        uint64_t from = __atomic_load_n(&probes[i].from, __ATOMIC_ACQUIRE);
+        if (from && fr >= from && fr < from + probes[i].frames) return 1;
+    }
+    return 0;
 }
 
 void seqwatch_log_active(void) {

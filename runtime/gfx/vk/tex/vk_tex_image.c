@@ -12,11 +12,32 @@
 #include "nvn_tex.h"
 #include "tex.h"
 #include "vk.h"
+#include "vk_defaults.h"
 #include "vk_exec.h"
 #include "vk_tex_internal.h"
 #include "platform/platform.h"
 
 // ---------------------------------------------------------------- images
+// MKW_TEX_MAX=<texels> (default 1024 on Adreno, 0 = off elsewhere): 2D images of 8192 texels or more lose their top
+// levels until they fit. Turnip has no sparseResidencyImage2D, so the game's sparse terrain arrays (8192x8192x68) and
+// their 8192x8192 ASTC sources get all their memory: 5.5 GiB of textures at the first race (Odin 2, 10/11/2026) against
+// 1.7 GiB on a GPU with sparse images, and the render targets failed after them (black race). The game copies only
+// levels 3-11 into the arrays; their top levels were zero without sparse binding anyway. The image's level 0 is NVN level
+// drop (VkTexImage.drop); sampling picks its levels from the smaller size as on a smaller texture.
+static uint32_t tex_drop(VkImageType type, uint32_t w, uint32_t h, uint32_t levels, uint32_t samples) {
+    static int64_t limit = -1;
+    if (limit < 0) {
+        const char *e = cfg_get("MKW_TEX_MAX");
+        VkCtx *c = vk_ctx();
+        limit = e && *e ? atoll(e) : c && c->props.vendorID == 0x5143 ? 1024 : 0;
+        if (limit > 0) rt_log("vk: textures of 8192 texels or more cut to %lld (MKW_TEX_MAX)", (long long)limit);
+    }
+    uint32_t side = w > h ? w : h, drop = 0;
+    if (limit <= 0 || type != VK_IMAGE_TYPE_2D || samples > 1 || side < 8192) return 0;
+    while ((side >> drop) > (uint64_t)limit && drop + 1 < levels && drop < 15) drop++;
+    return drop;
+}
+
 static VkFormatFeatureFlags features_of(VkFormat f) {
     VkFormatProperties p;
     vkGetPhysicalDeviceFormatProperties(vk_ctx()->phys, f, &p);
@@ -40,6 +61,18 @@ static int format_compressed(VkFormat f) {   // vkCmdClearColorImage takes no bl
 static int bind_pool_memory(VkCtx *c, Tex *e, VkImage img) {
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements(c->device, img, &req);
+    // A Vulkan image larger than its NVN storage overwrites the pool memory after it. AMD lays out a 676x676 D32S8 in
+    // 0x2e0170 bytes for NVN's 0x204000, and the minimap's depth wrote into its colour target at +0x204200 (#365,
+    // diagnosed by elenotrindade). A depth or stencil image is not read through other formats in that memory, so it
+    // gets its own; a colour one stays bound, as the game may alias it. MKW_POOL_SPILL=1 binds them all as before.
+    static int spill_env = -1;
+    if (spill_env < 0) spill_env = cfg_get("MKW_POOL_SPILL") && atoi(cfg_get("MKW_POOL_SPILL"));
+    if ((e->f.depth || e->f.stencil) && req.size > e->t.L.size && !spill_env) {
+        rt_log("vk_tex: depth %#llx %ux%u fmt %#x takes %#llx bytes for NVN's %#llx: own memory (MKW_POOL_SPILL)",
+               (unsigned long long)e->pub.addr, e->key.d.width, e->key.d.height, e->key.d.format,
+               (unsigned long long)req.size, (unsigned long long)e->t.L.size);
+        return 0;
+    }
     VkMemSpan sp;
     if (!vk_mem_resolve(e->pub.addr, req.size, &sp) || !sp.alloc || sp.alloc_offset % req.alignment) return 0;
     VmaAllocationInfo info;
@@ -104,6 +137,20 @@ VkFormat vk_srgb_twin(VkFormat f) {
     return VK_FORMAT_UNDEFINED;
 }
 
+int vk_format_numeric(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R16_UINT:
+    case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32G32_UINT:
+    case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_A2B10G10R10_UINT_PACK32:
+        return GFX_TYPE_UINT;
+    case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_R16_SINT:
+    case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32G32_SINT:
+    case VK_FORMAT_R32G32B32A32_SINT:
+        return GFX_TYPE_SINT;
+    default: return GFX_TYPE_FLOAT;
+    }
+}
+
 static int list_storage(void) {
     static int on = -1;
     if (on < 0) {
@@ -144,6 +191,33 @@ static int block_views_ok(const VkImageCreateInfo *ci) {
            ci->arrayLayers <= q->maxArrayLayers;
 }
 
+// Whether the driver takes an image of this format, type, usage, flags and view format list, whatever its size: the
+// usages each format allows one by one can still be refused together (#174: R8G8_UNORM with STORAGE and its sRGB twin,
+// which has no storage, in the list, on Intel's ANV: VK_ERROR_FORMAT_NOT_SUPPORTED and the image made anyway).
+// Answers kept (64), so the replay thread asks the driver once per kind of image.
+static int usage_ok(const VkImageCreateInfo *ci) {
+    static struct { VkFormat f; VkImageType t; VkImageUsageFlags u; VkImageCreateFlags fl; int list, ok; } seen[64];
+    static int nseen;
+    static PlatMutex lk = PLAT_MUTEX_INIT;
+    int ok = -1;
+    plat_mutex_lock(&lk);
+    for (int i = 0; i < nseen && ok < 0; i++)
+        if (seen[i].f == ci->format && seen[i].t == ci->imageType && seen[i].u == ci->usage && seen[i].fl == ci->flags &&
+            seen[i].list == (ci->pNext != NULL))
+            ok = seen[i].ok;
+    plat_mutex_unlock(&lk);
+    if (ok >= 0) return ok;
+    VkPhysicalDeviceImageFormatInfo2 fi = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+                                           .pNext = ci->pNext, .format = ci->format, .type = ci->imageType,
+                                           .tiling = ci->tiling, .usage = ci->usage, .flags = ci->flags};
+    VkImageFormatProperties2 p = {.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2};
+    ok = vkGetPhysicalDeviceImageFormatProperties2(vk_ctx()->phys, &fi, &p) == VK_SUCCESS;
+    plat_mutex_lock(&lk);
+    if (nseen < 64) seen[nseen++] = (typeof(seen[0])){ci->format, ci->imageType, ci->usage, ci->flags, ci->pNext != NULL, ok};
+    plat_mutex_unlock(&lk);
+    return ok;
+}
+
 // UNDEFINED -> GENERAL; new depth / stencil images start cleared (LAS textures.c: the game copies depth
 // without stencil, and the stencil of those images must not be whatever the memory held).
 void init_image(Tex *e, VkCommandBuffer cb) {
@@ -156,7 +230,26 @@ void init_image(Tex *e, VkCommandBuffer cb) {
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &ib};
     vkCmdPipelineBarrier2(cb, &di);
     if (e->sparse) {
-        // Tiles get zeroed memory when they are bound; a clear would erase physical pages other images share.
+        // Mapped tiles get zeroed memory separately and may alias another image. Only the private small mips are ours
+        // to initialize here: VMA can reuse memory holding another texture's data, even before this image was written.
+        if (e->sparse_tail.zero_bytes) {
+            VkBuffer zeros;
+            void *map = vk_staging(e->sparse_tail.zero_bytes, &zeros, NULL);
+            memset(map, 0, (size_t)e->sparse_tail.zero_bytes);
+            uint32_t n = (e->pub.levels - e->sparse_tail.first) * e->pub.layers;
+            VkBufferImageCopy *regions = calloc(n, sizeof *regions);
+            if (!regions) rt_fatal("vk: out of memory for sparse tail initialization");
+            uint32_t k = 0;
+            for (uint32_t l = e->sparse_tail.first; l < e->pub.levels; l++) {
+                uint32_t w = e->pub.width >> l, h = e->pub.height >> l;
+                for (uint32_t layer = 0; layer < e->pub.layers; layer++)
+                    regions[k++] = (VkBufferImageCopy){.imageSubresource = {e->sparse_tail.aspect, l, layer, 1},
+                                                      .imageExtent = {w ? w : 1, h ? h : 1, 1}};
+            }
+            vkCmdCopyBufferToImage(cb, zeros, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, n, regions);
+            barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+            free(regions);
+        }
     } else if (e->f.depth || e->f.stencil) {
         VkClearDepthStencilValue zero = {0.0f, 0};
         VkImageSubresourceRange rg = {e->pub.aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
@@ -223,9 +316,9 @@ static int astc_alpha_one(const uint8_t *p, uint64_t size, int bw, int bh) {
     return any;
 }
 
-// Texture memory made before play (MKW_VK_TEX_POOL_MIN=<blocks>, default half the VRAM, 0 off; by default on discrete
-// GPUs only, a value set makes it on any): a pool of fixed 256 MiB blocks, that many of them allocated at start on a
-// thread of their own, takes the textures of its memory type.
+// Texture memory made before play (MKW_VK_TEX_POOL_MIN=<blocks>, default half the VRAM up to 8, 0 off; by default on
+// discrete GPUs only, a value set makes it on any): a pool of fixed 256 MiB blocks, that many of them allocated at
+// start on a thread of their own, takes the textures of its memory type.
 // On a GTX 1050 Ti the race load spent 79-93 % of a 2.2 s frame on the replay thread in vkAllocateMemory: VMA's
 // default pools, over the driver's budget (which counts the imported host memory), give every texture its own
 // allocation (VmaBlockVector::AllocatePage), and a pool whose blocks are made on demand only moved that time into
@@ -236,6 +329,7 @@ static int astc_alpha_one(const uint8_t *p, uint64_t size, int bw, int bh) {
 #define TEX_POOL_BLOCK (256ull << 20)
 static VmaPool tex_pool;              // set once its blocks exist (tex_pool_main)
 static uint32_t tex_pool_type;
+static PlatThread *tex_pool_thread;
 
 static void tex_pool_main(void *arg) {
     int blocks = (int)(intptr_t)arg;
@@ -270,9 +364,23 @@ void vk_tex_pool_start(void) {
     for (uint32_t h = 0; h < c->mem_props.memoryHeapCount; h++)
         if (c->mem_props.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT && c->mem_props.memoryHeaps[h].size > vram)
             vram = c->mem_props.memoryHeaps[h].size;
-    int blocks = e && *e ? atoi(e) : (int)(vram / 2 / TEX_POOL_BLOCK);   // default: half of the largest VRAM heap
+    int blocks = e && *e ? atoi(e)
+                         : (int)vk_default_tex_pool_blocks(
+                               c->props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU, vram >> 20);
     if (blocks <= 0) return;
-    if (!plat_thread_spawn(tex_pool_main, (void *)(intptr_t)blocks, "vk tex pool", 0)) rt_log("vk: texture pool: no thread");
+    tex_pool_thread = plat_thread_new(tex_pool_main, (void *)(intptr_t)blocks, "vk tex pool");
+    if (!tex_pool_thread) rt_log("vk: texture pool: no thread");
+}
+
+// All images are gone and the device is idle. A pool must be destroyed before VMA's allocator; its creator may
+// still be allocating the minimum blocks when a short probe shuts down, so join it before taking the pool away.
+void vk_tex_pool_stop(void) {
+    if (tex_pool_thread) {
+        plat_thread_join(tex_pool_thread);
+        tex_pool_thread = NULL;
+    }
+    VmaPool pool = __atomic_exchange_n(&tex_pool, NULL, __ATOMIC_ACQ_REL);
+    if (pool) vmaDestroyPool(vk_ctx()->vma, pool);
 }
 
 VkResult vma_image(VkCtx *c, const VkImageCreateInfo *ci, const VmaAllocationCreateInfo *ai, VkImage *img,
@@ -398,6 +506,8 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     if (levels > most) levels = most;
     uint32_t samples = d->samples > 1 ? (uint32_t)d->samples : 1;
     if (samples > 1) levels = 1;
+    uint32_t drop = tex_drop(type, w, h, levels, samples);
+    if (drop) w = umax(w >> drop, 1), h = umax(h >> drop, 1), levels -= drop;
     VkFormatFeatureFlags ff = features_of(f.vk);
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     int ds = f.depth || f.stencil;
@@ -409,7 +519,11 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     if (!ds && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) && samples == 1)
         usage |= VK_IMAGE_USAGE_STORAGE_BIT;
     VkImageCreateFlags flags = ds ? 0 : VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;   // format-reinterpreting views
-    if (type == VK_IMAGE_TYPE_2D && layers >= 6 && w == h && samples == 1) flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    // Array shape alone does not imply cube views. RX 570 samples non-base mips incorrectly when ordinary BC arrays
+    // carry this flag too (transfer readbacks still match); only the NVN cube targets need it.
+    if ((d->target == NVN_TEXTURE_TARGET_CUBEMAP || d->target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY) &&
+        type == VK_IMAGE_TYPE_2D && layers >= 6 && w == h && samples == 1)
+        flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     // NVN renders into a 3D texture slice by slice (a view's min layer is the depth plane, nvn_mtl.m), e.g. the
     // grading LUT of the menu background blur. Vulkan needs a 2D view of the slice for that.
     if (type == VK_IMAGE_TYPE_3D && (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
@@ -444,6 +558,30 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
                !block_views && (ci.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) && format_list_on();
     if (list && listed[1]) ci.pNext = &fl;
     else if (list) ci.flags &= ~(VkImageCreateFlags)VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    // Storage refused only because a format of the view list lacks it (R8G8's sRGB twin on ANV, #174): EXTENDED_USAGE
+    // (core 1.1) allows a usage some view formats lack, and every view in another format already names its own usages
+    // (vk_exec_view.c), so storage stays. Left out, a compute pass's imageStore into it went nowhere: the 3D scene came
+    // out tinted red, with red trails behind what moves (#174, Iris Xe, 13/11/2026).
+    static volatile int32_t n_extended;
+    if ((ci.usage & VK_IMAGE_USAGE_STORAGE_BIT) && (ci.flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) && !usage_ok(&ci)) {
+        VkImageCreateInfo ext = ci;
+        ext.flags |= VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+        if (usage_ok(&ext)) {
+            ci.flags = ext.flags;
+            log_limited(&n_extended, "texture format %#x (VkFormat %d): storage kept with EXTENDED_USAGE", d->format,
+                        (int)ci.format);
+        }
+    }
+    // the optional usages (storage on any format that allows it, the feedback loop) go first when refused together
+    static const VkImageUsageFlags optional[] = {VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT};
+    static volatile int32_t n_dropped;
+    for (int i = 0; i < 2 && !usage_ok(&ci); i++) {
+        if (!(ci.usage & optional[i])) continue;
+        log_limited(&n_dropped, "texture format %#x (VkFormat %d): usage %#x refused with usage %#x; left out", d->format,
+                    (int)ci.format, (unsigned)ci.usage, (unsigned)optional[i]);
+        ci.usage = usage &= ~optional[i];
+        if (optional[i] == VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT) fb_usage = 0;
+    }
     Tex *e = calloc(1, sizeof *e);
     if (!e) rt_fatal("vk: out of memory for a texture");
     e->key = *k;
@@ -452,7 +590,7 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     e->f = f;
     e->pub.addr = k->addr;
     VkImage img = VK_NULL_HANDLE;
-    if (vk_sparse_create(&ci, d, k->addr, L.size, &img)) e->sparse = 1;
+    if (vk_sparse_create(&ci, d, k->addr, L.size, &img, &e->sparse_tail)) e->sparse = 1;
     else if (nvn_gpu_only(k->addr)) {   // storage in a physical or virtual pool: alias the pool memory (section 3.2)
         if (vkCreateImage(c->device, &ci, NULL, &img) == VK_SUCCESS && !bind_pool_memory(c, e, img)) {
             vkDestroyImage(c->device, img, NULL);
@@ -526,6 +664,7 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     p->usage = usage;
     p->aspect = aspect_of(&f);
     p->width = w, p->height = h, p->depth = depth, p->levels = levels, p->layers = layers, p->samples = samples;
+    p->drop = (uint8_t)drop;
     p->view_type = type == VK_IMAGE_TYPE_1D ? (d->target == NVN_TEXTURE_TARGET_1D_ARRAY ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_1D)
                  : type == VK_IMAGE_TYPE_3D ? VK_IMAGE_VIEW_TYPE_3D
                  : d->target == NVN_TEXTURE_TARGET_CUBEMAP && (flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT) ? VK_IMAGE_VIEW_TYPE_CUBE

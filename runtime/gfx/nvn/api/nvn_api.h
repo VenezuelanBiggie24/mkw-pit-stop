@@ -45,6 +45,7 @@ const pool_t *nvn_pool_find(uint64_t addr, uint64_t len);  // GPU-visible pool h
 uint64_t nvn_new_serial(void);                             // next tex_t / prog_t serial, from 1
 uint64_t nvn_fence_last(void);                             // fence value of the newest submit (0 before the first)
 void nvn_present_fence_note(void);                         // a present: notes the newest fence (SyncWait census)
+void nvn_sync_wait_window(void);                           // a present: the waits of the last 60, by where the value was
 int nvn_depth_minus_w(void);                               // 1 after DeviceSetDepthMode(NEAR_IS_MINUS_W), else 0
 void nvn_depth_minus_w_set(int on);                        // the mode of a capture being replayed (runtime/gfx/cap)
 void nvn_guest_written(uint64_t addr, uint64_t size);      // the host or the game wrote pool storage: back end re-reads
@@ -61,6 +62,10 @@ uint64_t gfx_replayed_submits(void);                       // newest submit numb
 #define NVN_HANDLE_SAMP(h) ((int)(((h) >> 20) & 0xfff))
 extern GfxStats gfx_counters;                              // behind gfx_stats(); add with __atomic_fetch_add. frames:
                                                            // the back end's present; nvn_calls/nvn_distinct: NVN_API
+// nvn_dstk.c (ctl drawstacks): draws counted by guest call stack and depth target for the next N frames
+void nvn_dstk_request(int frames);
+void nvn_dstk_rt(const void *depth_mem);
+void nvn_dstk_draw(const Cpu *c);
 
 // ---- nvn_api_obj.c: textures, samplers, programs, windows
 #define NVN_TEX_MAGIC MAGIC('T', 'E', 'X', 0)              // tex_t.magic of an initialized texture

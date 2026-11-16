@@ -14,6 +14,9 @@
 #include "cfg.h"
 #include "host.h"
 #include "platform/platform.h"
+#ifdef _WIN32
+#include "utf16.h"
+#endif
 
 #define PREFIX "MKW_"
 #define PREFIX_LEN (sizeof PREFIX - 1)
@@ -30,39 +33,48 @@ static int save_ok = 1;                         // the last cfg_save_to wrote (o
 // Every name the runtime reads (and the patch sets in generated/), without the prefix. A file key outside this list is
 // logged as unknown. A new variable goes here too, or its ini key logs a harmless "unknown key" line.
 static const char *const known[] = {
-    "AB", "ADDR_SPIN", "ADDR_SPIN_US", "ANISO", "APP_POOL", "ASSUME_FOCUS", "ASTC", "ASTC_BC_ARRAYS", "ASTC_BC_CHECK", "ASTC_ERRORS", "ASTC_ERRORS_LAG", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_OFF", "AUDIO_PREFILL_MS",
-    "BACKGROUND_WINDOW", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
+    "AB", "ANISO", "APP_POOL", "ASPECT", "ASSUME_FOCUS", "ASTC", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_CHANNELS", "AUDIO_OFF", "AUDIO_PREFILL_MS",
+    "BACKGROUND_MUTE", "BACKGROUND_WINDOW", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
     "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
     "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
     "BIND_SKIP", "BIND_STATS", "BIND_UP", "BIND_X", "BIND_Y",
-    "BIND_ZL", "BIND_ZR", "BUTTON_ICONS", "CORE_DIAG", "CORE_HANDOFF", "CRIT", "CRIT_OUT", "CTL", "DESC_TEMPLATE", "DETAIL_DISTANCE", "DEVICE_PROFILE", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_LOG",
-    "EARLY_BATCH", "EARLY_SIBLING_WAIT", "EARLY_WAIT_AWAY", "EXEFS", "FEEDBACK", "FIX_C0", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
-    "FLIGHT_THUMBS", "FPS", "FREEZE_IDLE", "GLYPH_DUMP", "FREE_CORES", "FULLSCREEN", "GPL", "GPL_DRAW_BUILD", "GPU",
-    "GPU_CRUMBS", "GPU_CRUMBS_DRAW", "GPU_INDEX", "GPU_MEM_LIMIT", "GPU_NAME", "GPU_ONLY_RELEASE", "HEADLESS", "HEAP_SHRINK_RELEASE", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LANG", "LIST_WATCH",
+    "BIND_ZL", "BIND_ZR", "BUTTON_ICONS", "CLASSIC_GP", "CORE_DIAG", "CRIT", "CRIT_OUT", "CTL", "DESC_TEMPLATE", "DETAIL_DISTANCE", "DEVICE_PROFILE", "DISCORD", "DISCORD_APP", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_DRAWS", "DUMP_DRAWS_RECT", "DUMP_DRAWS_SKIP", "DYN_DIFF", "DUMP_LOG",
+    "EXEFS", "FEEDBACK", "FG_BIAS", "FG_DUMP", "FG_DUMP_DIR", "FG_LAMBDA", "FG_PROBE", "FIX_C0", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
+    "FLIGHT_THUMBS", "FPS", "FRAMEGEN", "FREEZE_IDLE", "GLYPH_DUMP", "FREE_CORES", "FULLSCREEN", "GAME_DIR", "GPL", "GPL_DRAW_BUILD", "GPU",
+    "GPU_CRUMBS", "GPU_CRUMBS_DRAW", "HDR", "HDR_FAKE", "GPU_INDEX", "GPU_MEM_LIMIT", "GPU_NAME", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LAN", "LAN_IP", "LANG", "LATENCY", "LOW_LATENCY",
     "LOCALE", "MEMORY", "MESH_COMPUTE", "MENU_LANG", "MENU_TEST",
-    "MENU_TEST_DIR", "MENU_TEST_SET", "MINIMAL_LAYOUT", "MIRROR_GAP", "MOTION", "MOUSE_SENS",
-    "ONE_PER_CORE", "OPERATION_MODE", "PACK", "PACK_COLD_S", "PACK_STORE_MIB", "PACK_VERIFY", "PAD_LAYOUT", "PERF_OVERLAY", "PERF_SLOW_MS", "PICTURE_FIT", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SKIP", "PIPE_STALL", "PIPE_SYNC", "PIPE_WAIT", "POOL_RELEASE",
-    "PROFILE", "PROFILE_CHAINS", "PROFILE_DIR", "PROFILE_FRAMES", "PROFILE_FN", "PROFILE_FROM", "PROFILE_ONLY", "PROFILE_US",
-    "PROFILE_MAIN", "PROFILE_RENDER", "PS5_FAST_LOCK", "PS5_OVERLAP", "PS5_PW_BATCH", "PS5_TSC_CLOCK", "PW_HOT", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REEXEC",
-    "BIND_XF", "REG_LATE", "REG_QUEUED", "REPLAY_ASYNC", "REPLAY_PAR", "REPLAY_PAR_FIRST", "REPLAY_PAR_MORE", "REPLAY_PAR_SMALL", "REPLAY_PAR_THREADS", "SNAP_BG", "USNAP_CMP",
-    "REPLAY_CHECK", "RESOLUTION", "RESOLVE_CHECK", "ROMFS", "ROMFS_MODS", "ROMFS_PATCHES",
+    "MENU_TEST_DIR", "MENU_TEST_SET", "MINIMAL_LAYOUT", "MIRROR_GAP", "MODS", "MODS_ACK", "MODS_PLAYED", "MOTION",
+    "MOUSE_SENS", "PLAYER",   // PLAYER: the launcher's choice (core/base/players.h), no row: Reset all leaves it
+    "ONE_PER_CORE", "OPERATION_MODE", "PAD_LAYOUT", "PERF_OVERLAY", "PERF_SLOW_MS", "PICTURE_FIT", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SKIP", "PIPE_STALL", "PIPE_SYNC", "PIPE_TRACE", "POOL_SPILL", "PIPE_WAIT", "PIPE_WORKERS",
+    "PROBE", "PROFILE", "PROFILE_CHAINS", "PROFILE_DIR", "PROFILE_FRAMES",
+    "PROFILE_MAIN", "PROFILE_RENDER", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REEXEC",
+    "BIND_XF", "REG_LATE", "REG_QUEUED", "REPLAY_ASYNC", "USNAP_CMP",
+    "REPLAY_CHECK", "RESOLUTION", "RESOLVE_CHECK", "ROMFS", "RTSTATS", "ROMFS_MODS", "ROMFS_PATCHES",
     "RUMBLE", "RUMBLE_CURVE", "RUMBLE_STRENGTH", "RUMBLE_TRIGGERS",
-    "SEQ_UNTIL", "SEQ_WATCH", "SHADER_MEMO", "SHADOW_SIZE", "SHADOW_TRIM", "SHARED_FONTS", "SHARPNESS", "SHOTS", "SHOTS_DIR", "SHOTS_FULL", "SPARSE_EVICT", "SPARSE_IMAGES", "SPARSE_MIB", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SPLIT_US", "SWKBD_ANSWER",
-    "SVC_STATS", "SWKBD_TEST", "TEX_ALIAS", "TEX_EVICT_IDLE", "TEX_MEMO", "TEX_QUALITY", "TEX_UP_DUMP", "TEX_UP_DUMP_DIR", "TEX_UP_LOG", "TEX_UP_LOG_AT", "TEX_ZERO_LOG", "TIMER_1MS", "TRACE", "TURBO", "TURBO_SPEED", "SKIP_MOVIES", "SEED", "UNLOCK_ALL", "QUICK_RACE", "FREEZE_KEYS", "QUALITY", "TRACE_UBO", "TRACE_UBO_OUT", "UBO_SNAPSHOT", "UPSCALER", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
-    "VK_PRESENT", "YIELD_NOLOCK", "ZERO_SCAN_CACHE", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "VRAM_MARGIN", "VS_OUTS",
+    "SHADER_MEMO", "SHADOW_SIZE", "SHARED_FONTS", "SHARPNESS", "SHORTCUT_ASKED", "SHOTS", "SHOTS_DIR", "SHOTS_FULL", "SPARSE_IMAGES", "SPARSE_MIB", "SPARSE_NO_BUFFER", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SPLIT_US", "STICK_DEADZONE", "SWITCH2", "SWKBD_ANSWER",
+    "SKIP_PROGRAMS", "SWKBD_TEST", "TEX_ALIAS", "TEX_MEMO", "TEX_QUALITY", "TEX_RELEASED_MIB", "TIMER_1MS", "TRACE", "TURBO", "TURBO_SPEED", "SKIP_MOVIES", "SEED", "UNLOCK_ALL", "QUICK_RACE", "FREEZE_KEYS", "QUALITY", "TRACE_UBO", "TRACE_UBO_OUT", "UBO_SNAPSHOT", "UPSCALER", "VRR", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
+    "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_TEX_POOL_MIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "VRAM_LOG", "VRAM_MARGIN", "VS_OUTS",
+    // the PS5 port's (ps5-port-60fps)
+    "ADDR_SPIN", "ADDR_SPIN_US", "ASTC_BC_ARRAYS", "ASTC_BC_CHECK", "ASTC_ERRORS", "ASTC_ERRORS_LAG", "CORE_HANDOFF",
+    "EARLY_BATCH", "EARLY_SIBLING_WAIT", "EARLY_WAIT_AWAY", "GPU_ONLY_RELEASE", "HEADLESS", "HEAP_SHRINK_RELEASE",
+    "LIST_WATCH", "PACK", "PACK_COLD_S", "PACK_STORE_MIB", "PACK_VERIFY", "POOL_RELEASE", "PROFILE_FN", "PROFILE_FROM",
+    "PROFILE_ONLY", "PROFILE_US", "PS5_FAST_LOCK", "PS5_OVERLAP", "PS5_PW_BATCH", "PS5_TSC_CLOCK", "PW_HOT",
+    "REPLAY_PAR", "REPLAY_PAR_FIRST", "REPLAY_PAR_MORE", "REPLAY_PAR_SMALL", "REPLAY_PAR_THREADS", "SEQ_UNTIL",
+    "SEQ_WATCH", "SHADOW_TRIM", "SNAP_BG", "SPARSE_EVICT", "SVC_STATS", "TEX_EVICT_IDLE", "TEX_UP_DUMP",
+    "TEX_UP_DUMP_DIR", "TEX_UP_LOG", "TEX_UP_LOG_AT", "TEX_ZERO_LOG", "YIELD_NOLOCK", "ZERO_SCAN_CACHE",
     "UPDATE_AS", "UPDATE_CHECK", "UPDATE_REPO", "WINDOW_SIZE", "ZSTD_CHECK", "ZSTD_NATIVE",
 };
 
 // The mkw.ini section a key cfg_set may write goes to when the file lacks it (mkw.ini.example's sections).
 static const struct { const char *key, *section; } sections[] = {
     {"FULLSCREEN", "display"}, {"WINDOW_SIZE", "display"}, {"PERF_OVERLAY", "display"}, {"VK_PRESENT", "display"},
-    {"GPU_INDEX", "display"}, {"UPSCALER", "display"}, {"SHARPNESS", "display"}, {"PICTURE_FIT", "display"},
-    {"DEVICE_PROFILE", "display"}, {"RESOLUTION", "display"}, {"FPS", "display"},
+    {"GPU_INDEX", "display"}, {"UPSCALER", "display"}, {"HDR", "display"}, {"SHARPNESS", "display"}, {"PICTURE_FIT", "display"},
+    {"DEVICE_PROFILE", "display"}, {"RESOLUTION", "display"}, {"ASPECT", "display"}, {"FPS", "display"}, {"FRAMEGEN", "display"}, {"VRR", "display"}, {"LOW_LATENCY", "display"},
     {"QUALITY", "graphics"}, {"ANISO", "graphics"}, {"TEX_QUALITY", "graphics"}, {"DETAIL_DISTANCE", "graphics"}, {"SHADOW_SIZE", "graphics"},
-    {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"},
-    {"VOLUME", "audio"},
+    {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"}, {"LAN", "language"},
+    {"VOLUME", "audio"}, {"AUDIO_CHANNELS", "audio"}, {"BACKGROUND_MUTE", "audio"},
     {"MOTION", "input"}, {"RUMBLE_STRENGTH", "input"}, {"RUMBLE_CURVE", "input"}, {"RUMBLE_TRIGGERS", "input"},
-    {"PAD_LAYOUT", "input"}, {"BUTTON_ICONS", "input"}, {"MOUSE_SENS", "input"}, {"INPUT_RECORD", "input"},
+    {"PAD_LAYOUT", "input"}, {"BUTTON_ICONS", "input"}, {"MOUSE_SENS", "input"}, {"STICK_DEADZONE", "input"}, {"SWITCH2", "input"}, {"INPUT_RECORD", "input"},
     {"BIND_A", "input"}, {"BIND_B", "input"}, {"BIND_X", "input"}, {"BIND_Y", "input"}, {"BIND_LCLICK", "input"},
     {"BIND_RCLICK", "input"}, {"BIND_L", "input"}, {"BIND_R", "input"}, {"BIND_ZL", "input"}, {"BIND_ZR", "input"},
     {"BIND_PLUS", "input"}, {"BIND_MINUS", "input"}, {"BIND_LEFT", "input"}, {"BIND_UP", "input"},
@@ -78,7 +90,9 @@ static const struct { const char *key, *section; } sections[] = {
     {"VK_DYN_VERTEX", "performance"}, {"VK_SUBGROUP_PIN", "performance"},
     {"TRACE", "diagnostics"}, {"FLIGHT", "diagnostics"}, {"FLIGHT_SPIKE_MS", "diagnostics"}, {"SEQ_WATCH", "diagnostics"}, {"SEQ_UNTIL", "diagnostics"},
     {"TURBO", "hacks"}, {"TURBO_SPEED", "hacks"}, {"SKIP_MOVIES", "hacks"}, {"SEED", "hacks"}, {"UNLOCK_ALL", "hacks"}, {"FREEZE_KEYS", "hacks"},
-    {"QUICK_RACE", "hacks"}, {"UPDATE_CHECK", "launcher"},
+    {"QUICK_RACE", "hacks"}, {"CLASSIC_GP", "hacks"}, {"MODS", "launcher"}, {"MODS_ACK", "launcher"}, {"MODS_PLAYED", "launcher"},
+    {"UPDATE_CHECK", "launcher"}, {"DISCORD", "launcher"}, {"GAME_DIR", "launcher"}, {"PLAYER", "launcher"},
+    {"SHORTCUT_ASKED", "launcher"},
 };
 
 // The settings the menu shows: the value in effect when the key is unset, and what the key accepts. The only place a
@@ -90,25 +104,37 @@ static const CfgMeta metas[] = {
     // Screen
     {"FULLSCREEN", "0", "0|1", LIVE}, {"WINDOW_SIZE", "1920x1080", NULL, LIVE},
     {"VK_PRESENT", "mailbox", "mailbox|fifo|immediate", LIVE}, {"GPU_INDEX", "", NULL, RESTART},
-    {"PERF_OVERLAY", "off", "off|fps|full", LIVE}, {"FPS", "auto", "auto|30|60", LIVE},
-    {"UPSCALER", "fsr", "fsr|bilinear", LIVE}, {"SHARPNESS", "80", "0..100", LIVE},
-    {"PICTURE_FIT", "keep", "keep|stretch", LIVE},
+    {"PERF_OVERLAY", "off", "off|fps|full", LIVE}, {"FPS", "auto", "auto|game|60|30|20|15", LIVE}, {"LOW_LATENCY", "1", "0|1", LIVE},
+    {"FRAMEGEN", "off", "off|auto|2|3|4", LIVE},
+    // the screen has variable refresh (FreeSync, G-Sync), told by the player: Vulkan does not say whether it is on.
+    // Off, frame generation's Automatic uses only the factors that split the refreshes evenly (vk_framegen.c fits)
+    {"VRR", "0", "0|1", LIVE},
+    // bilinear by default (Adrià 15/11/2026): FSR 1 only when the player picks it or Auto-set does
+    {"UPSCALER", "bilinear", "fsr|bilinear", LIVE}, {"SHARPNESS", "80", "0..100", LIVE},
+    {"PICTURE_FIT", "keep", "keep|stretch", LIVE}, {"HDR", "auto", "auto|off", LIVE},   // auto: HDR when the display is (hdr6c, 12/11/2026)
     {"DEVICE_PROFILE", "auto", "auto|desktop|deck|ps5", RESTART},
     {"RESOLUTION", "original", "original|540|720|900|1080|1440|2160", RESTART},
+    {"ASPECT", "16:9", "16:9|window|21:9|32:9|48:9", RESTART},
     // Game
-    {"LANG", "", "ja|en-US|fr|de|it|es|zh-CN|ko|nl|pt|ru|zh-TW|en-GB|fr-CA|es-419|zh-Hans|zh-Hant|pt-BR", RESTART},
+    {"LANG", "", "ja|en-US|fr|de|it|es|zh-CN|ko|nl|pt|ru|zh-TW|en-GB|fr-CA|es-419|zh-Hans|zh-Hant|pt-BR|pl|th|ca|gl|eu", RESTART},
     {"OPERATION_MODE", "docked", "docked|handheld", RESTART},
+    {"LAN", "0", "0|1", RESTART},   // LAN play (sdk/ov/ov_socket.c), off until played between two PCs (#144)
     // Graphics: the console's look by default
     {"QUALITY", "console", "low|medium|console|high|ultra|custom", RESTART},   // the menu's presets; nothing reads it
     {"ANISO", "game", "game|2|4|8|16", RESTART}, {"TEX_QUALITY", "full", "full|half|quarter", RESTART},
     {"DETAIL_DISTANCE", "2", "1|1.5|2|3|4", RESTART}, {"SHADOW_SIZE", "console", "console|1024|2048|3072|4096", RESTART},
     // Sound, Controls, Menu
-    {"VOLUME", "100", "0..100", LIVE},
+    {"VOLUME", "100", "0..100", LIVE}, {"AUDIO_CHANNELS", "auto", "auto|2|6", RESTART}, {"BACKGROUND_MUTE", "0", "0|1", LIVE},
     {"MOTION", "1", "0|1", LIVE}, {"RUMBLE_STRENGTH", "130", "0..300", LIVE}, {"RUMBLE_CURVE", "0.6", "0.2..1.5", LIVE},
     {"RUMBLE_TRIGGERS", "0", "0|1", LIVE}, {"PAD_LAYOUT", "auto", "auto|nintendo|xbox", LIVE},
     {"BUTTON_ICONS", "auto", "auto|nintendo|xbox|playstation|keyboard", LIVE},
-    {"MOUSE_SENS", "1", "0..10", LIVE},
-    {"MENU_LANG", "", "en|ru|es", LIVE}, {"UPDATE_CHECK", "1", "0|1", LIVE},
+    {"MOUSE_SENS", "1", "0..10", LIVE}, {"STICK_DEADZONE", "8", "0..40", LIVE}, {"SWITCH2", "0", "0|1|2", RESTART},
+    {"MENU_LANG", "", "en|ja|fr|de|it|es|nl|pt|pt-BR|ru|zh-Hans|zh-Hant|ko|es-419|ca|gl|eu|pl|tr|uk|th", LIVE}, {"UPDATE_CHECK", "1", "0|1", LIVE},
+    {"DISCORD", "0", "0|1", LIVE},   // Discord Rich Presence (core/presence): off by default, the player's friends see it
+    {"MODS", "", NULL, RESTART},   // the Mods page's enabled mods, comma-separated in load order; not a menu row
+    {"MODS_ACK", "0", "0|1", LIVE},   // the player ticked the Mods page's "I understand" once
+    {"MODS_PLAYED", "", NULL, LIVE},   // the mods of the last start: a new set backs the save up first (launcher)
+    {"GAME_DIR", "", NULL, RESTART},   // unset: beside the executable; the launcher remembers the selection there
     // Advanced: scheduling
     {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "1", "0|1", RESTART},
 #ifdef __PROSPERO__
@@ -139,7 +165,8 @@ static const CfgMeta metas[] = {
     // Hacks: none of them on the console, all off by default
     {"TURBO", "off", "off|hold|toggle|on|until", LIVE}, {"TURBO_SPEED", "4", "2..8", LIVE},
     {"SKIP_MOVIES", "0", "0|1", LIVE}, {"SEED", "", NULL, RESTART},
-    {"UNLOCK_ALL", "0", "0|1", RESTART}, {"FREEZE_KEYS", "0", "0|1", LIVE}, {"QUICK_RACE", "off", "off|tt|free", RESTART},
+    {"UNLOCK_ALL", "0", "0|1", RESTART}, {"FREEZE_KEYS", "0", "0|1", LIVE}, {"QUICK_RACE", "off", "off|tt|gp|free", RESTART},
+    {"CLASSIC_GP", "0", "0|1", LIVE},   // core/hacks/classic.c: the cups' intermissions become laps on one course
 };
 
 static int is_known(const char *key) {
@@ -215,9 +242,13 @@ int cfg_load(const char *path) {
 //
 // The Steam Deck (LCD Jupiter, OLED Galileo; 1280x800, 16:10, 4 Zen 2 cores, RDNA 2 with 8 CUs sharing 16 GB): a
 // window at the screen's 1280x800, fullscreen and vsync, as gamescope composes Game Mode.
-// Starting points to replace with measured ones (docs/tester-guide.md, Steam Deck).
+// RESOLUTION 720: with "original" the output already shrinks to the 720 lines a 16:9 picture gets on the 800-line
+// screen (patches.c output_size), but the 3D scene still renders at the console's docked 2560x1440 (romfs_res.c),
+// passes of that size taking 16 of the GPU's 42 ms a frame (MKW_PASS_TIMING with MKW_VK_RECORDER=0). With 720 they
+// go: race median 36.3 -> 23.4 ms (time trial, low quality preset, UMA 1 GB, 13/11/2026), 35.7 -> 24.6 ms without the
+// timing; a docked Deck on a large screen can pick a higher one in the menu.
 static const struct { const char *key, *value; } DECK[] = {
-    {"FULLSCREEN", "1"}, {"WINDOW_SIZE", "1280x800"}, {"VK_PRESENT", "fifo"},
+    {"FULLSCREEN", "1"}, {"WINDOW_SIZE", "1280x800"}, {"VK_PRESENT", "fifo"}, {"RESOLUTION", "720"},
 };
 // The PS5: the game's 30 fps (MKW_FPS 30: two game ticks a frame, the race at full speed). The race's work is ~26-27
 // ms a frame on the first course and does not reach 16.7 ms (docs/roadmap.md); with auto the game swapped 60 and 30 Hz
@@ -225,6 +256,10 @@ static const struct { const char *key, *value; } DECK[] = {
 // window, speed 1.00x, 27 slow frames in 5,300. A weaker machine's setting, so a profile, not the table's default.
 static const struct { const char *key, *value; } PS5[] = {
     {"FPS", "30"},
+    // Frame generation at 2x: the 30 fps race shown at 60 (vk_framegen.c). Unlike the rest of this table, not what the
+    // console does: the user's choice for the PS5 (16/11/2026, then on upstream's MKW_FRAMEGEN, 17/11/2026), which the
+    // Pit Stop menu turns off. Untested on the console so far.
+    {"FRAMEGEN", "2"},
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 
@@ -477,6 +512,15 @@ static const char *section_of(const char *key) {
     return NULL;
 }
 
+static void put_value(Out *o, const CfgEntry *e) {
+    // Keep the in-memory path literal. The parser trims whitespace outside quotes, then removes just the outer
+    // quotes: paths ending in spaces/tabs, and literal quotes or backslashes inside them, must survive a restart.
+    int quote = !strcmp(e->key, "GAME_DIR");
+    if (quote) puts_(o, "\"");
+    puts_(o, e->value);
+    if (quote) puts_(o, "\"");
+}
+
 // "key = value" + eol for entry e (key lower-case)
 static void put_entry(Out *o, const CfgEntry *e, const char *eol) {
     char k[64];
@@ -484,7 +528,7 @@ static void put_entry(Out *o, const CfgEntry *e, const char *eol) {
     for (char *p = k; *p; p++) *p = (char)tolower((unsigned char)*p);
     puts_(o, k);
     puts_(o, " = ");
-    puts_(o, e->value);
+    put_value(o, e);
     puts_(o, eol);
 }
 
@@ -569,7 +613,7 @@ int cfg_save_to(const char *path) {
             while (kn && (s[kn - 1] == ' ' || s[kn - 1] == '\t')) kn--;
             put(&o, s, kn);
             puts_(&o, " = ");
-            puts_(&o, entries[replace[i]].value);
+            put_value(&o, &entries[replace[i]]);
             int had_eol = len && s[len - 1] == '\n';
             if (had_eol) puts_(&o, eol);
         } else {
@@ -617,23 +661,80 @@ int cfg_save_to(const char *path) {
     return ok;
 }
 
-static char ini_path[1024];
+static char ini_path[PLAT_PATH_MAX * 3], launcher_ini[PLAT_PATH_MAX * 3], game_dir[PLAT_PATH_MAX * 2];
+static int game_dir_invalid;
+
+static int resolve_game_dir(const char *path, char *out, size_t cap) {
+    if (!path || !*path || strchr(path, '\n')) return 0;
+    const char *cut = plat_last_sep(launcher_ini);
+    int absolute = path[0] == '/' || path[0] == '\\' || path[1] == ':';
+    if (!absolute && !cut) return 0;
+    int n = absolute ? snprintf(out, cap, "%s", path)
+                     : snprintf(out, cap, "%.*s/%s", (int)(cut - launcher_ini), launcher_ini, path);
+    if (n < 0 || n > CFG_GAME_DIR_MAX || (size_t)n >= cap) return 0;
+#ifdef _WIN32
+    // The manifest does not opt into long paths, and Win32 length counts UTF-16 units rather than UTF-8 bytes.
+    // The byte limit above guarantees this conversion fits without truncating; include room for derived paths.
+    // https://learn.microsoft.com/en-us/windows/win32/fileio/maximum-file-path-limitation
+    uint16_t wide[CFG_GAME_DIR_MAX + 1];
+    if (utf8_to_utf16(out, wide, CFG_GAME_DIR_MAX + 1) > CFG_GAME_DIR_WIN32_MAX) return 0;
+#endif
+    return 1;
+}
 
 static int find_ini(void) {
     if (ini_path[0]) return 1;
-    char path[1024];
+    char path[PLAT_PATH_MAX * 2];
     if (!plat_exe_path(path, sizeof path)) return 0;
     char *cut = plat_last_sep(path);
     if (!cut) cut = strrchr(path, '/');
     if (!cut || cut + 10 >= path + sizeof path) return 0;
     strcpy(cut + 1, "mkw.ini");
     snprintf(ini_path, sizeof ini_path, "%s", path);
+    snprintf(launcher_ini, sizeof launcher_ini, "%s", path);
+    *cut = 0;
+    snprintf(game_dir, sizeof game_dir, "%s", path);
     return 1;
 }
 
 int cfg_save(void) {
     if (find_ini()) return cfg_save_to(ini_path);
     __atomic_store_n(&save_ok, 0, __ATOMIC_RELEASE);
+    return 0;
+}
+
+const char *cfg_game_dir(void) {
+    // mem_init needs the game library's tables before it can reserve the guest address space.
+    if (!game_dir[0]) cfg_init();
+    return game_dir;
+}
+
+int cfg_game_dir_invalid(void) { return game_dir_invalid; }
+
+// Save pending settings to the current installation first. Only the selector belongs beside the launcher; the
+// caller restarts it after success so no DLL, shader cache or settings from the old installation survive the switch.
+int cfg_select_game_dir(const char *path) {
+    cfg_game_dir();
+    if (cfg_from_env("MKW_GAME_DIR")) return 0;
+    char resolved[CFG_GAME_DIR_MAX + 1];
+    game_dir_invalid = !resolve_game_dir(path, resolved, sizeof resolved);
+    if (game_dir_invalid) {
+#ifdef _WIN32
+        rt_log("cfg: game directory rejected: maximum %d UTF-16 units, no newlines", CFG_GAME_DIR_WIN32_MAX);
+#else
+        rt_log("cfg: game directory rejected: maximum %d UTF-8 bytes, no newlines", CFG_GAME_DIR_MAX);
+#endif
+        return 0;
+    }
+    if (!cfg_save()) return 0;
+    int i = 0, old_n = n_entries;
+    while (i < n_entries && strcmp(entries[i].key, "GAME_DIR")) i++;
+    CfgEntry old = i < n_entries ? entries[i] : (CfgEntry){0};
+    cfg_set("MKW_GAME_DIR", resolved);
+    if (cfg_save_to(launcher_ini)) return 1;
+    // A failed selector write must not leak into the current installation on the next settings save.
+    if (i < old_n) entries[i] = old;
+    else n_entries = old_n;
     return 0;
 }
 
@@ -704,7 +805,33 @@ void cfg_save_drain(void) {
 }
 
 void cfg_init(void) {
+    static int initialized;
+    if (initialized) return;
+    initialized = 1;
     load_ini();
+    const char *selected = cfg_get("MKW_GAME_DIR");
+    if (selected && *selected) {
+        char dir[CFG_GAME_DIR_MAX + 1];
+        game_dir_invalid = !resolve_game_dir(selected, dir, sizeof dir);
+        if (game_dir_invalid) {
+#ifdef _WIN32
+            rt_log("cfg: invalid game directory: maximum %d UTF-16 units, no newlines; using %s",
+                   CFG_GAME_DIR_WIN32_MAX, game_dir);
+#else
+            rt_log("cfg: invalid game directory: maximum %d UTF-8 bytes, no newlines; using %s", CFG_GAME_DIR_MAX,
+                   game_dir);
+#endif
+        } else if (strcmp(game_dir, dir)) {
+            snprintf(game_dir, sizeof game_dir, "%s", dir);
+            snprintf(ini_path, sizeof ini_path, "%s/mkw.ini", game_dir);
+            // Each installation keeps its own RomFS path and settings. The launcher ini holds the selection only.
+            cfg_load(ini_path);
+            char key[] = "GAME_DIR", value[sizeof game_dir];
+            snprintf(value, sizeof value, "%s", game_dir);
+            add(key, value, 0);
+            rt_log("cfg: game directory %s (settings %s)", game_dir, ini_path);
+        }
+    }
     if (profile_of())
         rt_log("cfg: device profile %s: defaults for the keys mkw.ini does not set (MKW_DEVICE_PROFILE=desktop "
                "turns it off)", profile_of() == 2 ? "PS5" : "Steam Deck");

@@ -41,6 +41,7 @@ sys.path.insert(0, str(ROOT / 'recomp'))
 import flags  # noqa: E402
 import jumptables  # noqa: E402
 import loops  # noqa: E402
+import nso  # noqa: E402
 import patches  # noqa: E402
 import regs  # noqa: E402
 from layout import DEFAULT, INCOMPLETE, PLACEMENTS, check_output_profile, layout, output_lock  # noqa: E402
@@ -179,6 +180,35 @@ def discover(mod):
     return starts, stats
 
 
+SETJMP_NAMES = frozenset({'setjmp', '_setjmp', '__setjmp', 'sigsetjmp'})
+
+
+def setjmp_owners(mod, starts):
+    """Function starts (absolute) of mod that call setjmp: through a PLT stub of an imported setjmp, or directly an
+    exported one. They get a host setjmp point of their own (runtime/cpu/sjlj.c) so that a guest longjmp can come
+    back into them. starts: sorted absolute function starts."""
+    n = mod.nso
+    names = {mod.base + off: n.syms[sym][0] for off, typ, sym, _ in n.relocs
+             if typ in (nso.R_AARCH64_JUMP_SLOT, nso.R_AARCH64_GLOB_DAT) and sym}
+    w = mod.words.astype(np.int64)
+    pcs = mod.lo + 4 * np.arange(len(w), dtype=np.int64)
+    # PLT stub: ADRP x16, P; LDR x17, [x16, #o]; ADD x16, x16, #o; BR x17. Its GOT slot is P + o.
+    m = np.flatnonzero(((w[:-3] & 0x9F00001F) == 0x90000010) & ((w[1:-2] & 0xFFC003FF) == 0xF9400211)
+                       & ((w[2:-1] & 0xFFC003FF) == 0x91000210) & (w[3:] == 0xD61F0220))
+    page = (pcs[m] & ~0xFFF) + (_sext(((w[m] >> 5) & 0x7FFFF) << 2 | ((w[m] >> 29) & 3), 21) << 12)
+    got = page + (((w[m + 1] >> 10) & 0xFFF) << 3)
+    targets = {int(a) for a, g in zip(pcs[m], got) if names.get(int(g)) in SETJMP_NAMES}
+    targets |= {mod.base + value for name, info, shndx, value, _ in n.syms
+                if shndx and (info & 0xF) == 2 and name in SETJMP_NAMES}
+    if not targets:
+        return set()
+    bl = np.flatnonzero((w & 0xFC000000) == 0x94000000)
+    tgt = pcs[bl] + 4 * _sext(w[bl] & 0x03FFFFFF, 26)
+    sites = pcs[bl][np.isin(tgt, np.fromiter(targets, dtype=np.int64))]
+    i = np.searchsorted(starts, sites, side='right') - 1
+    return {int(starts[k]) for k in i[i >= 0]}
+
+
 def estimate_sizes(mod, starts):
     """Estimated bytes of C per function (for chunking only; the manifest records the real sizes)."""
     w = mod.words
@@ -222,15 +252,17 @@ class Emitter:
     """C for the functions of one module. starts is the set of every function start of the module."""
 
     def __init__(self, mod, starts, patched=None, reg_locals=regs.LOCALS, callee_saved=True, spins=None,
-                 loop_analysis=True, reg_loop_weight=regs.LOOP_WEIGHT):
+                 loop_analysis=True, reg_loop_weight=regs.LOOP_WEIGHT, spanned=None):
         self.mod = mod
         self.starts = starts
         self.patched = patched or {}   # {address: (set index, [replacement words])} (recomp/patches.py)
         self.spins = spins or {}       # {spin wait back-edge: its head} (recomp/patches.py `spin`)
+        self.spanned = spanned or {}   # {span start: (set index, span end)} (skipped whole when the set is on)
         self.reg_locals = reg_locals   # recomp/regs.py: registers per function in C locals
         self.kept = regs.CALLEE_SAVED if callee_saved else frozenset()   # not reloaded after a call
         self.loop_analysis = loop_analysis   # recomp/loops.py: False puts the barrier on every loop without calls
         self.reg_loop_weight = reg_loop_weight   # recomp/regs.py: a use inside a loop counts this much (per level)
+        self.sj_owners = setjmp_owners(mod, np.fromiter(sorted(starts), dtype=np.int64))
         self.uses_patches = False
         self.stats = Counter()
         self.unsupported = Counter()
@@ -338,7 +370,12 @@ class Emitter:
         insns = [mod.lift(a) for a in range(entry, end, 4)]
         labels, tables = self.scan(insns, entry, end)
         refs = set()
-        all_labels = 'all' in tables.values()
+        # A setjmp caller is re-entered at the setjmp's return address after a guest longjmp (runtime/cpu/sjlj.c),
+        # so it is built like a function with an unresolved computed br: every instruction a label.
+        sj_owner = entry in self.sj_owners
+        all_labels = 'all' in tables.values() or sj_owner
+        if sj_owner:
+            self.stats['setjmp_owners'] += 1
         if all_labels:
             labels = set(range(entry, end, 4))
         # An unresolved computed br re-enters the function through fb_<entry>, a C function of its own, which local
@@ -379,9 +416,10 @@ class Emitter:
             fb = f'fb_{entry:x}'
             cases = ' '.join(f'case {hx(t)}: goto L_{t:x};' for t in range(entry, end, 4))
             redispatch = f'{MUSTTAIL} {fb}(c);'
+            enter = f'rt_sj_owner(c, {fb}, {hx(entry)}, {hx(end)});' if sj_owner else redispatch
             out = [f'static void {fb}(Cpu *c);',
                    f'void {fname(entry)}(Cpu *c) {{', f'    FN_ENTER({hx(entry)});', f'    c->pc = {hx(entry)};',
-                   f'    {redispatch}', '}',
+                   f'    {enter}', '}',
                    f'static void {fb}(Cpu *c) {{', f'    switch (c->pc) {{ {cases} default: break; }}',
                    f'    {MUSTTAIL} rt_dispatch(c);']
         else:
@@ -424,6 +462,64 @@ class Emitter:
         def emit(i, line):
             body.append((i, line))
 
+        # A span the switch skips whole: its words lift as usual inside if (!switch), so the function's control
+        # flow, labels and jump tables stay the original's. Entries into the span must be impossible with the switch
+        # on: its head is fall-through only, and an outside branch into its interior is allowed only when the source
+        # is itself unreachable without the span (a re-entry from the span's own early exit, like a timer block's
+        # mode check rejoining its tail).
+        open_span = None
+        nins = len(insns)
+        for s, (sk, se) in sorted(self.spanned.items()):
+            if se <= entry or s >= end:
+                continue
+            if not (entry <= s and se <= end):
+                raise patches.PatchError(f'{s:#x}: span ends at {se:#x}, outside this function')
+            si, se_i = (s - entry) // 4, (se - entry) // 4
+            targets = {}   # branch source index: target indices in this function
+            for i, ins in enumerate(insns):
+                tgts = []
+                if ins.kind in ('b', 'bcond'):
+                    tgts = [ins.target]
+                elif ins.kind == 'br':
+                    jt = tables.get(entry + 4 * i)
+                    if jt == 'all':
+                        raise patches.PatchError(f'{s:#x}: an unresolved computed branch with the span')
+                    tgts = [t for t in (jt or []) if entry <= t < end]
+                targets[i] = [(t - entry) // 4 for t in tgts if entry <= t < end]
+            for i, ins in enumerate(insns):
+                a = entry + 4 * i
+                if a in self.patched and s <= a < se:
+                    raise patches.PatchError(f'{a:#x}: a site inside the span at {s:#x}')
+                for t in targets[i]:
+                    if not (s <= entry + 4 * t < se and not (si <= i < se_i)):
+                        continue
+                    if entry + 4 * t == s:
+                        raise patches.PatchError(f'{a:#x}: outside branch to the span head at {s:#x}')
+                    # a re-entry: allowed only when the source is unreachable without the span, walking
+                    # its predecessors back (through the span is gated; the function entry is not)
+                    ok, todo, back = True, [i], set()
+                    while todo:
+                        j = todo.pop()
+                        if j in back:
+                            continue
+                        back.add(j)
+                        if si <= j < se_i:
+                            continue   # through the span: gated
+                        if j == 0:
+                            ok = False   # function entry reaches it without the span
+                            break
+                        preds = [p for p in range(nins) if j in targets.get(p, [])]
+                        pj = j - 1
+                        if pj >= 0 and insns[pj].kind not in ('b', 'br', 'ret', 'trap'):
+                            preds.append(pj)   # falls through from the previous instruction
+                        if not preds:
+                            ok = False
+                            break
+                        todo.extend(preds)
+                    if not ok:
+                        raise patches.PatchError(f'{a:#x}: outside branch into the span at {s:#x}')
+            self.stats['spans'] += 1
+
         # Calls up to each instruction: a loop with none needs a compiler barrier on its back-edge (below).
         calls = [0]
         for ins in insns:
@@ -456,6 +552,14 @@ class Emitter:
         k = None
         for i, ins in enumerate(insns):
             a = entry + 4 * i
+            if open_span is not None and a == open_span:
+                emit(None, '    }')
+                open_span = None
+            if a in self.spanned:
+                sk, se = self.spanned[a]
+                emit(None, f'    if (!rt_patch_on[{sk}]) {{')
+                open_span = se
+                self.uses_patches = True
             if a in labels:
                 emit(None, f'L_{a:x}:;')
             k = ins.kind
@@ -499,6 +603,9 @@ class Emitter:
             else:
                 raise ValueError(f'{a:#x}: unknown instruction kind {k!r}')
         n = len(insns)
+        if open_span is not None:   # a span ending at the function end closes after its last word
+            emit(None, '    }')
+            open_span = None
         if k not in TERMINATORS:  # falls through into the next function
             if end < mod.hi:
                 emit(n, '    ' + jump(end, n))
@@ -578,8 +685,9 @@ def _retry(fn, *args):
 _W = {}  # worker state: 'mods' {name: (path, base)}, 'starts' {name: sorted array}, 'emitters' {name: Emitter}
 
 
-def _worker_init(mods, starts, table, opts):
+def _worker_init(mods, starts, table, opts, image=None):
     _W['mods'] = mods
+    _W['image'] = image or {}   # {module: [(offset, bytes)]}: enabled code mods (--image)
     _W['starts'] = starts
     _W['patches'] = table
     _W['opts'] = opts   # Emitter keyword arguments
@@ -590,10 +698,11 @@ def _emitter(name):
     e = _W['emitters'].get(name)
     if e is None:
         path, base = _W['mods'][name]
-        mod = Module(name, path, base, 'c')
+        mod = Module(name, path, base, 'c', _W['image'].get(name, ()))
         e = _W['emitters'][name] = Emitter(mod, set(_W['starts'][name].tolist()),
                                            _W['patches'].for_module(name, base),
-                                           spins=_W['patches'].spins_for(name, base), **_W['opts'])
+                                           spins=_W['patches'].spins_for(name, base),
+                                           spanned=_W['patches'].spans_for(name, base), **_W['opts'])
     return e
 
 
@@ -648,7 +757,7 @@ def main():
     ap.add_argument('--exefs', type=Path, required=True)
     ap.add_argument('--out', type=Path, required=True)
     ap.add_argument('--guest-layout', choices=PLACEMENTS, default=DEFAULT, help='guest address placement')
-    ap.add_argument('--modules', default='main,subsdk0,sdk')
+    ap.add_argument('--modules', default='', help='comma-separated; default: every module of the ExeFS')
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
     ap.add_argument('--limit', type=int, default=0, help='emit only the first N functions of each module')
     ap.add_argument('--chunk-fns', type=int, default=3000, help='functions per chunk at most')
@@ -656,11 +765,16 @@ def main():
     ap.add_argument('--big-fn', type=int, default=300000, help='estimated bytes of C from which a function gets '
                                                                'its own chunk')
     ap.add_argument('--patches', type=Path, help='code patch table (recomp/patches.py)')
+    ap.add_argument('--mods', type=Path,
+                    help='mods with code patches (<mod>/mod.json "patches", merged into the table; default: '
+                         'the mods/ beside --exefs when there is one)')
     ap.add_argument('--reg-locals', type=int, default=regs.LOCALS,
                     help=f'guest registers per function kept in C locals (recomp/regs.py; default {regs.LOCALS}, 0: none)')
     ap.add_argument('--reg-loop-weight', type=int, default=regs.LOOP_WEIGHT,
                     help='how much a register use inside a loop counts when choosing the locals (recomp/regs.py; '
                          f'default {regs.LOOP_WEIGHT}: plain count)')
+    ap.add_argument('--image', type=Path,
+                    help='the enabled code mods\' bytes (JSON from tools/prepare/prepare.py), lifted in place')
     ap.add_argument('--no-callee-saved-trust', action='store_true',
                     help='reload X19-X29 and SP after every call too, instead of trusting AAPCS64 (slower; for '
                          'telling a broken callee from a generator bug)')
@@ -683,14 +797,20 @@ def generate(args, mods):
             'loop_analysis': not args.all_loop_barriers, 'reg_loop_weight': args.reg_loop_weight}
     t0 = time.perf_counter()
     table = patches.load(args.patches, mods) if args.patches else patches.Table()
-    want = args.modules.split(',')
+    bases = {n: b for n, b, _ in mods}
+    if args.mods is not None:
+        patches.load_mods(table, args.mods, bases)
+    elif (args.exefs.parent / 'mods').is_dir():
+        patches.load_mods(table, args.exefs.parent / 'mods', bases)
+    image = patches.load_image(table, args.image) if args.image else {}
+    write_if_changed(args.out / 'patches.h', patches.header_text(table, GENERATED_MARKER))
+    want = args.modules.split(',') if args.modules else [n for n, _, _ in mods]
     unknown = set(want) - {n for n, _, _ in mods}
     if unknown:
         raise SystemExit(f'not in {args.exefs}: {", ".join(sorted(unknown))}')
     incomplete = args.out / INCOMPLETE
     incomplete.touch()
     write_layout(mods, args.out, args.guest_layout)
-    write_if_changed(args.out / 'patches.h', patches.header_text(table, GENERATED_MARKER))
 
     paths, starts_abs, info, tasks = {}, {}, {}, []
     for name, base, _ in mods:
@@ -698,7 +818,7 @@ def generate(args, mods):
             continue
         t = time.perf_counter()
         path = args.exefs / name
-        mod = Module(name, path, base, 'c')
+        mod = Module(name, path, base, 'c', image.get(name, ()))
         patches.check(table, mod, name)
         starts, dstats = discover(mod)
         est = estimate_sizes(mod, starts)
@@ -726,7 +846,7 @@ def generate(args, mods):
     done_at, errors = {}, []
     t_emit = time.perf_counter()
     ctx = mp.get_context('spawn')
-    with ctx.Pool(max(1, args.jobs), initializer=_worker_init, initargs=(paths, starts_abs, table, opts)) as pool:
+    with ctx.Pool(max(1, args.jobs), initializer=_worker_init, initargs=(paths, starts_abs, table, opts, image)) as pool:
         for i, r in enumerate(pool.imap_unordered(_emit_chunk, [t for _, t in tasks], chunksize=1)):
             results[r['module']].append(r)
             if r['error']:

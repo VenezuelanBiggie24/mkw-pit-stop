@@ -5,6 +5,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 #include "cfg.h"
 #include "host.h"
@@ -20,6 +23,30 @@ extern VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInst
 static VkCtx g_vk;
 static int g_ready;
 static PlatMutex g_lock = PLAT_MUTEX_INIT;
+
+// VMA's vkAllocateMemory, timed: a new VkDeviceMemory costs the calling thread 8-19 ms or more (the kernel clears its
+// pages; vk_headroom.c), and the title's sparse arrays ask for ~1 GB in one frame. A slow one (5 ms or more) is logged
+// with its thread, the first 8 and then every power of two.
+static VKAPI_ATTR VkResult VKAPI_CALL timed_alloc(VkDevice d, const VkMemoryAllocateInfo *info,
+                                                  const VkAllocationCallbacks *cb, VkDeviceMemory *mem) {
+    static int64_t n_slow, ns_all, bytes_all;
+    uint64_t t0 = plat_now_ns();
+    VkResult r = vkAllocateMemory(d, info, cb, mem);
+    int64_t dt = (int64_t)(plat_now_ns() - t0);
+    int64_t all = plat_add64(&ns_all, dt), bytes = plat_add64(&bytes_all, (int64_t)info->allocationSize);
+    if (dt >= 5000000) {
+        int64_t k = plat_inc64(&n_slow);
+        char name[32] = "";
+#if !defined(_WIN32) && !defined(MKW_PS5_NATIVE)   // the PS5's libc has no pthread_getname_np
+        pthread_getname_np(pthread_self(), name, sizeof name);
+#endif
+        if (k <= 8 || !(k & (k - 1)))
+            rt_log("vk: vkAllocateMemory of %.1f MiB (type %u) took %.1f ms on thread %u %s (%lld slow; %.0f ms for "
+                   "%.0f MiB in all so far)", info->allocationSize / 1048576.0, info->memoryTypeIndex, dt / 1e6,
+                   plat_thread_id(), name, (long long)k, all / 1e6, bytes / 1048576.0);
+    }
+    return r;
+}
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
                                                const VkDebugUtilsMessengerCallbackDataEXT *d, void *user) {
@@ -77,8 +104,15 @@ static int create_instance(void) {
         return 0;
     }
 #endif
-    const char *ext[8];
+    const char *ext[9];
     uint32_t n_ext = is_headless() ? 0 : (uint32_t)gfx_window_vk_extensions(ext, 7);
+    uint32_t ni = 0;   // HDR10 swapchains (gfx_hdr.c) need the colour spaces of VK_EXT_swapchain_colorspace
+    vkEnumerateInstanceExtensionProperties(NULL, &ni, NULL);
+    VkExtensionProperties *ie = calloc(ni ? ni : 1, sizeof *ie);
+    vkEnumerateInstanceExtensionProperties(NULL, &ni, ie);
+    if (has_ext(ie, ni, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))
+        g_vk.has_colorspace = 1, ext[n_ext++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
+    free(ie);
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     int validate = cfg_bool("MKW_VK_VALIDATION");
     if (validate && !layer_present(layers[0])) {
@@ -113,9 +147,10 @@ static int create_instance(void) {
     return 1;
 }
 
+// VK_EXT_external_memory_host is optional (has_emh): pools are shadowed by default and imported only when a shadow
+// does not fit (vk_mem_back.c import_pool). Turnip (Adreno, Mesa 25-27) does not offer it.
 static const char *const k_required_ext[] = {
-    VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME,
-    VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME};
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME, VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME};
 
 // Name of the first missing required extension, or NULL.
 static const char *missing_required(VkPhysicalDevice pd) {
@@ -233,6 +268,8 @@ typedef struct {
     VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR lr;
     VkPhysicalDeviceMapMemoryPlacedFeaturesEXT placed;
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pexe;
+    VkPhysicalDevicePresentIdFeaturesKHR pid;
+    VkPhysicalDevicePresentWaitFeaturesKHR pwait;
 } FeatureChain;
 
 static int create_device(void) {
@@ -295,7 +332,17 @@ static int create_device(void) {
         ext[n_ext++] = VK_KHR_MAP_MEMORY_2_EXTENSION_NAME;
         CHAIN(placed, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT);
     }
+    if (has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME)) {
+        g_vk.has_emh = 1;
+        ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME;
+    } else {
+        rt_log("vk: no VK_EXT_external_memory_host: a pool whose shadow does not fit cannot be imported");
+    }
     if (has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) { g_vk.has_memory_budget = 1; ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME; }
+    if (g_vk.has_colorspace && has_ext(ep, ne, VK_EXT_HDR_METADATA_EXTENSION_NAME)) {
+        g_vk.has_hdr_metadata = 1;
+        ext[n_ext++] = VK_EXT_HDR_METADATA_EXTENSION_NAME;
+    }
     if (has_ext(ep, ne, VK_AMD_BUFFER_MARKER_EXTENSION_NAME)) { g_vk.has_buffer_marker = 1; ext[n_ext++] = VK_AMD_BUFFER_MARKER_EXTENSION_NAME; }
     // The breadcrumbs' fallback where the buffer marker is missing (NVIDIA's drivers have both: GTX 1050 Ti on Windows,
     // RTX 5070 Ti 620.70 on Linux, 09/11/2026); only with the breadcrumbs on: enabling it may cost even unused.
@@ -323,12 +370,22 @@ static int create_device(void) {
         gpl_link = tail;
         CHAIN(gpl, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT);
     }
+    // MKW_LATENCY only (vk_latency.c): when each picture reached the screen
+    int want_pw = vk_lat_on() && has_ext(ep, ne, VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
+                  has_ext(ep, ne, VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+    if (want_pw) {
+        ext[n_ext++] = VK_KHR_PRESENT_ID_EXTENSION_NAME;
+        ext[n_ext++] = VK_KHR_PRESENT_WAIT_EXTENSION_NAME;
+        CHAIN(pid, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR);
+        CHAIN(pwait, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR);
+    }
     free(ep);
 
     // The driver fills the chain with what it supports; the same chain then enables all of it (robustBufferAccess
     // stays on: guest shaders index constant buffers freely and out-of-range reads must stay harmless).
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &c->f2);
     vk_caps_features(&c->f2.features);
+    int has_pw = want_pw && c->pid.presentId && c->pwait.presentWait;
     if (gpl_link) {
         VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT gp = {
             .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT};
@@ -346,9 +403,9 @@ static int create_device(void) {
     const char *miss = NULL;
     if (!c->f12.timelineSemaphore) miss = "timelineSemaphore";
     else if (!c->f12.drawIndirectCount) miss = "drawIndirectCount";   // MultiDrawElementsIndirectCount
-    else if (!c->f12.scalarBlockLayout) miss = "scalarBlockLayout";   // constant banks read at dynamic addresses (sm86 mem.cb_word)
     else if (!c->f13.dynamicRendering) miss = "dynamicRendering";
     else if (!c->f13.synchronization2) miss = "synchronization2";
+    else if (!c->f13.shaderDemoteToHelperInvocation) miss = "shaderDemoteToHelperInvocation";   // KILL (sm86 core.py)
     else if (!h->shaderStorageImageWriteWithoutFormat) miss = "shaderStorageImageWriteWithoutFormat";
     else if (!c->clip.depthClipControl) miss = "depthClipControl";
     else if (!h->shaderInt64) miss = "shaderInt64";
@@ -391,14 +448,17 @@ static int create_device(void) {
 #ifdef MKW_PS5_NATIVE
     volkLoadDevice(g_vk.device);
 #endif
+    vk_lat_device(g_vk.device, has_pw);
     vkGetDeviceQueue(g_vk.device, g_vk.gfx_family, 0, &g_vk.gfx_queue);
     if (g_vk.xfer_family != g_vk.gfx_family) vkGetDeviceQueue(g_vk.device, g_vk.xfer_family, 0, &g_vk.xfer_queue);
     else { g_vk.xfer_queue = g_vk.gfx_queue; g_vk.xfer_shared = 1; }
 
     VkPhysicalDeviceExternalMemoryHostPropertiesEXT emh = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT};
     VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &emh};
-    vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
-    g_vk.min_imported_host_alignment = (uint32_t)emh.minImportedHostPointerAlignment;
+    if (g_vk.has_emh) {
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
+        g_vk.min_imported_host_alignment = (uint32_t)emh.minImportedHostPointerAlignment;
+    }
     vk_caps_init(&g_vk);
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.device, .instance = g_vk.instance,
@@ -409,10 +469,12 @@ static int create_device(void) {
                                  .flags = (g_vk.has_buffer_device_address ? VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT : 0) |
                                           (g_vk.has_memory_budget ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0),
                                  .pDeviceMemoryCallbacks = vk_headroom_callbacks()};
+    static const VmaVulkanFunctions vf = {.vkAllocateMemory = timed_alloc};   // the rest from VMA's static imports
+    ai.pVulkanFunctions = &vf;
     // MKW_GPU_MEM_LIMIT=<MiB>: a cap on what VMA allocates, split over the heaps by size. On an integrated GPU this
     // memory is system RAM outside the process's cgroup (run47: the global OOM killer took other applications), so
-    // unset there it is 4096, what every scripted run sets (3072 makes the race black), or more with more RAM
-    // (vk_default_mem_limit_mib); a player
+    // unset there it is 4096, what every scripted run sets (3072 makes the race black), or more with more RAM, plus the
+    // GPU's firmware carve-out (vk_default_mem_limit_mib); a player
     // starting the game from its folder has no script to set it. 0 lifts it. On a discrete GPU it caps the VRAM heaps
     // alone: split with the host heap too, a player's 6400 left an RTX 2070 SUPER 1 040 MiB of its 8 GB (#28).
     VkDeviceSize limits[VK_MAX_MEMORY_HEAPS];
@@ -424,8 +486,14 @@ static int create_device(void) {
     if (!lim && dp.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
         float used, total = 0, proc;
         plat_mem_info(&used, &total, &proc);
+        VkPhysicalDeviceIDProperties id = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &id};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
+        uint64_t carve = plat_gpu_vram_mib(dp.vendorID, dp.deviceID, id.deviceLUIDValid ? id.deviceLUID : NULL);
         snprintf(lim_ram, sizeof lim_ram, "%llu",
-                 (unsigned long long)vk_default_mem_limit_mib(total > 0 ? (uint64_t)total : 0));
+                 (unsigned long long)vk_default_mem_limit_mib(total > 0 ? (uint64_t)total : 0, carve));
+        rt_log("vk: integrated GPU, %llu MiB carved out of RAM by the firmware: memory cap %s MiB", (unsigned long long)carve,
+               lim_ram);
         lim = lim_ram;
     }
 #endif
@@ -493,6 +561,8 @@ static void destroy_all(void) {
     if (g_vk.device) vk_astc_release(), vk_crumbs_release();
     if (g_vk.timeline) vkDestroySemaphore(g_vk.device, g_vk.timeline, NULL);
     vk_headroom_stop();
+    vk_tex_pool_stop();
+    vk_sparse_shutdown();
     if (g_vk.vma) vmaDestroyAllocator(g_vk.vma);
     if (g_vk.device) vkDestroyDevice(g_vk.device, NULL);
     if (g_vk.messenger) {

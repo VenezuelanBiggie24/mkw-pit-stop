@@ -21,6 +21,8 @@
 #define R_BAD_HANDLE KERN_R_BAD_HANDLE
 #define R_BAD_STATE KERN_R_BAD_STATE
 #define R_INVALID_ENUM KERN_R_INVALID_ENUM
+#define R_INVALID_CORE 0xE201u   // svc InvalidCoreId (113)
+#define R_INVALID_COMBINATION 0xE801u   // svc InvalidCombination (116)
 #define WAITERS_BIT KERN_WAITERS_BIT
 #define H_CUR_THREAD KERN_H_CURRENT_THREAD
 
@@ -154,6 +156,7 @@ static inline RtThread *cur(uint32_t svc) {
     return tcur;
 }
 static inline uint32_t ld32(uint64_t a) { return __atomic_load_n((uint32_t *)(uintptr_t)a, __ATOMIC_SEQ_CST); }
+static inline uint64_t ld64(uint64_t a) { return __atomic_load_n((uint64_t *)(uintptr_t)a, __ATOMIC_SEQ_CST); }
 
 // Defined in one kernel file, used by another.
 int st_of(int kind);   // kernel.c

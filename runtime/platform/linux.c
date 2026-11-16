@@ -174,12 +174,21 @@ static void intr_handler(int sig, siginfo_t *si, void *uc) {
     PlatIntr *t = intr_me;
     ucontext_t *u = uc;
     if (!t) return;
+#if defined(__aarch64__)
+    t->rip = (uint64_t)u->uc_mcontext.pc;
+    t->rsp = (uint64_t)u->uc_mcontext.sp;
+#else
     t->rip = (uint64_t)u->uc_mcontext.gregs[REG_RIP];
     t->rsp = (uint64_t)u->uc_mcontext.gregs[REG_RSP];
+#endif
     int32_t req = INTR_REQ;
     if (!__atomic_compare_exchange_n(&t->state, &req, INTR_STOPPED, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return;
     while (__atomic_load_n(&t->state, __ATOMIC_ACQUIRE) != INTR_GO) plat_pause();
+#if defined(__aarch64__)
+    if (t->to) u->uc_mcontext.pc = t->to;
+#else
     if (t->to) u->uc_mcontext.gregs[REG_RIP] = (greg_t)t->to;
+#endif
     __atomic_store_n(&t->state, INTR_IDLE, __ATOMIC_RELEASE);
 }
 
@@ -237,6 +246,169 @@ int plat_intr_resume(PlatIntr *t, uint64_t to) {
     return 1;
 }
 
+#if defined(__aarch64__)
+// ---- fibers: a stack switch of our own. glibc's swapcontext saves and restores the signal mask with a system call
+// on every switch, and the game switches fibers often. fiber_swap saves the callee-saved registers, the MXCSR and the
+// x87 control word on the current stack, stores the stack pointer in *save and loads the other one. A new fiber's
+// stack is laid out as fiber_swap leaves one, returning into fiber_entry, which calls fn(arg) (r12 and r13).
+struct PlatFiber {
+    void *sp;
+    void *stack;   // mapped stack (NULL for a thread's own context)
+    size_t size;
+};
+
+void plat_fiber_swap(void **save, void *load);
+void plat_fiber_entry(void);
+#if defined(__aarch64__)
+// AArch64: x19-x29, x30 (the return address), d8-d15 and FPCR in a 176-byte frame (FIBER_FRAME_WORDS words):
+// 0 x19 x20, 16 x21 x22, 32 x23 x24, 48 x25 x26, 64 x27 x28, 80 x29 x30, 96 d8-d15, 160 FPCR. A new fiber's frame
+// returns into plat_fiber_entry with fn in x19 and arg in x20.
+#define FIBER_FRAME_WORDS 22
+__asm__(".text\n"
+        ".globl plat_fiber_swap\n"
+        ".type plat_fiber_swap, %function\n"
+        ".p2align 4\n"
+        "plat_fiber_swap:\n"
+        "    .cfi_startproc\n"
+        "    sub sp, sp, #176\n"
+        "    stp x19, x20, [sp, #0]\n"
+        "    stp x21, x22, [sp, #16]\n"
+        "    stp x23, x24, [sp, #32]\n"
+        "    stp x25, x26, [sp, #48]\n"
+        "    stp x27, x28, [sp, #64]\n"
+        "    stp x29, x30, [sp, #80]\n"
+        "    stp d8, d9, [sp, #96]\n"
+        "    stp d10, d11, [sp, #112]\n"
+        "    stp d12, d13, [sp, #128]\n"
+        "    stp d14, d15, [sp, #144]\n"
+        "    mrs x9, fpcr\n"
+        "    str x9, [sp, #160]\n"
+        "    mov x9, sp\n"
+        "    str x9, [x0]\n"
+        "    mov sp, x1\n"
+        "    ldr x9, [sp, #160]\n"
+        "    msr fpcr, x9\n"
+        "    ldp x19, x20, [sp, #0]\n"
+        "    ldp x21, x22, [sp, #16]\n"
+        "    ldp x23, x24, [sp, #32]\n"
+        "    ldp x25, x26, [sp, #48]\n"
+        "    ldp x27, x28, [sp, #64]\n"
+        "    ldp x29, x30, [sp, #80]\n"
+        "    ldp d8, d9, [sp, #96]\n"
+        "    ldp d10, d11, [sp, #112]\n"
+        "    ldp d12, d13, [sp, #128]\n"
+        "    ldp d14, d15, [sp, #144]\n"
+        "    add sp, sp, #176\n"
+        "    ret\n"
+        "    .cfi_endproc\n"
+        ".size plat_fiber_swap, .-plat_fiber_swap\n"
+        ".globl plat_fiber_entry\n"
+        ".type plat_fiber_entry, %function\n"
+        ".p2align 4\n"
+        "plat_fiber_entry:\n"
+        "    mov x0, x20\n"
+        "    blr x19\n"
+        "    brk #0\n"
+        ".size plat_fiber_entry, .-plat_fiber_entry\n");
+#else
+__asm__(".text\n"
+        ".globl plat_fiber_swap\n"
+        ".type plat_fiber_swap, @function\n"
+        ".p2align 4\n"
+        "plat_fiber_swap:\n"
+        "    .cfi_startproc\n"
+        "    pushq %rbp\n"
+        "    pushq %rbx\n"
+        "    pushq %r12\n"
+        "    pushq %r13\n"
+        "    pushq %r14\n"
+        "    pushq %r15\n"
+        "    subq $16, %rsp\n"
+        "    stmxcsr 8(%rsp)\n"
+        "    fnstcw (%rsp)\n"
+        "    movq %rsp, (%rdi)\n"
+        "    movq %rsi, %rsp\n"
+        "    fldcw (%rsp)\n"
+        "    ldmxcsr 8(%rsp)\n"
+        "    addq $16, %rsp\n"
+        "    popq %r15\n"
+        "    popq %r14\n"
+        "    popq %r13\n"
+        "    popq %r12\n"
+        "    popq %rbx\n"
+        "    popq %rbp\n"
+        "    ret\n"
+        "    .cfi_endproc\n"
+        ".size plat_fiber_swap, .-plat_fiber_swap\n"
+        ".globl plat_fiber_entry\n"
+        ".type plat_fiber_entry, @function\n"
+        ".p2align 4\n"
+        "plat_fiber_entry:\n"
+        "    movq %r13, %rdi\n"
+        "    andq $-16, %rsp\n"   // the ret here left it 8 off; SysV wants 16 before the call (NX2navi e9edd6a)
+        "    callq *%r12\n"
+        "    ud2\n"
+        ".size plat_fiber_entry, .-plat_fiber_entry\n");
+#endif
+
+static __thread PlatFiber *fiber_cur;
+static __thread PlatFiber fiber_own;
+
+PlatFiber *plat_fiber_self(void) {
+    fiber_own = (PlatFiber){0};
+    fiber_cur = &fiber_own;
+    return &fiber_own;
+}
+
+void plat_fiber_unself(void) { fiber_cur = NULL; }
+
+PlatFiber *plat_fiber_new(size_t stack, void (*fn)(void *arg), void *arg) {
+    PlatFiber *f = calloc(1, sizeof *f);
+    if (!f) return NULL;
+    // Reserved, not committed; the lowest page stays inaccessible, so an overflow faults instead of corrupting.
+    void *m = mmap(NULL, stack, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_STACK, -1, 0);
+    if (m == MAP_FAILED) {
+        free(f);
+        return NULL;
+    }
+    mprotect(m, 4096, PROT_NONE);
+    f->stack = m, f->size = stack;
+    uint64_t *top = (uint64_t *)(((uintptr_t)m + stack) & ~(uintptr_t)15);
+#if defined(__aarch64__)
+    uint64_t *sp = top - FIBER_FRAME_WORDS;   // plat_fiber_swap's frame, all zero (FPCR: the default) but these
+    memset(sp, 0, FIBER_FRAME_WORDS * sizeof *sp);
+    sp[0] = (uint64_t)(uintptr_t)fn;    // x19
+    sp[1] = (uint64_t)(uintptr_t)arg;   // x20
+    sp[11] = (uint64_t)(uintptr_t)plat_fiber_entry;   // x30
+    f->sp = sp;
+    return f;
+#else
+    uint64_t *sp = top - 10;   // fpu state (2 words), r15, r14, r13, r12, rbx, rbp, return address, padding
+    sp[0] = 0x037f;            // x87 control word: the default
+    sp[1] = 0x1f80;            // MXCSR: the default
+    sp[2] = sp[3] = 0;         // r15, r14
+    sp[4] = (uint64_t)(uintptr_t)arg;   // r13
+    sp[5] = (uint64_t)(uintptr_t)fn;    // r12
+    sp[6] = sp[7] = 0;         // rbx, rbp
+    sp[8] = (uint64_t)(uintptr_t)plat_fiber_entry;
+    sp[9] = 0;
+    f->sp = sp;
+    return f;
+#endif
+}
+
+void plat_fiber_switch(PlatFiber *to) {
+    PlatFiber *from = fiber_cur;
+    fiber_cur = to;   // on this thread; the switch back into from sets it on whichever thread that is
+    plat_fiber_swap(&from->sp, to->sp);
+}
+
+void plat_fiber_free(PlatFiber *f) {
+    if (!f) return;
+    if (f->stack) munmap(f->stack, f->size);
+    free(f);
+}
+#else
 static void *fiber_map_stack(size_t *stack) {
     // Keep the lowest page inaccessible, so an overflow faults instead of corrupting.
     void *mapped = mmap(NULL, *stack, PROT_READ | PROT_WRITE,
@@ -246,6 +418,7 @@ static void *fiber_map_stack(size_t *stack) {
 }
 
 #include "fiber_x86.h"
+#endif
 
 int plat_thread_spawn(PlatThreadFn fn, void *arg, const char *name, size_t stack) {
     PlatThread *t = plat_thread_new_ex(fn, arg, name, stack);

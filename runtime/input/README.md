@@ -8,6 +8,10 @@
 | `ps5_input.c`, `ps5_input.h` | SDL-free adapter from raw DualSense axes and physical buttons to the runtime's binding tables and stick conventions. `MKW_PAD_LAYOUT=auto` is the Switch layout by position (circle A, cross B), as in OcarinaPS5; `xbox` gives cross A |
 | `ps5_wsys.c` | PS5 keyboard and mouse stubs for `input_wsys.h` |
 | `motion_fusion.c` | Gyro and accelerometer |
+| `switch2_proto.h` | The Switch 2 controllers' Bluetooth LE protocol (Pro Controller 2, Joy-Con 2: GATT ids, handshake, reports, stick calibration, rumble, pairing), from seedds/mkw-neo (MIT) with our button bits; checked by `tests/test_switch2.py` |
+| `switch2.h`, `switch2.c` | Switch 2 controllers over Bluetooth LE (`MKW_SWITCH2`, off by default; SDL has them over USB only): the session on top of a transport (identity, pairing, calibration, features, player lights, rumble), each pad a virtual SDL gamepad with its gyro, so players, layout and rumble work as for any gamepad |
+| `linux_switch2.c` | Its Linux transport: BlueZ over the system D-Bus, libdbus-1 loaded at run time; `MKW_SWITCH2=2` logs each advertising device once |
+| `switch2_win.c` | Its Windows transport: WinRT through its C ABI (advertisement watcher, `BluetoothLEDevice`, GATT), its events queued for the transport's thread; `MKW_SWITCH2=2` as on Linux |
 
 Default keyboard (`input_map.c`, changeable in the `.ini`):
 

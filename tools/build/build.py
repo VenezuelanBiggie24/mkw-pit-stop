@@ -7,11 +7,14 @@ parallel. Each job can take several hundred MB, so the job count comes from a me
 Flags, libraries and the module glue follow totk-pc-recomp tools/build_game.py on its Linux port branch (linux-port
 @ eccf4dd, MIT): GEN_FLAGS, RT_FLAGS, LINK_FLAGS, LINK_LIBS and module_glue(). build/obj/rt/modules.c carries the game
 code's tables (runtime/core/boot/gamelib.h: module layout, function tables, the SHA-256 of each ExeFS file read now from the
-game copy, patch sets); build/obj/rt/defaults.c the default game paths.
+game copy, patch sets); build/obj/rt/defaults.c the default game paths; build/obj/rt/i18n/ the menu texts
+of every language, from i18n/*.po (tools/i18n/catalog.py).
 
---target windows cross-compiles build/mkw.exe from Linux with llvm-mingw and the MSYS2 UCRT64 libraries that
-tools/build/windeps.py puts in build/win (totk-pc-recomp's --toolchain build: its LLVM_LINK_LIBS). Objects go to
-build/obj-win. The window, input, keyboard and menu are SDL3 on both systems; platform/win32.c replaces platform/linux.c.
+--target windows builds build/mkw.exe with llvm-mingw and the MSYS2 UCRT64 libraries that tools/build/windeps.py puts
+in build/win (totk-pc-recomp's --toolchain build: its LLVM_LINK_LIBS), cross-compiled from Linux or on Windows itself,
+where it is the only target and ninja comes from PATH or else MSYS2 UCRT64 (C:/msys64/ucrt64/bin, MSYS2_UCRT64_BIN).
+Objects go to build/obj-win. The window, input, keyboard and menu are SDL3 on both systems; platform/win32.c replaces
+platform/linux.c.
 
 --pgo-gen DIR instruments the generated C for profile-guided optimization (clang -fprofile-instr-generate): the run
 writes DIR/mkw-<pid>-*.profraw (runtime/core/diag/pgo.c, MKW_PGO_AT) for tools/ps5/build_game.py --pgo-use.
@@ -25,12 +28,17 @@ import argparse
 import hashlib
 import json
 import os
+import platform
+import re
 import shutil
 import subprocess
 import sys
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "i18n"))
+import catalog  # noqa: E402  (tools/i18n: the text catalogs from i18n/*.po)
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "recomp"))
@@ -39,10 +47,39 @@ from layout import DEFAULT, PLACEMENTS, output_lock, placement_defines, placemen
 RUNTIME = ROOT / "runtime"
 GAME = Path(os.environ.get("MKW_GAME", ROOT / "game"))
 WIN = ROOT / "build/win"  # tools/build/windeps.py
+# The CPU the game and runtime are built for. x86-64: AVX2 (x86-64-v3). AArch64: ARMv8.2 with the extensions of every
+# Cortex-A76-class core or newer (Snapdragon 8cx/8 Gen 1+, Raspberry Pi 5, Apple M): LSE atomics, FP16, RCpc, dot
+# product, CRC32. The lifted code also leaves x18 alone there: kern_ap_stub (runtime/core/kernel/kernel_preempt.c)
+# returns through it.
+ARCH_FLAGS = {"x86_64": ["-march=x86-64-v3"], "aarch64": ["-march=armv8.2-a+fp16+rcpc+dotprod+crc"]}
+GEN_ARCH_FLAGS = {"x86_64": [], "aarch64": ["-ffixed-x18"]}
+HOST_ARCH = {"amd64": "x86_64", "x64": "x86_64", "arm64": "aarch64"}.get(platform.machine().lower(),
+                                                                          platform.machine().lower())  # fmt: skip
+ARCH = HOST_ARCH if HOST_ARCH in ARCH_FLAGS else "x86_64"
 GEN_FLAGS = ["-O1", "-fno-strict-aliasing", "-Wno-return-type", "-Wno-unused-label", "-fvisibility=hidden",
-             "-march=x86-64-v3"]  # fmt: skip
-RT_FLAGS = ["-O2", "-g", "-Wall", "-fno-strict-aliasing", "-march=x86-64-v3"]
-MODULES = ("main", "subsdk0", "sdk")
+             *ARCH_FLAGS[ARCH], *GEN_ARCH_FLAGS[ARCH]]  # fmt: skip
+RT_FLAGS = ["-O2", "-g", "-Wall", "-fno-strict-aliasing", *ARCH_FLAGS[ARCH]]
+sys.path.insert(0, str(ROOT / "recomp"))
+from versions import detect as detect_version  # noqa: E402  (the game version of a dump: patches, RtGame.version)
+
+
+def gen_modules(gen: Path) -> list[str]:
+    """The modules the generator wrote, in layout order (1.0.0: main, subsdk0, sdk; 1.8.0 adds subsdk1)."""
+    return [m["name"] for m in json.loads((gen / "layout.json").read_text())]
+
+
+def set_arch(arch: str) -> None:
+    """Builds for arch from here on (GEN_FLAGS, RT_FLAGS and game_id() follow; the lists change in place)."""
+    global ARCH
+    ARCH = arch
+    GEN_FLAGS[5:] = [*ARCH_FLAGS[arch], *GEN_ARCH_FLAGS[arch]]
+    RT_FLAGS[4:] = ARCH_FLAGS[arch]
+
+
+# Built on Windows itself (not cross-compiled from Linux): Ninja runs each command with CreateProcess, no shell, and
+# Windows caps a command line at 32 K characters; see windows_host_rules() and windows_host_ninja().
+HOST_WINDOWS = os.name == "nt"
+MSYS2_UCRT64_BIN = Path(os.environ.get("MSYS2_UCRT64_BIN", "C:/msys64/ucrt64/bin"))  # ninja, glslc, spirv-val
 
 
 @dataclass(frozen=True)
@@ -72,14 +109,33 @@ WINDOWS = Target(
     [f"-I{WIN / 'deps/include'}"],
     # 16 MiB main-thread stack, as mkw; the map as on Linux.
     [f"-L{WIN / 'deps/lib'}", "-fuse-ld=lld", "-Wl,--stack,16777216", "-Wl,--Map=$builddir/mkw.map"],
-    ["-lpsapi", "-lbcrypt", "-luser32", "-lole32", "-luuid", "-lshell32", "-lgdi32", "-ldwmapi", "-lwinmm", "-lvulkan-1", "-lSDL3", "-lopus",
+    ["-lpsapi", "-lbcrypt", "-ladvapi32", "-lws2_32", "-liphlpapi", "-luser32", "-lole32", "-luuid", "-lshell32", "-lgdi32", "-ldwmapi", "-lruntimeobject", "-lwinmm", "-lvulkan-1", "-lSDL3", "-lopus",
      "-l:libvpx.a", "-l:libzstd.a", "-l:libc++.a", "-l:libc++abi.a", "-l:libunwind.a", "-l:libwinpthread.a"],
     WIN / "deps/include/vma",
     str(WIN / "llvm-mingw/bin/x86_64-w64-mingw32-windres"),
 )  # fmt: skip
 
 
+def windows_memory_gb() -> tuple[float, float]:
+    """Windows' total and available physical memory in GiB (GlobalMemoryStatusEx, MEMORYSTATUSEX); OSError if the
+    call fails. Shared with tools/prepare/machine.py mem_available_gb."""
+    import ctypes
+
+    class Status(ctypes.Structure):  # MEMORYSTATUSEX
+        _fields_ = [("length", ctypes.c_uint32), ("load", ctypes.c_uint32), ("total", ctypes.c_uint64),
+                    ("avail", ctypes.c_uint64), ("rest", ctypes.c_uint64 * 5)]  # fmt: skip
+
+    st = Status(length=ctypes.sizeof(Status))
+    if not ctypes.WinDLL("kernel32", use_last_error=True).GlobalMemoryStatusEx(ctypes.byref(st)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return st.total / 2**30, st.avail / 2**30
+
+
 def mem_total_gb() -> float:
+    """The machine's memory in GiB, for the job counts (build.py --job-mem-gb, prepare.py fit). Windows has no
+    /proc/meminfo."""
+    if os.name == "nt":
+        return windows_memory_gb()[0]
     with open("/proc/meminfo") as f:
         for line in f:
             if line.startswith("MemTotal:"):
@@ -105,7 +161,9 @@ def game_id(profile: str = DEFAULT) -> str:
     another id is not loaded (runtime/core/boot/gamelib.c)."""
     h = hashlib.sha256(" ".join(GEN_FLAGS).encode())
     for p in sorted([*(RUNTIME / "cpu").glob("*.h"), RUNTIME / "core/boot/gamelib.h"]):
-        h.update(p.read_bytes())
+        # without CRs: Git for Windows checks out with CRLF (core.autocrlf=true), and a runtime built from such a clone
+        # refused the release's mkwgame.dll of the same headers as "built for another version" (16/11/2026)
+        h.update(p.read_bytes().replace(b"\r\n", b"\n"))
     if profile != DEFAULT:
         h.update(json.dumps(placement_info(profile), sort_keys=True).encode())
     return h.hexdigest()[:16]
@@ -131,12 +189,19 @@ def module_glue(gen: Path, exefs: Path, library: bool, profile: str = DEFAULT) -
     out += ["};", "", "#ifdef RT_PATCH_COUNT", "static const RtPatchSet patch_sets[] = {",
             "#define X(i, n, e, d) {#n, e, d},", "    RT_PATCH_SETS(X)", "#undef X", "};", "#else",
             "#define RT_PATCH_COUNT 0", "#define RT_PATCH_PAGE 0", "static const RtPatchSet *const patch_sets = 0;",
-            "#endif", "",
-            # 100: MKW 1.0.0, the version the menu shows
+            "#endif",
+            # the enabled code mods' bytes (gen.py --image), for the loader to write into each module's .text
+            "#if defined(RT_IMAGE_PATCH_COUNT) && RT_IMAGE_PATCH_COUNT",
+            "static const RtImagePatch image_patches[] = {",
+            "#define X(m, off, b, n) {m, off, (const uint8_t *)b, n},", "    RT_IMAGE_PATCHES(X)", "#undef X", "};",
+            "#else", "#undef RT_IMAGE_PATCH_COUNT", "#define RT_IMAGE_PATCH_COUNT 0",
+            "static const RtImagePatch *const image_patches = 0;", "#endif", "",
+            # RtGame.version: recomp/versions.py's number for the dump (100: 1.0.0, 180: 1.8.0)
             "volatile int g_fnprof;", "uint8_t rt_patch_on[RT_MAX_PATCH_SETS];", "",
             "static const RtGame game = {RT_GAME_ABI, RT_GAME_ID, modules, sizeof modules / sizeof *modules,",
             "                            exefs_sha256, sizeof exefs_sha256 / sizeof *exefs_sha256, patch_sets,",
-            "                            RT_PATCH_COUNT, RT_PATCH_PAGE, 100, &g_fnprof, rt_patch_on};", "",
+            f"                            RT_PATCH_COUNT, RT_PATCH_PAGE, {detect_version(exefs).number}, &g_fnprof, rt_patch_on,",
+            "                            image_patches, RT_IMAGE_PATCH_COUNT};", "",
             "RT_GAME_EXPORT const RtGame *mkwgame_tables(void) { return &game; }" if library
             else "const RtGame *rt_game_builtin(void) { return &game; }", ""]  # fmt: skip
     return "\n".join(out)
@@ -164,12 +229,13 @@ def defaults_glue(exefs: Path, romfs: Path, dist: bool) -> str:
 
 
 # What the game code library calls in the runtime (runtime/cpu/cpu.h): the executable exports them.
-RT_EXPORTS = ("rt_dispatch", "rt_svc", "rt_udf", "rt_ticks", "rt_spin_gate", "fnprof_hit")
+RT_EXPORTS = ("rt_dispatch", "rt_sj_owner", "rt_svc", "rt_udf", "rt_ticks", "rt_spin_gate", "fnprof_hit")
 
 
 def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: Path | None,
                runtime_only: bool = False, ld_extra: list[str] | None = None, profile: str = DEFAULT,
-               exe: Path | None = None, gen_extra: list[str] | None = None) -> str:  # fmt: skip
+               exe: Path | None = None, gen_extra: list[str] | None = None,
+               sys_flags: list[str] | None = None) -> str:  # fmt: skip
     """dist: the player's build into that folder, the runtime (mkw, mkw.exe) and the game code apart (mkwgame.so,
     mkwgame.dll); else build/mkw with the game code linked in. runtime_only (with dist): the runtime alone, what a
     release ships and the CI builds, without the game's generated C."""
@@ -190,9 +256,9 @@ def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: 
     cc = f"ccache {target.cc}" if os.environ.get("MKW_CCACHE", "1") != "0" and shutil.which("ccache") else target.cc
     lines = [
         f"builddir = {out}",
-        f"genflags = {' '.join(GEN_FLAGS + pic + (gen_extra or []))} -I{RUNTIME / 'cpu'}",
+        f"genflags = {' '.join(GEN_FLAGS + pic + (sys_flags or []) + (gen_extra or []))} -I{RUNTIME / 'cpu'}",
         f"rtflags = {' '.join(RT_FLAGS + target.rt_flags + rt_extra)} {gid} {inc} -I{gen} -I{out / 'rt'} -I{target.vma}",
-        f"tabflags = {' '.join(GEN_FLAGS + pic)} {gid} {inc} -I{gen}",
+        f"tabflags = {' '.join(GEN_FLAGS + pic + (sys_flags or []))} {gid} {inc} -I{gen}",
         f"ldflags = {' '.join(link_flags)}",
         (
             f"rule cc\n  command = {cc} $genflags -MD -MF $out.d -c $in -o $out\n  depfile = $out.d\n  deps = gcc"
@@ -210,17 +276,26 @@ def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: 
             f"rule tabcc\n  command = {cc} -std=gnu11 $tabflags -MD -MF $out.d -c $in -o $out\n"
             "  depfile = $out.d\n  deps = gcc\n  description = cc $in"
         ),
-        f"rule ar\n  command = rm -f $out && {target.ar} rcs $out $in\n  description = ar $out",
-        (f"rule solink\n  command = {target.cc} -shared -fuse-ld=lld -o $out $in $solibs\n  description = link $out"),
-        (
-            f"rule link\n  command = {target.cxx} $ldflags -o $out $in {' '.join(target.link_libs)}"
-            "\n  description = link $out"
-        ),
+        *(
+            windows_host_rules(target)
+            if HOST_WINDOWS
+            else [
+                f"rule ar\n  command = rm -f $out && {target.ar} rcs $out $in\n  description = ar $out",
+                (
+                    f"rule solink\n  command = {' '.join([target.cc, *(sys_flags or [])])} -shared -fuse-ld=lld -o $out $in $solibs"
+                    "\n  description = link $out"
+                ),
+                (
+                    f"rule link\n  command = {target.cxx} $ldflags -o $out $in {' '.join(target.link_libs)}"
+                    "\n  description = link $out"
+                ),
+            ]
+        ),  # fmt: skip
         f"rule rc\n  command = {target.windres} -O coff -I {out / 'rt/platform'} $in -o $out\n  description = rc $in",
         f"rule icon\n  command = {sys.executable} $in $out\n  description = icon $out",
     ]
     libs = []
-    for mod in () if runtime_only else MODULES:
+    for mod in () if runtime_only else gen_modules(gen):
         objs = []
         for src in sorted((gen / mod).glob("*.c")):
             obj = out / mod / (src.stem + ".o")
@@ -230,7 +305,10 @@ def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: 
         libs.append(str(lib))
         lines.append(f"build {lib}: ar {' '.join(objs)}")
     rt_objs = []
-    rt_srcs = [*runtime_sources(target), out / "rt/defaults.c"] + ([] if dist else [out / "rt/modules.c"])
+    rt_srcs = [*runtime_sources(target), out / "rt/defaults.c", *sorted((out / "rt/i18n").glob("ui_text_*.c"))]
+    rt_srcs.append(out / "rt/app_icon.c")   # the window's icon, drawn by tools/build/icon.py (never committed)
+    lines.append(f"build {out / 'rt/app_icon.c'}: icon {ROOT / 'tools/build/icon.py'}")
+    rt_srcs += [] if dist else [out / "rt/modules.c"]
     for src in rt_srcs:
         rel = src.relative_to(RUNTIME) if src.is_relative_to(RUNTIME) else Path(src.name)
         obj = out / "rt" / rel.with_suffix(".o")
@@ -263,11 +341,38 @@ def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: 
     return "\n".join(lines) + "\n"
 
 
+def windows_host_rules(target: Target) -> list[str]:
+    """ar, solink and link when Ninja runs on Windows. No shell: "rm -f $out && ..." would hand rm the "&&", the
+    archiver and every object as files to delete. The object lists go through response files (the game's archive and
+    the link pass the 32 K command-line limit); clang reads a response file the GNU way by default, where a backslash
+    escapes, so the links ask for Windows quoting. llvm-ar replaces members by name, so without the rm a chunk that
+    disappears stays in its archive until build/obj-win is cleaned."""
+    rsp = "\n  rspfile = $out.rsp\n  rspfile_content = $in"
+    return [
+        f"rule ar\n  command = {target.ar} rcs $out @$out.rsp{rsp}\n  description = ar $out",
+        (
+            f"rule solink\n  command = {target.cc} -shared -fuse-ld=lld --rsp-quoting=windows -o $out @$out.rsp"
+            f" $solibs{rsp}\n  description = link $out"
+        ),
+        (
+            f"rule link\n  command = {target.cxx} $ldflags --rsp-quoting=windows -o $out @$out.rsp"
+            f" {' '.join(target.link_libs)}{rsp}\n  description = link $out"
+        ),
+    ]
+
+
+def windows_host_ninja(text: str) -> str:
+    """Ninja reads the ":" of a drive letter in a build line as the end of its outputs: escape it ($:)."""
+    drive = re.compile(r"(?<![$\w])([A-Za-z]):(?=[\\/])")
+    return "\n".join(drive.sub(r"\1$:", line) if line.startswith("build ") else line for line in text.split("\n"))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--gen", type=Path, help="generated source directory (defaults to the selected layout's build folder)")
     ap.add_argument("--guest-layout", choices=PLACEMENTS, default=DEFAULT, help="guest address placement used by gen.py")
     ap.add_argument("--target", choices=("linux", "windows"), default="linux")
+    ap.add_argument("--arch", choices=tuple(ARCH_FLAGS), default=ARCH, help="Linux: the CPU (default: this machine's)")
     ap.add_argument("--out", type=Path, help="object directory (default build/obj, build/obj-win for windows)")
     ap.add_argument(
         "--dist", action="store_true",
@@ -280,7 +385,9 @@ def main() -> int:
     ap.add_argument("--exefs", type=Path, default=GAME / "exefs")
     ap.add_argument("--romfs", type=Path, default=GAME / "romfs")
     ap.add_argument("--jobs", type=int, default=0, help="parallel compiles (default: from the memory budget)")
-    ap.add_argument("--job-mem-gb", type=float, default=1.0, help="memory one job may take (a main chunk: ~0.3 GB)")
+    # 0.5: measured peaks 13/11/2026, 12 jobs at once: the largest game chunks 266-300 MB, main_table.c 409 MB, zig cc
+    # with the setup's flags 291 MB, the runtime's C++ (imgui.cpp) 199 MB. 1.0 left a third of a 12-thread PC idle.
+    ap.add_argument("--job-mem-gb", type=float, default=0.5, help="memory one job may take (a main chunk: ~0.3 GB)")
     ap.add_argument(
         "--sysroot", type=Path,
         help="Linux: compile and link against this sysroot (tools/build/sysroot.py: glibc 2.31, the release)",
@@ -301,7 +408,13 @@ def main() -> int:
         ap.error("--runtime-only needs --dist")
     if args.dist and args.guest_layout != DEFAULT:
         ap.error("an experimental guest layout needs a build with the generated game linked in")
-    if args.sysroot and args.target == "windows":
+    if HOST_WINDOWS and args.target != "windows":
+        ap.error("on Windows only --target windows builds (mkw.exe)")
+    target = WINDOWS if args.target == "windows" else LINUX
+    if args.arch != "x86_64" and target is WINDOWS:
+        ap.error("--target windows is x86_64 only")
+    set_arch(args.arch)
+    if args.sysroot and target is WINDOWS:
         ap.error("--sysroot is for Linux")
     if args.pgo_gen and (args.dist or args.target == "windows"):
         ap.error("--pgo-gen is for the Linux build with the game linked in (the profile runtime is Linux's)")
@@ -319,12 +432,16 @@ def main() -> int:
 def build(args: argparse.Namespace, build_root: Path) -> int:
     target = WINDOWS if args.target == "windows" else LINUX
     # zstd and xxhash.h of the sysroot sit in its usr/local (tools/build/sysroot.py), whose include clang already reads
-    sys_flags = ["--target=x86_64-linux-gnu", f"--sysroot={args.sysroot.resolve()}"] if args.sysroot else []
+    sys_flags = [f"--target={ARCH}-linux-gnu", f"--sysroot={args.sysroot.resolve()}"] if args.sysroot else []
     sys_ld = [*sys_flags, f"-L{args.sysroot.resolve()}/usr/local/lib"] if args.sysroot else []
-    dist = ROOT / "build/dist" / args.target if args.dist else None
+    cross = ARCH != HOST_ARCH and target is LINUX  # another CPU's build: its own dist and object folders
+    dist = ROOT / "build/dist" / (args.target + (f"-{ARCH}" if cross else "")) if args.dist else None
     exe = build_root / (target.exe.name + ("-pgo-gen" if args.pgo_gen else ""))
     args.out = args.out or build_root / ("obj" + ("-dist" if dist else "") + ("-win" if target is WINDOWS else "")
-                                         + ("-pgo-gen" if args.pgo_gen else ""))
+                                         + (f"-{ARCH}" if cross else "") + ("-pgo-gen" if args.pgo_gen else ""))
+    if HOST_WINDOWS and not shutil.which("ninja") and (MSYS2_UCRT64_BIN / "ninja.exe").is_file():
+        # at the end, as windeps.py does: what PATH already has stays first
+        os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{MSYS2_UCRT64_BIN}"
     # Front-end instrumentation (-fprofile-instr-generate), not IR (-fprofile-generate): its function hashes come from
     # the C's syntax tree, so the PS5 build (another target, -march, -fPIC) finds the same functions; IR PGO hashes the
     # control flow after early passes, which can differ between targets. %p: one file per process.
@@ -354,15 +471,20 @@ def build(args: argparse.Namespace, build_root: Path) -> int:
     for path, text in glue:
         if not path.exists() or path.read_text() != text:  # an unchanged file keeps its mtime: no rebuild
             path.write_text(text)
+    catalog.generate(args.out / "rt/i18n")  # the menu texts of every language (i18n/*.po)
     # which headers the library is built with, for the start screen (runtime/core/boot/gamelib.c rt_game_present)
     if dist:
         dist.mkdir(parents=True, exist_ok=True)
         (dist / "mkwgame.id").write_text(game_id())
     fp = ["-fno-omit-frame-pointer", "-mno-omit-leaf-frame-pointer"] if args.frame_pointers else []
-    (args.out / "build.ninja").write_text(
-        ninja_file(target, args.gen, args.out, fp + sys_flags, dist, args.runtime_only, sys_ld + ld_pgo,
-                   args.guest_layout, exe, gen_pgo)
+    ninja = (
+        # the lifted code and its library take the sysroot only for another CPU: an x86-64 release's stay as they were
+        ninja_file(
+            target, args.gen, args.out, fp + sys_flags, dist, args.runtime_only, sys_ld + ld_pgo, args.guest_layout,
+            exe, gen_pgo, sys_flags if cross else None,
+        )
     )
+    (args.out / "build.ninja").write_text(windows_host_ninja(ninja) if HOST_WINDOWS else ninja)
     if target is LINUX and not dist and args.guest_layout == DEFAULT and not args.pgo_gen:
         write_compile_db(args.out / "build.ninja")
     cmd = ["ninja", "-f", str(args.out / "build.ninja"), "-j", str(jobs)] + (["-n"] if args.dry_run else [])

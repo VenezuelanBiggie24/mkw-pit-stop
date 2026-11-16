@@ -25,7 +25,8 @@ static int failures;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; printf("  FAIL: " __VA_ARGS__); putchar('\n'); } } while (0)
 
 static uint64_t a_lock_waiter, a_cv_waiter, a_cv_order_waiter, a_arb_waiter, a_event_waiter, a_core_worker,
-    a_exit_entry, a_exit_nested, a_fiber_fn, a_fiber_exit_thread, a_fiber_exit_fn, a_tick_worker;
+    a_exit_entry, a_exit_nested, a_fiber_fn, a_fiber_exit_thread, a_fiber_exit_fn, a_tick_worker, a_mover_fn,
+    a_mover_thread, a_ender_fn;
 static uint64_t a_fib_init, a_fib_fin, a_fib_switch, a_fib_cur, tick_stub;
 
 // ---- helpers: SVCs through rt_svc, thread start and join
@@ -396,8 +397,14 @@ static void test_arbiter(Cpu *c) {
     uint32_t r = sv(c, 0x34, arb, 2, 5, 5000000);
     double ms = ms_since(t0);
     CHECK(r == KERN_R_TIMEOUT && ms >= 5.0, "wait type 2 with a 5 ms timeout: %#x after %.2f ms", r, ms);
-    CHECK(sv(c, 0x34, arb, 3, 0, 0) == KERN_R_INVALID_ENUM && sig(c, 3, 0, 0) == KERN_R_INVALID_ENUM, "type 3");
-    printf("address arbiter: wait types 0-2 (less, decrement-less, equal), signal types 0-2 (wake, increment, modify by "
+    // wait type 3, if the 64-bit word is equal: the upper half counts, the address is 8-aligned
+    static volatile uint64_t w64 __attribute__((aligned(8)));
+    w64 = 0x100000005ull;
+    CHECK(sv(c, 0x34, ga(&w64), 3, 5, 0) == KERN_R_BAD_STATE, "wait type 3 compared only the low half");
+    CHECK(sv(c, 0x34, ga(&w64), 3, 0x100000005ull, 0) == KERN_R_TIMEOUT, "wait type 3 equal, timeout 0");
+    CHECK(sv(c, 0x34, ga(&w64) + 4, 3, 0, 0) == KERN_R_INVALID_ADDRESS, "wait type 3 on a 4-aligned address");
+    CHECK(sv(c, 0x34, arb, 4, 0, 0) == KERN_R_INVALID_ENUM && sig(c, 3, 0, 0) == KERN_R_INVALID_ENUM, "type 4 / signal 3");
+    printf("address arbiter: wait types 0-3 (less, decrement-less, equal, equal 64-bit), signal types 0-2 (wake, increment, modify by "
            "waiters), 5 ms timeout after %.2f ms: %s\n", ms, failures == before ? "ok" : "FAIL");
 }
 
@@ -508,6 +515,43 @@ static void test_cores(Cpu *c) {
     CHECK(ok || !gate, "virtual cores");
 }
 
+// ---- core arguments: CreateThread and SetThreadCoreMask take every application core (0-5) and nothing outside
+static uint32_t try_create(Cpu *c, int core, uint32_t *h) {
+    uint8_t *stack = mem_kernel_alloc(STACK, 16);
+    c->x[1] = a_core_worker;
+    c->x[2] = 0;
+    c->x[3] = ga(stack + STACK);
+    c->x[4] = 44;
+    c->x[5] = (uint64_t)(int64_t)core;
+    rt_svc(c, 0x08, 0);
+    *h = (uint32_t)c->x[1];
+    return (uint32_t)c->x[0];
+}
+
+static void test_core_args(Cpu *c) {
+    int before = failures;
+    uint32_t h, bad;
+    CHECK(try_create(c, PROBE_CORES - 1, &h) == 0, "CreateThread on core %d", PROBE_CORES - 1);
+    CHECK(try_create(c, PROBE_CORES, &bad) != 0, "CreateThread on core %d accepted", PROBE_CORES);
+    CHECK(sv(c, 0x0F, h, 4, 1u << 4 | 1u << 3, 0) == 0, "SetThreadCoreMask(core 4, mask 0x18)");
+    CHECK(sv(c, 0x0E, 0, 0, h, 0) == 0 && c->x[1] == 4 && c->x[2] == 0x18, "GetThreadCoreMask after it: core %llu mask %#llx",
+          (unsigned long long)c->x[1], (unsigned long long)c->x[2]);
+    CHECK(sv(c, 0x0F, h, 3, 1u << 4, 0) != 0, "SetThreadCoreMask with the core outside the mask accepted");
+    CHECK(sv(c, 0x0F, h, 0, 1u << 6 | 1, 0) != 0, "SetThreadCoreMask with a core outside the process accepted");
+    CHECK(sv(c, 0x0F, h, 6, 1u << 6, 0) != 0, "SetThreadCoreMask on core 6 accepted");
+    CHECK(sv(c, 0x0F, h, -1, 0, 0) != 0, "SetThreadCoreMask with an empty mask accepted");
+    CHECK(sv(c, 0x0F, h, -3, 1u << 1, 0) != 0, "SetThreadCoreMask(-3) with the ideal core outside the new mask accepted");
+    CHECK(sv(c, 0x0E, 0, 0, h, 0) == 0 && c->x[1] == 4 && c->x[2] == 0x18, "a refused SetThreadCoreMask changed the thread");
+    // the special ideal cores (svc_types_common.hpp): -1 don't care keeps the mask given, -2 the process's core alone
+    CHECK(sv(c, 0x0F, h, -1, 0x3f, 0) == 0 && sv(c, 0x0E, 0, 0, h, 0) == 0 && c->x[2] == 0x3f,
+          "SetThreadCoreMask(-1, 0x3f): mask %#llx (want 0x3f)", (unsigned long long)c->x[2]);
+    CHECK(sv(c, 0x0F, h, -2, 0, 0) == 0 && sv(c, 0x0E, 0, 0, h, 0) == 0 && c->x[2] == 1,
+          "SetThreadCoreMask(-2): mask %#llx (want 0x1, the process's ideal core)", (unsigned long long)c->x[2]);
+    CHECK(sv(c, 0x16, h, 0, 0, 0) == 0, "CloseHandle(thread %#x)", h);
+    printf("core arguments: cores 0-%d accepted, %d and masks outside refused: %s\n", PROBE_CORES - 1, PROBE_CORES,
+           failures == before ? "ok" : "FAIL");
+}
+
 // ---- fibers: two fibers switch to each other; each checks its callee-saved registers, sp and tpidr survive
 typedef struct { uint64_t self, other; int id; } FiberJob;
 static volatile int32_t g_switches, g_runs[3];
@@ -575,6 +619,46 @@ static void test_fibers(Cpu *c) {
            ms * 1000.0 / (double)(g_switches ? g_switches : 1), g_fiber_bad, base_ok ? "preserved" : "CHANGED",
            ok ? "ok" : "FAIL");
     CHECK(ok, "fiber ping-pong");
+}
+
+// ---- a fiber started on one thread, which then ends, resumed and finished on another (nn::async moves them so)
+typedef struct { uint64_t fiber, ender; int steps, bad; } MoverJob;
+
+static void ender_fn(Cpu *c) { ret_x(c, 0); }   // finishes at once: back to the thread's own context
+
+static void mover_fn(Cpu *c) {
+    MoverJob *j = arg_p(c, 0);
+    j->steps++;
+    rt_call(c, a_fib_switch, 1, j->ender);   // the first thread gets its own context back and ends
+    j->steps++;                              // resumed by the second thread
+    if (rt_call(c, a_fib_cur, 0) != j->fiber) j->bad++;
+    rt_call(c, a_fib_switch, 1, (uint64_t)0);   // 0, what GetCurrentFiber gives there: the thread's own context
+    j->bad++;                                   // never resumed
+}
+
+static void mover_thread(Cpu *c) {
+    MoverJob *j = arg_p(c, 0);
+    rt_call(c, a_fib_switch, 1, j->fiber);
+    if (rt_call(c, a_fib_cur, 0) != 0) j->bad++;
+    exit_thread(c);
+}
+
+static void test_fiber_move(Cpu *c) {
+    MoverJob j = {.fiber = ga(mem_kernel_alloc(0x100, 16)), .ender = ga(mem_kernel_alloc(0x100, 16))};
+    rt_call(c, a_fib_init, 6, j.fiber, a_mover_fn, ga(&j), ga(mem_kernel_alloc(STACK, 16)), (uint64_t)STACK, (uint64_t)0);
+    rt_call(c, a_fib_init, 6, j.ender, a_ender_fn, 0, ga(mem_kernel_alloc(STACK, 16)), (uint64_t)STACK, (uint64_t)0);
+    uint32_t h = create(c, a_mover_thread, &j, 44, -2);
+    start(c, h);
+    join(c, h);   // the first thread is gone and freed
+    h = create(c, a_mover_thread, &j, 44, -2);
+    start(c, h);
+    join(c, h);
+    rt_call(c, a_fib_fin, 1, j.fiber);
+    rt_call(c, a_fib_fin, 1, j.ender);
+    int ok = j.steps == 2 && !j.bad;
+    printf("fiber moved between threads: started on one that ended, resumed on another and left by SwitchToFiber(0) (%d steps, %d mismatches): %s\n",
+           j.steps, j.bad, ok ? "ok" : "FAIL");
+    CHECK(ok, "fiber moved between threads");
 }
 
 // ---- ExitThread unwinding: from three nested host calls deep, and from a fiber
@@ -705,7 +789,9 @@ static void probe_main(Cpu *c) {
     test_core_handoff(c);
     test_events(c);
     test_cores(c);
+    test_core_args(c);
     test_fibers(c);
+    test_fiber_move(c);
     test_exit(c);
     test_lifted_ticks(c);
     test_exit_process(c);
@@ -781,6 +867,9 @@ int probe_kernel(void) {
     a_fiber_exit_thread = hostfn_register("probe-kernel fiber exit thread", fiber_exit_thread);
     a_fiber_exit_fn = hostfn_register("probe-kernel fiber exit", fiber_exit_fn);
     a_tick_worker = hostfn_register("probe-kernel tick worker", tick_worker);
+    a_mover_fn = hostfn_register("probe-kernel moving fiber", mover_fn);
+    a_mover_thread = hostfn_register("probe-kernel moving fiber thread", mover_thread);
+    a_ender_fn = hostfn_register("probe-kernel ending fiber", ender_fn);
     a_fib_init = hostfn_register(KERN_SYM_INITIALIZE_FIBER, kern_fiber_initialize);   // the loader's addresses
     a_fib_fin = hostfn_register(KERN_SYM_FINALIZE_FIBER, kern_fiber_finalize);
     a_fib_switch = hostfn_register(KERN_SYM_SWITCH_TO_FIBER, kern_fiber_switch);

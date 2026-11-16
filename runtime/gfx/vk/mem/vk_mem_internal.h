@@ -55,6 +55,7 @@ typedef struct PoolRec {
     // Shadow storage (POOL_IMPORT in shadow mode, "shadow storage" below): buf is a host-visible copy of the guest pages.
     VmaAllocation salloc;
     uint8_t *smap;                     // its mapping; offsets as in buf (from import_lo)
+    uint8_t snc;                       // salloc is not coherent (or MKW_SHADOW_CACHED=1): shadow_flush, shadow_inval
     uint32_t sgen;                     // gen_lock: every page write stamped up to this generation is in the shadow
     volatile uint8_t stouched;         // on the touched list: the GPU may use it in the submission being recorded
     uint64_t ssub;                     // shadow_lock: the submission whose shadow sync last covered it
@@ -102,6 +103,7 @@ void destroy_rec(VkCtx *c, PoolRec *r);
 #define SNAP_REGIONS (RT_ADDRESS_LIMIT >> SNAP_SHIFT)
 extern PlatMutex gen_lock;
 extern uint32_t *gen_chunk[GEN_CHUNKS];
+extern uint32_t *cpu_gen_chunk[GEN_CHUNKS];   // the page's last stamp by a CPU write (vk_mem_gen.c); NULL: none ever
 extern uint32_t gen_now;
 extern uint32_t reg_max[RT_ADDRESS_LIMIT >> REG_SHIFT];
 extern uint32_t snap_at[SNAP_REGIONS];
@@ -127,6 +129,11 @@ extern int64_t s_live_n, s_live_bytes;
 int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size);
 void shadow_touch(PoolRec *r);
 void shadow_forget(PoolRec *r);
+// vk_mem_shadow_nc.c: shadow storage on cached memory that may not be coherent (#283)
+void shadow_alloc_flags(VkCtx *c, VmaAllocationCreateInfo *ai);
+void shadow_alloc_note(VkCtx *c, PoolRec *r);
+void shadow_flush(const PoolRec *r, uint64_t lo, uint64_t hi);   // the CPU wrote [lo, hi): to the GPU
+void shadow_inval(const PoolRec *r, uint64_t lo, uint64_t hi);   // before the CPU reads what the GPU wrote there
 void shadow_log(uint64_t frame);
 uint64_t shadow_trim(uint64_t bytes);
 void shadow_reset(void);
@@ -210,7 +217,7 @@ void watch_copy(const PoolRec *r, uint64_t a, uint64_t b, uint64_t sync);   // s
 void watch_event(const char *what, uint64_t lo, uint64_t hi, uint64_t fence, uint64_t bytes);
 
 // vk_mem_mirror.c: VRAM mirror of buffer-bound pools
-extern int mirror_verify, mirror_gap;
+extern int mirror_verify, mirror_gap, mirror_cpu_gen, shadow_cpu_gen;
 extern volatile int64_t m_live_n, m_live_bytes;
 void mirror_forget(PoolRec *r);     // pool_lock exclusive: off the mirrored list
 void mirror_retiring(PoolRec *r);   // vk_pool_fini: kept until mirror_retire (or vk_mem_shutdown)

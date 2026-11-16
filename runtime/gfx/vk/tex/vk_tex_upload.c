@@ -362,7 +362,8 @@ static int upload(Tex *e) {
     int agpu = astc && vk_astc_gpu(),
         acheck = agpu && vk_astc_mode() == VK_ASTC_CHECK && (uint64_t)e->pub.width * e->pub.height * e->pub.layers * 4 <= (16ull << 20);
     uint32_t n = levels * layers, k = 0;
-    if (agpu && e->f.astc_bc7 == 1 && !acheck && !linear && vk_texpre_on() && upload_texpre(e, levels, layers)) {
+    uint32_t drop = e->pub.drop;   // NVN level = image level + drop
+    if (agpu && e->f.astc_bc7 == 1 && !acheck && !linear && !drop && vk_texpre_on() && upload_texpre(e, levels, layers)) {
         UP_PHASE(UPH_TEXPRE);
         goto counted;
     }
@@ -372,7 +373,8 @@ static int upload(Tex *e) {
     VkDeviceSize total = 0, decoded = 0;
     for (uint32_t lv = 0; lv < levels; lv++)
         for (uint32_t ly = 0; ly < layers; ly++) {
-            uint32_t w = mip(d->width, lv), h = one_d ? 1 : mip(d->height, lv), sl = is3d ? mip(d->depth, lv) : 1;
+            uint32_t w = mip(d->width, lv + drop), h = one_d ? 1 : mip(d->height, lv + drop),
+                     sl = is3d ? mip(d->depth, lv + drop) : 1;
             uint64_t texels = (uint64_t)w * h * sl, raw = (uint64_t)(w + bw - 1) / bw * bpb * ((h + bh - 1) / bh) * sl;
             uint64_t out = agpu ? raw : astc ? texels * 4 : rgb ? texels * (uint64_t)bpb / 3 * 4 : raw;
             rg[k++] = (VkBufferImageCopy){.bufferOffset = total, .imageSubresource = {e->pub.aspect, lv, ly, 1},
@@ -402,7 +404,7 @@ static int upload(Tex *e) {
             uint32_t rb = (w + bw - 1) / bw * (uint32_t)bpb, rows = (h + bh - 1) / bh;
             size_t raw = (size_t)rb * rows * sl;
             uint8_t *dst = stg + rg[k].bufferOffset, *tmp = (astc && !agpu) || rgb ? malloc(raw) : NULL;
-            if (nvn_deswizzle(d, lv, ly, t->mem, tmp ? tmp : dst, rb)) {
+            if (nvn_deswizzle(d, lv + drop, ly, t->mem, tmp ? tmp : dst, rb)) {
                 log_limited(&n_bad, "texture %#llx fmt %#x target %d: level %u layer %u has no CPU layout; uploaded as zeros",
                             (unsigned long long)e->pub.addr, d->format, d->target, lv, ly);
                 memset(tmp ? tmp : dst, 0, raw);
@@ -586,8 +588,8 @@ counted:;
 // terrain arrays this way, from small ASTC textures; skipped, those levels read zero and the race's bushes and cacti,
 // which take their colour from level 11, came out black (m16, 01/11/2026). 0 when it cannot (the caller skips).
 int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers, uint32_t x, uint32_t y,
-                         uint32_t w, uint32_t h, VkImage dst, VkImageAspectFlags aspect, uint32_t dlevel, uint32_t dlayer,
-                         int32_t dx, int32_t dy, int bc7) {
+                         uint32_t w, uint32_t h, const VkTexImage *dst, VkImageAspectFlags aspect, uint32_t dlevel,
+                         uint32_t dlayer, int32_t dx, int32_t dy, int bc7) {
     TexVkFormat f;
     if (!tex_vk_format(src->d.format, &f) || !f.astc_bw || !src->mem || x % f.astc_bw || y % f.astc_bh ||
         (bc7 && (dx % 4 || dy % 4)))   // a BC destination: whole blocks
@@ -609,7 +611,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
         ok = !nvn_texels_box(&src->d, level, layer + l, x / f.astc_bw * 16, y / f.astc_bh, 0, rb, rows, src->mem,
                              stg + l * per, rb, 1);
         ar[l] = (VkAstcRegion){.src = l * per, .w = w, .h = h, .slices = 1, .level = dlevel, .layer = dlayer + l,
-                               .offset = {dx, dy, 0}};
+                               .offset = {dx, dy, 0}, .lw = dst->width >> dlevel, .lh = dst->height >> dlevel};
     }
     // MKW_ASTC_PROBE_LEVEL=<n> (diagnosis): the first copies into level n read back the decoded texels and log them with
     // the source's first block (the bushes' level 11 of the terrain arrays sampled black, 01/11/2026).
@@ -624,7 +626,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
     if (ok) {
         barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
         vk_astc_tag((uintptr_t)src->mem, 2);
-        ok = vk_astc_record(cb, sb, per * layers, ar, (int)layers, f.astc_bw, f.astc_bh, f.astc_srgb, dst, aspect, bc7,
+        ok = vk_astc_record(cb, sb, per * layers, ar, (int)layers, f.astc_bw, f.astc_bh, f.astc_srgb, dst->image, aspect, bc7,
                             rbuf);
         barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
     }
@@ -756,12 +758,56 @@ int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now) {
     return vk_mem_changed(lo, hi - lo, since, now);
 }
 
+// Without a write watch (vk_mem_changed -1: a kernel without userfaultfd, as the Odin 2's SteamOS ARM 7.2) every check
+// uploaded the texture again: three 8192x8192 ASTC textures 627 times each at the first menus (run7, 10/11/2026), ~100
+// ms of every frame. The storage's hash, once per submission, tells a rewrite apart: 1 when it is unchanged since the
+// last upload. MKW_TEX_HASH_UNTRACKED=1 on any GPU, 0 never; on by default wherever the write watch is missing: also
+// in a container whose seccomp profile refuses userfaultfd (#241: Docker's default, an RX 9070 at ~6 fps on the title,
+// ~20 with this, 60 with userfaultfd allowed), not only on Qualcomm's kernels.
+// The check runs once per submission: a rewrite of the storage later in the same submission is uploaded at the next
+// one. That is the point (the 627 re-uploads were checks within a few submissions), and a texture the game rewrites
+// mid-submission without a write watch reads the bytes of that submission's start.
+static int hash_untracked(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *c = cfg_get("MKW_TEX_HASH_UNTRACKED");
+        uint64_t page;
+        int no_watch = plat_mem_written(mem_layout()->heap.base, 0x1000, &page, 1, 0) == UINT64_MAX;
+        on = c && *c ? atoi(c) != 0 : no_watch;
+        if (no_watch)
+            rt_log("vk: no write watch (on Linux, userfaultfd refused: in a container, allow it in its seccomp profile): "
+                   "texture storage %s, much slower than with it (MKW_TEX_HASH_UNTRACKED)",
+                   on ? "is hashed once per submission instead" : "is uploaded again at every check");
+    }
+    return on;
+}
+
+// Before a texture's first upload: its storage's hash, so the first check after it compares with what was uploaded
+// instead of with 0 (an upload more for every texture). Taken before, a write while uploading only costs one upload
+// more; taken after, it would hide that write.
+static void note_storage(Tex *e) {
+    if (!hash_untracked() || !e->t.mem) return;
+    e->shash_epoch = submit_epoch;
+    e->shash = vk_texpre_hash(e->t.mem, e->t.L.size);
+}
+
+static int same_storage(Tex *e) {
+    if (!hash_untracked()) return 0;
+    if (e->shash_epoch == submit_epoch) return 1;   // checked (and uploaded if needed) in this submission
+    e->shash_epoch = submit_epoch;
+    uint64_t h = vk_texpre_hash(e->t.mem, e->t.L.size);
+    if (h == e->shash) return 1;
+    e->shash = h;
+    return 0;
+}
+
 // A mirrored texture is uploaded on first use and again when its storage pages carry a newer write generation.
 void make_fresh(Tex *e) {
     if (!e->pub.mirrored || e->pub.gpu_owned) return;
     uint64_t size = e->t.L.size;
     if (!e->uploaded) {
         vk_mem_changed(e->pub.addr, size, 0, &e->wgen);   // resets the write bits before the storage is read
+        note_storage(e);
         upload(e);
         return;
     }
@@ -769,7 +815,8 @@ void make_fresh(Tex *e) {
     int ch = vk_mem_changed(e->pub.addr, size, e->wgen, &now);
     e->wgen = now;
     e->last_ch = ch;
-    if (ch || e->up_pending) upload(e);   // 1 written, -1 not tracked: both upload again; a deferred one too
+    if (ch < 0 && e->t.mem && !e->up_pending && same_storage(e)) return;   // not tracked: the hash decides
+    if (ch || e->up_pending) upload(e);   // 1 written, -1 not tracked and rewritten: both upload again; a deferred one too
 }
 
 // make_fresh for draw bindings: the page check answers from this submission's write-watch snapshot (vk_memory.c
@@ -781,8 +828,13 @@ void make_fresh_snap(Tex *e) {
     n_checks++;
     int ch = vk_mem_changed_snap(e->pub.addr, e->t.L.size, e->uploaded ? e->wgen : 0, submit_epoch, &now);
     e->wgen = now;
-    if (!e->uploaded) { upload(e); return; }
+    if (!e->uploaded) {
+        note_storage(e);
+        upload(e);
+        return;
+    }
     e->last_ch = ch;
-    if (ch || e->up_pending) upload(e);
+    if (ch < 0 && e->t.mem && !e->up_pending && same_storage(e)) return;   // not tracked: the hash decides
+    if (ch || e->up_pending) upload(e);   // 1 written, -1 not tracked and rewritten: both upload again; a deferred one too
 }
 

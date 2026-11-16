@@ -1,6 +1,7 @@
 // mkw entry: reserves the guest address space, parses the command line and runs one mode.
 //
-//   mkw [--exefs DIR] [--romfs DIR] [--profile DIR] <mode>
+//   mkw [--exefs DIR] [--romfs DIR|FILE.nup|FILE.nx] [--nup FILE] [--profile DIR] <mode>
+//   mkw --unpack PACKAGE DEST [PREFIX...]   a .nup or .nx dump's files written out (sdk/fs/pack_unpack.c)
 //     --selftest        layout, dispatch table and host-function registry; needs no game files
 //     --replay DIR      a frame capture (MKW_CAPTURE, runtime/gfx/cap) replayed through the back end, no game
 //     --probe-loader    load and relocate the modules, check them against the measured 1.2.1 values
@@ -8,6 +9,7 @@
 //     --probe-gfx-abi   NVN object layouts against nvn.h's reserved sizes; needs no game files
 //     --probe-nvn, --probe-nvn-tex, --probe-window, --probe-vkmem, --probe-vkexec    graphics probes
 //     --probe-astc      the compute ASTC decoder against astc_decode_ldr; needs no game files
+//     --probe-framegen  frame generation's passes on two pictures (MKW_FG_PROBE=DIR); needs no game files
 
 //     --boot            run the game to the first NVN call
 //     --seconds S       run the game (implies --boot's start-up) until the world clock (game time since the loaded
@@ -18,6 +20,11 @@
 // Also here: the runtime services the generated code calls besides rt_dispatch and rt_svc (rt_brk, rt_udf,
 // rt_ticks, the function profiler hook), logging, SHA-256, and the crash reporter (a vectored exception handler that
 // names the lifted function, the guest registers and the guest frame-pointer chain).
+#if defined(__aarch64__)
+#include <asm/hwcap.h>
+#include <sys/auxv.h>
+#endif
+#include <SDL3/SDL_messagebox.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,10 +34,12 @@
 #include <sys/prctl.h>
 #endif
 #include "cap.h"
+#include "pack.h"
 #include "cfg.h"
 #include "gamelib.h"
 #include "hacks.h"
 #include "host.h"
+#include "players.h"
 #include "platform/platform.h"
 #include "sha256.h"
 #include "ui/launcher/launcher.h"
@@ -46,7 +55,7 @@ extern const char rt_port_version[];
 unsigned rt_trace;
 
 // Log file. A game run whose stderr is not a file already (started from Explorer, a shortcut or a console) also
-// writes its log to logs\mkw.log next to mkw, so a player has one to attach to a report; run_game.py and
+// writes its log to logs\mkw.log in the selected game folder, so a player has one to attach to a report; run_game.py and
 // `2> file` keep their own file. Each start moves the earlier logs to mkw.1.log .. mkw.4.log. A file stops at 64 MiB
 // (MKW_TRACE can write that much). Lines from before log_open wait in a static buffer: mem_init runs first so that
 // nothing else lands in the guest address space, and an earlier open would put the CRT's heap there.
@@ -205,26 +214,44 @@ const char *rt_log_path(void) {
     return __atomic_load_n(&g_log_state, __ATOMIC_ACQUIRE) == LOG_FILE ? g_log_path : NULL;
 }
 
+// MKW_LOG_NAME: the log file's name without .log for a run that is not the player's, NULL for the player's mkw.log.
+// Only letters, digits, '-' and '_' (a name, never a path), and never "mkw" or "mkw.N", which would clobber the rotation.
+static const char *log_name_own(void) {
+    const char *n = getenv("MKW_LOG_NAME");
+    if (!n || !*n || strlen(n) > 32 || !strncmp(n, "mkw", 3)) return NULL;
+    for (const char *p = n; *p; p++)
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '-' || *p == '_'))
+            return NULL;
+    return n;
+}
+
 // Opens the log file for a game run (game = 1) and writes the buffered lines to it; anything else drops them. Runs on
 // the main thread before the boot starts other threads.
 static void log_open(int game) {
     char dir[PLAT_PATH_MAX * 3], from[PLAT_PATH_MAX * 3 + 16], to[PLAT_PATH_MAX * 3 + 16];
     char *cut = NULL;
-    if (game && !plat_stderr_path(dir, sizeof dir) && plat_exe_path(dir, sizeof dir)) {
-        cut = plat_last_sep(dir);
-        char *f = strrchr(dir, '/');
-        if (f > cut) cut = f;
+    if (game && !plat_stderr_path(dir, sizeof dir) && *cfg_game_dir()) {
+        snprintf(dir, sizeof dir, "%s", cfg_game_dir());
+        cut = dir + strlen(dir);
     }
     if (cut && (size_t)(cut - dir) + sizeof "/logs" <= sizeof dir) {
         strcpy(cut, "/logs");
         plat_file_mkdir_p(dir);
-        for (int i = LOG_KEEP - 1; i > 0; i--) {   // mkw.3.log -> mkw.4.log, ..., mkw.log -> mkw.1.log
-            if (i > 1) snprintf(from, sizeof from, "%s/mkw.%d.log", dir, i - 1);
-            else snprintf(from, sizeof from, "%s/mkw.log", dir);
-            snprintf(to, sizeof to, "%s/mkw.%d.log", dir, i);
-            if (plat_file_exists(from)) plat_file_replace(from, to);
+        // A run that is not the player's (the setup's warm-up, tools/prepare/prepare.py) names its own file and leaves
+        // mkw.log and its rotation alone: else updating pushed the player's crash out of mkw.log, the file a report
+        // attaches and the start screen reads (#437, 16/11/2026: the attached mkw.log was the 0.1.12 warm-up)
+        const char *own = log_name_own();
+        if (own) {
+            snprintf(g_log_path, sizeof g_log_path, "%s/%s.log", dir, own);
+        } else {
+            for (int i = LOG_KEEP - 1; i > 0; i--) {   // mkw.3.log -> mkw.4.log, ..., mkw.log -> mkw.1.log
+                if (i > 1) snprintf(from, sizeof from, "%s/mkw.%d.log", dir, i - 1);
+                else snprintf(from, sizeof from, "%s/mkw.log", dir);
+                snprintf(to, sizeof to, "%s/mkw.%d.log", dir, i);
+                if (plat_file_exists(from)) plat_file_replace(from, to);
+            }
+            snprintf(g_log_path, sizeof g_log_path, "%s/mkw.log", dir);
         }
-        snprintf(g_log_path, sizeof g_log_path, "%s/mkw.log", dir);
         g_log_file = plat_append_open(g_log_path);
     }
     if (!g_log_file) {
@@ -237,7 +264,10 @@ static void log_open(int game) {
     g_log_bytes = n;
     __atomic_store_n(&g_log_state, LOG_FILE, __ATOMIC_RELEASE);
     if (plat_thread_spawn(log_thread, NULL, "log", 0)) __atomic_store_n(&g_log_async, 1, __ATOMIC_RELEASE);
-    rt_log("log: %s", g_log_path);
+    // the port's version as git describe gave it at build time (tools/build/build.py port_version): "-dirty" or a
+    // commit no release has tells a report from a build with local changes (#88 on 11/11/2026: a log line of a
+    // transcoder that is in no commit)
+    rt_log("log: %s (MKW Recomp %s)", g_log_path, rt_port_version);
 }
 
 static void parse_trace(void) {
@@ -266,16 +296,49 @@ const RtConfig *rt_config(void) { return &cfg; }
 // ---- runtime services the generated code calls (cpu.h)
 // fnprof_hit: seqwatch.c (MKW_SEQ_WATCH, MKW_IMPORT_CENSUS)
 
+// The guest's frame chain (x29) before a fatal stop at a guest instruction: the lr alone names only the last caller
+// (1.8.0's first boot stopped in CentralHeap::Free with nothing about who freed).
+static void guest_frames(const Cpu *c) {
+    char d[128];
+    uint64_t fp = c->x[29];
+    for (int n = 0; n < 24 && fp && !(fp & 7) && plat_mem_readable(fp, 16); n++) {
+        uint64_t next = LD64(fp), lr = LD64(fp + 8);
+        rt_logf("  guest frame %2d: %s\n", n, ldr_describe(lr, d, sizeof d));
+        if (next <= fp || next - fp > (64u << 20)) break;
+        fp = next;
+    }
+}
+
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
     char at[128], lr[128];
+    guest_frames(c);
     rt_fatal("brk #%#x at %s (lr %s)", imm, ldr_describe(pc, at, sizeof at), ldr_describe(c->x[30], lr, sizeof lr));
 }
 
 void rt_udf(Cpu *c, uint64_t pc) {
     char at[128], lr[128];
+    for (int i = 0; i < 31; i++) rt_logf("  x%-2d %016llx%s", i, (unsigned long long)c->x[i], i % 4 == 3 ? "\n" : "");
+    guest_frames(c);
     rt_fatal("undefined instruction at %s (lr %s)", ldr_describe(pc, at, sizeof at),
              ldr_describe(c->x[30], lr, sizeof lr));
 }
+
+#if defined(__x86_64__)
+// The runtime and the game code are built for x86-64-v3 (tools/build/build.py ARCH_FLAGS), so on a CPU without AVX2,
+// FMA or BMI2 (AMD FX, Intel before Haswell) the first such instruction kills the process before any log or window:
+// issue #262 (FX-8320) only saw mkw.exe not open. This runs first of all constructors (101; the others, e.g.
+// tick_scale_init's 128-bit multiply, may already use BMI2) and is itself built for the baseline x86-64.
+__attribute__((constructor(101), target("arch=x86-64"))) static void require_x86_64_v3(void) {
+    __builtin_cpu_init();
+    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2")) return;
+    const char *msg = "This processor lacks AVX2, which mkw-recomp needs for now (for example an AMD FX or an Intel "
+                      "Core older than the 4th generation). A version without it is planned: "
+                      "https://github.com/adriadam10/mkw-recomp/discussions/82";
+    fprintf(stderr, "cpu: %s\n", msg);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "mkw-recomp", msg, NULL);
+    _Exit(3);
+}
+#endif
 
 // CNTPCT_EL0 at RT_TICK_HZ. The scale is set before main, so no thread reads it half written.
 static PlatScale tick_scale;
@@ -372,10 +435,19 @@ static volatile int host_probe_hits;
 static void host_probe(Cpu *c) { host_probe_hits++; c->x[0] = 42; }
 
 static void check_cpu(void) {
+#if defined(__aarch64__)
+    // tools/build/build.py ARCH_FLAGS: ARMv8.2 with LSE atomics, FP16, RCpc, dot product and CRC32
+    unsigned long hw = getauxval(AT_HWCAP);
+    int ok = (hw & HWCAP_ATOMICS) && (hw & HWCAP_FPHP) && (hw & HWCAP_ASIMDHP) && (hw & HWCAP_LRCPC) &&
+             (hw & HWCAP_ASIMDDP) && (hw & HWCAP_CRC32);
+    printf("cpu: ARMv8.2 (LSE, FP16, RCpc, DotProd, CRC32) %s\n", ok ? "present" : "MISSING");
+    CHECK(ok, "the lifted code is built for ARMv8.2 with LSE, FP16, RCpc, DotProd and CRC32");
+#else
     __builtin_cpu_init();
     int ok = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma") && __builtin_cpu_supports("bmi2");
     printf("cpu: x86-64-v3 (AVX2, FMA, BMI2) %s\n", ok ? "present" : "MISSING");
     CHECK(ok, "the lifted code is built for x86-64-v3");
+#endif
 }
 
 // Layout: ascending, no overlap, below 2^39, and inside the window mem_init reserved.
@@ -569,16 +641,16 @@ static int selftest(void) {
 }
 
 static int usage(const char *argv0) {
-    fprintf(stderr, "usage: %s [--exefs DIR] [--romfs DIR] [--profile DIR] [--launcher | --play | --selftest | --probe-loader | "
+    fprintf(stderr, "usage: %s [--exefs DIR] [--romfs DIR|FILE.nup|FILE.nx] [--nup FILE] [--profile DIR] [--launcher | --play | --selftest | --probe-loader | "
                     "--probe-cfg | --probe-kernel | --probe-audio | --probe-services | --probe-fs | --probe-gfx-abi | "
                     "--probe-nvn | --probe-nvn-tex | --probe-window | --probe-vkmem | "
-                    "--probe-vkexec | --probe-astc | --probe-texpre | --texpre | --boot |--seconds S [--shot PNG]]\n", argv0);
+                    "--probe-vkexec | --probe-astc | --probe-framegen | --probe-fps | --probe-discord | --probe-texpre | --texpre | --boot |--seconds S [--shot PNG]]\n", argv0);
     return 2;
 }
 
 // Paths for a copied folder (tools/package_build.py). Per path: MKW_EXEFS, MKW_ROMFS, MKW_PROFILE_DIR, else the
-// folder next to mkw (exefs, romfs, profile) if it exists, else the path baked in at build time. A relative
-// value is relative to mkw's folder.
+// selected game folder (exefs, romfs, profile) if it exists, else the path baked in at build time. A relative
+// value is relative to the selected game folder.
 static char pp_exefs[PLAT_PATH_MAX * 2], pp_romfs[PLAT_PATH_MAX * 2], pp_profile[PLAT_PATH_MAX * 2];
 
 static const char *portable_path(const char *dir, const char *var, const char *sub, const char *must, char *out, size_t cap,
@@ -598,16 +670,13 @@ static const char *portable_path(const char *dir, const char *var, const char *s
 }
 
 static void portable_paths(RtConfig *c) {
-    char exe[PLAT_PATH_MAX * 2];
-    int n = plat_exe_path(exe, sizeof exe);
-    char *cut = n && n < sizeof exe ? plat_last_sep(exe) : NULL;
-    if (!cut) return;
-    *cut = 0;
+    const char *exe = cfg_game_dir();
     c->exefs = portable_path(exe, "MKW_EXEFS", "exefs", "main.npdm", pp_exefs, sizeof pp_exefs, c->exefs);
-    // MKW reads the RomFS as loose files: a romfs/ folder next to the executable, as exefs/.
+    // The RomFS: a romfs/ folder of loose files in the selected game folder, as exefs/ (MKW_ROMFS, mkw.ini's romfs and
+    // --romfs may also name a .nup package, romfs.c).
     c->romfs = portable_path(exe, "MKW_ROMFS", "romfs", NULL, pp_romfs, sizeof pp_romfs, c->romfs);
     c->profile = portable_path(exe, "MKW_PROFILE_DIR", "profile", ".", pp_profile, sizeof pp_profile, c->profile);
-    if (!*c->profile) {   // the player's build bakes no path in: saves go to profile/ beside the executable
+    if (!*c->profile) {   // the player's build bakes no path in: saves go to profile/ in the selected game folder
         snprintf(pp_profile, sizeof pp_profile, "%s/profile", exe);
         plat_file_mkdir_p(pp_profile);
         c->profile = pp_profile;
@@ -648,7 +717,10 @@ static int want_launcher(int argc, char **argv) {
     int asked = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--launcher")) asked = 1;
-        else if (!strcmp(argv[i], "--exefs") || !strcmp(argv[i], "--romfs") || !strcmp(argv[i], "--profile")) i++;
+        else if (!strcmp(argv[i], "--gb-install")) asked = 1, i++;   // GameBanana's 1-Click: the Mods page
+        else if (!strcmp(argv[i], "--exefs") || !strcmp(argv[i], "--romfs") || !strcmp(argv[i], "--nup") ||
+                 !strcmp(argv[i], "--profile"))
+            i++;
         else return 0;   // --play, a mode, --seconds: straight in
     }
     return asked || !rt_game_builtin();
@@ -658,8 +730,38 @@ static int want_launcher(int argc, char **argv) {
 #ifdef MKW_PS5_NATIVE
 extern void platform_init(const char *title_name);
 #else
-static int run_launcher(void) {
+static int run_launcher(int argc, char **argv) {
     cfg_init();   // mkw.ini: the settings pages read and write it
+    // the Mods page merges against the same romfs the game will boot: argv wins, else MKW_ROMFS / mkw.ini,
+    // else the selected installation, else the baked-in default (nup packages cannot merge: no loose files)
+    const char *romfs = NULL;
+    for (int i = 1; i + 1 < argc; i++)
+        if (!strcmp(argv[i], "--romfs") || !strcmp(argv[i], "--nup")) romfs = argv[i + 1];
+    if (!romfs)
+        romfs = portable_path(cfg_game_dir(), "MKW_ROMFS", "romfs", NULL, pp_romfs, sizeof pp_romfs,
+                              rt_default_romfs);
+    if (romfs) launcher_set_romfs(romfs);
+    // the players (Profiles page) live in the profile folder the game will use: --profile, else MKW_PROFILE_DIR /
+    // mkw.ini, else profile/ in the selected installation
+    const char *profile = NULL;
+    for (int i = 1; i + 1 < argc; i++)
+        if (!strcmp(argv[i], "--profile")) profile = argv[i + 1];
+    if (!profile) {
+        RtConfig paths = {.profile = rt_default_profile};
+        portable_paths(&paths);
+        profile = paths.profile;
+    }
+    if (profile && *profile) launcher_set_profile(profile);
+    // the same for exefs: an import checks a mod's build id against the game it will run with
+    const char *exefs = NULL;
+    for (int i = 1; i + 1 < argc; i++)
+        if (!strcmp(argv[i], "--exefs")) exefs = argv[i + 1];
+    if (!exefs)
+        exefs = portable_path(cfg_game_dir(), "MKW_EXEFS", "exefs", "main.npdm", pp_exefs, sizeof pp_exefs,
+                              rt_default_exefs);
+    if (exefs) launcher_set_exefs(exefs);
+    for (int i = 1; i + 1 < argc; i++)
+        if (!strcmp(argv[i], "--gb-install")) launcher_gb_install(argv[i + 1]);
     if (launcher_run() != LAUNCHER_PLAY) return 0;
     plat_setenv("MKW_LAUNCHED", "1");
     plat_reexec();
@@ -681,7 +783,10 @@ int main(int argc, char **argv) {
         }
     }
 #else
-    if (want_launcher(argc, argv)) return run_launcher();
+    // --unpack PACKAGE DEST [PREFIX...]: a packed dump's files written out (sdk/fs/pack_unpack.c), for the setup; first,
+    // as the setup runs it before the game code exists (no address space, launcher or log file needed)
+    if (argc >= 2 && !strcmp(argv[1], "--unpack")) return pack_unpack_main(argc - 2, argv + 2);
+    if (want_launcher(argc, argv)) return run_launcher(argc, argv);
 #endif
 #ifdef __linux__
     // MKW_ALLOW_PTRACE=1: let a debugger attach (tools/run/stacks.py) under yama ptrace_scope 1, without root.
@@ -711,7 +816,9 @@ int main(int argc, char **argv) {
     }
     const char *mode = NULL;
     for (int i = 1; i < argc; i++) {
-        const char **path = !strcmp(argv[i], "--exefs") ? &cfg.exefs : !strcmp(argv[i], "--romfs") ? &cfg.romfs
+        // --romfs takes the loose romfs/ folder or a packed dump, .nup or .nx (romfs.c); --nup is the same
+        const char **path = !strcmp(argv[i], "--exefs") ? &cfg.exefs
+                          : !strcmp(argv[i], "--romfs") || !strcmp(argv[i], "--nup") ? &cfg.romfs
                           : !strcmp(argv[i], "--profile") ? &cfg.profile : NULL;
         if (path) {
             if (++i == argc) return usage(argv[0]);
@@ -735,6 +842,11 @@ int main(int argc, char **argv) {
     if (cfg.shot && !cfg.seconds) return usage(argv[0]);
     if (cfg.seconds && mode) return usage(argv[0]);
     log_open(!mode);
+    // the player the launcher picked (core/base/players.h): its account and save; the lock stays on the folder
+    static char player_profile[PLAT_PATH_MAX * 2];
+    cfg.profile_base = cfg.profile;
+    player_active_dir(cfg.profile, player_profile, sizeof player_profile);
+    cfg.profile = player_profile;
     if (!mode) {
         cfg.boot = cfg.seconds > 0;   // --seconds starts the game like --boot, with its checkpoints
         rt_boot();
@@ -754,6 +866,9 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--probe-vkmem")) return probe_vkmem();
     if (!strcmp(mode, "--probe-vkexec")) return probe_vkexec();
     if (!strcmp(mode, "--probe-astc")) return probe_astc();
+    if (!strcmp(mode, "--probe-framegen")) return probe_framegen();
+    if (!strcmp(mode, "--probe-fps")) return probe_fps();
+    if (!strcmp(mode, "--probe-discord")) return probe_discord();
     if (!strcmp(mode, "--probe-vkdevice")) return probe_vkdevice();
 
     if (!strcmp(mode, "--probe-texpre")) return probe_texpre();

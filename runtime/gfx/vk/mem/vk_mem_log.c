@@ -108,6 +108,28 @@ void flag_names(uint32_t f, char *buf, size_t n) {
 
 
 
+// MKW_VRAM_LOG=<frames> (diagnosis, off by default): the "mem: vram" line every that many presented frames, without
+// the rest of MKW_TRACE=perf (its GPU timestamps change the frame being measured). For a session whose frame rate falls
+// after some courses on an 8 GB GPU (7.5 of 8 GB in use, the menu drawn in 80 ms, 12/11/2026): what grows from course
+// to course, and whether it is ever given back. The ctl command "vram" logs one now.
+static uint64_t vram_every(void) {
+    static int64_t n = -1;
+    if (n < 0) {
+        const char *e = cfg_get("MKW_VRAM_LOG");
+        n = e && *e ? atoll(e) : 0;
+        if (n < 0) n = 0;
+        if (n) rt_log("mem: the vram line every %lld frames (MKW_VRAM_LOG)", (long long)n);
+    }
+    return (uint64_t)n;
+}
+
+// A capture holds a few frames (build/cap/race: 3), so the per-60-frames summaries above never come in a replay: the
+// same lines once at its end, averaged over the frames it presented (mir-base, 14/11/2026).
+void vk_mem_replay_log(uint64_t frames) {
+    mirror_log(frames);
+    shadow_log(frames);
+}
+
 #define GROW_TOP 8
 
 static void log_mem_census(uint64_t frame, int force) {
@@ -264,7 +286,8 @@ void vk_oom_census(const char *what) {
 void vk_mem_census(uint64_t frame) {
     if (frame == 1 || frame % 15 == 0) ps5_vk_snap_refresh();
     mem_early_log(frame);   // MKW_EARLY_READ
-    if ((rt_trace & RT_TRACE_PERF) && frame % 150 == 0) vram_log(frame);
+    uint64_t every = vram_every();
+    if (((rt_trace & RT_TRACE_PERF) && frame % 150 == 0) || (every && frame % every == 0)) vram_log(frame);
     if (vk_dirty_census && !vk_mirror_on) dirty_frame(frame);
     if ((rt_trace & RT_TRACE_PERF) ? frame % 60 == 0 : frame == 600 || frame == 1800)
         mirror_log(frame), shadow_log(frame);   // mirror_log also logs the write-watch line
@@ -403,6 +426,8 @@ static void mirror_mode(int discrete) {
     const char *g = cfg_get("MKW_MIRROR_GAP");
     mirror_gap = g && *g ? atoi(g) : 2;
     if (mirror_gap < 0) mirror_gap = 0;
+    mirror_cpu_gen = rt_knob("MIRROR_CPU_GEN", "1");
+    shadow_cpu_gen = rt_knob("SHADOW_CPU_GEN", "1");
     // Submissions a region stays unwritten before it is frozen. 60 rather than 300: in a fight 100 of the 257 MiB
     // queried a frame lay in regions idle for 30-299 submissions, and a thaw by a write costs about 60 us.
     const char *fi = cfg_get("MKW_FREEZE_IDLE");

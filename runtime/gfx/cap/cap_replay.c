@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <x86intrin.h>
 
 #include "cap.h"
 #include "cfg.h"
@@ -286,7 +285,7 @@ int cap_replay_main(int argc, char **argv) {
             // the TSC's rate taken from this frame's span: a recording change measured without the game.
             if (rt_trace & RT_TRACE_DRAW) {
                 static uint64_t tsc0, ns0;
-                uint64_t tsc = __rdtsc(), ns = plat_now_ns();
+                uint64_t tsc = plat_cycles(), ns = plat_now_ns();
                 char tb[900];
                 if (tsc0 && vk_exec_draw_timing(tb, sizeof tb, (double)(ns - ns0) / 1e3 / (double)(tsc - tsc0)))
                     rt_log("cap: frame %llu: prepare_draw per draw, us:%s", (unsigned long long)(m.first_frame + presents), tb);
@@ -349,6 +348,7 @@ int cap_replay_main(int argc, char **argv) {
     cap_in_close(in);
     b->finish();
     vk_pt_flush(frame, presents);   // MKW_PASS_TIMING: the GPU time of the replayed frames
+    vk_mem_replay_log(presents);    // mirror and shadow traffic per presented frame (MKW_MEMORY=mirror)
     long errors = vk_validation_errors_total();
     vk_exec_par_log();   // how many submissions went in chunks: a replay that never chunks compares serial with serial
     static const char *const names[] = {"", "meta", "mem", "zero", "pool init", "pool fini", "mapv", "texreg", "sampreg",

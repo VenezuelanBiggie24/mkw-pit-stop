@@ -234,17 +234,18 @@ static void pipe_worker(void *arg) {
     return;
 }
 
-// Starts the pool on first use: a quarter of the logical processors, 2 to 4; one on a machine under 16 GB, because
+// Starts the pool on first use: a quarter of the logical processors, 2 to 4; one under 14 GiB of usable RAM, because
 // RADV compiling one of MKW's large pipelines holds gigabytes (heaptrack, run68: 5.2 GB of the process's peak inside
-// vkCreateGraphicsPipelines on three workers, and systemd-oomd ended runs 54-67). MKW_PIPE_WORKERS=<n> sets it. Caller
-// holds P.lock.
+// vkCreateGraphicsPipelines on three workers, and systemd-oomd ended runs 54-67 on a machine with 13.4 GiB usable).
+// The cut is below 16: a 16 GB machine reports 15.3-15.6 GiB after firmware and iGPU reservations (issue #132).
+// MKW_PIPE_WORKERS=<n> sets it. Caller holds P.lock.
 static int workers_start(void) {
     if (A.threads) return 1;
     uint32_t cpus = plat_cpu_count();
     int n = cpus / 4 < 2 ? 2 : cpus / 4 > MAX_WORKERS ? MAX_WORKERS : (int)(cpus / 4);
     float used, total = 0, proc;
     plat_mem_info(&used, &total, &proc);
-    if (total > 0 && total < 16 * 1024) n = 1;
+    if (total > 0 && total < 14 * 1024) n = 1;
     const char *w = cfg_get("MKW_PIPE_WORKERS");
     if (w && atoi(w) > 0) n = atoi(w) > MAX_WORKERS ? MAX_WORKERS : atoi(w);
     for (int i = 0; i < n; i++) {
@@ -276,6 +277,12 @@ void workers_drain(void) {
     while (A.inflight) plat_cond_wait(&A.idle, &P.lock);
     while (U.running) plat_cond_wait(&done_cv, &P.lock);
     plat_mutex_unlock(&P.lock);
+}
+
+void vk_pipeline_async_busy(unsigned *inflight, int *building) {
+    *inflight = __atomic_load_n(&A.inflight, __ATOMIC_RELAXED);
+    int idle = __atomic_load_n(&U.idle, __ATOMIC_RELAXED);
+    *building = A.threads > idle ? A.threads - idle : 0;
 }
 
 void vk_pipeline_async_enable(void) {
@@ -321,6 +328,7 @@ static Pipe *pipe_miss(const VkPipeState *s, const GKey *k, uint64_t h, int mode
         uint32_t mo, fo;
         mesh_offsets(s, &mo, &fo);
         if (!vk_ctx()->has_mesh) why = "no VK_EXT_mesh_shader";
+        else if (vk_mesh_cs_on()) why = "task/mesh drawn as compute (MKW_MESH_COMPUTE)";
         else if (!add_stage(&B, s->vs, 0) || (s->mesh && !add_stage(&B, s->mesh, mo)) || (s->fs && !add_stage(&B, s->fs, fo)))
             why = "too many bindings";
         else if (!(l = layout_get(&B))) why = "descriptor layout creation failed";
@@ -633,6 +641,28 @@ static void warm_builder(void *arg) {
     return;
 }
 
+// A mark next to the keys while the boot builds them, naming the GPU and driver. One left by a start that died there
+// (a driver that crashes on one of these pipelines would kill every start) skips the prewarm on that GPU and driver
+// from then on: the pipelines are built as the game draws them. Another driver tries again. (NX2navi's idea.)
+static int prewarm_mark(char *path, size_t cap) {
+    const VkPhysicalDeviceProperties *p = &vk_ctx()->props;
+    char who[320];
+    snprintf(who, sizeof who, "%04x:%04x %s driver %u\n", p->vendorID, p->deviceID, p->deviceName, p->driverVersion);
+    snprintf(path, cap, "%s", K.path);
+    char *dot = strrchr(path, '.');
+    if (dot) snprintf(dot, cap - (size_t)(dot - path), ".prewarm");
+    uint64_t n = 0;
+    char *old = (char *)plat_file_read(path, &n);
+    int same = old && n == strlen(who) && !memcmp(old, who, n);
+    free(old);
+    if (same) {
+        rt_log("vk_pipeline: prewarm skipped: the last start died building pipelines on this GPU and driver (%s)", path);
+        return 0;
+    }
+    if (!plat_file_write_atomic(path, who, strlen(who))) rt_log("vk_pipeline: cannot write %s", path);
+    return 1;
+}
+
 void vk_pipeline_prewarm(void) {
     const char *gpu = rt_config()->gpu;
     if (!A.on || (gpu && !strcmp(gpu, "null"))) return;
@@ -646,12 +676,15 @@ void vk_pipeline_prewarm(void) {
         rt_log("vk_pipeline: prewarm: no pipeline keys (%s)", K.path[0] ? K.path : "<none>");
         return;
     }
+    char mark[sizeof K.path + 16];
+    if (!prewarm_mark(mark, sizeof mark)) return;
     const KeyRec *r = (const KeyRec *)K.file;
     size_t n = K.file_n, m = 0;
     uint8_t (*ids)[32] = malloc(2 * n * 32);
     const GfxShader **sh = calloc(2 * n, sizeof *sh);
     if (!ids || !sh) {
         free(ids), free(sh);
+        plat_file_delete(mark);
         return;
     }
     for (size_t i = 0; i < n; i++) {
@@ -696,9 +729,11 @@ void vk_pipeline_prewarm(void) {
         // A vertex shader fed integer attributes was drawn as its integer-input variant, which the record names by
         // the base program (gfx_shader.c int_input_variant keeps the program key as its id): built from the base, the
         // pipeline paired float inputs with integer formats, the likely cause of RADV's crash in run49.
-        GfxShaderAnswers a;
-        vk_pipeline_answers(&s, &a);
-        s.vs = gfx_shader_int_variant(vs, &a), s.fs = fs;
+        GfxShaderAnswers a = {0};
+        GfxShaderAnswers af = {0};
+        vk_pipeline_answers(&s, GFX_STAGE_VS, &a);
+        vk_pipeline_answers(&s, GFX_STAGE_FS, &af);
+        s.vs = gfx_shader_int_variant(vs, &a), s.fs = fs ? gfx_shader_int_variant(fs, &af) : NULL;
         GKey k;
         gkey_fill(&s, &k);
         uint64_t h = key_hash(&k, sizeof k);
@@ -732,18 +767,24 @@ void vk_pipeline_prewarm(void) {
     if (stalled)
         for (i--; i < nt; i++) plat_thread_detach(t[i]);
     plat_mutex_lock(&P.lock);
-    if (stalled) {
+    // then the jobs a pool worker took, under the same rule: the joins only watch the prewarm's own threads, and a pool
+    // worker's build the driver never returned held the boot for good
+    while (K.left && !stalled) {
+        uint32_t done = K.built + K.failed;
+        if (done != last) last = done, last_t = now_ms();
+        if ((stalled = now_ms() - last_t >= PREWARM_STALL_MS)) break;
+        plat_cond_wait_ms(&done_cv, &P.lock, 2000);
+    }
+    if (stalled)
         rt_log("vk_pipeline: prewarm: no pipeline finished in %u ms; the game starts, %u pipelines still building in the "
                "background", PREWARM_STALL_MS, K.left);
-    } else {
-        while (K.left) plat_cond_wait(&done_cv, &P.lock);   // jobs a pool worker took
-    }
     rt_log("vk_pipeline: prewarm: %zu records in %s: %u pipelines built, %u failed, %u already built, %u dropped "
            "(shader not loaded); shaders %.0f ms, pipelines %.0f ms on %d threads, total %.0f ms",
            n, K.path, K.built, K.failed, known, dropped, t1 - t0, now_ms() - t1, nt, now_ms() - t0);
     free(K.file);
     K.file = NULL;
     plat_mutex_unlock(&P.lock);
+    plat_file_delete(mark);   // the boot got through: a stall above left the rest to the background, not a crash
 }
 
 // ensure_init's hook: without a prewarm (MKW_PIPE_PREBUILD=0, or the device came up first elsewhere) the records
@@ -771,6 +812,12 @@ static VkPipeline compute_create(const GfxShader *cs, const Layout *l) {
                                                 .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main"},
                                       .layout = l->layout};
     pin_subgroup32(&ci.stage, &rqc, code, words);
+    if (!ci.stage.pNext && vk_caps.cs_wide) {   // vk_caps.c cs_wide: Adreno's wave limit for barriers
+        rqc = (VkPipelineShaderStageRequiredSubgroupSizeCreateInfo){
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+            .requiredSubgroupSize = vk_caps.cs_wide};
+        ci.stage.pNext = &rqc;
+    }
     if (vk_ctx()->has_exec_stats) ci.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
     if (vk_ctx()->has_exec_stats && cfg_get("MKW_SPEC_ISA")) ci.flags |= VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
     VkPipeline pipe = VK_NULL_HANDLE;

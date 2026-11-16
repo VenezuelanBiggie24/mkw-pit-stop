@@ -135,15 +135,21 @@ static int video_up(void);
 
 // The lines of the picture the window will show, for the game's output size before the window exists
 // (patches.c): the monitor's in fullscreen (its desktop mode, in pixels), else MKW_WINDOW_SIZE's. 0 when unknown.
-int gfx_window_lines(void) {
-    int w, h;
+int gfx_window_shape(int *w, int *h) {
     if (!gfx_cfg_fullscreen()) {
-        gfx_cfg_window_size(&w, &h);
-        return h;
+        gfx_cfg_window_size(w, h);
+        return *h > 0;
     }
     if (!video_up()) return 0;
     const SDL_DisplayMode *m = SDL_GetDesktopDisplayMode(SDL_GetPrimaryDisplay());
-    return m ? (int)(m->h * m->pixel_density + 0.5f) : 0;
+    if (!m) return 0;
+    *w = (int)(m->w * m->pixel_density + 0.5f), *h = (int)(m->h * m->pixel_density + 0.5f);
+    return 1;
+}
+
+int gfx_window_lines(void) {
+    int w, h;
+    return gfx_window_shape(&w, &h) ? h : 0;
 }
 
 static void density_update(void) {
@@ -182,6 +188,7 @@ static void handle(const SDL_Event *e) {
         density_update();
         gfx_window_mark_dirty();
         break;
+    case SDL_EVENT_WINDOW_HDR_STATE_CHANGED:   // the system turned HDR on or off: the swapchain follows (gfx_hdr.c)
     case SDL_EVENT_WINDOW_DISPLAY_CHANGED:
     case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
     case SDL_EVENT_DISPLAY_CURRENT_MODE_CHANGED:
@@ -199,6 +206,8 @@ static void handle(const SDL_Event *e) {
         break;
     }
 }
+
+void app_icon_set(SDL_Window *w);   // build/obj/rt/app_icon.c, drawn by tools/build/icon.py
 
 static void window_main(void *arg) {
     (void)arg;
@@ -280,6 +289,7 @@ static void open_window(void *arg) {
         rt_log("gfx: SDL_CreateWindow failed (%s)", SDL_GetError());
         return;
     }
+    app_icon_set(g_win);
     set_pixel_size(w, h);   // w x h were window units; the setting is in pixels
     density_update();
     note_applied();
@@ -316,6 +326,22 @@ VkSurfaceKHR wsys_surface(VkInstance inst) {
 void wsys_client_size(int *w, int *h) {
     *w = *h = 0;
     if (g_win) SDL_GetWindowSizeInPixels(g_win, w, h);
+}
+
+int wsys_hdr(float *sdr_white, float *headroom) {
+    *sdr_white = *headroom = 0;
+    if (!g_win) return -1;
+    SDL_PropertiesID p = SDL_GetWindowProperties(g_win);
+    if (!p || !SDL_HasProperty(p, SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN)) return -1;
+    // SDL's X11 driver sets the property but never to true (it cannot know). Inside gamescope (its Xwayland: Steam
+    // Deck's game mode) that is unknown, so the surface's formats decide (gfx_hdr.c: HDR10 only with its HDR on); hdr5,
+    // 12/11/2026, was "not in HDR" there. Elsewhere on X11 it stays SDR: a driver may list HDR10 on an SDR screen.
+    const char *drv = SDL_GetCurrentVideoDriver();
+    int gamescope = drv && !strcmp(drv, "x11") && SDL_getenv("GAMESCOPE_WAYLAND_DISPLAY");
+    if (!SDL_GetBooleanProperty(p, SDL_PROP_WINDOW_HDR_ENABLED_BOOLEAN, false)) return gamescope ? -1 : 0;
+    *sdr_white = SDL_GetFloatProperty(p, SDL_PROP_WINDOW_SDR_WHITE_LEVEL_FLOAT, 0.0f);
+    *headroom = SDL_GetFloatProperty(p, SDL_PROP_WINDOW_HDR_HEADROOM_FLOAT, 0.0f);
+    return 1;
 }
 
 int wsys_minimized(void) { return g_win && (SDL_GetWindowFlags(g_win) & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)); }
