@@ -258,11 +258,15 @@ int vk_glyphs_due(void) {
 
 // Every live entry at the sheet's address: the game samples it through more than one (another view of the same
 // storage); uploading the one entry_of found again changed nothing on screen (gl6, 06/11/2026).
+// All of them pinned first: an upload that runs short of staging trims idle textures (vk_texture_trim), and the walk
+// goes on through next_at.
 void vk_glyphs_redo(void) {
     lock();
     g_glyph_gen = glyphs_generation();
+    for (Tex *e = entries_at(g_glyph_addr); e; e = e->next_at) tex_pin(e);
     for (Tex *e = entries_at(g_glyph_addr); e; e = e->next_at)
         if (e->uploaded && !e->released && e->pub.mirrored && !e->pub.gpu_owned) upload(e);
+    for (Tex *e = entries_at(g_glyph_addr); e; e = e->next_at) tex_unpin(e);
     unlock();
 }
 
@@ -573,6 +577,9 @@ counted:;
         }
     }
     e->wt_n = 0;
+    // A first upload deferred earlier: the draws bound the zero stand-in for it (tex_unready), and the slots and the
+    // replay's descriptor memos keep what they resolved while the address generation stays: moved, they take the image.
+    if (!e->uploaded && e->up_pending) tex_gen_bump(e->key.addr);
     e->uploaded = 1;
     e->up_pending = 0;
     e->n_up++;
@@ -756,33 +763,72 @@ int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now) {
     return vk_mem_changed(lo, hi - lo, since, now);
 }
 
+void gpu_baseline(Tex *e) {
+    storage_rewritten(e, 0, &e->gpu_gen);   // queries the write watch now: writes up to here carry gpu_gen or older
+    e->cpu_newer = 0;
+}
+
+// A GPU-owned mirrored texture whose storage the CPU wrote after the GPU's last write (gpu_gen), or whose WriteTexels
+// reached the storage only (cpu_newer), goes back to the CPU: on the console the storage is the texture, so the next
+// sample sees those bytes. Before, gpu_owned was never cleared (make_fresh returned on it, vk_texture_write_back only
+// dropped gpu_dirty, and a released entry taken back kept it), so such a texture showed its last render for good. The
+// rule is vk_texture_write_back's and alias_has_gpu_content's: a CPU write after the render makes the storage the
+// content. Only a write the page check saw (1); untracked storage (-1) says nothing about the order. From the
+// submission's write-watch snapshot (vk_mem_changed_snap): render targets come through make_fresh at every pass, and a
+// write the snapshot missed shows at the next submission. 1 when the CPU owns it again (the caller uploads).
+static int cpu_took_back(Tex *e) {
+    if (!e->cpu_newer) {
+        uint64_t lo = (e->pub.addr + 0xfff) & ~0xfffull, hi = (e->pub.addr + e->t.L.size) & ~0xfffull;
+        if (hi <= lo) lo = e->pub.addr, hi = e->pub.addr + e->t.L.size;   // as storage_rewritten
+        uint32_t now;
+        if (vk_mem_changed_snap(lo, hi - lo, e->gpu_gen, submit_epoch, &now) != 1) return 0;
+    }
+    e->pub.gpu_owned = 0, e->gpu_dirty = 0, e->cpu_newer = 0;
+    return 1;
+}
+
 // A mirrored texture is uploaded on first use and again when its storage pages carry a newer write generation.
+// seen first: staging that runs short trims textures idle by it on this same thread (vk_texture_trim, recursive
+// lock), and the caller goes on using e; the pin keeps it for the rest of the upload.
 void make_fresh(Tex *e) {
-    if (!e->pub.mirrored || e->pub.gpu_owned) return;
+    e->seen = submit_epoch;
+    if (!e->pub.mirrored) return;
+    int took = e->pub.gpu_owned && cpu_took_back(e);
+    if (e->pub.gpu_owned) return;
+    tex_pin(e);
     uint64_t size = e->t.L.size;
     if (!e->uploaded) {
         vk_mem_changed(e->pub.addr, size, 0, &e->wgen);   // resets the write bits before the storage is read
         upload(e);
-        return;
+    } else {
+        uint32_t now;
+        int ch = vk_mem_changed(e->pub.addr, size, e->wgen, &now);
+        e->wgen = now;
+        e->last_ch = ch;
+        if (ch || e->up_pending || took) upload(e);   // 1 written, -1 not tracked: both upload again; a deferred one too
     }
-    uint32_t now;
-    int ch = vk_mem_changed(e->pub.addr, size, e->wgen, &now);
-    e->wgen = now;
-    e->last_ch = ch;
-    if (ch || e->up_pending) upload(e);   // 1 written, -1 not tracked: both upload again; a deferred one too
+    tex_unpin(e);
 }
 
 // make_fresh for draw bindings: the page check answers from this submission's write-watch snapshot (vk_memory.c
 // vk_mem_changed_snap) instead of a system call per texture. A write the snapshot of the texture's region missed (made
 // after it, during this replay) keeps its write-watch bit and is caught by the next submission's snapshot.
 void make_fresh_snap(Tex *e) {
-    if (!e->pub.mirrored || e->pub.gpu_owned) return;
+    e->seen = submit_epoch;   // as make_fresh
+    if (!e->pub.mirrored) return;
+    int took = e->pub.gpu_owned && cpu_took_back(e);
+    if (e->pub.gpu_owned) return;
     uint32_t now;
     n_checks++;
     int ch = vk_mem_changed_snap(e->pub.addr, e->t.L.size, e->uploaded ? e->wgen : 0, submit_epoch, &now);
     e->wgen = now;
-    if (!e->uploaded) { upload(e); return; }
-    e->last_ch = ch;
-    if (ch || e->up_pending) upload(e);
+    tex_pin(e);
+    if (!e->uploaded) {
+        upload(e);
+    } else {
+        e->last_ch = ch;
+        if (ch || e->up_pending || took) upload(e);
+    }
+    tex_unpin(e);
 }
 

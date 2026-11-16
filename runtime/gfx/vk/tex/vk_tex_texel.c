@@ -59,8 +59,17 @@ static int read_aspect(const Tex *e, VkImageAspectFlags *a) {
     }
 }
 
-// Image <-> caller rows through a staging buffer; the GPU copy is waited for.
+// Image <-> caller rows through a staging buffer; the GPU copy is waited for. e is pinned while staging is asked for:
+// running short, it trims textures on this thread (vk_texture_trim) and e is used after.
+static int texels_pinned(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, int write);
 int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, int write) {
+    tex_pin(e);
+    int ok = texels_pinned(e, g, r, mem, write);
+    tex_unpin(e);
+    return ok;
+}
+
+static int texels_pinned(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, int write) {
     static volatile int32_t n_astc, n_ds;
     VkCtx *c = vk_ctx();
     VkImageAspectFlags aspect;
@@ -88,7 +97,18 @@ int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, 
     VkCommandBuffer cb = VK_NULL_HANDLE;
     if (write) cb = vk_upload_begin_staging(slice * (size_t)g->nz, &sb, (void **)&stg);
     else stg = vk_staging_try(slice * (size_t)g->nz, &sb, &sa);
-    if (!stg) return 0;   // no staging memory even after relieving it: the write is lost, a read returns zeros
+    if (!stg) {   // no staging memory even after relieving it (vk_upload_begin_staging): a read returns zeros
+        static volatile int32_t n_lost;
+        // A write into a mirrored texture is already in its storage (vk_write_texels): the storage is the newer content
+        // and make_fresh takes it back (cpu_took_back), unless the GPU wrote the image since its last write-back
+        // (gpu_dirty), whose render the storage lacks: uploading it would lose more than this region. Only the image
+        // held the texels of anything else, and no copy of them is kept: that write is lost.
+        if (write && e->pub.mirrored && !e->gpu_dirty) e->cpu_newer = 1;
+        else if (write)
+            log_limited(&n_lost, "WriteTexels into texture %#llx (fmt %#x) lost: no staging%s", (unsigned long long)e->pub.addr,
+                        e->t.d.format, e->pub.mirrored ? " and its storage lacks the GPU's render" : "");
+        return 0;
+    }
     VkBufferImageCopy *rg = calloc((size_t)g->nz, sizeof *rg);
     for (int z = 0; z < g->nz; z++) {
         uint8_t *s = stg + slice * (size_t)z;
@@ -217,11 +237,19 @@ void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, co
                (unsigned long long)(uintptr_t)t->mem, r->xoffset, r->yoffset, r->width, r->height, (void *)e,
                e ? e->pub.mirrored : -1, e ? e->uploaded : -1, e ? e->pub.gpu_owned : -1);
     if (e && e->pub.mirrored) {
+        // GPU-owned: whether the CPU had already rewritten the storage since the GPU's last write (cpu_took_back then
+        // uploads all of it, this write included); asked before this write stamps the pages
+        uint32_t now;
+        int newer = e->pub.gpu_owned && (e->cpu_newer || storage_rewritten(e, e->gpu_gen, &now) == 1);
         if (!storage_texels(t, &g, r, (uint8_t *)src, 1))
             log_limited(&n_bad, "WriteTexels: region outside level %u of texture %#llx", g.level, (unsigned long long)e->pub.addr);
         vk_guest_written((uintptr_t)t->mem, t->L.size);
-        if (e->pub.gpu_owned) image_texels(e, &g, r, (uint8_t *)src, 1);
-        else if (e->uploaded) e->wt_n++;
+        if (e->pub.gpu_owned) {
+            // written to the image too, so the storage is no newer than it was: this write must not make
+            // cpu_took_back upload the whole storage over a render it lacks; one the image missed set cpu_newer
+            int lost = !image_texels(e, &g, r, (uint8_t *)src, 1) && e->cpu_newer;
+            if (!newer && !lost) gpu_baseline(e);
+        } else if (e->uploaded) e->wt_n++;
     } else if (e) {
         image_texels(e, &g, r, (uint8_t *)src, 1);
     }
@@ -233,6 +261,7 @@ void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, co
 // there. The game may still read that storage with the CPU: TotK moves its generated grass maps between pools with
 // memcpy once the GPU is done, and the copy then carried zeros. Such a read writes the image back first.
 static void write_back(Tex *e) {
+    int ok = 1;
     const nvn_texdesc *d = &e->t.d;
     int linear = nvn_tex_is_linear(d), is3d = d->target == NVN_TEXTURE_TARGET_3D;
     uint32_t levels = linear ? 1 : e->pub.levels, layers = linear || is3d ? 1 : e->pub.layers;
@@ -247,9 +276,12 @@ static void write_back(Tex *e) {
             uint8_t *buf = malloc(g.img * (size_t)g.nz);
             if (!buf) rt_fatal("vk: out of memory for a texture write-back");
             if (image_texels(e, &g, &r, buf, 0)) storage_texels(&e->t, &g, &r, buf, 1);
+            else ok = 0;
             free(buf);
         }
+    if (!ok) return;   // a level not read back (no staging): still dirty, written back at the next read
     e->gpu_dirty = 0;
+    gpu_baseline(e);   // these storage writes are the image's own bytes, not a CPU write after the render
 }
 
 // Mirrored textures overlapping [addr, addr+size) that the GPU wrote since their last write-back.

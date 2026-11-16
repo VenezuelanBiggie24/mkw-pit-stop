@@ -44,6 +44,11 @@ typedef struct Tex {
     struct Tex *rel_prev, *rel_next;   // while released: the list of released entries, oldest first
     uint8_t sparse;               // a Vulkan sparse image whose tiles follow the game's MapVirtual (vk_sparse.c)
     uint64_t use;                 // MKW_GPU_GUARD: newest submission part that looked it up (vk_guard_note)
+    uint16_t pin;                 // held by a caller inside an upload or texel copy (tex_pin): eviction and the release
+                                  // sweeps skip it, since staging that runs short trims textures on this same thread
+                                  // (the lock is recursive) and the caller goes on using the entry afterwards
+    uint8_t cpu_newer;            // GPU-owned and mirrored: a WriteTexels reached the storage but not the image (no
+                                  // staging), so the storage is the newer content (make_fresh takes it back)
 } Tex;
 
 // A slot keeps what vk_texture_by_id resolved for it, so a draw binding skips the key lookup and the address chain: the
@@ -123,6 +128,18 @@ static inline void lock(void) {
 }
 static inline void unlock(void) { plat_rmutex_unlock(&tex_lock); }
 
+// An entry a caller keeps using across a call that may run short of staging (vk_texture_trim, evict_idle and the
+// release sweeps then free textures on this thread): those skip a pinned one.
+static inline void tex_pin(Tex *e) { e->pin++; }
+static inline void tex_unpin(Tex *e) { e->pin--; }
+
+// A mirrored image whose first upload was deferred for want of staging memory: never written, it holds whatever the
+// recycled memory held (other textures' texels), so a draw binds the zero stand-in instead until the upload is made.
+// Not once the GPU owns it (a render wrote it) or an alias copy filled it (uploaded).
+static inline int tex_unready(const Tex *e) {
+    return e->pub.mirrored && !e->pub.gpu_owned && !e->uploaded && e->up_pending;
+}
+
 static inline uint32_t umax(uint32_t a, uint32_t b) { return a > b ? a : b; }
 static inline uint32_t mip(uint32_t v, unsigned lv) { return umax(v >> lv, 1); }
 
@@ -141,6 +158,7 @@ void own_add(Tex *e);
 int owned_lower(uint64_t a);
 void rel_append(Tex *e);
 void rel_unlink(Tex *e);
+Tex *rel_oldest(void);   // the oldest released entry not pinned; NULL when none
 void sweep_released(void);
 
 // vk_tex_upload.c: uploads and the freshness checks
@@ -149,6 +167,7 @@ void make_fresh_snap(Tex *e);
 void expand_rgb(int format, const uint8_t *src, uint8_t *dst, size_t n);
 void shrink_rgb(int format, const uint8_t *src, uint8_t *dst, size_t n);
 int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now);
+void gpu_baseline(Tex *e);   // CPU writes to the storage from here on are newer than the image (cpu_took_back)
 extern uint64_t trace_addr;
 int tracing(uint64_t addr);
 

@@ -181,6 +181,10 @@ const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view) {
         s->cepoch = 0;
     }
     Tex *e = s->ce;
+    if (e) {   // seen before the check below, which may upload: staging that runs short trims what looks idle
+        if (e->sparse && e->seen != submit_epoch) vk_sparse_touch(e->pub.image);
+        e->seen = submit_epoch;
+    }
     // Bindings of one submit share one check, answered from the submit's write-watch snapshot (guest writes during a
     // replay race the GPU read on hardware too). After one check an entry is either uploaded or never uploads (not
     // mirrored, GPU-owned or no CPU layout), so a slot that checked its entry in this submit has nothing left to do.
@@ -194,9 +198,12 @@ const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view) {
     }
     if (view) *view = has_view ? s->cview : s->v;
     if (has_view) *has_view = view ? s->chas_view : s->has_view;
-    if (e) {
-        if (e->sparse && e->seen != submit_epoch) vk_sparse_touch(e->pub.image);
-        e->seen = submit_epoch;
+    if (e && tex_unready(e)) {   // never written (first upload deferred): the zero stand-in, not recycled memory
+        static volatile int32_t n_unready;
+        log_limited(&n_unready, "texture %#llx (%ux%u fmt %#x): first upload deferred for want of staging; zero "
+                    "stand-in until it is made", (unsigned long long)e->pub.addr, e->t.d.width, e->t.d.height,
+                    e->t.d.format);
+        return NULL;
     }
     if (!e) unresolved_note(id, s);
     else if (vk_guard_on()) {

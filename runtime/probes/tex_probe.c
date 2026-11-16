@@ -755,6 +755,65 @@ static int test_textures(pool_t *tpool, pool_t *phys) {
     return 0;
 }
 
+// Textures under memory pressure (vk_staging_fail_test makes staging buffers fail as on a console low on memory):
+// 1. an entry idle past the eviction threshold is rewritten by the CPU; its re-upload finds no staging, the relief
+//    trims idle textures on the same thread (recursive lock), and the entry must survive it (it was freed and handed
+//    out: one-frame garbage textures on the PS5).
+// 2. a new texture whose first upload is deferred binds the zero stand-in, not its never-written image, and its slot
+//    gives the image once the upload is made.
+// 3. a mirrored texture the GPU wrote takes the CPU's bytes again once the CPU rewrites its storage.
+static int test_pressure(pool_t *tpool) {
+    uint8_t *lin[1] = {0}, *lin2[1] = {0}, *lin3[1] = {0};
+    tex_t u = make_tex(tpool, 0xE0000, 0x25, 64, 64, 1, 9);
+    if (fill_storage(&u, lin)) return 1;
+    const VkTexImage *img = vk_texture_get(&u);
+    GCHECK(img && img->mirrored, "pressure: RGBA8 texture image");
+    for (int i = 0; i < 80; i++) vk_texture_new_submit();   // idle past EVICT_IDLE (64)
+    if (fill_storage(&u, lin)) return 1;
+    uint64_t up0, up1, re0, re1;
+    vk_texture_stats(NULL, &up0, &re0);
+    vk_staging_fail_test = 2;   // the staging pool and the default pool: then the texture trim
+    const VkTexImage *img2 = vk_texture_get(&u);
+    vk_staging_fail_test = 0;
+    // evicted, the next lookup makes a new entry: a first upload, not a re-upload (the freed one may share its address)
+    const VkTexImage *img3 = vk_texture_get(&u);
+    vk_texture_stats(NULL, &up1, &re1);
+    GCHECK(img2 == img && img3 == img && up1 == up0 && re1 == re0 + 1, "pressure: the entry being uploaded was evicted "
+           "by its own staging's trim (uploads +%llu, re-uploads +%llu)", (unsigned long long)(up1 - up0),
+           (unsigned long long)(re1 - re0));
+    if (read_back(&u, 0, lin, 1, "pressure: re-upload after a trim")) return 1;
+
+    tex_t w = make_tex(tpool, 0xF0000, 0x25, 64, 64, 1, 10);
+    if (fill_storage(&w, lin2)) return 1;
+    vk_texture_register(6, &w, NULL);
+    vk_texture_new_submit();
+    vk_staging_fail_test = 1 << 20;   // every attempt of this upload, relief included
+    const VkTexImage *s0 = vk_texture_by_id(6, NULL, NULL);
+    vk_staging_fail_test = 0;
+    GCHECK(!s0, "pressure: a texture whose first upload was deferred is bound as its uninitialised image");
+    __atomic_add_fetch(&gfx_counters.frames, 1, __ATOMIC_RELAXED);   // a deferred upload is tried again next frame
+    vk_texture_new_submit();
+    const VkTexImage *s1 = vk_texture_by_id(6, NULL, NULL);
+    GCHECK(s1 && s1->mirrored, "pressure: the slot does not give the image once its upload is made");
+    if (read_back(&w, 0, lin2, 1, "pressure: deferred first upload")) return 1;
+
+    tex_t x = make_tex(tpool, 0x100000 - 0x4000, 0x25, 64, 64, 1, 11);   // 16 KiB at the pool's end
+    if (fill_storage(&x, lin3)) return 1;
+    GCHECK(vk_texture_get(&x), "pressure: GPU-written texture image");
+    vk_texture_gpu_written(&x);
+    vk_texture_new_submit();
+    if (fill_storage(&x, lin3)) return 1;   // the CPU writes the storage after the render
+    vk_texture_new_submit();
+    vk_texture_get(&x);
+    if (read_back(&x, 0, lin3, 1, "pressure: CPU rewrite after a GPU write")) return 1;
+    g_gpu_checks += 5;
+    vk_texture_release(&u), vk_texture_release(&w), vk_texture_release(&x);
+    free(lin[0]), free(lin2[0]), free(lin3[0]);
+    printf("probe-vkmem: pressure: an idle texture survives the trim of its own re-upload's staging, a deferred first "
+           "upload binds the zero stand-in until made, a CPU rewrite after a GPU write is uploaded\n");
+    return 0;
+}
+
 static int test_gpu(void) {
     uint64_t heap = 0;
     GCHECK(mem_set_heap_size(16ull << 20, &heap) == 0 && heap, "SetHeapSize 16 MiB");
@@ -768,7 +827,7 @@ static int test_gpu(void) {
     if (test_import(&pool) || test_readfile(pool.mem + 0x38000) || test_virtual(&phys, &virt)) return 1;
     if (vk_mem_shadow_on() && test_merge(&pool)) return 1;
     GCHECK(vk_pool_init(&tpool), "vk_pool_init of the texture pool");
-    if (test_textures(&tpool, &phys) || test_region_copy(&tpool)) return 1;
+    if (test_textures(&tpool, &phys) || test_region_copy(&tpool) || test_pressure(&tpool)) return 1;
     const char *cap = cfg_get("MKW_SHADOW_SUBMIT");   // a measurement, off by default
     if (vk_mem_shadow_on() && cap && !strcmp(cap, "1") && test_capture(&pool)) return 1;
     VkMemStats st;

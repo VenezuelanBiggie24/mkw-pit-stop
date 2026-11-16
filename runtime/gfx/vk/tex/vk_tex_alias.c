@@ -129,6 +129,7 @@ Tex *entry_of(const tex_t *t) {
                     vk_mem_changed(e->pub.addr, e->t.L.size, 0, &e->wgen);
                     e->uploaded = 1;
                     e->pub.gpu_owned = 1;
+                    gpu_baseline(e);   // only a CPU write after this copy makes the storage the content again
                 }
             } else {
                 init_image(e, vk_upload_begin());
@@ -165,7 +166,7 @@ const VkTexImage *vk_texture_get(const tex_t *t) {
     if (!t || !t->mem) return NULL;
     lock();
     Tex *e = entry_of(t);
-    if (e) make_fresh(e), e->seen = submit_epoch;
+    if (e) make_fresh(e);   // marks it seen before it may upload (vk_texture_trim)
     if (e && vk_guard_on()) vk_guard_note(&e->use);
     unlock();
     return e ? &e->pub : NULL;
@@ -211,7 +212,7 @@ void vk_texture_gpu_written(const tex_t *t) {
         if (f > e->wr_fence) e->wr_fence = f;
         if (e->pub.mirrored) {
             e->gpu_dirty = 1;
-            storage_rewritten(e, 0, &e->gpu_gen);   // CPU writes up to here are older than this render
+            gpu_baseline(e);   // CPU writes up to here are older than this render
             e->gpu_seq = ++gpu_writes;
             e->gpu_fence = vk_exec_recording_fence();
             if (e->t.L.size <= WB_SMALL) __atomic_store_n(&small_pending, 1, __ATOMIC_RELEASE);

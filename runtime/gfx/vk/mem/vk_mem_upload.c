@@ -235,6 +235,18 @@ static void wait_and_collect_body(VkCtx *c) {
     cmd_give();
 }
 
+// --probe-vkmem: the next vk_staging_fail_test staging buffers fail as out of memory, so the relief paths (texture trim,
+// waits) run as on a console low on memory; 0 in a game run.
+int vk_staging_fail_test;
+static VkResult create_staging(VkCtx *c, const VkBufferCreateInfo *bi, const VmaAllocationCreateInfo *aci, VkBuffer *b,
+                               VmaAllocation *a, VmaAllocationInfo *info) {
+    if (__atomic_load_n(&vk_staging_fail_test, __ATOMIC_RELAXED) > 0) {
+        __atomic_sub_fetch(&vk_staging_fail_test, 1, __ATOMIC_RELAXED);
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    }
+    return vmaCreateBuffer(c->vma, bi, aci, b, a, info);
+}
+
 // NULL when out of memory and fatal is 0.
 static void *staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc, int fatal) {
     VkCtx *c = vk_ctx();
@@ -262,13 +274,13 @@ static void *staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc, int
     VmaAllocationInfo info;
     VkBuffer b;
     VmaAllocation a;
-    VkResult r = vmaCreateBuffer(c->vma, &bi, &aci, &b, &a, &info);
+    VkResult r = create_staging(c, &bi, &aci, &b, &a, &info);
     // Out of memory: the default pool (the staging pool's blocks may all be in use), then idle textures given back
     // (run-race6 stopped on a 341 KiB staging buffer with the heap full of them).
-    if (r != VK_SUCCESS && aci.pool) aci.pool = NULL, r = vmaCreateBuffer(c->vma, &bi, &aci, &b, &a, &info);
+    if (r != VK_SUCCESS && aci.pool) aci.pool = NULL, r = create_staging(c, &bi, &aci, &b, &a, &info);
     for (int round = 0; r != VK_SUCCESS && round < 4 && vk_texture_trim(bi.size * 2 + (8ull << 20)); round++) {
         vk_mem_collect();
-        r = vmaCreateBuffer(c->vma, &bi, &aci, &b, &a, &info);
+        r = create_staging(c, &bi, &aci, &b, &a, &info);
     }
     // Last: wait for the GPU up to the newest submission, its parts already sent (the one being recorded) and every
     // upload batch in flight, so finalized pools, released textures waiting for their fence (cap-race1 died with 454
@@ -276,7 +288,7 @@ static void *staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc, int
     // more.
     if (r != VK_SUCCESS && (retiring_count() || dead_pending() || ninflight)) {
         wait_and_collect(c);
-        r = vmaCreateBuffer(c->vma, &bi, &aci, &b, &a, &info);
+        r = create_staging(c, &bi, &aci, &b, &a, &info);
         rt_log("vk: staging of %llu bytes after waiting for the GPU and the upload batches: %s",
                (unsigned long long)size, r == VK_SUCCESS ? "made" : "still out of memory");
     }

@@ -488,13 +488,13 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         // Out of memory: released entries kept for a re-use go first, oldest first, then the retry (run115: 1 230
         // released entries held 596 MiB while new textures failed). Their images go to the deferred list; what the
         // GPU finished with is freed by vk_mem_collect.
-        for (int round = 0; can_fit && r == VK_ERROR_OUT_OF_DEVICE_MEMORY && rel_head && round < 8; round++) {
+        for (int round = 0; can_fit && r == VK_ERROR_OUT_OF_DEVICE_MEMORY && rel_oldest() && round < 8; round++) {
             VkDeviceSize freed = 0;
-            while (rel_head && freed < 2 * need + (16ull << 20)) {
+            for (Tex *rl; freed < 2 * need + (16ull << 20) && (rl = rel_oldest());) {
                 VmaAllocationInfo vi = {0};
-                if (rel_head->alloc) vmaGetAllocationInfo(c->vma, rel_head->alloc, &vi);
+                if (rl->alloc) vmaGetAllocationInfo(c->vma, rl->alloc, &vi);
                 freed += vi.size;
-                destroy_idle(rel_head);
+                destroy_idle(rl);
             }
             vk_mem_collect();
             r = vma_image(c, &ci, &ai, &img, &e->alloc);

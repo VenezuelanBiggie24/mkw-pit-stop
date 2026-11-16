@@ -311,6 +311,7 @@ VkCommandBuffer vk_upload_begin(void);
 void vk_upload_end(void);
 void *vk_staging(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc);
 void *vk_staging_try(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc);   // NULL when out of memory
+extern int vk_staging_fail_test;   // --probe-vkmem: that many staging buffers fail as out of memory (vk_mem_upload.c)
 // MKW_GPU_ONLY_RELEASE (vk_memory.c): a GPU-owned texture's storage in a CPU_NO_ACCESS pool released; whether a
 // packaged texture's storage overlaps such a release (its bytes lost: counted)
 void vk_mem_cna_gpu_texture(uint64_t lo, uint64_t size);
@@ -388,7 +389,8 @@ void vk_mem_shutdown(void);                        // before vk_shutdown: waits 
 
 // Textures. Images are keyed by storage GPU address plus descriptor and stay in VK_IMAGE_LAYOUT_GENERAL. A mirrored
 // texture (CPU-written pool storage, MNG tex_mirrored) is uploaded on first use and again when its storage pages were
-// written; once the GPU wrote it (vk_texture_gpu_written) the image is its content. A returned pointer stays valid
+// written; once the GPU wrote it (vk_texture_gpu_written) the image is its content until the CPU writes the storage
+// again (or a WriteTexels reaches the storage only), which makes the storage the content. A returned pointer stays valid
 // until the next call that may drop textures (release, pool fini); copy what outlives that.
 typedef struct {
     VkImage image;
@@ -459,11 +461,13 @@ VkSampler vk_sampler_point_by_id_locked(int id);
 uint32_t vk_texture_slots_gen(void);
 int vk_texture_checked(int id, uint32_t ep);   // unlocked: slot id's check in submit ep still stands (vk_tex_slots.c)
 // What vk_texture_by_id(id) returns can change only when this does: the slot is registered again, or a texture entry at
-// its storage address is created, dropped, released or taken back into use. Unlocked; read it before the lookup it
-// guards (a lookup may create an entry). 0 when the slot was never registered: nothing is kept under 0.
+// its storage address is created, dropped, released or taken back into use, or a deferred first upload is made (the
+// slot gave the zero stand-in before). Unlocked; read it before the lookup it guards (a lookup may create an entry).
+// 0 when the slot was never registered: nothing is kept under 0.
 uint64_t vk_texture_slot_token(int id);
 uint32_t vk_sampler_gen(void);                      // changes whenever a sampler slot is registered
 void vk_texture_gpu_written(const tex_t *t);        // rendered or copied into by the GPU: no re-upload from storage
+                                                    // until the CPU writes it after this
 // runtime/gfx/cap: of the live image of t, if any (none is made): VK_TEXCAP_GPU its content is what the GPU wrote,
 // VK_TEXCAP_RECENT a draw sampled it within the last `recent` submissions, VK_TEXCAP_SPARSE it is a Vulkan sparse image
 // (a sparse NVN texture may be a whole image: depth formats in RADV).
