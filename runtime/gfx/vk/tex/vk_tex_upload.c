@@ -734,6 +734,10 @@ static void inline_stg_room(VkDeviceSize need) {
 // blocked the game threads that register textures (16 MiB copies at loading). Probes and the readback keep it.
 // A BC destination takes whole 4x4 blocks: dx and dy multiples of 4, and w and h too unless the region reaches the
 // level's edge; a region that ends inside a block would write the whole block, clamped texels over its neighbours.
+// A region that reaches the source level's own edge is first widened to whole source blocks, as the console's copy
+// of a compressed texture moves whole blocks: MKW copies whole 509x1020, 1024x1023, 512x510 ASTC 8x8 textures into its
+// 8192x8192 terrain arrays, and refused for their last partial block those copies were skipped (42 in the first
+// minute of a race, texcopy 17/11/2026) and the tiles kept what they held, the error colour of an earlier decode.
 // Recorded in the replay's command buffer at the copy's place (vk_exec_inline_begin), not in the upload batch: the
 // batch runs before the whole part being recorded, so a decode there went ahead of the commands recorded before it (a
 // copy into the same destination through vkCmdCopyImage, a draw that sampled it) and was undone by an earlier copy or
@@ -748,6 +752,13 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
         return 0;
     if (bc7) {   // a BC destination: whole blocks
         uint32_t lw = mip(dsti->width, dlevel), lh = mip(dsti->height, dlevel);
+        uint32_t sw = mip(src->d.width, level), sh = mip(src->d.height, level);
+        if (dx >= 0 && dy >= 0 && (uint32_t)dx < lw && (uint32_t)dy < lh) {   // the source's last partial block, whole
+            if (x + w == sw && w % f.astc_bw) w = (w + f.astc_bw - 1) / f.astc_bw * f.astc_bw;
+            if (y + h == sh && h % f.astc_bh) h = (h + f.astc_bh - 1) / f.astc_bh * f.astc_bh;
+            if (w > lw - (uint32_t)dx) w = lw - (uint32_t)dx;
+            if (h > lh - (uint32_t)dy) h = lh - (uint32_t)dy;
+        }
         if (dx < 0 || dy < 0 || dx % 4 || dy % 4 || (w % 4 && (uint32_t)dx + w != lw) || (h % 4 && (uint32_t)dy + h != lh))
             return 0;
     }

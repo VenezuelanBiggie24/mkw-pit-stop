@@ -1070,6 +1070,16 @@ static int test_astc_inline(pool_t *tp, pool_t *phys) {
     free(lin);
     GCHECK(vk_texture_astc_copy(&src, 0, 0, 1, 0, 0, 32, 32, di, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 0, 64, 1) ==
            VK_TEX_COPY_BATCH, "the reference ASTC copy outside a replay");
+    // A whole 30x30 source (its last block column and row partial) into the BC7 image at 128,64, away from its edge:
+    // copied as whole source blocks, 32x32 (the terrain arrays' 509x1020 copies were refused and skipped before).
+    tex_t odd = make_tex(tp, 0x70000, 0x79, 30, 30, 1, 29);
+    GCHECK(!nvn_deswizzle_geom(&odd.d, 0, 0, &rb, &rows, &sl, &base, &th, &td, &bpb), "ASTC 4x4 30x30 geometry");
+    lin = malloc((size_t)rb * rows);
+    for (size_t k = 0; k < (size_t)rb * rows / 16; k++) void_block(lin + 16 * k, 0x2000, 0x9000, 0xD000, 0xFFFF, 0);
+    ref_swizzle(lin, odd.mem + base, rb, rows, 1, th, td);
+    free(lin);
+    GCHECK(vk_texture_astc_copy(&odd, 0, 0, 1, 0, 0, 30, 30, di, VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 128, 64, 1) ==
+           VK_TEX_COPY_BATCH, "a whole 30x30 ASTC source into BC7 at 128,64 refused (its last partial block)");
     vk_upload_flush(1);
     uint64_t c0[VK_ASTC_COPY_N], c1[VK_ASTC_COPY_N], c2[VK_ASTC_COPY_N];
     vk_texture_astc_copy_counts(c0);
@@ -1088,10 +1098,14 @@ static int test_astc_inline(pool_t *tp, pool_t *phys) {
     uint32_t bad[2] = {0, 0};
     for (uint32_t by = 0; by < 16; by++)
         for (uint32_t bx = 0; bx < 32; bx++) bad[by >= 8] += memcmp(blk + (by * 64 + bx) * 16, ref, 16) != 0;
+    uint32_t odd_bad = 0;
+    for (uint32_t by = 16; by < 24; by++)
+        for (uint32_t bx = 32; bx < 40; bx++) odd_bad += memcmp(blk + (by * 64 + bx) * 16, ref, 16) != 0;
     int ref_differs = memcmp(blk + (16 * 64 + 40) * 16, ref, 16) != 0;   // a block no copy wrote
     free(blk);
-    vk_texture_release(&src), vk_texture_release(&dst);
+    vk_texture_release(&src), vk_texture_release(&dst), vk_texture_release(&odd);
     GCHECK(ref_differs, "the reference block equals a block no copy wrote");
+    GCHECK(!odd_bad, "the whole 30x30 source copied into BC7: %u of 64 blocks are not the reference's", odd_bad);
     GCHECK(c1[VK_ASTC_COPY_INLINE] - c0[VK_ASTC_COPY_INLINE] == 4 && c1[VK_ASTC_COPY_PART_WAITS] > c0[VK_ASTC_COPY_PART_WAITS],
            "serial replay: %llu inline copies (want 4), %llu part waits (want some)",
            (unsigned long long)(c1[VK_ASTC_COPY_INLINE] - c0[VK_ASTC_COPY_INLINE]),
@@ -1102,9 +1116,10 @@ static int test_astc_inline(pool_t *tp, pool_t *phys) {
            (unsigned long long)(c2[VK_ASTC_COPY_INLINE] - c1[VK_ASTC_COPY_INLINE]),
            (unsigned long long)(c2[VK_ASTC_COPY_CHUNK_HELD] - c1[VK_ASTC_COPY_CHUNK_HELD]));
     GCHECK(!bad[1], "chunked replay: %u of 256 blocks of the inline copies are not the reference's", bad[1]);
-    g_gpu_checks += 5;
+    g_gpu_checks += 7;
     printf("probe-vkmem: inline ASTC copy: 4 copies decoded in the replay's command buffer serially (%llu part waits for "
-           "the staging cap) and 4 in chunks (%llu held for the submission), every block the upload batch's\n",
+           "the staging cap) and 4 in chunks (%llu held for the submission), every block the upload batch's; a whole "
+           "30x30 source into BC7 copied as whole blocks\n",
            (unsigned long long)(c1[VK_ASTC_COPY_PART_WAITS] - c0[VK_ASTC_COPY_PART_WAITS]),
            (unsigned long long)(c2[VK_ASTC_COPY_CHUNK_HELD] - c1[VK_ASTC_COPY_CHUNK_HELD]));
     return 0;
