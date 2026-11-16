@@ -6,6 +6,9 @@ end's regression test runs over captures instead (`tools/test/`).
 | File | What it checks |
 |---|---|
 | `test_setup.py` | The setup's command lines and files from folders with spaces and accents: the compiler's path on its way to the shader step (issue #29), the resume without `--source` after an update, the update's version order and its clean-up of `*.old` files |
+| `test_nup.py` | Clean-room Switch 2 `.nup` reader (`tools/prepare/nup.py`): raw and zstd entries, base + update layering, path traversal rejection, TOC SHA-256 verification, and MKW 1.0.0 build ID check |
+| `test_ps5_recv.py` | PS5 placeholder TCP receiver (`runtime/platform/ps5_recv.c`) + `tools/ps5/send_ps5.py` client: path traversal rejection, bad SHA-256 rejection, atomic staging under title folder, incremental `STAT_BATCH` manifest deltas, and listener close on completion |
+| `test_ps5_builder.py` | PS5 release game-content scan (`release_ps5.py` including placeholder `eboot.bin` symbol check) and pure-Python ELF64/`ar` symbol readers (`prepare_ps5.py`) |
 | `test_defaults.py` | The memory caps a player gets with nothing set (`runtime/gfx/vk/device/vk_defaults.c`), built alone and checked on the GPUs players reported: the Radeon 660M keeps its measured caps, a large discrete GPU is not held to them (issue #31) |
 | `test_layout.py` | Legacy desktop layouts, interrupted or mismatched generation, synthetic module placement, and stack/alias overlap in either order |
 | `test_ps5_mixed.py`, `ps5_mixed_host.c` | Mixed guest permissions and partial decommit over a Linux model of PS5 backing, with synthetic AArch64 loads, stores and atomics lowered to native x86 |

@@ -59,13 +59,44 @@ static struct {
     Page shot_page;
     int shot_tab;
     char exe_dir[1024];
-    char source[1024];              // the player's copy, from the folder dialog
+    char source[1024];              // the player's copy, from the folder or .nup dialog
     int link_romfs;                 // 0 copy it into the game folder, 1 use it where it is
     int tools;                      // the setup tools are there
+    int ps5_tools;                  // the PS5 link bundle & prepare_ps5.py are there
+    char ps5_ip[64];                // last PS5 console IP entered
     char shortcut_note[1200];       // what the shortcut button did
     char updated[96];               // the release the previous run installed (launcher_update.h)
     int relaunch;                   // an update is in place: start the new program when the window is gone
 } L = {};
+
+static bool is_nup_source(const char *path) {
+    size_t n = path ? strlen(path) : 0;
+    return n >= 4 && !SDL_strcasecmp(path + n - 4, ".nup");
+}
+
+static void load_ps5_ip(void) {
+    char p[1100];
+    snprintf(p, sizeof p, "%s/ps5-ip.txt", L.exe_dir);
+    FILE *f = fopen(p, "r");
+    if (!f) return;
+    if (fgets(L.ps5_ip, (int)sizeof L.ps5_ip, f)) {
+        size_t n = strlen(L.ps5_ip);
+        while (n && (L.ps5_ip[n - 1] == '\n' || L.ps5_ip[n - 1] == '\r' || L.ps5_ip[n - 1] == ' '))
+            L.ps5_ip[--n] = 0;
+    }
+    fclose(f);
+}
+
+static void save_ps5_ip(void) {
+    if (!L.ps5_ip[0]) return;
+    char p[1100];
+    snprintf(p, sizeof p, "%s/ps5-ip.txt", L.exe_dir);
+    FILE *f = fopen(p, "w");
+    if (f) {
+        fprintf(f, "%s\n", L.ps5_ip);
+        fclose(f);
+    }
+}
 
 static void exe_dir(char *out, size_t cap) {
     out[0] = 0;
@@ -249,18 +280,27 @@ static void page_settings(float w, float h) {
 static const UiTextId kStepText[SETUP_STEPS] = {UI_LAUNCH_STEP_CHECK, UI_LAUNCH_STEP_EXEFS, UI_LAUNCH_STEP_ROMFS,
                                                 UI_LAUNCH_STEP_GENERATE, UI_LAUNCH_STEP_COMPILE, UI_LAUNCH_STEP_SHADERS,
                                                 UI_LAUNCH_STEP_WARM, UI_LAUNCH_STEP_CLEANUP};
+static const UiTextId kPs5StepText[SETUP_PS5_STEPS] = {
+    UI_LAUNCH_STEP_CHECK,   UI_LAUNCH_STEP_NUP,  UI_LAUNCH_STEP_EXEFS,  UI_LAUNCH_STEP_ROMFS,
+    UI_LAUNCH_STEP_GENERATE, UI_LAUNCH_STEP_COMPILE, UI_LAUNCH_STEP_LINK, UI_LAUNCH_STEP_SHADERS,
+    UI_LAUNCH_STEP_DEPLOY};
 
 static void SDLCALL picked(void *, const char *const *files, int) {
-    if (files && files[0]) snprintf(L.source, sizeof L.source, "%s", files[0]);
+    if (files && files[0]) {
+        snprintf(L.source, sizeof L.source, "%s", files[0]);
+        if (is_nup_source(L.source)) L.link_romfs = 0;
+    }
 }
 
 static void setup_progress(const SetupState &st) {
-    for (int i = 0; i < SETUP_STEPS; i++) {
+    const UiTextId *texts = st.mode == SETUP_MODE_PS5 ? kPs5StepText : kStepText;
+    int count = st.step_count > 0 ? st.step_count : SETUP_STEPS;
+    for (int i = 0; i < count; i++) {
         bool now = st.running && st.step == i;
         ImVec4 col = st.done[i] ? ImVec4(0.55f, 0.85f, 0.6f, 1) : now ? ImVec4(0.93f, 0.76f, 0.33f, 1)
                                                                        : ImVec4(0.62f, 0.64f, 0.58f, 1);
         const char *mark = st.done[i] == 2 ? menu_text(UI_LAUNCH_STEP_KEPT) : st.done[i] ? "OK" : now ? ">" : "";
-        ImGui::TextColored(col, "%-3s %s", mark, menu_text(kStepText[i]));
+        ImGui::TextColored(col, "%-3s %s", mark, menu_text(texts[i]));
         if (now) {
             ImGui::SameLine();
             if (st.total > 0) {
@@ -301,14 +341,41 @@ static void page_files(float w, float h) {
         ImGui::SameLine();
         ImGui::TextUnformatted(L.source[0] ? L.source : "-");
         if (ImGui::Button(menu_text(UI_LAUNCH_PICK))) SDL_ShowOpenFolderDialog(picked, nullptr, L.win, nullptr, false);
+        ImGui::SameLine();
+        if (ImGui::Button(menu_text(UI_LAUNCH_PICK_NUP))) {
+            static const SDL_DialogFileFilter nup_filter[] = {{"Switch 2 package", "nup"}};
+            SDL_ShowOpenFileDialog(picked, nullptr, L.win, nup_filter, 1, nullptr, false);
+        }
+        bool is_nup = is_nup_source(L.source);
+        if (is_nup) L.link_romfs = 0;
         ImGui::TextDisabled("%s", menu_text(UI_LAUNCH_ROMFS_MODE));
         ImGui::RadioButton(menu_text(UI_LAUNCH_ROMFS_COPY), &L.link_romfs, 0);
         ImGui::SameLine();
+        ImGui::BeginDisabled(is_nup);
         ImGui::RadioButton(menu_text(UI_LAUNCH_ROMFS_LINK), &L.link_romfs, 1);
+        ImGui::EndDisabled();
         ImGui::BeginDisabled(!L.source[0]);
         if (ImGui::Button(menu_text(ready ? UI_LAUNCH_SETUP_AGAIN : UI_LAUNCH_SETUP)))
             setup_start(L.exe_dir, L.source, L.link_romfs);
         ImGui::EndDisabled();
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextDisabled("%s", menu_text(UI_LAUNCH_PS5_HEADING));
+        ImGui::TextWrapped("%s", menu_text(UI_LAUNCH_PS5_HELP));
+        if (!L.ps5_tools) {
+            ImGui::TextDisabled("%s", menu_text(UI_LAUNCH_PS5_NO_TOOLS));
+        } else {
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.42f);
+            ImGui::InputTextWithHint("##ps5_ip", "192.168.1.50", L.ps5_ip, sizeof L.ps5_ip);
+            ImGui::SameLine();
+            ImGui::TextUnformatted(menu_text(UI_LAUNCH_PS5_IP));
+            ImGui::BeginDisabled(!L.source[0] || !L.ps5_ip[0]);
+            if (ImGui::Button(menu_text(UI_LAUNCH_PS5_BUILD))) {
+                save_ps5_ip();
+                setup_ps5_start(L.exe_dir, L.source, L.ps5_ip);
+            }
+            ImGui::EndDisabled();
+        }
         ImGui::EndDisabled();
         if (st.running) {
             ImGui::SameLine();
@@ -317,10 +384,13 @@ static void page_files(float w, float h) {
         if (st.running || st.finished) {
             ImGui::Spacing();
             setup_progress(st);
-            if (st.finished > 0) ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.6f, 1), "%s", menu_text(UI_LAUNCH_SETUP_DONE));
+            bool ps5 = st.mode == SETUP_MODE_PS5;
+            if (st.finished > 0)
+                ImGui::TextColored(ImVec4(0.55f, 0.85f, 0.6f, 1), "%s",
+                                   menu_text(ps5 ? UI_LAUNCH_PS5_DONE : UI_LAUNCH_SETUP_DONE));
             if (st.finished < 0) {
                 char msg[700];
-                snprintf(msg, sizeof msg, menu_text(UI_LAUNCH_SETUP_FAILED), st.error);
+                snprintf(msg, sizeof msg, menu_text(ps5 ? UI_LAUNCH_PS5_FAILED : UI_LAUNCH_SETUP_FAILED), st.error);
                 ImGui::PushTextWrapPos(0);
                 ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.35f, 1), "%s", msg);
                 ImGui::PopTextWrapPos();
@@ -397,6 +467,8 @@ extern "C" int launcher_run(void) {
         }
     }
     L.tools = setup_available(L.exe_dir);
+    L.ps5_tools = setup_ps5_available(L.exe_dir);
+    load_ps5_ip();
     if (!rt_game_present() && !L.shot_at) L.page = PAGE_FILES;
     char state[1100];
     snprintf(state, sizeof state, "%s/setup-state.json", L.exe_dir);

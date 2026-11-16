@@ -25,6 +25,7 @@
 #include "hacks.h"
 #include "hangwatch.h"
 #include "nvn_api.h"
+#include "ui/menu/boot_screen.h"
 #include "ui/menu/menu.h"
 #include "vk.h"
 #include "platform/platform.h"
@@ -609,7 +610,8 @@ void gfx_fit_rect(int cw, int ch, int dw, int dh, int out[4]) {
     out[0] = (dw - out[2]) / 2, out[1] = (dh - out[3]) / 2;
 }
 
-static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4], int defer) {
+static void present_image_ex(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4], int defer,
+                             int allow_blank_overlay) {
     int general = layout == VK_IMAGE_LAYOUT_GENERAL;
     gfx_window_start();
     VkCtx *c = vk_ctx();
@@ -661,9 +663,9 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     const char *menu_shot = NULL;
     MenuTarget mt = {c->instance, c->phys, c->device, c->gfx_family, c->gfx_queue, g_sc_fmt, g_sc_ext.width,
                      g_sc_ext.height, cw, ch, g_scaler};
-    int overlay = src && g_sc_view[idx] &&
+    int overlay = (src || allow_blank_overlay) && g_sc_view[idx] &&
                   menu_overlay_frame(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED), &mt, &menu_shot);
-    int cap = src && (g_capture || menu_shot) && ensure_capture_buffer();
+    int cap = (src || (allow_blank_overlay && overlay)) && (g_capture || menu_shot) && ensure_capture_buffer();
     int thumb = src && g_th_n && ensure_thumbs();
 
     VkCommandBuffer cb = g_cb[slot];
@@ -784,12 +786,45 @@ out:
     plat_rmutex_unlock(&g_pl);
 }
 
+// The game's first image ends the boot screen (ui/menu/boot_screen.cpp): under g_pl, so a boot screen present that
+// already holds it finishes first and none starts after.
+static int g_game_presented;
+
+static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4], int defer) {
+    if (!__atomic_load_n(&g_game_presented, __ATOMIC_ACQUIRE)) {
+        plat_rmutex_lock(&g_pl);
+        if (!g_game_presented) {
+            boot_screen_game_presenting();
+            __atomic_store_n(&g_game_presented, 1, __ATOMIC_RELEASE);
+        }
+        plat_rmutex_unlock(&g_pl);
+    }
+    present_image_ex(src, layout, fmt, w, h, crop, defer, 0);
+}
+
 // The window at boot, black until the game's first image: a first frame that waits for its pipelines left players with
-// no window at all, only mkw.exe in the Task Manager (issue #36). Not with MKW_GPU=null.
+// no window at all, only mkw.exe in the Task Manager (issue #36). Not with MKW_GPU=null, nor while the boot screen
+// shows (its frames already keep the window alive; a black one in between would flash).
 void gfx_window_early(void) {
     const char *gpu = cfg_get("MKW_GPU");
     if (gpu && !strcmp(gpu, "null")) return;
-    present_image(VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, VK_FORMAT_UNDEFINED, 0, 0, NULL, 0);
+    if (boot_screen_active()) return;
+    present_image_ex(VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, VK_FORMAT_UNDEFINED, 0, 0, NULL, 0, 0);
+}
+
+int gfx_window_boot_present(void) {
+    gfx_window_start();   // before g_pl: its first call takes g_start_lock, then g_pl
+    plat_rmutex_lock(&g_pl);
+    int on = !g_game_presented;
+    if (on) present_image_ex(VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, VK_FORMAT_UNDEFINED, 0, 0, NULL, 0, 1);
+    plat_rmutex_unlock(&g_pl);
+    return on;
+}
+
+void gfx_window_placeholder_present(void) {
+    const char *gpu = cfg_get("MKW_GPU");
+    if (gpu && !strcmp(gpu, "null")) return;
+    present_image_ex(VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED, VK_FORMAT_UNDEFINED, 0, 0, NULL, 0, 1);
 }
 
 void vk_present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w, int h, const int crop[4]) {

@@ -489,6 +489,41 @@ int plat_fs_list(const char *dir, int (*cb)(const char *name, int kind, uint64_t
     return PLAT_FS_OK;
 }
 
+// The kind from d_type, no lstat: the RomFS index's 205,660 lstat calls cost 29-31 s at every boot (~145 us each,
+// a full path lookup per file). An entry the file system leaves DT_UNKNOWN is stat'ed as plat_fs_list does.
+int plat_fs_list_names(const char *dir, int (*cb)(const char *name, int kind, uint64_t size, void *ctx), void *ctx) {
+    char buf[PLAT_PATH_MAX];
+    dir = posix_path(dir, buf);
+    if (!dir) return PLAT_FS_ERROR;
+    DIR *d = opendir(dir);
+    if (!d) {
+        fprintf(stderr, "plat_fs_list_names: opendir(%s) failed: errno=%d (%s)\n", dir, errno, strerror(errno));
+        return fs_err_from_errno(errno);
+    }
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        int kind;
+        uint64_t size = PLAT_FS_SIZE_UNKNOWN;
+        if (e->d_type == DT_DIR) kind = PLAT_FS_DIR;
+        else if (e->d_type == DT_LNK) kind = PLAT_FS_LINK;
+        else if (e->d_type == DT_REG) kind = PLAT_FS_FILE;
+        else if (e->d_type != DT_UNKNOWN) continue;   // sockets, devices, pipes: never game files
+        else {
+            char full[PLAT_PATH_MAX];
+            struct stat st;
+            if (snprintf(full, sizeof full, "%s/%s", dir, e->d_name) >= (int)sizeof full || lstat(full, &st) != 0)
+                continue;
+            kind = S_ISLNK(st.st_mode) ? PLAT_FS_LINK : S_ISDIR(st.st_mode) ? PLAT_FS_DIR : PLAT_FS_FILE;
+            size = kind == PLAT_FS_FILE ? (uint64_t)st.st_size : 0;
+        }
+        if (kind != PLAT_FS_FILE) size = 0;
+        if (!cb(e->d_name, kind, size, ctx)) break;
+    }
+    closedir(d);
+    return PLAT_FS_OK;
+}
+
 PlatFile *plat_fs_open(const char *path, int write, int *err) {
     char buf[PLAT_PATH_MAX];
     path = posix_path(path, buf);

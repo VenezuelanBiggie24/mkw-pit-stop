@@ -513,3 +513,67 @@ PitResult pit_frame(float width, float height, const InputMenuPad &pad, int test
     ImGui::PopStyleVar();
     return result;
 }
+
+// The boot screen's page: Pit Stop's backdrop and heading over an opaque base (no game image behind it yet), one row
+// per boot task styled as Pit Stop's option rows, the running one in the focus colour with its bar along the bottom.
+void pit_loading_frame(float width, float height, const char *title, const PitLoadingRow *rows, int n,
+                       const char *foot) {
+    Geometry g = geometry(width, height);
+    const float s = g.scale;
+    ImGui::SetNextWindowPos(ImVec2(0, 0));
+    ImGui::SetNextWindowSize(ImVec2(width, height));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("##pit_loading", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoNav |
+        ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImFont *font = ImGui::GetFont();
+    dl->AddRectFilled(ImVec2(0, 0), ImVec2(width, height), IM_COL32(6, 15, 32, 255));
+    backdrop(width, height, g);
+
+    dl->AddText(font, 22 * s, ImVec2(g.left + 60 * s, g.top - 1 * s), kPitIce, "MARIO KART WORLD");
+    ImVec2 pos(g.left, g.top + 31 * s);
+    ImFont *large = heading_font ? heading_font : font;
+    text_fit(dl, ImVec2(pos.x + 4 * s, pos.y + 5 * s), g.right - pos.x - 4 * s, 62 * s, IM_COL32(28, 66, 119, 255),
+             title, large);
+    text_fit(dl, pos, g.right - pos.x - 4 * s, 62 * s, kPitWhite, title, large);
+
+    const double t = ImGui::GetTime();
+    const float r = 7 * s, pad = 20 * s, fs = 30 * s, status_fs = 23 * s;
+    for (int i = 0; i < n; ++i) {
+        const PitLoadingRow &row = rows[i];
+        bool run = row.state == 1, done = row.state == 2;
+        ImVec2 p(g.left, g.list_top + i * (g.row_h + g.gap)), end(g.left + g.list_w, p.y + g.row_h);
+        dl->AddRectFilled(ImVec2(p.x, p.y + 3 * s), ImVec2(end.x, end.y + 3 * s),
+                          run ? IM_COL32(171, 117, 25, 255) : IM_COL32(5, 15, 29, 255), r);
+        dl->AddRectFilled(p, end, run ? kPitFocus : kPitNavy, r);
+        dl->AddRect(p, end, run ? kPitFocus : kPitLine, r);
+        dl->AddRectFilled(p, ImVec2(p.x + 6 * s, end.y), run ? IM_COL32(255, 248, 212, 255) : done ? kPitIce : kPitLine,
+                          r, ImDrawFlags_RoundCornersLeft);
+        ImU32 ink = run ? kPitInk : done ? kPitWhite : IM_COL32(150, 165, 190, 255);
+        float center = (p.y + end.y) * 0.5f;
+        float status_w = row.status ? font->CalcTextSizeA(status_fs, FLT_MAX, 0, row.status).x : 0;
+        text_fit(dl, ImVec2(p.x + pad + 6 * s, center - fs * 0.5f), end.x - p.x - 3 * pad - status_w, fs, ink,
+                 row.label, font);
+        if (row.status)
+            dl->AddText(font, status_fs, ImVec2(end.x - pad - status_w, center - status_fs * 0.5f),
+                        run ? kPitInk : done ? kPitIce : IM_COL32(150, 165, 190, 255), row.status);
+        if (run) {   // the bar along the row's bottom edge, inside its border
+            float x0 = p.x + 6 * s, x1 = end.x - r, y0 = end.y - 7 * s, y1 = end.y - 3 * s, span = x1 - x0;
+            dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), IM_COL32(171, 117, 25, 255), 2 * s);
+            if (row.progress >= 0) {
+                dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + span * ImClamp(row.progress, 0.0f, 1.0f), y1), kPitInk,
+                                  2 * s);
+            } else {   // the total is unknown: a segment a quarter as wide sweeps across every 1.6 s
+                float phase = (float)fmod(t / 1.6, 1.0), seg = span * 0.25f;
+                float a = x0 + (span + seg) * phase - seg;
+                dl->AddRectFilled(ImVec2(ImMax(a, x0), y0), ImVec2(ImMin(a + seg, x1), y1), kPitInk, 2 * s);
+            }
+        }
+    }
+
+    dl->AddLine(ImVec2(g.left, g.foot), ImVec2(g.right, g.foot), kPitLine, 2 * s);
+    if (foot && *foot) dl->AddText(font, 21 * s, ImVec2(g.left, g.foot + 25 * s), kPitIce, foot);
+    ImGui::End();
+    ImGui::PopStyleVar();
+}

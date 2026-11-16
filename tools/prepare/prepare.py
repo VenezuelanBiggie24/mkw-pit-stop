@@ -54,6 +54,7 @@ from machine import (
     shader_jobs,
     tool_env,
 )
+from nup import NupError, NupReader, is_nup
 
 PREP_VERSION = 1  # bump when a step's output changes meaning: every step runs again
 MAIN_BUILD_ID = "9e244438c3d8ef1c"  # MKW 1.0.0 exefs/main, the first 8 bytes of the NSO build id at 0x40
@@ -89,6 +90,13 @@ def count_files(top: Path, enough: int) -> int:
 
 
 def check(src: Path) -> tuple[Path, Path]:
+    if is_nup(src):
+        try:
+            with NupReader(src) as reader:
+                reader.check_mkw_100(MAIN_BUILD_ID, int(ROMFS_FILES * ROMFS_MARGIN))
+        except NupError as e:
+            raise Failed(str(e)) from None
+        return src, src
     exefs, romfs = find_game(src)
     head = (exefs / "main").read_bytes()[:0x48]
     if head[:4] != b"NSO0":
@@ -339,14 +347,23 @@ def main() -> None:
         emit("step", "check")
         cc = args.cc.split() if args.cc else default_cc(game, args.target)
         exefs_src, romfs_src = check(src)
+        from_nup = is_nup(src)
+        if from_nup:
+            args.romfs = "copy"
+            state["romfs_mode"] = "copy"
+            with NupReader(src) as r:
+                src_id = f"nup:{r.toc_sha256.hex()}"
+        else:
+            src_id = str(exefs_src)
         romfs = game / "romfs" if args.romfs == "copy" else romfs_src
+        romfs_id = src_id if from_nup else str(romfs_src)
         keys = {
-            "exefs": str(exefs_src),
-            "romfs": f"{args.romfs} {romfs_src}",
-            "generate": f"{build.game_id()} {exefs_src}",
-            "compile": f"{build.game_id()} {exefs_src} {args.target}",
-            "shaders": f"{exefs_src} {romfs_src} {hashlib.sha256((ROOT / 'tools/shaders/translate.py').read_bytes()).hexdigest()[:16]}",
-            "warm": f"{build.game_id()} {romfs_src}",
+            "exefs": src_id,
+            "romfs": f"{args.romfs} {romfs_id}",
+            "generate": f"{build.game_id()} {src_id}",
+            "compile": f"{build.game_id()} {src_id} {args.target}",
+            "shaders": f"{src_id} {romfs_id} {hashlib.sha256((ROOT / 'tools/shaders/translate.py').read_bytes()).hexdigest()[:16]}",
+            "warm": f"{build.game_id()} {romfs_id}",
         }
         for step in STEPS[1:]:
             key = keys.get(step, "")
@@ -355,9 +372,17 @@ def main() -> None:
                 continue
             emit("step", step)
             if step == "exefs":
-                copy_tree(exefs_src, game / "exefs", sum(1 for p in exefs_src.iterdir() if p.is_file()))
+                if from_nup:
+                    with NupReader(src) as reader:
+                        reader.unpack_tree("exefs", game / "exefs", progress_cb=lambda d, t: emit("progress", d, t))
+                else:
+                    copy_tree(exefs_src, game / "exefs", sum(1 for p in exefs_src.iterdir() if p.is_file()))
             elif step == "romfs":
-                if args.romfs == "copy":
+                if from_nup:
+                    with NupReader(src) as reader:
+                        reader.unpack_tree("romfs", romfs, progress_cb=lambda d, t: emit("progress", d, t))
+                    ini_set(game / "mkw.ini", "romfs", "romfs")
+                elif args.romfs == "copy":
                     copy_tree(romfs_src, romfs, ROMFS_FILES)
                     ini_set(game / "mkw.ini", "romfs", "romfs")
                 else:

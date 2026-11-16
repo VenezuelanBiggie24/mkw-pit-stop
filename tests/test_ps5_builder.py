@@ -1,0 +1,96 @@
+"""Tests for PS5 Pit Stop builder & release checks (release_ps5.py, prepare_ps5.py)."""
+
+from __future__ import annotations
+
+import struct
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+for p in (ROOT / "tools/ps5", ROOT / "tools/prepare"):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+import prepare_ps5  # noqa: E402
+import release_ps5  # noqa: E402
+
+
+def _make_elf64_with_symtab(syms: list[tuple[str, int]], sh_flags: int = 0x4) -> bytes:
+    """Build a minimal valid little-endian ELF64 binary with .shstrtab, .symtab, .strtab, and .text."""
+    shstrtab = b"\x00.text\x00.symtab\x00.strtab\x00.shstrtab\x00"
+    strtab = bytearray(b"\x00")
+    symtab = bytearray(struct.pack("<IBBHQQ", 0, 0, 0, 0, 0, 0))
+    for name, val in syms:
+        off = len(strtab)
+        strtab.extend(name.encode() + b"\x00")
+        # STB_GLOBAL=1, STT_FUNC=2 -> st_info = (1<<4)|2 = 0x12
+        symtab.extend(struct.pack("<IBBHQQ", off, 0x12, 0, 1, val, 16))
+
+    ehdr_size = 64
+    text_off = ehdr_size
+    text = b"\xc3" + b"\x00" * 15
+    sym_off = text_off + len(text)
+    str_off = sym_off + len(symtab)
+    shstr_off = str_off + len(strtab)
+    pad = (-shstr_off - len(shstrtab)) & 7
+    shoff = shstr_off + len(shstrtab) + pad
+
+    ehdr = struct.pack(
+        "<16sHHIQQQIHHHHHH",
+        b"\x7fELF\x02\x01\x01" + b"\x00" * 9,
+        3,       # ET_DYN
+        62,      # EM_X86_64
+        1,
+        0, 0, shoff, 0, ehdr_size, 0, 0, 64, 5, 4,
+    )
+    sh_null = struct.pack("<IIQQQQIIQQ", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    sh_text = struct.pack("<IIQQQQIIQQ", 1, 1, sh_flags | 0x2, 0x1000, text_off, len(text), 0, 0, 16, 0)
+    sh_sym = struct.pack("<IIQQQQIIQQ", 7, 2, 0, 0, sym_off, len(symtab), 3, 1, 8, 24)
+    sh_str = struct.pack("<IIQQQQIIQQ", 15, 3, 0, 0, str_off, len(strtab), 0, 0, 1, 0)
+    sh_shstr = struct.pack("<IIQQQQIIQQ", 23, 3, 0, 0, shstr_off, len(shstrtab), 0, 0, 1, 0)
+    return bytes(ehdr + text + symtab + strtab + shstrtab + (b"\x00" * pad) + sh_null + sh_text + sh_sym + sh_str + sh_shstr)
+
+
+def test_check_no_game_ps5(tmp_path: Path) -> None:
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    (clean / "README.md").write_text("ok", encoding="utf-8")
+    (clean / "sce_sys").mkdir()
+    (clean / "sce_sys/param.json").write_text("{}", encoding="utf-8")
+    assert release_ps5.check_no_game_ps5(clean) == []
+
+    # Game-free placeholder eboot.bin is allowed only when allow_placeholder_eboot=True
+    (clean / "eboot.bin").write_bytes(b"\x00\x01hello_world")
+    assert len(release_ps5.check_no_game_ps5(clean, allow_placeholder_eboot=False)) == 1
+    assert release_ps5.check_no_game_ps5(clean, allow_placeholder_eboot=True) == []
+
+    # Even with allow_placeholder_eboot=True, lifted symbols and game markers must still be rejected!
+    (clean / "eboot.bin").write_bytes(b"ELF \x00 f_70001234 \x00")
+    errs = release_ps5.check_no_game_ps5(clean, allow_placeholder_eboot=True)
+    assert any("lifted guest function symbols" in e for e in errs)
+
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "test.spv").write_bytes(b"\x03\x02\x23\x07")
+    (bad / "foo.c").write_text("/* MKW_RECOMP_" + "GENERATED_FROM_GAME_CODE */\n", encoding="utf-8")
+    errs2 = release_ps5.check_no_game_ps5(bad)
+    assert len(errs2) == 2
+
+
+def test_elf64_symbol_and_ar_readers(tmp_path: Path) -> None:
+    elf_bytes = _make_elf64_with_symtab([("host_foo", 0x1234), ("f_7000abcd", 0x2000)])
+    elf_path = tmp_path / "test.elf"
+    elf_path.write_bytes(elf_bytes)
+
+    sym_out = tmp_path / "mkw.sym"
+    n = prepare_ps5.write_mkw_sym(elf_path, sym_out)
+    assert n == 1
+    assert sym_out.read_text(encoding="utf-8") == "1234 host_foo\n"
+
+    # Minimal `ar` archive containing one ELF object with ps5_localeconv
+    obj_bytes = _make_elf64_with_symtab([("ps5_localeconv", 0x10)])
+    hdr = f"member.o/       0           0     0     100644  {len(obj_bytes):<10d}`\n".encode("ascii")
+    ar_path = tmp_path / "libps5platform.a"
+    ar_path.write_bytes(b"!<arch>\n" + hdr + obj_bytes + (b"\n" if len(obj_bytes) & 1 else b""))
+    syms = prepare_ps5.read_ar_defined(ar_path)
+    assert "ps5_localeconv" in syms

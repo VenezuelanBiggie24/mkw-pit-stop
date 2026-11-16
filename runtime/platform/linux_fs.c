@@ -368,6 +368,11 @@ int plat_fs_list(const char *dir, int (*cb)(const char *name, int kind, uint64_t
     return PLAT_FS_OK;
 }
 
+// Linux keeps the sizes: fstatat on the open directory is cheap here, and the RomFS walk on Linux uses nftw anyway.
+int plat_fs_list_names(const char *dir, int (*cb)(const char *name, int kind, uint64_t size, void *ctx), void *ctx) {
+    return plat_fs_list(dir, cb, ctx);
+}
+
 PlatFile *plat_fs_open(const char *path, int write, int *err) {
     struct stat st;
     int fd = open(path, (write ? O_RDWR : O_RDONLY) | O_CLOEXEC);

@@ -52,10 +52,12 @@ def parse(text: str, version: str) -> dict[str, str]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--version", required=True, help="e.g. 0.1.3 (the tag without its v)")
+    ap.add_argument("--template", type=Path, default=ROOT / "docs/release-template.md",
+                    help="release notes template (default: docs/release-template.md)")
     ap.add_argument("--out", type=Path, help="write here instead of stdout")
     args = ap.parse_args()
     got = parse(version_section((ROOT / "CHANGELOG.md").read_text(encoding="utf-8"), args.version), args.version)
-    template = (ROOT / "docs/release-template.md").read_text(encoding="utf-8")
+    template = args.template.read_text(encoding="utf-8")
     notes = template.format(
         summary=got["summary"], changes=got["changes"], tested=got["tested"], known=got.get("known", "")
     )

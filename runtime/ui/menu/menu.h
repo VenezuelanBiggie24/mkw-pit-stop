@@ -52,6 +52,11 @@ int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const char **shot);
 void menu_overlay_draw(VkCommandBuffer cb);
 void menu_vk_release(void);               // before the device goes away (gfx_window_release_vk)
 
+// Registers an ImGui full-screen callback rendered by menu_overlay_frame even when the Pit Stop menu is closed
+// (used by the PS5 placeholder / missing-game-files screen). Pass NULL to clear.
+typedef void (*MenuPlaceholderDraw)(float width, float height, void *ctx);
+void menu_set_placeholder(MenuPlaceholderDraw fn, void *ctx);
+
 // ---- what the menu asks of the platform side (gfx_window_sdl.c)
 void gfx_window_apply_settings(void);     // MKW_FULLSCREEN or MKW_WINDOW_SIZE changed: the window follows
 void gfx_window_request_close(void);      // as the window's close button: the process ends

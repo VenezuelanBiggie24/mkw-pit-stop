@@ -16,6 +16,7 @@
 #include "nvn_api.h"
 #include "vk.h"
 #include "platform/platform.h"
+#include "ui/menu/boot_screen.h"
 
 #define SYM_INIT_START "_ZN2nn4init5StartEmmPFvvES2_S2_"
 // MKW 1.0.0's first nvnBootstrapLoader call (main+0xcf3a5c) (graphics bring-up in main+0xcf39b4). MKW does
@@ -321,14 +322,27 @@ static void guest_main(Cpu *c) {
 static void prewarm_main(void *arg) {
     (void)arg;
     vk_pipeline_prewarm();
+    boot_screen_task(BOOT_TASK_SHADERS, BOOT_TASK_DONE);
     return;
+}
+
+// The RomFS index (fs_init) built while the modules load and the prewarm runs, instead of on the guest's main thread
+// inside nninitInitializeSdkModule: the guest's fs_init then waits for it (plat_once) or finds it done.
+static void romfs_index_main(void *arg) {
+    (void)arg;
+    fs_init();
 }
 
 void rt_boot(void) {
     check_npdm();
+    boot_screen_start();
     if (!rt_config()->shot) vk_pipeline_async_enable();   // a --shot image must not depend on build timing
+    boot_screen_task(BOOT_TASK_FILES, BOOT_TASK_RUNNING);
+    if (!plat_thread_new(romfs_index_main, NULL, "romfs index")) fs_init();
     // Shaders and pipelines recorded in earlier runs are made ready while the modules load; the guest waits for them.
+    boot_screen_task(BOOT_TASK_SHADERS, BOOT_TASK_RUNNING);
     PlatThread *warm = plat_thread_new(prewarm_main, NULL, "prewarm");
+    boot_screen_task(BOOT_TASK_CODE, BOOT_TASK_RUNNING);
     ldr_load(rt_config()->exefs);
     rt_patches_init();
     seqwatch_init();
@@ -338,13 +352,15 @@ void rt_boot(void) {
     cb_addr[1] = hostfn_register("<rtld module_inits>", cb_module_inits);
     cb_addr[2] = hostfn_register("<rtld module_finis>", cb_module_finis);
     hostfn_seal();
+    boot_screen_task(BOOT_TASK_CODE, BOOT_TASK_DONE);
     uint64_t held = plat_now_ms();
     if (warm) plat_thread_join(warm);
-    else vk_pipeline_prewarm();
+    else vk_pipeline_prewarm(), boot_screen_task(BOOT_TASK_SHADERS, BOOT_TASK_DONE);
     held = plat_now_ms() - held;
     rt_log("boot: guest starts %llu ms after process start (%llu ms of it waiting for the prewarm)",
            (unsigned long long)(plat_process_uptime_ns() / 1000000), (unsigned long long)held);
     gfx_window_early();
+    boot_screen_task(BOOT_TASK_GAME, BOOT_TASK_RUNNING);
     rt_guest_start_ns = kern_now_ns();
     kern_run_on_guest_main(guest_main);
     rt_fatal("boot: the guest main thread ended");

@@ -59,6 +59,30 @@ static Entry entry(uint64_t i) {
 }
 static const char *entry_name(Entry e) { return (const char *)index_bytes + strings_offset + e.name; }
 
+// Entry i's size. The PS5 walk takes names only (plat_fs_list_names: no lstat per file, 29-31 s of every boot), so a
+// size is PLAT_FS_SIZE_UNKNOWN until first asked: from f when the caller has the file open (an fstat), else a stat of
+// its path. The 8-byte field is aligned (index_bytes is malloc'd, entries are 24 bytes), so threads that ask at the
+// same time store the same value.
+static volatile int32_t n_lazy_sizes;
+static uint64_t entry_size_of(uint64_t i, PlatFile *f) {
+    uint64_t *field = (uint64_t *)(void *)(index_bytes + 24 + i * 24 + 8);
+    uint64_t size = __atomic_load_n(field, __ATOMIC_RELAXED);
+    if (size != PLAT_FS_SIZE_UNKNOWN) return size;
+    PlatFileId id;
+    if (f && plat_file_id(f, &id)) {
+        size = id.size;
+    } else {
+        char path[4096];
+        int64_t s = snprintf(path, sizeof path, "%s/%s", loose_root, entry_name(entry(i))) < (int)sizeof path
+                        ? plat_file_size(path) : -1;
+        size = s < 0 ? 0 : (uint64_t)s;
+    }
+    __atomic_store_n(field, size, __ATOMIC_RELAXED);
+    plat_inc32(&n_lazy_sizes);
+    return size;
+}
+static uint64_t entry_size(uint64_t i) { return entry_size_of(i, NULL); }
+
 static double now_s(void) { return (double)plat_now_ns() / 1e9; }
 
 // ---- positional reads
@@ -192,6 +216,7 @@ static void overlay_load(const char *dir) {
                  "overlay original path");
             PlatFile *of = open_read(orig_file);
             if (!of) rt_fatal("RomFS overlay: original %s missing", orig_file);
+            e.size = entry_size_of(i, of);
             sha_range(of, 0, e.size, hex, 0);
             plat_file_close(of);
             if (strcmp(hex, orig)) rt_fatal("RomFS overlay: the original of %s has SHA-256 %s, %s/manifest.tsv says %s",
@@ -281,6 +306,8 @@ static void overlay_init(void) {
 #include <errno.h>
 
 static size_t loose_root_len;
+static uint64_t scan_files;          // files the walk has found so far (romfs_index_progress, the boot screen)
+static int scan_done;
 typedef struct { char *name; uint64_t size; } LooseFile;
 static LooseFile *loose_files;
 static size_t loose_n, loose_cap;
@@ -316,7 +343,7 @@ static int walk_loose_cb(const char *name, int kind, uint64_t size, void *ctx) {
     char full[PLAT_PATH_MAX];
     if (snprintf(full, sizeof full, "%s/%s", dir, name) >= (int)sizeof full) return 1;
     if (kind == PLAT_FS_DIR) {
-        plat_fs_list(full, walk_loose_cb, full);
+        plat_fs_list_names(full, walk_loose_cb, full);
         return 1;
     }
     if (kind != PLAT_FS_FILE) return 1;
@@ -329,14 +356,15 @@ static int walk_loose_cb(const char *name, int kind, uint64_t size, void *ctx) {
         if (!loose_files) rt_fatal("RomFS: realloc(%zu) failed at loose_n=%zu (errno=%d)", loose_cap * sizeof *loose_files, loose_n, errno);
     }
     loose_files[loose_n].name = arena_strdup(rel);
-    loose_files[loose_n].size = size;
+    loose_files[loose_n].size = size;   // PLAT_FS_SIZE_UNKNOWN from d_type: entry_size asks when it is needed
     if (!loose_files[loose_n].name) rt_fatal("RomFS: arena_strdup(%s) failed at loose_n=%zu (errno=%d)", rel, loose_n, errno);
     loose_n++;
+    __atomic_store_n(&scan_files, loose_n, __ATOMIC_RELAXED);
     return 1;
 }
 
 static int walk_loose(const char *dir) {
-    return plat_fs_list(dir, walk_loose_cb, (void *)dir) == PLAT_FS_OK ? 0 : -1;
+    return plat_fs_list_names(dir, walk_loose_cb, (void *)dir) == PLAT_FS_OK ? 0 : -1;
 }
 #else
 static int loose_visit(const char *path, const struct stat *st, int type, struct FTW *ftw) {
@@ -354,6 +382,7 @@ static int loose_visit(const char *path, const struct stat *st, int type, struct
     loose_files[loose_n].size = (uint64_t)st->st_size;
     need(loose_files[loose_n].name != NULL, "loose index memory");
     loose_n++;
+    __atomic_store_n(&scan_files, loose_n, __ATOMIC_RELAXED);
     return 0;
 }
 #endif
@@ -425,11 +454,17 @@ static void init_once(void *param) {
     overlay_init();
     rt_log("RomFS ready: %llu loose files under %s, %zu overlays, %zu added, %.2f s", (unsigned long long)file_count,
            loose_root, noverlay, nadded, now_s() - t0);
+    __atomic_store_n(&scan_done, 1, __ATOMIC_RELEASE);
 }
 
 void fs_init(void) {
     static PlatOnce once = PLAT_ONCE_INIT;
     plat_once(&once, init_once, NULL);
+}
+
+uint64_t romfs_index_progress(int *done) {
+    if (done) *done = __atomic_load_n(&scan_done, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&scan_files, __ATOMIC_RELAXED);
 }
 
 // ---- the RomFS interface (fs.h)
@@ -446,7 +481,7 @@ const char *romfs_entry(uint64_t i, uint64_t *offset, uint64_t *size) {
     if (i >= file_count) return NULL;
     Entry e = entry(i);
     if (offset) *offset = e.offset;
-    if (size) *size = e.size;
+    if (size) *size = entry_size(i);
     return entry_name(e);
 }
 
@@ -497,6 +532,7 @@ uint32_t romfs_open(uint64_t *out, const char *path, int mode) {
     if (!ov && i < file_count) {
         f = loose_open(i);
         if (!f) return FS_R_PATH_NOT_FOUND;
+        entry_size_of(i, f);   // known from here on: reads and GetSize ask handle_source without a stat
     }
     if (ov) {
         const Overlay *o = &overlays[ov - 1];
@@ -531,7 +567,7 @@ static int handle_source(uint64_t h, PlatFile **f, uint64_t *size) {
     plat_mutex_unlock_shared(&lock);
     if (!i) return 0;
     *f = of;
-    *size = ov ? overlays[ov - 1].size : entry(i - 1).size;
+    *size = ov ? overlays[ov - 1].size : entry_size_of(i - 1, of);
     return 1;
 }
 
@@ -617,10 +653,21 @@ uint32_t romfs_list(const char *path, int (*add)(const char *name, int is_dir, u
     if (snprintf(prefix, sizeof prefix, *p ? "%s/" : "%s", p) >= (int)sizeof prefix) return FS_R_INVALID;
     size_t n = strlen(prefix);
     int found = 0, r = 0;
+    int32_t lazy0 = __atomic_load_n(&n_lazy_sizes, __ATOMIC_RELAXED);
+    uint64_t t0 = plat_now_ns();
     for (uint64_t i = lower(prefix); i < file_count && r == 0; i++) {
         Entry e = entry(i);
-        r = list_from(prefix, n, entry_name(e), e.size, last, sizeof last, add, ctx, &found);
+        // only the folder's own files need a size (list_from passes 0 for a child folder); the walk past the
+        // folder's last path stops at the prefix check before any stat
+        const char *nm = entry_name(e);
+        int own = !strncmp(nm, prefix, n) && !strchr(nm + n, '/');
+        r = list_from(prefix, n, nm, own ? entry_size(i) : 0, last, sizeof last, add, ctx, &found);
     }
+    // A listing that had to ask many sizes (the PS5 index has none until asked): how long it took, to see whether the
+    // game lists large folders, which would move part of the old boot walk's cost here.
+    int32_t lazy = __atomic_load_n(&n_lazy_sizes, __ATOMIC_RELAXED) - lazy0;
+    if (lazy >= 256)
+        rt_log("RomFS: listing %s asked %d file sizes, %.1f ms", path, lazy, (plat_now_ns() - t0) / 1e6);
     last[0] = 0;
     for (size_t k = added_lower(prefix); k < nadded && r >= 0; k++)
         if ((r = list_from(prefix, n, added[k], 0, last, sizeof last, add, ctx, &found)) > 0) break;

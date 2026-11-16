@@ -431,6 +431,11 @@ int plat_fs_links(const char *path);                      // the file's hard lin
 void plat_fs_sync_dir(const char *path);                  // a directory's entries to the disk, as far as the FS allows
 // cb(name, kind, size, ctx) for each entry of dir but "." and ".."; cb returns 0 to stop. The listing's error.
 int plat_fs_list(const char *dir, int (*cb)(const char *name, int kind, uint64_t size, void *ctx), void *ctx);
+// The same where the listing itself does not carry sizes (POSIX readdir): the kind from the entry's type, the size
+// PLAT_FS_SIZE_UNKNOWN, no stat per entry. The PS5's RomFS index walked 205,660 files with one lstat each in 29-31 s
+// (every console run, 15-16/11/2026); the caller asks a file's size when it needs it.
+#define PLAT_FS_SIZE_UNKNOWN UINT64_MAX
+int plat_fs_list_names(const char *dir, int (*cb)(const char *name, int kind, uint64_t size, void *ctx), void *ctx);
 // An existing file for reading and, with write, writing; *err (may be NULL) gets the reason on failure.
 PlatFile *plat_fs_open(const char *path, int write, int *err);
 PlatFile *plat_fs_create(const char *path, int *err);     // a new file for writing; PLAT_FS_EXISTS when there

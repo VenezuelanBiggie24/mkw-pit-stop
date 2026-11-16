@@ -34,6 +34,11 @@
 #include "platform/platform.h"
 #include "sha256.h"
 #include "ui/launcher/launcher.h"
+#ifdef MKW_PS5_NATIVE
+#include "platform/ps5_recv.h"
+#include "ui/menu/ps5_placeholder.h"
+extern const char rt_port_version[];
+#endif
 
 #define MAX_MODULES 16
 
@@ -563,6 +568,17 @@ static int run_launcher(void) {
 int main(int argc, char **argv) {
 #ifdef MKW_PS5_NATIVE
     platform_init("Mario Kart World: Pit Stop");
+    {
+        const RtGame *builtin = rt_game_builtin();
+        char why[256] = "";
+        int ready = builtin != NULL && ps5_game_files_ready("/app0", RT_GAME_ID, why, sizeof why);
+        if (!builtin && !why[0])
+            snprintf(why, sizeof why, "Game-free Pit Stop placeholder (build from PC)");
+        if (!ready) {
+            ps5_placeholder_run("/app0", rt_port_version, RT_GAME_ID, builtin != NULL, why);
+            plat_exit(0);
+        }
+    }
 #else
     if (want_launcher(argc, argv)) return run_launcher();
 #endif

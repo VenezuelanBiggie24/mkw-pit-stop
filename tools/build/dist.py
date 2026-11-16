@@ -82,8 +82,9 @@ PINS = {
                          "8dfbfd68ebf53249d11e528cbb80ad5a2460b0c5b4636eed82ee0d3950827a3d"),
     },
 }  # fmt: skip
-# The sources the setup runs, from the repository (tools/prepare/prepare.py imports and runs them).
-SOURCES = ["recomp", "sm86", "tools/build/build.py", "tools/prepare", "tools/romfs/resolution.py",
+# The sources the setup runs, from the repository (tools/prepare/prepare.py & tools/ps5/prepare_ps5.py import and run them).
+SOURCES = ["recomp", "sm86", "tools/build/build.py", "tools/prepare", "tools/ps5/prepare_ps5.py",
+           "tools/ps5/send_ps5.py", "tools/ps5/deploy.py", "tools/romfs/resolution.py",
            "tools/shaders/extract.py", "tools/shaders/translate.py", "runtime/cpu",
            "runtime/core/boot/gamelib.h"]  # fmt: skip
 # Windows DLLs mkw.exe needs beside it (build/win/deps/bin, tools/build/windeps.py); vulkan-1.dll is the driver's.

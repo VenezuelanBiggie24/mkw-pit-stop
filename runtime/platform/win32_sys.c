@@ -268,6 +268,11 @@ int plat_fs_list(const char *dir, int (*cb)(const char *name, int kind, uint64_t
     return PLAT_FS_OK;
 }
 
+// FindFirstFile carries each size with the name: nothing to save.
+int plat_fs_list_names(const char *dir, int (*cb)(const char *name, int kind, uint64_t size, void *ctx), void *ctx) {
+    return plat_fs_list(dir, cb, ctx);
+}
+
 static PlatFile *fs_open(const char *path, DWORD access, DWORD share, DWORD how, int *err) {
     wchar_t w[WPATH];
     if (!widen(path, w, WPATH)) {

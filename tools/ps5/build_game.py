@@ -40,7 +40,7 @@ FLEXIBLE_MIB = 640
 RUNTIME = ROOT / "runtime"
 PLATFORM_SOURCES = {
     "common", "prot_watch", "ps5_guest_memory", "ps5_memory", "ps5_mixed", "ps5_loader_io",
-    "ps5_mutex", "ps5_threads", "ps5_fiber", "ps5_sys", "sigsample", "fault_guard",
+    "ps5_mutex", "ps5_threads", "ps5_fiber", "ps5_recv", "ps5_sys", "sigsample", "fault_guard",
 }
 SDL_EXCLUDES = {
     "gfx_window_sdl.c", "input_sdl.c", "menu_sdl.cpp",
@@ -54,6 +54,8 @@ def source_files() -> list[Path]:
         if source.suffix not in (".c", ".cpp"):
             continue
         relative = source.relative_to(ROOT)
+        if relative.parts[:3] == ("runtime", "ui", "launcher"):
+            continue
         if relative.parts[:2] == ("runtime", "platform") and source.stem not in PLATFORM_SOURCES:
             continue
         if source.stem.endswith("_win"):
@@ -144,12 +146,17 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
     files += [(template / "ps5/src/platform.c", Path("template/platform.c"), "cc"),
               (template / "ps5/third_party/volk/volk.c", Path("template/volk.c"), "cc")]
     defaults = out / "defaults.c"
-    write_changed(defaults, (
+    defaults_src = (
+        '#include "gamelib.h"\n'
         'const char rt_default_exefs[] = "/app0/exefs";\n'
         'const char rt_default_romfs[] = "/app0/romfs";\n'
         'const char rt_default_profile[] = "";\n'
         f"const char rt_port_version[] = {json.dumps(port_version())};\n"
-    ).encode())
+    )
+    if generated is None:
+        # Weak so the game-free placeholder links alone while strong modules.o overrides it cleanly.
+        defaults_src += "__attribute__((weak)) const RtGame *rt_game_builtin(void) { return 0; }\n"
+    write_changed(defaults, defaults_src.encode())
     files.append((defaults, Path("defaults.c"), "cc"))
     if generated is not None:
         modules = out / "modules.c"
@@ -315,6 +322,10 @@ def main() -> int:
     if result.returncode:
         return 1
     package = title / "dist" / TITLE_ID
+    write_changed(package / "pitstop-game.id", (game_id(PROFILE) + "\n").encode())
+    write_changed(package / "pitstop-runtime.json", (json.dumps({
+        "title_id": TITLE_ID, "port_version": port_version(), "rt_game_id": game_id(PROFILE), "profile": PROFILE,
+    }, indent=2) + "\n").encode())
     write_symbols(sdk, env, link / "link/llvm-pie.elf", package / "mkw.sym")
     seq_nodes = ROOT / "build/seq_nodes.tsv"
     if seq_nodes.is_file():

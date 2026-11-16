@@ -36,6 +36,8 @@ void vk_queue_unlock(void);
 // ---- open state, any thread
 static std::atomic<int> g_open;     // the menu is open
 static std::atomic<int> g_reset;    // opened or closed since the last laid-out frame: drop stale input
+static std::atomic<MenuPlaceholderDraw> g_placeholder_fn;
+static void *g_placeholder_ctx;
 
 // g_open, the input block and the log line change together under open_lock, so they cannot disagree when the window thread
 // (F1, Esc), the polling thread (combo) and the present path (Continue, B) race.
@@ -61,6 +63,10 @@ static int g_failed_flag();
 extern "C" int menu_is_open(void) { return g_open.load(std::memory_order_relaxed); }
 extern "C" void menu_toggle(void) {
     if (!g_failed_flag()) change_open(-1);
+}
+extern "C" void menu_set_placeholder(MenuPlaceholderDraw fn, void *ctx) {
+    g_placeholder_ctx = ctx;
+    g_placeholder_fn.store(fn, std::memory_order_release);
 }
 
 // ---- events from the window adapter, queued while the menu is open; the present path hands them to ImGui
@@ -497,8 +503,10 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     if (!g_test.parsed) test_parse();
     if (g_test.next_set < g_test.n_sets && frame >= g_test.sets[g_test.next_set].frame) test_apply_sets(frame);
     perf_tick(plat_now_ns(), t);
+    MenuPlaceholderDraw placeholder = g_placeholder_fn.load(std::memory_order_acquire);
+    void *placeholder_ctx = g_placeholder_ctx;
     bool open = g_open.load(std::memory_order_relaxed);
-    if (!open) {
+    if (!open && !placeholder) {
         if (g_save_pending) g_save_pending = opt_save_tick(1);   // closed: the last change goes to mkw.ini now
         if (g_test.at && !g_test.opened && frame >= g_test.at) {
             g_test.opened = frame;
@@ -509,7 +517,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
             return 0;
         }
     }
-    if (g_failed_flag()) {
+    if (g_failed_flag() && !placeholder) {
         set_open(0);
         return 0;
     }
@@ -552,7 +560,9 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     }
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
-    if (open) {
+    if (placeholder) {
+        placeholder((float)t->width, (float)t->height, placeholder_ctx);
+    } else if (open) {
         PitResult result = pit_frame((float)t->width, (float)t->height, pad, g_test.page);
         if (result == PitResult::Resume) set_open(0);
         else if (result == PitResult::Quit) {
