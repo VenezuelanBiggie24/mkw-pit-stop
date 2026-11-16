@@ -330,6 +330,7 @@ static int upload(Tex *e) {
     int checked = 0;
     if (agpu) {
         uint64_t a0 = perf_begin();
+        vk_astc_tag(e->pub.addr, 1);
         checked = vk_astc_record(cb, sb, total, ar, (int)n, e->f.astc_bw, e->f.astc_bh, e->f.astc_srgb, e->pub.image,
                                  e->pub.aspect, e->f.astc_bc7, rbuf);
         perf_end(PERF_ASTC, a0);
@@ -416,6 +417,39 @@ counted:;
             rt_log("vk: upload dump %s: %zu of %llu bytes", path, wrote, (unsigned long long)t->L.size);
         }
     }
+    // MKW_TEX_ZERO_LOG=N (diagnosis, 16/11/2026: magenta on scenery, karts and a road edge in some runs, at random
+    // moments): the first N ASTC uploads with a whole 64 KiB unit of zero guest bytes. A zero 16-byte ASTC block is not
+    // a valid block and decodes as the error colour, magenta, so real texture data never holds a zero unit; each check
+    // stops at the first non-zero byte. The line says whether that unit is backed and frozen now and whether a
+    // pool-finalize release covered it, to tell which path left the zeros.
+    static int zlog = -1;
+    if (zlog < 0) zlog = cfg_get("MKW_TEX_ZERO_LOG") ? atoi(cfg_get("MKW_TEX_ZERO_LOG")) : 0;
+    if (zlog > 0 && astc && t->L.size >= (64u << 10)) {
+        uint64_t lo = ((uintptr_t)t->mem + 0xffffu) & ~0xffffull, hi = ((uintptr_t)t->mem + t->L.size) & ~0xffffull;
+        uint64_t first = 0, nz = 0, units = 0;
+        for (uint64_t u = lo; u < hi; u += 0x10000, units++) {
+            const uint64_t *q = (const uint64_t *)(uintptr_t)u;
+            size_t k = 0;
+            while (k < 0x10000 / 8 && !q[k]) k++;
+            if (k == 0x10000 / 8) nz++, first = first ? first : u;
+        }
+        if (nz && __atomic_fetch_sub(&zlog, 1, __ATOMIC_RELAXED) > 0) {
+            uint64_t rlo = 0, rhi = 0, rfreed = 0, rframe = 0;
+            uint32_t rflags = 0;
+            int rel = vk_pool_release_find(first, 0x10000, &rlo, &rhi, &rfreed, &rframe, &rflags);
+            rt_log("vk: zero upload at frame %llu: texture %#llx %ux%ux%u fmt %#x levels %u, %.1f KiB, upload %u%s: %llu of "
+                   "%llu units all zero, first %#llx (backed %.0f KiB, frozen %d)%s",
+                   (unsigned long long)__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED),
+                   (unsigned long long)e->pub.addr, d->width, d->height, d->depth, d->format, e->pub.levels,
+                   t->L.size / 1024.0, e->n_up + 1, e->uploaded ? " (again)" : "", (unsigned long long)nz,
+                   (unsigned long long)units, (unsigned long long)first, plat_mem_backed_bytes(first, 0x10000) / 1024.0,
+                   mem_frozen(first) != 0, rel ? "; under a pool-finalize release" : "");
+            if (rel)
+                rt_log("vk: zero upload %#llx: pool-finalize release [%#llx,%#llx) flags %#x of frame %llu (%.1f KiB)",
+                       (unsigned long long)first, (unsigned long long)rlo, (unsigned long long)rhi, rflags,
+                       (unsigned long long)rframe, rfreed / 1024.0);
+        }
+    }
     e->wt_n = 0;
     e->uploaded = 1;
     e->up_pending = 0;
@@ -465,6 +499,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
         rmap = vk_staging((VkDeviceSize)w * h * 4, &rbuf, &ralloc);
     if (ok) {
         barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        vk_astc_tag((uintptr_t)src->mem, 2);
         ok = vk_astc_record(cb, sb, per * layers, ar, (int)layers, f.astc_bw, f.astc_bh, f.astc_srgb, dst, aspect, bc7,
                             rbuf);
         barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);

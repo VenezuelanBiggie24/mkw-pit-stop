@@ -17,6 +17,9 @@ layout(std430, set = 0, binding = 1) writeonly buffer Texels { uint px[]; };
 // uint 0..11: byte offsets of the weight unquantization rows (QUANT_2..QUANT_32), 12..27: of the colour rows
 // (QUANT_6..QUANT_256 minus one); the bytes follow (vk_astc.c astc_tables).
 layout(std430, set = 0, binding = 2) readonly buffer Tables { uint tab[]; };
+// MKW_ASTC_ERRORS (diagnosis): err[pc.err_slot] counts this call's blocks that decode to the error colour (reserved or
+// invalid block modes, bad void extents) and partitions whose endpoints are magenta; slot 0 counts nothing.
+layout(std430, set = 0, binding = 3) buffer Errors { uint err[]; };
 
 layout(push_constant) uniform Params {
     uint in_base;    // first block of slice 0 (uvec4 index into blk)
@@ -26,6 +29,7 @@ layout(push_constant) uniform Params {
     uint bx;         // blocks per row
     uint bslice;     // blocks per slice
     uint srgb;
+    uint err_slot;   // MKW_ASTC_ERRORS' counter of this call, 0 none
 } pc;
 
 uint tab_byte(uint i) { return (tab[i >> 2] >> ((i & 3u) * 8u)) & 0xFFu; }
@@ -355,7 +359,11 @@ void main() {
     live = live && bxi < int(pc.bx);
     lb = min(lb, MAXB - 1);
     uvec4 b = live ? blk[pc.in_base + gl_WorkGroupID.z * pc.bslice + uint(byi) * pc.bx + uint(bxi)] : uvec4(0u);
-    if (live && lane == 0) s_h[lb] = header(b, bw, bh);   // one lane per block: the header is the same for all
+    if (live && lane == 0) {   // one lane per block: the header is the same for all
+        s_h[lb] = header(b, bw, bh);
+        // an error block: magenta and solid (a void extent of exactly that colour is counted too; real data has none)
+        if (pc.err_slot != 0u && s_h[lb].solid && s_h[lb].konst == MAGENTA) atomicAdd(err[pc.err_slot], 1u);
+    }
     barrier();
     Hdr H = s_h[lb];
     bool work = live && !H.solid;
@@ -383,7 +391,10 @@ void main() {
             if (j < n) v[j] = s_cv[lb][k + j];
         }
         ivec4 e0, e1;
-        if (!unpack_endpoints(cem, v, e0, e1)) { e0 = ivec4(0xFF, 0, 0xFF, 0xFF); e1 = e0; }
+        if (!unpack_endpoints(cem, v, e0, e1)) {
+            e0 = ivec4(0xFF, 0, 0xFF, 0xFF); e1 = e0;
+            if (pc.err_slot != 0u) atomicAdd(err[pc.err_slot], 1u);
+        }
         if (pc.srgb != 0u) { e0 = e0 << 8 | 0x80; e1 = e1 << 8 | 0x80; }
         else { e0 *= 257; e1 *= 257; }
         s_e0[lb][p] = pack16(e0);

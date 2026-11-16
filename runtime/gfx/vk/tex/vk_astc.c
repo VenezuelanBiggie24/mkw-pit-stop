@@ -20,6 +20,7 @@
 #include "bc7_encode_spv.h"
 #include "cfg.h"
 #include "host.h"
+#include "nvn_api.h"
 #include "tex.h"
 #include "vk.h"
 #include "platform/platform.h"
@@ -90,7 +91,7 @@ _Static_assert(sizeof wunq_data == 142 && sizeof cunq_data == 936, "unquantizati
 enum { TAB_BYTES = 28 * 4, TAB_WUNQ = TAB_BYTES, TAB_CUNQ = TAB_BYTES + 144, TAB_SIZE = TAB_CUNQ + 936 };
 
 typedef struct {
-    uint32_t in_base, out_base, width, height, bw, bh, bx, bslice, srgb;
+    uint32_t in_base, out_base, width, height, bw, bh, bx, bslice, srgb, err_slot;
 } Push;
 
 static PlatMutex g_lock = PLAT_MUTEX_INIT;
@@ -108,7 +109,154 @@ static struct {
     VkBuffer tab;                 // device-local copy of the tables
     VmaAllocation tab_alloc;
     int tab_uploaded;
+    VkBuffer err;                 // MKW_ASTC_ERRORS' counters (binding 3), host-visible and mapped
+    VmaAllocation err_alloc;
+    volatile uint32_t *err_map;
 } G = {.mode = -1, .bc7 = -1};
+
+// MKW_ASTC_ERRORS=N (diagnosis, 16/11/2026: flat magenta on scenery, a road edge and karts in some PS5 runs, at random,
+// not zero guest bytes: MKW_TEX_ZERO_LOG saw none): every vk_astc_record call gets a counter (a slot of ERR_SLOTS, 0
+// unused) that the decoder raises for each block that decodes to the error colour. A call err_lag calls later, or
+// when its slot comes round again, its count is read and the first N calls with errors are logged with the caller's
+// tag (vk_astc_tag: the texture and which path recorded it).
+#define ERR_SLOTS 8192
+#define ERR_LEVELS 16   // a counter per mip level (the last one also counts deeper levels) in each slot
+static int err_on = -1, err_lag = 256;   // MKW_ASTC_ERRORS_LAG: calls before a count is read (1 for the probe)
+static struct { uint64_t addr, frame; uint32_t w, h, regions, seen; uint16_t fp; uint8_t path, used; } err_meta[ERR_SLOTS];
+static uint32_t err_next = 1, err_logged, err_calls, err_bad;
+static uint64_t err_blocks;
+// One line per texture, the first time it has errors (a texture copied level by level made 300 lines in one frame of
+// the boot, astcerr-20261116-095851); the rest goes into a summary every 600 frames.
+#define ERR_SEEN 1024
+static uint64_t err_seen[ERR_SEEN];
+static uint32_t err_win_calls, err_win_bad, err_win_new;
+static uint64_t err_win_blocks, err_win_frame;
+static int err_seen_add(uint64_t a) {   // 1 when a is new
+    for (uint32_t h = (uint32_t)(a >> 9) * 2654435761u, i = 0; i < ERR_SEEN; i++) {
+        uint64_t *e = &err_seen[(h + i) % ERR_SEEN];
+        if (*e == a) return 0;
+        if (!*e) return *e = a, 1;
+    }
+    return 0;   // full: counted in the summary only
+}
+static _Thread_local struct { uint64_t addr; int path; } tag;
+static const char *const err_path[] = {"other", "upload", "astc-copy", "write-texels", "probe"};
+
+void vk_astc_tag(uint64_t addr, int path) { tag.addr = addr, tag.path = path; }
+
+// What the blocks of a texture's first level are (every 16 bytes is one block in any layout), to tell why the decoder
+// made the error colour: zero (not written, or layout padding), void extents (an HDR one, bit 9, is an error to an LDR
+// decoder), reserved block modes, one-partition blocks with an HDR colour endpoint mode (2, 3, 7, 11, 14, 15: also
+// errors to an LDR decoder), and the rest. Khronos Data Format Specification 1.3, ASTC (block mode, void extent, CEM).
+static void err_classify(uint64_t a, uint32_t w, uint32_t h, uint32_t bw, uint32_t bh, char *out, size_t cap) {
+    uint64_t n = (uint64_t)((w + bw - 1) / bw) * ((h + bh - 1) / bh), zero = 0, vldr = 0, vhdr = 0, resv = 0, hdr = 0,
+             multi = 0, ldr = 0, vbits = 0, vcoord = 0;
+    const uint8_t *p = (const uint8_t *)(uintptr_t)a;
+    for (uint64_t i = 0; i < n; i++) {
+        uint64_t lo, hi;
+        memcpy(&lo, p + i * 16, 8), memcpy(&hi, p + i * 16 + 8, 8);
+        if (!lo && !hi) { zero++; continue; }
+        unsigned m = (unsigned)(lo & 0x7ff);
+        if ((m & 0x1ff) == 0x1fc) {
+            if (m & 0x200) { vhdr++; continue; }
+            vldr++;
+            uint64_t s0 = lo >> 12 & 0x1fff, s1 = lo >> 25 & 0x1fff, t0 = (lo >> 38 & 0x1fff), t1 = (lo >> 51 | hi << 13) & 0x1fff;
+            int ones = s0 == 0x1fff && s1 == 0x1fff && t0 == 0x1fff && t1 == 0x1fff;
+            if ((lo >> 10 & 3) != 3) vbits++;
+            else if ((s0 >= s1 || t0 >= t1) && !ones) vcoord++;
+            continue;
+        }
+        if ((m & 3) == 0 && ((m >> 2) & 3) == 0) { resv++; continue; }
+        if ((m & 3) == 0 && ((m >> 7) & 3) == 3 && ((m >> 5) & 3) >= 2) { resv++; continue; }
+        if (((lo >> 11) & 3) != 0) { multi++; continue; }
+        unsigned cem = (unsigned)((lo >> 13) & 15);
+        if (cem == 2 || cem == 3 || cem == 7 || cem == 11 || cem == 14 || cem == 15) hdr++;
+        else ldr++;
+    }
+    snprintf(out, cap, "level 0's %llu blocks: zero %llu, void extent %llu (reserved bits not 11 %llu, coordinates min >= max "
+             "%llu) + HDR %llu, reserved mode %llu, HDR endpoints %llu, LDR one partition %llu, several partitions %llu",
+             (unsigned long long)n, (unsigned long long)zero, (unsigned long long)vldr, (unsigned long long)vbits,
+             (unsigned long long)vcoord, (unsigned long long)vhdr,
+             (unsigned long long)resv, (unsigned long long)hdr, (unsigned long long)ldr, (unsigned long long)multi);
+}
+
+static void err_check(uint32_t s, const char *when) {   // the caller holds the upload lock (vk_astc_record)
+    if (!err_meta[s].used || !G.err_map) return;
+    vmaInvalidateAllocation(vk_ctx()->vma, G.err_alloc, (VkDeviceSize)s * ERR_LEVELS * 4, ERR_LEVELS * 4);
+    uint32_t n = 0, lv[ERR_LEVELS];
+    for (int i = 0; i < ERR_LEVELS; i++) lv[i] = G.err_map[s * ERR_LEVELS + i], n += lv[i];
+    if (n <= err_meta[s].seen) return;
+    if (!err_meta[s].seen) err_bad++, err_win_bad++;
+    err_blocks += n - err_meta[s].seen, err_win_blocks += n - err_meta[s].seen;
+    int first = !err_meta[s].seen && err_seen_add(err_meta[s].addr ? err_meta[s].addr : 1);
+    err_meta[s].seen = n;
+    if (first) err_win_new++;
+    if (first && err_logged < (uint32_t)err_on) {
+        // the guest bytes now: backed, and whether the first 4 KiB are still zero (not written yet)
+        uint64_t a = err_meta[s].addr, backed = a ? plat_mem_backed_bytes(a, 0x10000) : 0;
+        int zero = -1;
+        if (a && backed) {
+            const uint64_t *q = (const uint64_t *)(uintptr_t)a;
+            zero = 1;
+            for (int k = 0; k < 512 && zero; k++) zero = !q[k];
+        }
+        err_logged++;
+        rt_log("vk: ASTC errors: %u blocks of error colour in texture %#llx %ux%u ASTC %ux%u, %u regions, by %s at frame "
+               "%llu (%s; %u of %u calls with errors, %llu blocks)",
+               n, (unsigned long long)err_meta[s].addr, err_meta[s].w, err_meta[s].h, err_meta[s].fp / 13,
+               err_meta[s].fp % 13, err_meta[s].regions, err_path[err_meta[s].path < 5 ? err_meta[s].path : 0],
+               (unsigned long long)err_meta[s].frame, when, err_bad, err_calls, (unsigned long long)err_blocks);
+        char lvs[256];
+        int o = 0;
+        for (int i = 0; i < ERR_LEVELS && o < (int)sizeof lvs - 16; i++)
+            if (lv[i]) o += snprintf(lvs + o, sizeof lvs - (size_t)o, " L%d %u", i, lv[i]);
+        rt_log("vk: ASTC errors: texture %#llx now: %.0f of 64 KiB backed, first 4 KiB %s; by level:%s", (unsigned long long)a,
+               backed / 1024.0, zero < 0 ? "not readable" : zero ? "zero" : "not zero", lvs);
+        uint32_t cbw = err_meta[s].fp / 13, cbh = err_meta[s].fp % 13;
+        uint64_t l0 = (uint64_t)((err_meta[s].w + cbw - 1) / cbw) * ((err_meta[s].h + cbh - 1) / cbh) * 16;
+        if (a && backed && err_meta[s].path == 1 && plat_mem_backed_bytes(a, l0) == l0) {
+            char cls[320];
+            err_classify(a, err_meta[s].w, err_meta[s].h, err_meta[s].fp / 13, err_meta[s].fp % 13, cls, sizeof cls);
+            rt_log("vk: ASTC errors: texture %#llx %s", (unsigned long long)a, cls);
+        }
+    }
+}
+
+static void err_summary(void) {   // every 600 frames, from err_slot (the upload lock)
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (fr / 600 == err_win_frame / 600) return;
+    rt_log("vk: ASTC errors at frame %llu: %u calls since frame %llu, %u with errors (%u textures not seen before), %llu "
+           "blocks; %u of %u calls with errors in all",
+           (unsigned long long)fr, err_win_calls, (unsigned long long)err_win_frame, err_win_bad, err_win_new,
+           (unsigned long long)err_win_blocks, err_bad, err_calls);
+    err_win_frame = fr, err_win_calls = err_win_bad = err_win_new = 0, err_win_blocks = 0;
+}
+
+// A slot for this call (0 when off), after reading the call ERR_LAG back and the slot's last user.
+static uint32_t err_slot(const VkAstcRegion *rg, int n, uint32_t bw, uint32_t bh) {
+    if (err_on < 0) {
+        err_on = cfg_get("MKW_ASTC_ERRORS") ? atoi(cfg_get("MKW_ASTC_ERRORS")) : 0;
+        const char *lag = cfg_get("MKW_ASTC_ERRORS_LAG");
+        if (lag && atoi(lag) > 0 && atoi(lag) < ERR_SLOTS - 1) err_lag = atoi(lag);
+    }
+    if (err_on <= 0 || !G.err_map) return 0;
+    uint32_t s = err_next;
+    err_next = err_next + 1 < ERR_SLOTS ? err_next + 1 : 1;
+    uint32_t back = s > (uint32_t)err_lag ? s - (uint32_t)err_lag : s + ERR_SLOTS - 1 - (uint32_t)err_lag;
+    err_check(back, "read later");
+    err_check(s, "slot reused");
+    err_summary();
+    err_win_calls++;
+    for (int i = 0; i < ERR_LEVELS; i++) G.err_map[s * ERR_LEVELS + i] = 0;
+    vmaFlushAllocation(vk_ctx()->vma, G.err_alloc, (VkDeviceSize)s * ERR_LEVELS * 4, ERR_LEVELS * 4);
+    err_meta[s].addr = tag.addr, err_meta[s].path = (uint8_t)tag.path;
+    err_meta[s].frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    err_meta[s].w = rg[0].w, err_meta[s].h = rg[0].h, err_meta[s].regions = (uint32_t)n;
+    err_meta[s].fp = (uint16_t)(bw * 13 + bh), err_meta[s].seen = 0, err_meta[s].used = 1;
+    err_calls++;
+    tag.addr = 0, tag.path = 0;
+    return s;
+}
 static uint64_t n_dispatch, n_texels;
 
 // MKW_ASTC_TIME=1 (or vk_astc_time_enable): timestamps around the dispatches of each scratch chunk (the decode
@@ -264,13 +412,13 @@ static void reset_for(VkCtx *c) {
 
 static int create_pipeline(VkCtx *c) {
     G.push = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(c->device, "vkCmdPushDescriptorSetKHR");
-    VkDescriptorSetLayoutBinding b[3];
-    for (int i = 0; i < 3; i++)
+    VkDescriptorSetLayoutBinding b[4];
+    for (int i = 0; i < 4; i++)
         b[i] = (VkDescriptorSetLayoutBinding){.binding = (uint32_t)i, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                               .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
     VkDescriptorSetLayoutCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                            .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-                                           .bindingCount = 3, .pBindings = b};
+                                           .bindingCount = 4, .pBindings = b};
     VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push)};
     VkShaderModuleCreateInfo mi = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof astc_decode_spv,
                                    .pCode = astc_decode_spv};
@@ -292,6 +440,14 @@ static int create_pipeline(VkCtx *c) {
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     if (vmaCreateBuffer(c->vma, &bi, &aci, &G.tab, &G.tab_alloc, NULL) != VK_SUCCESS) return 0;
+    VkBufferCreateInfo ebi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = ERR_SLOTS * ERR_LEVELS * 4,
+                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+    VmaAllocationCreateInfo eaci = {.usage = VMA_MEMORY_USAGE_AUTO,
+                                    .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+    VmaAllocationInfo einfo = {0};
+    if (vmaCreateBuffer(c->vma, &ebi, &eaci, &G.err, &G.err_alloc, &einfo) != VK_SUCCESS) return 0;
+    G.err_map = einfo.pMappedData;
+    if (G.err_map) memset((void *)G.err_map, 0, ERR_SLOTS * ERR_LEVELS * 4), vmaFlushAllocation(c->vma, G.err_alloc, 0, VK_WHOLE_SIZE);
     rt_log("vk: ASTC compute decoder ready (pipeline built in %.1f ms)", (double)(plat_now_ns() - t0) / 1e6);
     mi.codeSize = sizeof bc7_encode_spv, mi.pCode = bc7_encode_spv;
     if (vkCreateShaderModule(c->device, &mi, NULL, &m) == VK_SUCCESS) {
@@ -535,9 +691,10 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     VkQueryPool tpool = t_pool;
     plat_mutex_unlock(&t_lock);
     if (whole >= 0) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, tpool, 2 * (uint32_t)whole);
-    VkDescriptorBufferInfo dbi[3] = {{sb, 0, cap_in}, {sb, cap_in, cap_out}, {tab, 0, TAB_SIZE}};
-    VkWriteDescriptorSet w[3];
-    for (int i = 0; i < 3; i++)
+    uint32_t eslot = err_slot(rg, n, bw, bh);
+    VkDescriptorBufferInfo dbi[4] = {{sb, 0, cap_in}, {sb, cap_in, cap_out}, {tab, 0, TAB_SIZE}, {G.err, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet w[4];
+    for (int i = 0; i < 4; i++)
         w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = (uint32_t)i,
                                       .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                       .pBufferInfo = &dbi[i]};
@@ -576,13 +733,14 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
         }
         if (slot >= 0) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, tpool, 2 * (uint32_t)slot);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
-        rec_push(G.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, G.layout, 0, 3, w);
+        rec_push(G.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, G.layout, 0, 4, w);
         VkDeviceSize ib = 0, ob = 0;
         for (int i = i0; i < i1; i++) {
             const VkAstcRegion *r = &rg[i];
             uint32_t bx = (r->w + bw - 1) / bw, by = (r->h + bh - 1) / bh;
             Push pc = {.in_base = (uint32_t)(ib / 16), .out_base = (uint32_t)(ob / 4), .width = r->w, .height = r->h,
-                       .bw = bw, .bh = bh, .bx = bx, .bslice = bx * by, .srgb = (uint32_t)(srgb != 0)};
+                       .bw = bw, .bh = bh, .bx = bx, .bslice = bx * by, .srgb = (uint32_t)(srgb != 0),
+                       .err_slot = eslot ? eslot * ERR_LEVELS + (r->level < ERR_LEVELS ? r->level : ERR_LEVELS - 1) : 0};
             vkCmdPushConstants(cb, G.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
             uint32_t bpw = bw * bh <= 64 ? 64 / (bw * bh) : 1;   // blocks per workgroup, as astc_decode.comp main
             vkCmdDispatch(cb, (bx + bpw - 1) / bpw, by, r->slices);
@@ -657,6 +815,7 @@ void vk_astc_release(void) {
         if (G.layout) vkDestroyPipelineLayout(c->device, G.layout, NULL);
         if (G.dsl) vkDestroyDescriptorSetLayout(c->device, G.dsl, NULL);
         if (G.tab) vmaDestroyBuffer(c->vma, G.tab, G.tab_alloc);
+        if (G.err) vmaDestroyBuffer(c->vma, G.err, G.err_alloc);
         if (fx_buf) vmaDestroyBuffer(svma(), fx_buf, fx_alloc);
     }
     fx_buf = VK_NULL_HANDLE, fx_alloc = NULL, fx_tried = 0;

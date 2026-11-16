@@ -4,6 +4,7 @@ Usage: uv run tools/shaders/embed_spv.py runtime/shaders/bc7_encode.comp
 """
 
 import hashlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -17,7 +18,12 @@ def main() -> None:
     name = src.stem
     with tempfile.TemporaryDirectory() as d:
         spv = Path(d, f"{name}.spv")
-        subprocess.run(["glslc", "--target-env=vulkan1.3", "-O", str(src), "-o", str(spv)], check=True)
+        if shutil.which("glslc"):
+            subprocess.run(["glslc", "--target-env=vulkan1.3", "-O", str(src), "-o", str(spv)], check=True)
+        else:  # no shaderc: glslang then spirv-opt -O, the same optimisation glslc -O runs
+            raw = Path(d, f"{name}.raw.spv")
+            subprocess.run(["glslangValidator", "-V", "--target-env", "vulkan1.3", str(src), "-o", str(raw)], check=True)
+            subprocess.run(["spirv-opt", "-O", str(raw), "-o", str(spv)], check=True)
         data = spv.read_bytes()
     words = [int.from_bytes(data[i : i + 4], "little") for i in range(0, len(data), 4)]
     rows = [", ".join(f"0x{w:08x}" for w in words[i : i + 8]) for i in range(0, len(words), 8)]

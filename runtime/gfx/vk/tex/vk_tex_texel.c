@@ -124,6 +124,7 @@ int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, 
                 ar[z] = (VkAstcRegion){.src = slice * (size_t)z, .w = w, .h = h, .slices = 1, .level = rg[z].imageSubresource.mipLevel,
                                        .layer = rg[z].imageSubresource.baseArrayLayer, .offset = rg[z].imageOffset};
             uint64_t a0 = perf_begin();
+            vk_astc_tag(e->pub.addr, 3);
             done = vk_astc_record(cb, sb, slice * (size_t)g->nz, ar, g->nz, e->f.astc_bw, e->f.astc_bh, e->f.astc_srgb,
                                   e->pub.image, aspect, e->f.astc_bc7, VK_NULL_HANDLE);
             perf_end(PERF_ASTC, a0);

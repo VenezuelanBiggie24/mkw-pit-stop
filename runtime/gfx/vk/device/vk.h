@@ -345,6 +345,8 @@ int vk_astc_mode(void);                 // decided once per device (logged); VK_
 int vk_astc_native(VkFormat astc_fmt);  // 1: images of this ASTC format are created as such and get the raw blocks
 int vk_astc_gpu(void);                  // 1: ASTC images decoded to RGBA8 by the compute decoder (vk_astc_record)
 int vk_astc_bc7(void);                  // 1: and encoded again as BC7 (MKW_ASTC_BC7, default on): 1 byte a texel, not 4
+void vk_astc_tag(uint64_t addr, int path);  // MKW_ASTC_ERRORS: the next vk_astc_record's texture and path (1 upload,
+                                            // 2 astc-copy, 3 write-texels) on this thread
 // One image region decoded from raw blocks: tight rows of 16-byte blocks at byte src of the source buffer (slices one
 // after the other), w x h texels and slices deep, written at offset of level / layer.
 typedef struct { VkDeviceSize src; uint32_t w, h, slices, level, layer; VkOffset3D offset; } VkAstcRegion;
