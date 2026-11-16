@@ -3,10 +3,16 @@
 Use `uv run tools/ps5/build_game.py --stack DIR --inventory` for the
 game-free compile and import report. Add the completed PS5 lift and extracted
 ExeFS with `--generated DIR --exefs DIR` to build the loader-stage title.
+
+`--pgo-use FILE` compiles the generated C with a profile (`llvm-profdata merge` of the .profraw files of a Linux
+build with `tools/build/build.py --pgo-gen`, same generated tree): objects in `game-objects/lift-pgo`, so the
+build without it keeps its own, and the clang warnings about functions whose profile is missing or out of date
+are summed up at the end (a generator change since the profile shows there).
 """
 
 import argparse
 import json
+import re
 import os
 import shlex
 import shutil
@@ -80,7 +86,8 @@ def ninja_path(path: Path) -> str:
 
 
 def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[str, str],
-                    jobs: int, generated: Path | None, exefs: Path | None) -> tuple[list[Path], bool]:
+                    jobs: int, generated: Path | None, exefs: Path | None,
+                    pgo_use: Path | None = None) -> tuple[list[Path], bool]:
     out = WORK / ("game-objects" if generated else "inventory-objects")
     out.mkdir(parents=True, exist_ok=True)
     write_changed(out / "guest_layout.h", ("#pragma once\n" + placement_defines(PROFILE)).encode())
@@ -94,6 +101,10 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
              *(f"-I{p}" for p in [out, *include_dirs, *includes, template / "external", ROOT / "scratchpad/vma"])]
     genflags = [*common, "-O1", "-Wno-return-type", "-Wno-unused-label", "-fvisibility=hidden",
                 f"-I{RUNTIME / 'cpu'}"]
+    # PGO changes layout, inlining and branch weights only, never what a guest instruction computes.
+    # -Wprofile-instr-missing: a function the profile does not know, i.e. not compiled in the instrumented build.
+    if pgo_use is not None:
+        genflags += [f"-fprofile-instr-use={pgo_use}", "-Wprofile-instr-missing"]
     ninja = []
     for name, compiler, options in (
         ("cc", "prospero-clang", ["-std=gnu11", *flags]),
@@ -129,15 +140,18 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
         ninja += ["rule tables", f"  command = {invocation} -MMD -MF $out.d -c $in -o $out",
                   "  depfile = $out.d", "  deps = gcc", "  description = compile game tables"]
         files.append((modules, Path("modules.c"), "tables"))
+        lift = "lift-pgo" if pgo_use is not None else "lift"
         for name, _, _ in read_checked(generated, PROFILE):
-            files += [(source, Path("lift") / name / source.name, "lift")
+            files += [(source, Path(lift) / name / source.name, "lift")
                       for source in sorted((generated / name).glob("*.c"))]
     objects = []
     for source, relative, rule in files:
         obj = out / relative.with_suffix(".o")
         obj.parent.mkdir(parents=True, exist_ok=True)
         objects.append(obj)
-        ninja.append(f"build {ninja_path(obj)}: {rule} {ninja_path(source)}")
+        # a new profile in the same file rebuilds the generated code: the profile is an input
+        implicit = f" | {ninja_path(pgo_use)}" if rule == "lift" and pgo_use is not None else ""
+        ninja.append(f"build {ninja_path(obj)}: {rule} {ninja_path(source)}{implicit}")
     manifest = out / "build.ninja"
     write_changed(manifest, ("\n".join(ninja) + "\n").encode())
     log = out / "compile.log"
@@ -145,12 +159,30 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
         result = subprocess.run(["ninja", "-C", str(out), "-f", str(manifest), "-j", str(jobs), "-k", "0"],
                                 env=env, stdout=stream, stderr=subprocess.STDOUT, check=False)
     print(f"Compile log: {log}", flush=True)
+    if pgo_use is not None:
+        pgo_report(log.read_text(errors="replace"))
     failed = {line.removeprefix("FAILED: ").strip() for line in log.read_text().splitlines()
               if line.startswith("FAILED: ")}
     available = [obj for obj in objects if obj.is_file() and str(obj) not in failed]
     if result.returncode:
         print(f"Compile incomplete. The import reports cover only {len(available)} of {len(objects)} objects.")
     return available, result.returncode == 0
+
+
+def pgo_report(text: str) -> None:
+    """Sums clang's per-file profile warnings: "of N functions, M have mismatched data" (the C of M functions is not
+    what the profile was taken from: a generator or header change since) and "of N functions, M have no data" (not
+    in the instrumented build). Ninja shows a file's warnings only when it compiles it: a no-op build reports nothing."""
+    sums = {}
+    for kind, pattern in (("mismatched (out of date)", r"of (\d+) functions?, (\d+) (?:has|have) mismatched data"),
+                          ("without data (missing)", r"of (\d+) functions?, (\d+) (?:has|have) no data")):
+        found = [(int(a), int(b)) for a, b in re.findall(pattern, text)]
+        sums[kind] = (len(found), sum(b for _, b in found), sum(a for a, _ in found))
+    other = sorted({m for m in re.findall(r"warning: (.*profile.*)", text) if "of " not in m})[:10]
+    for kind, (files, bad, total) in sums.items():
+        print(f"PGO: {kind}: {bad} of {total} functions in {files} files")
+    for line in other:
+        print(f"PGO: {line}")
 
 
 def import_inventory(sdk: Path, objects: list[Path], env: dict[str, str], out: Path, reachable: bool) -> Path | None:
@@ -200,12 +232,17 @@ def main() -> int:
     parser.add_argument("--inventory", action="store_true", help="compile and report unresolved imports without packaging")
     parser.add_argument("--generated", type=Path, help="completed ps5-high144 lift")
     parser.add_argument("--exefs", type=Path, help="local extracted ExeFS for the built-in module hashes")
+    parser.add_argument("--pgo-use", type=Path, metavar="FILE",
+                        help="profile for the generated C (.profdata from tools/build/build.py --pgo-gen runs)")
     args = parser.parse_args()
     if not args.inventory and args.generated is None:
         parser.error("use --inventory or specify --generated (with --exefs on first build)")
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
     generated = args.generated.resolve() if args.generated else None
+    pgo_use = args.pgo_use.resolve() if args.pgo_use else None
+    if pgo_use is not None and not pgo_use.is_file():
+        parser.error(f"--pgo-use: {pgo_use} is not a file")
     exefs = args.exefs.resolve() if args.exefs else None
     includes = [path.resolve() for path in args.include]
     libraries = [path.resolve() for path in args.library]
@@ -233,7 +270,7 @@ def main() -> int:
         env.setdefault("PS5_CLANG", clang22)
     sdk = Path(subprocess.check_output(["bash", str(title / "ps5/tools/setup-sdk.sh")], env=env, text=True).strip())
     with output_lock(generated) if generated else nullcontext():
-        objects, complete = compile_objects(sdk, template, includes, env, args.jobs, generated, exefs)
+        objects, complete = compile_objects(sdk, template, includes, env, args.jobs, generated, exefs, pgo_use)
     out = WORK / ("game-objects" if generated else "inventory-objects")
     aggregate = import_inventory(sdk, objects, env, out, reachable=False)
     loader = import_inventory(sdk, objects, env, out, reachable=True)

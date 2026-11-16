@@ -13,8 +13,11 @@ game copy, patch sets); build/obj/rt/defaults.c the default game paths.
 tools/build/windeps.py puts in build/win (totk-pc-recomp's --toolchain build: its LLVM_LINK_LIBS). Objects go to
 build/obj-win. The window, input, keyboard and menu are SDL3 on both systems; platform/win32.c replaces platform/linux.c.
 
+--pgo-gen DIR instruments the generated C for profile-guided optimization (clang -fprofile-instr-generate): the run
+writes DIR/mkw-<pid>-*.profraw (runtime/core/diag/pgo.c, MKW_PGO_AT) for tools/ps5/build_game.py --pgo-use.
+
 Usage: uv run tools/build/build.py [--target linux|windows] [--guest-layout PROFILE] [--gen DIR] [--exefs DIR] [--romfs DIR]
-       [--jobs N] [--frame-pointers] [--dry-run]
+       [--jobs N] [--frame-pointers] [--pgo-gen DIR] [--dry-run]
 Heavy (all cores, several GB): our runs go through tools/run/job.sh.
 """
 
@@ -166,7 +169,7 @@ RT_EXPORTS = ("rt_dispatch", "rt_svc", "rt_udf", "rt_ticks", "rt_spin_gate", "fn
 
 def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: Path | None,
                runtime_only: bool = False, ld_extra: list[str] | None = None, profile: str = DEFAULT,
-               exe: Path | None = None) -> str:  # fmt: skip
+               exe: Path | None = None, gen_extra: list[str] | None = None) -> str:  # fmt: skip
     """dist: the player's build into that folder, the runtime (mkw, mkw.exe) and the game code apart (mkwgame.so,
     mkwgame.dll); else build/mkw with the game code linked in. runtime_only (with dist): the runtime alone, what a
     release ships and the CI builds, without the game's generated C."""
@@ -187,7 +190,7 @@ def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: 
     cc = f"ccache {target.cc}" if os.environ.get("MKW_CCACHE", "1") != "0" and shutil.which("ccache") else target.cc
     lines = [
         f"builddir = {out}",
-        f"genflags = {' '.join(GEN_FLAGS + pic)} -I{RUNTIME / 'cpu'}",
+        f"genflags = {' '.join(GEN_FLAGS + pic + (gen_extra or []))} -I{RUNTIME / 'cpu'}",
         f"rtflags = {' '.join(RT_FLAGS + target.rt_flags + rt_extra)} {gid} {inc} -I{gen} -I{out / 'rt'} -I{target.vma}",
         f"tabflags = {' '.join(GEN_FLAGS + pic)} {gid} {inc} -I{gen}",
         f"ldflags = {' '.join(link_flags)}",
@@ -288,6 +291,11 @@ def main() -> int:
         action="store_true",
         help="runtime with frame pointers: perf call graphs (-g) of where threads block, e.g. -e cs",
     )
+    ap.add_argument(
+        "--pgo-gen", type=Path, metavar="DIR",
+        help="instrument the generated C (-fprofile-instr-generate): the run writes DIR/mkw-<pid>-*.profraw; objects "
+        "in obj-pgo-gen, the executable mkw-pgo-gen",
+    )  # fmt: skip
     args = ap.parse_args()
     if args.runtime_only and not args.dist:
         ap.error("--runtime-only needs --dist")
@@ -295,6 +303,8 @@ def main() -> int:
         ap.error("an experimental guest layout needs a build with the generated game linked in")
     if args.sysroot and args.target == "windows":
         ap.error("--sysroot is for Linux")
+    if args.pgo_gen and (args.dist or args.target == "windows"):
+        ap.error("--pgo-gen is for the Linux build with the game linked in (the profile runtime is Linux's)")
     build_root = ROOT / "build"
     if args.guest_layout != DEFAULT:
         build_root /= f"layout-{args.guest_layout}"
@@ -312,8 +322,18 @@ def build(args: argparse.Namespace, build_root: Path) -> int:
     sys_flags = ["--target=x86_64-linux-gnu", f"--sysroot={args.sysroot.resolve()}"] if args.sysroot else []
     sys_ld = [*sys_flags, f"-L{args.sysroot.resolve()}/usr/local/lib"] if args.sysroot else []
     dist = ROOT / "build/dist" / args.target if args.dist else None
-    exe = build_root / target.exe.name
-    args.out = args.out or build_root / ("obj" + ("-dist" if dist else "") + ("-win" if target is WINDOWS else ""))
+    exe = build_root / (target.exe.name + ("-pgo-gen" if args.pgo_gen else ""))
+    args.out = args.out or build_root / ("obj" + ("-dist" if dist else "") + ("-win" if target is WINDOWS else "")
+                                         + ("-pgo-gen" if args.pgo_gen else ""))
+    # Front-end instrumentation (-fprofile-instr-generate), not IR (-fprofile-generate): its function hashes come from
+    # the C's syntax tree, so the PS5 build (another target, -march, -fPIC) finds the same functions; IR PGO hashes the
+    # control flow after early passes, which can differ between targets. %p: one file per process.
+    gen_pgo, ld_pgo = [], []
+    if args.pgo_gen:
+        args.pgo_gen = args.pgo_gen.resolve()
+        args.pgo_gen.mkdir(parents=True, exist_ok=True)
+        gen_pgo = [f"-fprofile-instr-generate={args.pgo_gen / 'mkw-%p.profraw'}"]
+        ld_pgo = ["-fprofile-instr-generate"]   # links clang's profile runtime (libclang_rt.profile)
     modules = None
     if not args.runtime_only:
         modules = module_glue(args.gen, args.exefs, dist is not None, args.guest_layout)
@@ -340,9 +360,10 @@ def build(args: argparse.Namespace, build_root: Path) -> int:
         (dist / "mkwgame.id").write_text(game_id())
     fp = ["-fno-omit-frame-pointer", "-mno-omit-leaf-frame-pointer"] if args.frame_pointers else []
     (args.out / "build.ninja").write_text(
-        ninja_file(target, args.gen, args.out, fp + sys_flags, dist, args.runtime_only, sys_ld, args.guest_layout, exe)
+        ninja_file(target, args.gen, args.out, fp + sys_flags, dist, args.runtime_only, sys_ld + ld_pgo,
+                   args.guest_layout, exe, gen_pgo)
     )
-    if target is LINUX and not dist and args.guest_layout == DEFAULT:
+    if target is LINUX and not dist and args.guest_layout == DEFAULT and not args.pgo_gen:
         write_compile_db(args.out / "build.ninja")
     cmd = ["ninja", "-f", str(args.out / "build.ninja"), "-j", str(jobs)] + (["-n"] if args.dry_run else [])
     print(f"{' '.join(cmd)}  ({jobs} jobs)")

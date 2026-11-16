@@ -278,3 +278,25 @@ renderer paths.
 The repository's game-free Linux baseline is `uv run tools/build/build.py --dist --runtime-only`. Keep game inputs and
 generated title contents outside version control. The current runtime initializes guest memory before dispatching
 probe commands, so it needs linked game module metadata to reach those probes.
+
+## Profile-guided build
+
+The PS5 SDK has no compiler-rt profile runtime, but `prospero-clang` is the same clang 21.1.8 as the Linux host's, so
+the profile is taken on Linux and used by the PS5 build. The Linux build compiles the PS5's own generated tree (same
+generator, `ps5-high144`, same patches and chunk file names, by which the profile names `static` helpers), so the two
+builds see the same functions:
+
+```sh
+uv run tools/build/build.py --guest-layout ps5-high144 --gen build/ps5-game/generated --pgo-gen build/pgo/raw
+MKW_GPU=null MKW_PGO_AT=1500,4500 build/layout-ps5-high144/mkw-pgo-gen --seconds 280   # menus, then a race
+llvm-profdata merge -o build/pgo/mkw.profdata build/pgo/raw/*.profraw
+uv run tools/ps5/build_game.py ... --pgo-use build/pgo/mkw.profdata
+```
+
+The instrumentation is clang's front end (`-fprofile-instr-generate`): its function hashes come from the C's syntax
+tree, so the other target, `-march` and `-fPIC` of the PS5 build do not change them. `MKW_GPU=null` runs the game's
+CPU side without the software GPU's stalls; the counts are of the game code, which does not depend on the GPU.
+`MKW_PGO_AT` cuts the profile into stretches (`runtime/core/diag/pgo.c`), so the race can be weighted above the menus
+(`llvm-profdata merge --weighted-input=W,FILE`). A profile goes stale when the generator or `runtime/cpu`'s headers
+change: `build_game.py --pgo-use` prints how many functions clang found out of date or without data, and those are
+compiled without the profile. Retake the profile then.

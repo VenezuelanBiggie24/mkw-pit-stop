@@ -21,7 +21,7 @@ build and only after a collision returns `EEXIST` and preserves the probe's mark
 | --- | --- |
 | `build_smoke.py` | Generates the standalone title and builds it through the pinned Vulkan Template |
 | `build_radv.py` | Applies `tools/ps5/patches/*.patch` to `PS5_Mesa`, rebuilds `libvulkan_radeon.ps5.a` when missing or stale, and records the archive and patch SHA-256 in `PROVENANCE.txt` |
-| `build_game.py` | Cross-builds the real runtime for the private PS5 loader-stage title and reports unresolved imports |
+| `build_game.py` | Cross-builds the real runtime for the private PS5 loader-stage title and reports unresolved imports. `--pgo-use FILE`: the generated C with a profile from a Linux `build.py --pgo-gen` run (objects in `game-objects/lift-pgo`; sums up clang's warnings about functions out of date or without data) |
 | `deploy.py` | Uploads the built smoke title (or the game with `--game`), verifies it by SHA-256, publishes it over FTP, and refreshes ShadowMountPlus's registered copy of `param.json` in `/user/app/<title>/sce_sys` when there is one |
 | `smoke.cpp` | Clears and presents a frame through the Vulkan Template's sample interface |
 | `probe.c` | Logs the selected device's features, queue support and candidate guest memory ranges |

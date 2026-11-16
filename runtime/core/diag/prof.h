@@ -15,3 +15,12 @@ void prof_sampler_frame(uint64_t frame, uint64_t now, uint64_t d);   // every pr
 // handler); prof_pc_describe only reads them.
 void prof_names_init(void);
 const char *prof_pc_describe(uint64_t pc, char *buf, int n);
+// The counters of instrumented game code (pgo.c, build.py --pgo-gen): MKW_PGO_AT's frames and plat_exit. Only Linux
+// has the profile runtime; elsewhere these do nothing, and the PS5 and Windows objects stay as they were.
+#if defined(__linux__) && !defined(MKW_PS5_NATIVE)
+void pgo_frame(uint64_t frame);
+void pgo_exit(void);
+#else
+static inline void pgo_frame(uint64_t frame) { (void)frame; }
+static inline void pgo_exit(void) {}
+#endif

@@ -155,7 +155,10 @@ int plat_stderr_path(char *out, size_t cap) {
 
 // ---- process
 
+void pgo_exit(void) __attribute__((weak));   // core/diag/pgo.c: an instrumented build's counters, which _exit skips
+
 void plat_exit(int code) {
+    if (pgo_exit) pgo_exit();
     fflush(stdout);
     fflush(stderr);
     _exit(code);
