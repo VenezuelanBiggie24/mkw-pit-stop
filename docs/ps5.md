@@ -1,9 +1,11 @@
-# Mario Kart World on PS5
+# Mario Kart World: Pit Stop (PS5)
 
-The target is a native PS5 homebrew title built on a PC from an extracted Mario Kart World 1.0.0 copy. The proposed
+**Mario Kart World: Pit Stop** (`PPSA99193`) is the native PS5 homebrew port of [mkw-recomp](https://github.com/adriadam10/mkw-recomp), built on a PC from an extracted Mario Kart World 1.0.0 copy. The
 output is a title folder with `eboot.bin`, `sce_sys/`, and the local data the runtime reads (`exefs/`, `romfs/`, and
 `spirv/`). Use the built-in game module path in `tools/build/build.py` to link the lifted C into the title. The PC
-builder handles game preparation. On the PS5, start in the game runtime and keep saves in the writable profile path.
+builder (`tools/ps5/prepare_ps5.py`) handles game preparation from a release bundle without a source checkout. On the PS5, start in the game runtime and keep saves in the writable profile path.
+
+Mario Kart World is © Nintendo. This project is not affiliated with or endorsed by Nintendo, Sony Interactive Entertainment, or any game publisher, contains no game code or assets, and does not help to obtain them.
 
 [Hookshot's PS5 beta](https://github.com/mihawk-99/PS5_Hookshot/blob/ps5-v0.1.0-beta.1/docs/PS5.md) is the reference for
 the build and title layout, linked RADV, Vulkan display, and DualSense and audio integration. Implement against MKW's
@@ -314,3 +316,23 @@ CPU side without the software GPU's stalls; the counts are of the game code, whi
 (`llvm-profdata merge --weighted-input=W,FILE`). A profile goes stale when the generator or `runtime/cpu`'s headers
 change: `build_game.py --pgo-use` prints how many functions clang found out of date or without data, and those are
 compiled without the profile. Retake the profile then.
+
+## Pit Stop placeholder and PC builder
+
+A redistributable PS5 package cannot ship the full `eboot.bin` (which statically links the recompiled game C),
+`spirv/`, `exefs/`, or `romfs/`. Instead:
+
+- **Placeholder title (`PPSA99193`)**: linking `loader-inventory.o` with weak `rt_game_builtin() == NULL` produces a
+  game-free `eboot.bin`. On boot, before `mem_init()` or `rt_boot()`, if `rt_game_builtin()` is NULL or
+  `ps5_game_files_ready("/app0", RT_GAME_ID)` reports missing/outdated files or `pitstop-game.id` mismatch,
+  `ps5_placeholder_run()` displays the Pit Stop missing-files screen (console IP from `sceNetCtlGetInfo`, expected
+  version, transfer progress) and starts the `PIT1` TCP receiver on port `19913`.
+- **Receiver security**: `ps5_recv.c` runs only while the placeholder screen is visible, never starts once the game
+  launches, rejects any path leaving the title root (`..`, leading `/`, `\`, symlinks), streams into `.pitstop.part`
+  with SHA-256 verification before atomic rename, skips matching files via `.pitstop-manifest.tsv` so runtime updates
+  resend only changed files (`eboot.bin`, `mkw.sym`, `pitstop-game.id`), closes the listening socket on `CMD_DONE`, and
+  refreshes `/user/app/PPSA99193/sce_sys` when writable.
+- **SDK-free PC builder**: `tools/ps5/release_ps5.py` packages `ps5-bundle/` (`loader-inventory.o`, prebuilt `app_crt.o`,
+  `libSceAgc*.so`, RADV/deps/SDK archives & stubs, linker scripts, and Linux/Windows `ps5-native-tool[.exe]`). The
+  desktop launcher (`runtime/ui/launcher/`) and `tools/ps5/prepare_ps5.py` drive the build with pinned `zig` (`zig cc`,
+  `zig ld.lld`) on both Linux and Windows from either a dump folder or a `.nup` package (`tools/prepare/nup.py`).
