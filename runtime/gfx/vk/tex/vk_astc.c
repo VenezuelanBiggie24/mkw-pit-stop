@@ -124,7 +124,13 @@ static struct {
 #define ERR_SLOTS 8192
 #define ERR_LEVELS 16   // a counter per mip level (the last one also counts deeper levels) in each slot
 static int err_on = -1, err_lag = 256;   // MKW_ASTC_ERRORS_LAG: calls before a count is read (1 for the probe)
-static struct { uint64_t addr, frame; uint32_t w, h, regions, seen; uint16_t fp; uint8_t path, used; } err_meta[ERR_SLOTS];
+static struct {
+    uint64_t addr, frame, key, img, call;   // key: the destination (stuck_key); call: err_calls when recorded
+    uint32_t w, h, regions, seen, level, layer;
+    int32_t x, y;
+    uint16_t fp;
+    uint8_t path, used;
+} err_meta[ERR_SLOTS];
 static uint32_t err_next = 1, err_logged, err_calls, err_bad;
 static uint64_t err_blocks;
 // One line per texture, the first time it has errors (a texture copied level by level made 300 lines in one frame of
@@ -145,6 +151,67 @@ static _Thread_local struct { uint64_t addr; int path; } tag;
 static const char *const err_path[] = {"other", "upload", "astc-copy", "write-texels", "probe"};
 
 void vk_astc_tag(uint64_t addr, int path) { tag.addr = addr, tag.path = path; }
+
+// With MKW_ASTC_ERRORS on, the result of the latest decode into each destination, to tell the magenta that stays on
+// screen from the error blocks a later decode replaces (17/11/2026: the same kart textures decoded with errors at the
+// same frames in every run, while the magenta seen was random and mostly terrain). A destination is the image and the
+// first region's level, layer and offset, with the region count: a texture's uploads all have the same one, and a copy
+// into a terrain array has that layer's level and place. Every 600 frames (err_summary) the destinations whose latest
+// decode has error blocks are counted, and the ones not listed before are logged ("ASTC stuck"). A destination whose
+// image was destroyed since stays in the table: a line's frame and size tell those from the live ones.
+#define STUCK_N 16384
+#define STUCK_LINES 32   // per summary
+static struct {
+    uint64_t key, addr, img, frame, call;
+    uint32_t err, w, h, level, layer, regions;
+    int32_t x, y;
+    uint16_t fp;
+    uint8_t path, listed;
+} stuck[STUCK_N];
+static uint32_t stuck_fixed, stuck_full;
+
+static uint64_t stuck_key(uint64_t img, const VkAstcRegion *r, int n) {
+    uint64_t k = img * 0x9E3779B97F4A7C15ull;
+    uint64_t v[5] = {r->level, r->layer, (uint32_t)r->offset.x, (uint32_t)r->offset.y, (uint64_t)n};
+    for (int i = 0; i < 5; i++) k = (k ^ v[i]) * 0x100000001B3ull;
+    return k | 1;   // never 0, the empty slot
+}
+
+static void stuck_note(uint32_t s, uint32_t n) {   // the upload lock (err_check)
+    uint64_t key = err_meta[s].key;
+    if (!key) return;
+    uint32_t i = (uint32_t)(key >> 20) % STUCK_N, k = 0;
+    for (; k < STUCK_N && stuck[i].key && stuck[i].key != key; k++) i = (i + 1) % STUCK_N;
+    if (k == STUCK_N) { stuck_full++; return; }
+    if (stuck[i].key && stuck[i].call > err_meta[s].call) return;   // a newer decode of it was read already
+    if (stuck[i].key && stuck[i].err && !n) stuck_fixed++;
+    if (!stuck[i].key || !stuck[i].err || stuck[i].call != err_meta[s].call) stuck[i].listed = 0;
+    stuck[i].key = key, stuck[i].call = err_meta[s].call, stuck[i].err = n;
+    stuck[i].addr = err_meta[s].addr, stuck[i].img = err_meta[s].img, stuck[i].frame = err_meta[s].frame;
+    stuck[i].w = err_meta[s].w, stuck[i].h = err_meta[s].h, stuck[i].level = err_meta[s].level;
+    stuck[i].layer = err_meta[s].layer, stuck[i].regions = err_meta[s].regions, stuck[i].x = err_meta[s].x;
+    stuck[i].y = err_meta[s].y, stuck[i].fp = err_meta[s].fp, stuck[i].path = err_meta[s].path;
+}
+
+static void stuck_summary(uint64_t fr) {
+    uint32_t n = 0, listed = 0, shown = 0;
+    for (uint32_t i = 0; i < STUCK_N; i++) {
+        if (!stuck[i].key || !stuck[i].err) continue;
+        n++;
+        if (stuck[i].listed) { listed++; continue; }
+        stuck[i].listed = 1;
+        if (shown++ >= STUCK_LINES) continue;
+        rt_log("vk: ASTC stuck: %u error blocks in the latest decode, by %s at frame %llu: source %#llx %ux%u ASTC %ux%u, "
+               "%u regions, into image %#llx level %u layer %u at %d,%d",
+               stuck[i].err, err_path[stuck[i].path < 5 ? stuck[i].path : 0], (unsigned long long)stuck[i].frame,
+               (unsigned long long)stuck[i].addr, stuck[i].w, stuck[i].h, stuck[i].fp / 13, stuck[i].fp % 13,
+               stuck[i].regions, (unsigned long long)stuck[i].img, stuck[i].level, stuck[i].layer, stuck[i].x,
+               stuck[i].y);
+    }
+    rt_log("vk: ASTC stuck at frame %llu: %u destinations whose latest decode has error blocks (%u listed before, %u new%s); "
+           "%u fixed by a later decode so far%s", (unsigned long long)fr, n, listed, shown,
+           shown > STUCK_LINES ? ", the first ones listed" : "", stuck_fixed, stuck_full ? " (table full: some not kept)" : "");
+}
 
 // What the blocks of a texture's first level are (every 16 bytes is one block in any layout), to tell why the decoder
 // made the error colour: zero (not written, or layout padding), void extents (an HDR one, bit 9, is an error to an LDR
@@ -187,6 +254,7 @@ static void err_check(uint32_t s, const char *when) {   // the caller holds the 
     vmaInvalidateAllocation(vk_ctx()->vma, G.err_alloc, (VkDeviceSize)s * ERR_LEVELS * 4, ERR_LEVELS * 4);
     uint32_t n = 0, lv[ERR_LEVELS];
     for (int i = 0; i < ERR_LEVELS; i++) lv[i] = G.err_map[s * ERR_LEVELS + i], n += lv[i];
+    stuck_note(s, n);
     if (n <= err_meta[s].seen) return;
     if (!err_meta[s].seen) err_bad++, err_win_bad++;
     err_blocks += n - err_meta[s].seen, err_win_blocks += n - err_meta[s].seen;
@@ -232,10 +300,11 @@ static void err_summary(void) {   // every 600 frames, from err_slot (the upload
            (unsigned long long)fr, err_win_calls, (unsigned long long)err_win_frame, err_win_bad, err_win_new,
            (unsigned long long)err_win_blocks, err_bad, err_calls);
     err_win_frame = fr, err_win_calls = err_win_bad = err_win_new = 0, err_win_blocks = 0;
+    stuck_summary(fr);
 }
 
 // A slot for this call (0 when off), after reading the call ERR_LAG back and the slot's last user.
-static uint32_t err_slot(const VkAstcRegion *rg, int n, uint32_t bw, uint32_t bh) {
+static uint32_t err_slot(const VkAstcRegion *rg, int n, uint32_t bw, uint32_t bh, VkImage img) {
     if (err_on < 0) {
         err_on = cfg_get("MKW_ASTC_ERRORS") ? atoi(cfg_get("MKW_ASTC_ERRORS")) : 0;
         const char *lag = cfg_get("MKW_ASTC_ERRORS_LAG");
@@ -255,7 +324,9 @@ static uint32_t err_slot(const VkAstcRegion *rg, int n, uint32_t bw, uint32_t bh
     err_meta[s].frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
     err_meta[s].w = rg[0].w, err_meta[s].h = rg[0].h, err_meta[s].regions = (uint32_t)n;
     err_meta[s].fp = (uint16_t)(bw * 13 + bh), err_meta[s].seen = 0, err_meta[s].used = 1;
-    err_calls++;
+    err_meta[s].img = (uint64_t)(uintptr_t)img, err_meta[s].key = stuck_key(err_meta[s].img, rg, n);
+    err_meta[s].level = rg[0].level, err_meta[s].layer = rg[0].layer, err_meta[s].x = rg[0].offset.x;
+    err_meta[s].y = rg[0].offset.y, err_meta[s].call = ++err_calls;
     tag.addr = 0, tag.path = 0;
     return s;
 }
@@ -817,7 +888,7 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     VkQueryPool tpool = t_pool;
     plat_mutex_unlock(&t_lock);
     if (whole >= 0) vkCmdWriteTimestamp2(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, tpool, 2 * (uint32_t)whole);
-    uint32_t eslot = err_slot(rg0, n0, bw, bh);
+    uint32_t eslot = err_slot(rg0, n0, bw, bh, img);
     VkDescriptorBufferInfo dbi[4] = {{sb, 0, cap_in}, {sb, cap_in, cap_out}, {tab, 0, TAB_SIZE}, {G.err, 0, VK_WHOLE_SIZE}};
     VkWriteDescriptorSet w[4];
     for (int i = 0; i < 4; i++)
@@ -944,6 +1015,10 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
 void vk_astc_release(void) {
     VkCtx *c = vk_ctx();
     vk_astc_time_summary();
+    if (err_on > 0 && G.err_map) {   // the device is idle: every decode's count, and what stays stuck at the end
+        for (uint32_t s = 1; s < ERR_SLOTS; s++) err_check(s, "at the end");
+        stuck_summary(__atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED));
+    }
     plat_mutex_lock(&t_lock);
     if (c && t_pool && t_dev == c->device) vkDestroyQueryPool(c->device, t_pool, NULL);
     t_pool = VK_NULL_HANDLE, t_dev = VK_NULL_HANDLE;
