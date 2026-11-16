@@ -6,7 +6,7 @@
 // slot once, then the reporters' values (semaphores, counters), and a line when presents resume. It reads the slots
 // with atomic loads and takes no lock of the runtime's: a lock the hung threads hold cannot hold the report too.
 //
-//   MKW_HANG_WATCH=<s>   seconds without a present before the report; 0 turns it off. Default 10 on the PS5 (no
+//   MKW_HANG_WATCH=<s>   seconds (fractions allowed) without a present before the report; 0 turns it off. Default 10 on the PS5 (no
 //                        debugger attaches to a title there), 0 elsewhere (gdb, and llvmpipe runs present every 25 s).
 #include <stdio.h>
 #include <stdlib.h>
@@ -146,7 +146,11 @@ static void report(uint64_t frame, uint64_t stalled_ns) {
 }
 
 static void watch_main(void *arg) {
-    uint64_t limit = (uint64_t)(uintptr_t)arg * 1000000000ull;
+    uint64_t limit_ms = (uint64_t)(uintptr_t)arg, limit = limit_ms * 1000000ull;
+    // Four looks per limit (at most every WAKE_MS, at least every 50 ms): with one look every 2 s a stall had to span
+    // two looks, so the 0.6-1 s hitches of a PS5 race (run vo, 16/11/2026) were never reported.
+    uint32_t wake = limit_ms / 4 < WAKE_MS ? (uint32_t)(limit_ms / 4) : WAKE_MS;
+    if (wake < 50) wake = 50;
     uint64_t last = __atomic_load_n(&frame_seen, __ATOMIC_ACQUIRE), moved = plat_now_ns();
     // A stall is reported at `limit`, then again every REPEAT_S while it lasts (at most MAX_REPORTS times): console run 6
     // reported once 10 s into a slow load, and the real hang that followed (after "sparse bind 2") went unreported.
@@ -154,7 +158,7 @@ static void watch_main(void *arg) {
     int reported = 0;
     uint64_t next = limit;
     for (;;) {
-        plat_sleep_ms(WAKE_MS);
+        plat_sleep_ms(wake);
         uint64_t f = __atomic_load_n(&frame_seen, __ATOMIC_ACQUIRE), now = plat_now_ns();
         if (f != last) {
             if (reported) rt_log("hang watch: presents resumed at frame %llu after %.1f s", (unsigned long long)f,
@@ -178,11 +182,12 @@ void hang_frame(uint64_t frame) {
     const char *def = "0";
 #endif
     const char *e = cfg_get("MKW_HANG_WATCH");
-    long s = atol(e && *e ? e : def);
-    if (s <= 0) return;
-    if (!plat_thread_spawn(watch_main, (void *)(uintptr_t)s, "hang watch", 0)) {
+    double s = atof(e && *e ? e : def);   // seconds, fractions allowed (0.5)
+    long ms = (long)(s * 1000.0 + 0.5);
+    if (ms <= 0) return;
+    if (!plat_thread_spawn(watch_main, (void *)(uintptr_t)ms, "hang watch", 0)) {
         rt_log("hang watch: cannot start its thread");
         return;
     }
-    rt_log("hang watch: every thread's checkpoint is logged after %ld s without a present (MKW_HANG_WATCH)", s);
+    rt_log("hang watch: every thread's checkpoint is logged after %.2f s without a present (MKW_HANG_WATCH)", s);
 }

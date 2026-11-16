@@ -115,6 +115,8 @@ void gfx_window_set_refresh(double hz) {
     if (plat_xchg32(&g_rate_mhz, mhz) != mhz) rt_log("gfx: monitor refresh rate %.3f Hz", hz);
 }
 
+uint32_t gfx_window_refresh_mhz(void) { return (uint32_t)__atomic_load_n(&g_rate_mhz, __ATOMIC_RELAXED); }
+
 // ---- swapchain and present state (g_pl)
 static PlatRMutex g_pl;
 static int g_headless;
@@ -637,7 +639,17 @@ static void present_image_ex(VkImage src, VkImageLayout layout, VkFormat fmt, in
     }
     uint32_t idx = slot;
     if (!g_headless) {
+        uint64_t acq0 = plat_now_ns();
         VkResult r = vkAcquireNextImageKHR(c->device, g_sc, 1000000000ull, g_acquire[slot], VK_NULL_HANDLE, &idx);
+        uint64_t acq_ns = plat_now_ns() - acq0;
+        // A slow or failed acquire skipped the frame without a word: the PS5's ~1 s hitches (runs memgrow2 to vo,
+        // 16/11/2026) waited on the display, the hang watch could not say where. Logged at most 50 times.
+        static int acq_logged;
+        if ((acq_ns > 100000000ull || (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR)) && acq_logged < 50) {
+            acq_logged++;
+            rt_log("gfx: swapchain acquire took %.1f ms (VkResult %d) at present %llu%s", acq_ns / 1e6, (int)r,
+                   (unsigned long long)g_frame, r == VK_TIMEOUT || r == VK_NOT_READY ? ": frame skipped" : "");
+        }
         if (r == VK_ERROR_OUT_OF_DATE_KHR) {
             plat_xchg32(&g_dirty, 1);
             if (!create_swapchain()) goto out;
