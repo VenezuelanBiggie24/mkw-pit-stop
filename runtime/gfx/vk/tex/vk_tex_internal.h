@@ -74,6 +74,7 @@ extern SampSlot *sslots;
 extern int nsslots, nreleased;
 extern Tex *rel_head, *rel_tail;
 extern uint64_t n_uploads, n_reuploads, ru_n, ru_bytes, ru_ns, ru_wt_n, ru_wt_bytes, ru_wt_ns;
+extern uint64_t rc_n, rc_bytes, rc_ns;   // vk_texture_region_copy (vk_tex_upload.c)
 extern int tex_alias;
 extern uint64_t n_alias_copied, n_alias_upload, n_alias_uninit;
 extern uint32_t submit_epoch, tex_gen, slots_gen, samp_gen, reg_serial;

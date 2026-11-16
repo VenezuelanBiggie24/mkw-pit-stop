@@ -246,10 +246,12 @@ void vk_texture_new_submit(void) {
                (unsigned long long)n_alias_uninit);
         n_alias_copied = n_alias_upload = n_alias_uninit = 0;
         tex_zero_tail_recheck(f * 60);
-        rt_log("perf: frame %llu: texture re-uploads %llu (%.1f MiB, %.2f ms), after WriteTexels %llu (%.1f MiB, %.2f ms)",
+        rt_log("perf: frame %llu: texture re-uploads %llu (%.1f MiB, %.2f ms), after WriteTexels %llu (%.1f MiB, %.2f ms); "
+               "region copies from storage %llu (%.1f MiB, %.2f ms)",
                (unsigned long long)f * 60, (unsigned long long)ru_n, ru_bytes / 1048576.0, ru_ns / 1e6,
-               (unsigned long long)ru_wt_n, ru_wt_bytes / 1048576.0, ru_wt_ns / 1e6);
-        ru_n = ru_bytes = ru_ns = ru_wt_n = ru_wt_bytes = ru_wt_ns = 0;
+               (unsigned long long)ru_wt_n, ru_wt_bytes / 1048576.0, ru_wt_ns / 1e6, (unsigned long long)rc_n,
+               rc_bytes / 1048576.0, rc_ns / 1e6);
+        ru_n = ru_bytes = ru_ns = ru_wt_n = ru_wt_bytes = ru_wt_ns = rc_n = rc_bytes = rc_ns = 0;
         uint64_t ck, calls, untr;
         vk_mem_snap_stats(&ck, &calls, &untr);
         rt_log("perf: frame %llu: binding storage checks %llu (texture %llu), write-watch snapshot queries %llu, untracked %llu",

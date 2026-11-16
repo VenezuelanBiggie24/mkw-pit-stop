@@ -179,6 +179,66 @@ static int test_box(void) {
     return 0;
 }
 
+// nvn_texels_region (task 42: a copy out of a CPU-written BC6H staging texture reads only the copied region,
+// vk_texture_region_copy): for every level and layer, regions at block-aligned offsets, ones reaching the level's
+// edge with a partial last block, and the whole level equal the box cut from the whole-level deswizzle, bit for bit.
+// Misaligned and outside boxes are refused. BC6H UFLOAT (0x50, the format of MKW's 8192x8192 staging texture) and an
+// uncompressed format.
+static unsigned g_region_cases;
+static int check_region(const nvn_texdesc *d) {
+    int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
+    nvn_texlayout L;
+    nvn_tex_layout(d, &L);
+    uint8_t *store = malloc(L.size);
+    for (uint64_t i = 0; i < L.size; i++) store[i] = rnd8();
+    for (unsigned lv = 0; lv < d->levels; lv++)
+        for (unsigned ly = 0; ly < L.layers; ly++) {
+            uint32_t lw = d->width >> lv ? d->width >> lv : 1, lh = d->height >> lv ? d->height >> lv : 1;
+            uint32_t cols = (lw + bw - 1) / bw, rows = (lh + bh - 1) / bh, rb = cols * (uint32_t)bpb;
+            uint8_t *lin = malloc((size_t)rb * rows);
+            if (nvn_deswizzle(d, lv, ly, store, lin, rb)) { printf("probe-vkmem: FAIL region deswizzle\n"); return 1; }
+            for (int k = 0; k < 6; k++) {
+                uint32_t bx, by, bn, hn;   // in blocks
+                if (k == 0) bx = by = 0, bn = cols, hn = rows;                                 // whole level
+                else if (k == 1) bx = cols / 2, by = rows / 3, bn = cols - bx, hn = rows - by;  // to the edges
+                else bx = rnd8() % cols, by = rnd8() % rows, bn = 1 + rnd8() % (cols - bx), hn = 1 + rnd8() % (rows - by);
+                uint32_t x = bx * bw, y = by * bh, w = bx + bn == cols ? lw - x : bn * bw, h = by + hn == rows ? lh - y : hn * bh;
+                size_t wb = (size_t)bn * bpb, pitch = wb + 16;
+                uint8_t *box = malloc(pitch * hn), *ref = malloc(pitch * hn);
+                memset(box, 0xAB, pitch * hn), memset(ref, 0xAB, pitch * hn);
+                for (uint32_t r = 0; r < hn; r++) memcpy(ref + r * pitch, lin + (size_t)(by + r) * rb + (size_t)bx * bpb, wb);
+                if (nvn_texels_region(d, lv, ly, x, y, w, h, store, box, pitch) || memcmp(box, ref, pitch * hn)) {
+                    printf("probe-vkmem: FAIL region read format %#x %ux%u level %u layer %u region %u,%u %ux%u\n",
+                           d->format, d->width, d->height, lv, ly, x, y, w, h);
+                    return 1;
+                }
+                g_region_cases++;
+                free(box), free(ref);
+            }
+            uint8_t one[64];
+            if ((bw > 1 && cols > 1 && !nvn_texels_region(d, lv, ly, 1, 0, (uint32_t)bw, 1, store, one, sizeof one)) ||
+                !nvn_texels_region(d, lv, ly, 0, 0, lw + 1, 1, store, one, sizeof one)) {
+                printf("probe-vkmem: FAIL region: a misaligned or outside box of level %u was read\n", lv);
+                return 1;
+            }
+            free(lin);
+        }
+    free(store);
+    return 0;
+}
+
+static int test_region(void) {
+    int bw, bh;
+    if (nvn_fmt_bpb(0x50, &bw, &bh) != 16 || bw != 4 || bh != 4) { printf("probe-vkmem: FAIL 0x50 is not BC6H\n"); return 1; }
+    nvn_texdesc bc2 = {.target = 1, .format = 0x50, .width = 1024, .height = 512, .depth = 1, .levels = 11};
+    nvn_texdesc bca = {.target = 4, .format = 0x50, .width = 300, .height = 130, .depth = 3, .levels = 9};
+    nvn_texdesc odd = {.target = 1, .format = 0x50, .width = 70, .height = 6, .depth = 1, .levels = 7};
+    nvn_texdesc rgba = {.target = 4, .format = 0x29, .width = 256, .height = 32, .depth = 4, .levels = 6};
+    if (check_region(&bc2) || check_region(&bca) || check_region(&odd) || check_region(&rgba)) return 1;
+    printf("probe-vkmem: region reads ok (%u regions, every level and layer)\n", g_region_cases);
+    return 0;
+}
+
 // ---- ASTC ----
 static void void_block(uint8_t b[16], uint16_t r, uint16_t g, uint16_t bl, uint16_t a, int hdr) {
     uint64_t lo = 0xFFFFFFFFFFFFFDFCull;     // 0x1FC mode, LDR, reserved bits 11, extent all ones
@@ -562,6 +622,74 @@ static int read_back(const tex_t *t, unsigned lv, uint8_t *const *lin, int gpu, 
     return 0;
 }
 
+// vk_texture_region_copy (task 42) against today's path: a BC6H source the CPU wrote, a region of each level copied from
+// its storage into one image and through the uploaded source image (vkCmdCopyImage) into a twin; the two read back the
+// same, equal to the CPU reference, and the region copy uploaded nothing of the source.
+static int test_region_copy(pool_t *tpool) {
+    TexVkFormat f;
+    if (!tex_vk_format(0x50, &f) || !tex_vk_format_supported(&f)) {
+        printf("probe-vkmem: region copy: BC6H not supported by this GPU, skipped\n");
+        return 0;
+    }
+    uint8_t *sl[2] = {0}, *dl[2] = {0}, *dl2[2] = {0};
+    tex_t src = make_tex(tpool, 0x80000, 0x50, 64, 48, 2, 6), da = make_tex(tpool, 0xA0000, 0x50, 64, 48, 2, 7),
+          db = make_tex(tpool, 0xC0000, 0x50, 64, 48, 2, 8);
+    if (fill_storage(&src, sl) || fill_storage(&da, dl)) return 1;
+    for (unsigned lv = 0; lv < 2; lv++) {   // the twin starts with the same content
+        uint32_t rb, rows, s2, bpb; uint64_t base; unsigned th, td;
+        nvn_deswizzle_geom(&db.d, lv, 0, &rb, &rows, &s2, &base, &th, &td, &bpb);
+        dl2[lv] = malloc((size_t)rb * rows);
+        memcpy(dl2[lv], dl[lv], (size_t)rb * rows);
+        ref_swizzle(dl2[lv], db.mem + base, rb, rows, 1, th, td);
+    }
+    const VkTexImage *ia = vk_texture_get(&da), *ib = vk_texture_get(&db);
+    GCHECK(ia && ib && ia->format == VK_FORMAT_BC6H_UFLOAT_BLOCK, "BC6H destination images");
+    VkImage ima = ia->image, imb = ib->image;
+    // level 0: 32x24 at 16,8 -> 8,20, before the source has an image; level 1 (32x24): 12x12 at 20,12 (the right edge)
+    // -> 0,4, after the reference path gave it one
+    static const uint32_t R[2][6] = {{16, 8, 32, 24, 8, 20}, {20, 12, 12, 12, 0, 4}};
+    for (unsigned lv = 0; lv < 2; lv++) {
+        const uint32_t *q = R[lv];
+        uint64_t up0, up1;
+        vk_texture_stats(NULL, &up0, NULL);
+        const char *why = NULL;
+        GCHECK(vk_texture_region_copy(&src, lv, 0, 1, q[0], q[1], q[2], q[3], ia, VK_IMAGE_ASPECT_COLOR_BIT, lv, 0,
+                                      (int32_t)q[4], (int32_t)q[5], &why),
+               "region copy of level %u refused (%s)", lv, why ? why : "?");
+        vk_texture_stats(NULL, &up1, NULL);
+        GCHECK(up1 == up0, "the region copy of level %u uploaded the source (%llu uploads)", lv,
+               (unsigned long long)(up1 - up0));
+        const VkTexImage *is = vk_texture_get(&src);   // today's path: the whole source uploaded, then an image copy
+        GCHECK(is, "BC6H source image");
+        VkCommandBuffer cb = vk_upload_begin();
+        VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                               .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                               .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
+        VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+        vkCmdPipelineBarrier2(cb, &di);
+        VkImageCopy cp = {{VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, 1}, {(int32_t)q[0], (int32_t)q[1], 0},
+                          {VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, 1}, {(int32_t)q[4], (int32_t)q[5], 0}, {q[2], q[3], 1}};
+        vkCmdCopyImage(cb, is->image, VK_IMAGE_LAYOUT_GENERAL, imb, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
+        vkCmdPipelineBarrier2(cb, &di);
+        vk_upload_end();
+        // the CPU reference: the destination's blocks with the source's region over them
+        uint32_t rb, rows, s2, bpb; uint64_t base; unsigned th, td;
+        nvn_deswizzle_geom(&src.d, lv, 0, &rb, &rows, &s2, &base, &th, &td, &bpb);
+        for (uint32_t r = 0; r < (q[3] + 3) / 4; r++)
+            memcpy(dl[lv] + (size_t)(q[5] / 4 + r) * rb + q[4] / 4 * 16, sl[lv] + (size_t)(q[1] / 4 + r) * rb + q[0] / 4 * 16,
+                   (q[2] + 3) / 4 * 16);
+    }
+    vk_upload_flush(1);
+    GCHECK(vk_texture_get(&da)->image == ima && vk_texture_get(&db)->image == imb, "destination images replaced");
+    for (unsigned lv = 0; lv < 2; lv++)
+        if (read_back(&da, lv, dl, 1, "BC6H region copy") || read_back(&db, lv, dl, 1, "BC6H image copy")) return 1;
+    vk_texture_release(&src), vk_texture_release(&da), vk_texture_release(&db);
+    for (int i = 0; i < 2; i++) free(sl[i]), free(dl[i]), free(dl2[i]);
+    printf("probe-vkmem: region copy: BC6H regions of 2 levels from storage equal to upload + image copy, no upload of "
+           "the source\n");
+    return 0;
+}
+
 static int test_textures(pool_t *tpool, pool_t *phys) {
     uint8_t *lin[4] = {0};
     // block-linear RGBA8 with 3 levels in a CPU-visible pool: uploaded through the GPU, read back from the image
@@ -640,7 +768,7 @@ static int test_gpu(void) {
     if (test_import(&pool) || test_readfile(pool.mem + 0x38000) || test_virtual(&phys, &virt)) return 1;
     if (vk_mem_shadow_on() && test_merge(&pool)) return 1;
     GCHECK(vk_pool_init(&tpool), "vk_pool_init of the texture pool");
-    if (test_textures(&tpool, &phys)) return 1;
+    if (test_textures(&tpool, &phys) || test_region_copy(&tpool)) return 1;
     const char *cap = cfg_get("MKW_SHADOW_SUBMIT");   // a measurement, off by default
     if (vk_mem_shadow_on() && cap && !strcmp(cap, "1") && test_capture(&pool)) return 1;
     VkMemStats st;
@@ -656,7 +784,7 @@ static int test_gpu(void) {
 }
 
 int probe_vkmem(void) {
-    if (test_deswizzle() || test_box() || test_astc() || test_formats()) return 1;
+    if (test_deswizzle() || test_box() || test_region() || test_astc() || test_formats()) return 1;
     printf("probe-vkmem: cpu part passed (%u deswizzle cases, %u astc blocks, formats: %u mapped, %u supported by the GPU, "
            "%u unsupported by the GPU, %u unmapped, %u with a fallback)\n",
            g_cases, g_astc_blocks, n_mapped, n_supported, n_unsupported, n_unmapped, n_fallback);

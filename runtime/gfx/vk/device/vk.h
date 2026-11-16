@@ -410,6 +410,15 @@ typedef struct {
     uint8_t fb_learned;            // a draw sampled it while it was a written attachment of the open pass: its passes
                                    // attach it in ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT (vk_exec.c vk_exec_pass_begin)
 } VkTexImage;
+// A copy out of a mirrored texture the CPU wrote into an image of the same VkFormat: the region read from the source's
+// storage into dst through the upload batch, the source's image left alone (vk_tex_upload.c); 0 when it cannot, *why
+// says what refused it
+int  vk_texture_region_copy(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers, uint32_t x, uint32_t y,
+                            uint32_t w, uint32_t h, const VkTexImage *dst, VkImageAspectFlags aspect, uint32_t dlevel,
+                            uint32_t dlayer, int32_t dx, int32_t dy, const char **why);
+// 1 when t is mirrored and no entry at its storage holds GPU-written content (its storage is its content); *uploads:
+// the uploads of t's entry so far (MKW_TEX_COPY_LOG)
+int  vk_texture_cpu_source(const tex_t *t, uint32_t *uploads);
 void vk_exec_recent_log(void);   // the last programs drawn or dispatched with (vk_exec_dstat.c), at a device loss
 // GPU breadcrumbs (diag/vk_crumbs.c, VK_AMD_buffer_marker): a start and an end mark around each upload batch, render
 // pass and dispatch, and at a device loss the last started and finished of each with what it was.

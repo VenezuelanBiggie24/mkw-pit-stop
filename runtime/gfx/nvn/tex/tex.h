@@ -22,6 +22,13 @@ int nvn_swizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void
 // region, not the level. Same textures as nvn_deswizzle; -1 for others and for a box outside the level.
 int nvn_texels_box(const nvn_texdesc *d, unsigned level, unsigned layer, uint32_t x, uint32_t y, uint32_t z, uint32_t wb,
                    uint32_t h, void *storage, void *rows, size_t pitch, int to_linear);
+// MKW's own: the texels [x, x + w) x [y, y + h) of a level and layer of a 2D, array or cube texture as linear block rows
+// (pitch bytes apart) in the texture's own format, the bytes a whole-level nvn_deswizzle gives for that box: a texture
+// copy out of CPU-written storage reads the region it copies, not the texture (vk_texture_region_copy). x and y on a
+// block corner; w and h whole blocks or reaching the level's edge. The whole level goes through nvn_deswizzle. -1 for
+// 3D, multisampled and unknown formats and a box that is not that.
+int nvn_texels_region(const nvn_texdesc *d, unsigned level, unsigned layer, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                      const void *storage, void *rows, size_t pitch);
 // Byte offset of (x byte, y block row, z slice) inside one level of block height 2^th and block depth 2^td GOBs.
 uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, uint32_t rows, unsigned th, unsigned td);
 // Geometry of a level as the two functions above use it; -1 for textures they reject.

@@ -197,6 +197,19 @@ Page protection then took 4.3-5.4 ms a frame; the race ran at a median of 26-28 
 Out of staging memory after relieving it, a texture upload is deferred (it streams in a later frame) instead of ending
 the title (run 31). The same goes for `vk_texture_astc_copy` and ReadTexels/WriteTexels.
 
+### The title pause
+
+Every boot paused 3-16 s on the world map behind the title, the render thread waiting on textures (15-16/11/2026).
+MKW fills its 8192x8192x68 sparse terrain arrays a level of a layer at a time from 8192x8192 staging textures it writes
+in its CPU_CACHED pool, and the replay is about 2 submits behind it: each copy found the staging texture's pages written
+since the last one and uploaded all of it first. The ASTC staging texture was already read region by region
+(`astc_into_sparse`); the BC6H one (`0x2481bbdc00`, 87 MiB) went up 242 times in one frame (`titleup`), and in other boots
+~900 re-uploads of 53.6 GB took 13.8 s (`titlepause-20261116-193942`). A copy out of a mirrored texture the CPU wrote
+into a sparse texture of the same VkFormat now reads only the copied region from the source's storage
+(`vk_texture_region_copy`, task 42), at the same point of the replay; the perf line `texture re-uploads` adds `region
+copies from storage`, and `MKW_TEX_COPY_LOG=N` logs each copy out of such a texture with the path it took.
+`MKW_TEX_REGION_COPY=0` restores the old path, to compare.
+
 ## Frame rate
 
 The PS5 build runs races at the game's own 30 fps: its device profile (`runtime/core/base/cfg.c`, `MKW_DEVICE_PROFILE`

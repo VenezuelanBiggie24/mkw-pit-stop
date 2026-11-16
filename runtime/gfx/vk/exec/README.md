@@ -18,7 +18,7 @@ and dispatches, descriptors, and their parallel recording.
 | `vk_exec_dstat.c` | Draw replay diagnostics: at a device loss, the driver's fault report (`VK_EXT_device_fault`: address and kind on RADV) and the last programs, `MKW_IND_TRACE`, `MKW_BIND_STATS`, time per stage |
 | `vk_exec_dcache.c` | `MKW_DRAW_CACHE`: descriptor sets kept across frames by their contents, with dynamic-offset UBOs; and the probe that measured its hit rate (`MKW_DRAW_CACHE_PROBE`) |
 | `vk_exec_reuse.c`, `vk_reuse.h` | `MKW_REUSE=1\|check\|ab` (with `MKW_DRAW_CACHE=1`): a draw equal to one of an earlier submit (program, order, fixed state and its inputs) takes its stored packets instead of being redone; `check` redoes them too and compares |
-| `vk_exec_xfer.c` | Copies, texture clears, events, counters and conditional rendering |
+| `vk_exec_xfer.c` | Copies, texture clears, events, counters and conditional rendering; copies into sparse arrays out of CPU-written textures read from the source's storage (ASTC decoded, other formats region by region), and `MKW_TEX_COPY_LOG` |
 | `vk_exec_par.c` | `MKW_REPLAY_PAR`: a submit recorded in chunks on several threads after a light walk that tracks the state (`MKW_REPLAY_WALK` measures it) |
 | `vk_mesh_cs.c` | Task/mesh as compute without mesh shaders: VRAM buffers per submit, compaction pipeline and whether a draw takes that path (`MKW_MESH_COMPUTE`) |
 | `vk_ind_read.c` | Diagnostics `MKW_IND_READ` (indirect arguments the GPU used, copied at the end of each pass) and `MKW_IND_BARRIER` (their barriers without copies) |

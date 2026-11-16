@@ -630,6 +630,103 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
     return ok;
 }
 
+// A mirrored texture whose storage holds its content: no entry at its address holds GPU-written content (gpu_owned,
+// gpu_dirty, as alias_has_gpu_content), so a full upload would make the image exactly the storage's bytes. *uploads:
+// the uploads of t's own entry so far (0 without one). Texture lock held.
+static int cpu_content(const tex_t *t, uint32_t *uploads) {
+    *uploads = 0;
+    if (!tex_mirrored(t)) return 0;
+    TexKey k;
+    make_key(t, &k);
+    const Tex *own = nvn_hm_get(&by_key, &k);
+    if (own) *uploads = own->n_up;
+    for (const Tex *p = entries_at(k.addr); p; p = p->next_at)
+        if (!p->released && (p->pub.gpu_owned || p->gpu_dirty)) return 0;
+    return 1;
+}
+
+int vk_texture_cpu_source(const tex_t *t, uint32_t *uploads) {
+    *uploads = 0;
+    if (!t || !t->mem) return 0;
+    lock();
+    int r = cpu_content(t, uploads);
+    unlock();
+    return r;
+}
+
+// A texture copy out of a mirrored texture the CPU wrote, into an image of the same VkFormat, from the region of the
+// source's storage instead of its image. MKW fills its 8192x8192x68 sparse terrain arrays a level of a layer at a time
+// through 8192x8192 staging textures it writes in its 2.4 GiB CPU_CACHED pool (ASTC ones, astc_into_sparse, and BC6H
+// ones): each copy found the staging texture's pages written since the last one and uploaded all of it again first,
+// 87 MiB for a BC6H one, deswizzled on the replay thread (titleup, 16/11/2026: 242 uploads of one texture in frame 77;
+// titlepause: 903 re-uploads, 53.6 GB in 13.8 s, the 3-16 s pause behind the title). Only the copied region is read
+// here, from the storage at this point of the replay, where make_fresh would have read it: the same bytes the image
+// copy gave, since an upload of such a texture is its storage's raw blocks (no ASTC decode, no RGB expansion, not the
+// button icon sheet). The source's entry is not made fresh and its page check is left as it was: a later draw that
+// samples it still finds the pages written and uploads it then, once. Recorded into the upload batch, as
+// vk_texture_astc_copy: it runs before the submission being recorded, so the caller takes this path only for a
+// destination nothing earlier in that submission writes or reads in the region (sparse arrays filled by copies).
+// 0 when it cannot: the caller copies as before. *why: what refused it (diagnosis).
+int vk_texture_region_copy(const tex_t *src, uint32_t level, uint32_t layer, uint32_t layers, uint32_t x, uint32_t y,
+                           uint32_t w, uint32_t h, const VkTexImage *dst, VkImageAspectFlags aspect, uint32_t dlevel,
+                           uint32_t dlayer, int32_t dx, int32_t dy, const char **why) {
+    static int on = -1;   // MKW_TEX_REGION_COPY=0 (diagnosis): every copy through the source's image, as before
+    if (on < 0) on = !cfg_get("MKW_TEX_REGION_COPY") || atoi(cfg_get("MKW_TEX_REGION_COPY")) != 0;
+    TexVkFormat f;
+    int bw, bh, bpb;
+    *why = "off";
+    if (!on || !src || !src->mem || !dst) return 0;
+    *why = "format";
+    if (!tex_vk_format(src->d.format, &f) || f.astc_bw || f.expand_rgb || f.depth || f.stencil ||
+        f.vk != dst->format || !(bpb = nvn_fmt_bpb(src->d.format, &bw, &bh)) || aspect != VK_IMAGE_ASPECT_COLOR_BIT ||
+        src->d.target == NVN_TEXTURE_TARGET_3D || src->d.samples > 1 || dst->samples > 1)
+        return 0;
+    *why = "alignment";
+    if (dx % bw || dy % bh || dx < 0 || dy < 0) return 0;
+    uint32_t rb = (w + (uint32_t)bw - 1) / (uint32_t)bw * (uint32_t)bpb, rows = (h + (uint32_t)bh - 1) / (uint32_t)bh;
+    size_t per = ((size_t)rb * rows + 15) & ~(size_t)15;   // bufferOffset: a multiple of the block size (1-16 bytes)
+    uint64_t p0 = perf_begin(), t0 = kern_now_ns();   // PERF_TEX, as the uploads it replaces
+    lock();   // as make_fresh: WriteTexels into the storage happen under it
+    uint32_t ups;
+    *why = "GPU content";
+    if (!cpu_content(src, &ups) || (g_glyph_addr && (uintptr_t)src->mem == g_glyph_addr)) {
+        unlock();
+        perf_end(PERF_TEX, p0);
+        return 0;
+    }
+    vk_upload_flush_over(64ull << 20);
+    VkBuffer sb;
+    uint8_t *stg;
+    *why = "staging";
+    VkCommandBuffer cb = vk_upload_begin_staging(per * layers, &sb, (void **)&stg);
+    if (!cb) {
+        unlock();
+        perf_end(PERF_TEX, p0);
+        return 0;
+    }
+    VkBufferImageCopy rg[8], *r = layers <= 8 ? rg : calloc(layers, sizeof *r);
+    int ok = r != NULL;
+    for (uint32_t l = 0; l < layers && ok; l++) {
+        ok = !nvn_texels_region(&src->d, level, layer + l, x, y, w, h, src->mem, stg + l * per, rb);
+        r[l] = (VkBufferImageCopy){.bufferOffset = l * per, .bufferRowLength = rb / (uint32_t)bpb * (uint32_t)bw,
+                                   .bufferImageHeight = rows * (uint32_t)bh,
+                                   .imageSubresource = {aspect, dlevel, dlayer + l, 1}, .imageOffset = {dx, dy, 0},
+                                   .imageExtent = {w, h, 1}};
+    }
+    *why = "region";
+    if (ok) {
+        barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        vkCmdCopyBufferToImage(cb, sb, dst->image, VK_IMAGE_LAYOUT_GENERAL, layers, r);
+        barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+        rc_n++, rc_bytes += (uint64_t)rb * rows * layers, rc_ns += kern_now_ns() - t0;
+    }
+    vk_upload_end();
+    if (r != rg) free(r);
+    unlock();
+    perf_end(PERF_TEX, p0);
+    return ok;
+}
+
 // vk_mem_changed over the pages wholly inside e's storage (all of its pages when it fills none): a neighbour that shares
 // the first or last page does not count as a write to e.
 int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now) {

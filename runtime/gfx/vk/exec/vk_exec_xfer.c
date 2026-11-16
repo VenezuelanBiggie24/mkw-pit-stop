@@ -595,7 +595,46 @@ static int astc_into_sparse(const p_copy_t2t *p) {
     return 1;
 }
 
-static void copy_t2t(VkExec *ex, const p_copy_t2t *p) {
+// Any other copy out of a mirrored texture the CPU wrote into a sparse texture of the same VkFormat: the region is read
+// from the source's storage (vk_texture_region_copy) instead of uploading the whole source first. MKW fills its
+// 8192x8192x68 BC6H terrain array a level of a layer at a time from an 8192x8192 BC6H texture it writes in between, as
+// the ASTC arrays above (titleup, 16/11/2026: that texture uploaded 242 times in frame 77, 87 MiB each). Sparse
+// destinations only: the copy goes through the upload batch, ahead of the submission being recorded, as the ASTC
+// copies do; MKW's sparse arrays are filled by copies alone, while another destination (a render target, a texture
+// drawn into earlier in the same submission) would take the copy out of its place among that submission's commands.
+static int region_into_sparse(const p_copy_t2t *p, const char **why) {
+    *why = NULL;
+    if (!p->src || !p->dst || !(p->dst->d.flags & NVN_TEXTURE_FLAGS_SPARSE) ||
+        (p->src->d.flags & NVN_TEXTURE_FLAGS_SPARSE) || p->src->d.target == NVN_TEXTURE_TARGET_3D)
+        return 0;
+    Sub d;
+    if (!sub_resolve(p->dst, &p->dv, p->has_dv, &p->dr, 1, &d, 1) || !vk_sparse_is(d.img->image) ||
+        d.img->type == VK_IMAGE_TYPE_3D)
+        return 0;
+    uint32_t level = p->has_sv && p->sv.set_levels ? p->sv.base_level : 0;
+    uint32_t layer = (p->has_sv && p->sv.set_layers ? p->sv.min_layer : 0) + (uint32_t)p->sr.zoffset;
+    uint32_t lw = max1(p->src->d.width >> level), lh = max1(p->src->d.height >> level);
+    if (p->sr.xoffset < 0 || p->sr.yoffset < 0 || p->sr.zoffset < 0) return 0;
+    uint32_t x = (uint32_t)p->sr.xoffset, y = (uint32_t)p->sr.yoffset;
+    if (x >= lw || y >= lh) return 0;
+    uint32_t w = p->sr.width > 0 ? (uint32_t)p->sr.width : lw - x, h = p->sr.height > 0 ? (uint32_t)p->sr.height : lh - y;
+    uint32_t n = p->sr.depth > 0 ? (uint32_t)p->sr.depth : 1, dl0 = d.layer0 + (uint32_t)d.z;
+    nvn_texlayout L;
+    nvn_tex_layout(&p->src->d, &L);
+    if (level >= p->src->d.levels || (uint64_t)x + w > lw || (uint64_t)y + h > lh || w != d.w || h != d.h ||
+        layer + n > L.layers || dl0 + n > d.img->layers)
+        return 0;
+    if (!vk_texture_region_copy(p->src, level, layer, n, x, y, w, h, d.img, d.aspect, d.level, dl0, d.x, d.y, why))
+        return 0;
+    vk_texture_gpu_written(p->dst);
+    vk_sparse_written(d.img->image, d.level, dl0, n, d.x, d.y, w, h);
+    return 1;
+}
+
+static _Thread_local const char *t2t_refused;   // MKW_TEX_COPY_LOG: why the region copy was refused for a copy that
+                                                 // took the source's image (not for formats it never takes)
+
+static const char *copy_t2t_do(VkExec *ex, const p_copy_t2t *p) {
     Sub s, d;
     static int trace = -1;
     static volatile int32_t ntrace;
@@ -609,9 +648,11 @@ static void copy_t2t(VkExec *ex, const p_copy_t2t *p) {
                p->dst->d.height, p->dst->d.depth, p->dst->d.format, p->dr.xoffset, p->dr.yoffset, p->dr.zoffset,
                p->dr.width, p->dr.height, p->dr.depth, p->has_dv && p->dv.set_levels ? p->dv.base_level : -1,
                p->has_dv && p->dv.set_layers ? p->dv.min_layer : -1);
-    if (astc_into_sparse(p)) return;
-    if (!sub_resolve(p->src, &p->sv, p->has_sv, &p->sr, 1, &s, 1)) return;
-    if (!sub_resolve(p->dst, &p->dv, p->has_dv, &p->dr, 1, &d, 1)) return;
+    if (astc_into_sparse(p)) return "ASTC decoded from storage";
+    const char *why = NULL;
+    if (region_into_sparse(p, &why)) return "region from storage";
+    if (!sub_resolve(p->src, &p->sv, p->has_sv, &p->sr, 1, &s, 1)) return "skipped";
+    if (!sub_resolve(p->dst, &p->dv, p->has_dv, &p->dr, 1, &d, 1)) return "skipped";
     // ASTC decoded on upload (MKW fills its sparse ASTC arrays from 8192x8192 ASTC textures, run-sp1): a copy of the
     // decoded texels when both sides are the same ASTC block in the same Vulkan format (BC7, BC1 or RGBA8). When the two
     // went to different formats (one kept RGBA8 under 256x256, an array re-encoded with its layers counted, BC1 against
@@ -625,25 +666,25 @@ static void copy_t2t(VkExec *ex, const p_copy_t2t *p) {
                                  d.img->image, d.aspect, d.level, dl0, d.x, d.y, to_bc)) {
             vk_texture_gpu_written(p->dst);
             vk_sparse_written(d.img->image, d.level, dl0, s.nz, d.x, d.y, s.w, s.h);
-            return;
+            return "ASTC decoded from storage";
         }
     }
     if ((s.astc_bw || d.astc_bw) &&
         (s.astc_bw != d.astc_bw || s.astc_bh != d.astc_bh || s.img->format != d.img->format)) {
         warn_once(W_FORMAT, "copy between ASTC textures decoded to VkFormat %d and %d (or ASTC and not): skipped",
                   (int)s.img->format, (int)d.img->format);
-        return;
+        return "skipped";
     }
     d.nz = s.nz;
     int same_size = s.w == d.w && s.h == d.h;
     int same_format = s.img->format == d.img->format;
     if (s.img->samples != d.img->samples && !(s.img->samples > 1 && d.img->samples == 1 && same_size && same_format)) {
         warn_once(W_COPY, "texture copy between %u and %u samples: skipped", s.img->samples, d.img->samples);
-        return;
+        return "skipped";
     }
     if (s.aspect != d.aspect || (s.aspect != VK_IMAGE_ASPECT_COLOR_BIT && !same_format)) {
         warn_once(W_COPY, "texture copy between formats %#x and %#x: skipped", p->src->d.format, p->dst->d.format);
-        return;
+        return "skipped";
     }
     VkImageSubresourceLayers sl = sub_layers(&s), dl = sub_layers(&d);
     // Between a 2D array and a 3D image, the layers of one side are the depth slices of the other: the extent's depth
@@ -684,6 +725,39 @@ static void copy_t2t(VkExec *ex, const p_copy_t2t *p) {
     ex->recorded++;
     vk_texture_gpu_written(p->dst);
     vk_sparse_written(d.img->image, d.level, d.layer0 + (d3d ? 0 : (uint32_t)d.z), d3d ? 1 : d.nz, d.x, d.y, d.w, d.h);
+    if (why && strcmp(why, "format") && strcmp(why, "off")) t2t_refused = why;
+    return "through the source's image";
+}
+
+// MKW_TEX_COPY_LOG=N (diagnosis, task 42): the first N texture copies whose source is a mirrored texture the CPU wrote
+// (vk_texture_cpu_source), from frame MKW_TEX_COPY_LOG_AT (0) on: source, region, destination, the path taken, and
+// whether the source was uploaded again for it (its entry's upload count before and after).
+static void copy_t2t(VkExec *ex, const p_copy_t2t *p) {
+    static int nlog = -1, at;
+    if (nlog < 0) {
+        nlog = cfg_get("MKW_TEX_COPY_LOG") ? atoi(cfg_get("MKW_TEX_COPY_LOG")) : 0;
+        at = cfg_get("MKW_TEX_COPY_LOG_AT") ? atoi(cfg_get("MKW_TEX_COPY_LOG_AT")) : 0;
+    }
+    uint32_t up0 = 0, up1 = 0;
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    int logit = __atomic_load_n(&nlog, __ATOMIC_RELAXED) > 0 && fr >= (uint64_t)at && p->src && p->dst &&
+                vk_texture_cpu_source(p->src, &up0) && __atomic_fetch_sub(&nlog, 1, __ATOMIC_RELAXED) > 0;
+    t2t_refused = NULL;
+    const char *path = copy_t2t_do(ex, p);
+    if (!logit) return;
+    vk_texture_cpu_source(p->src, &up1);
+    const tex_t *s = p->src, *d = p->dst;
+    rt_log("vk: copy at frame %llu: %#llx %ux%ux%u fmt %#x lv%d ly%d [%d,%d,%d %dx%dx%d] -> %#llx %ux%ux%u fmt %#x%s lv%d "
+           "ly%d [%d,%d,%d]: %s%s%s, source uploads %u -> %u%s, game %lld submits ahead", (unsigned long long)fr,
+           (unsigned long long)(uintptr_t)s->mem, s->d.width, s->d.height, s->d.depth, s->d.format,
+           p->has_sv && p->sv.set_levels ? p->sv.base_level : 0, p->has_sv && p->sv.set_layers ? p->sv.min_layer : 0,
+           p->sr.xoffset, p->sr.yoffset, p->sr.zoffset, p->sr.width, p->sr.height, p->sr.depth,
+           (unsigned long long)(uintptr_t)d->mem, d->d.width, d->d.height, d->d.depth, d->d.format,
+           d->d.flags & NVN_TEXTURE_FLAGS_SPARSE ? " sparse" : "", p->has_dv && p->dv.set_levels ? p->dv.base_level : 0,
+           p->has_dv && p->dv.set_layers ? p->dv.min_layer : 0, p->dr.xoffset, p->dr.yoffset, p->dr.zoffset, path,
+           t2t_refused ? ", region copy refused: " : "", t2t_refused ? t2t_refused : "", up0, up1,
+           up1 > up0 ? " (uploaded again for it)" : "",
+           (long long)(nvn_submit_count() - __atomic_load_n(&vk_replay_submit, __ATOMIC_RELAXED)));
 }
 
 // ---- buffer to buffer

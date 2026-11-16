@@ -126,6 +126,21 @@ int nvn_texels_box(const nvn_texdesc *d, unsigned level, unsigned layer, uint32_
     return 0;
 }
 
+int nvn_texels_region(const nvn_texdesc *d, unsigned level, unsigned layer, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                      const void *storage, void *rows, size_t pitch) {
+    int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
+    if (!bpb || d->target == 2 || d->samples > 1 || level >= (d->levels ? d->levels : 1) || !w || !h) return -1;
+    uint32_t lw = d->width >> level ? d->width >> level : 1, lh = d->height >> level ? d->height >> level : 1;
+    if (x % (uint32_t)bw || y % (uint32_t)bh || (uint64_t)x + w > lw || (uint64_t)y + h > lh ||
+        (w % (uint32_t)bw && x + w != lw) || (h % (uint32_t)bh && y + h != lh))
+        return -1;
+    uint32_t wb = (w + (uint32_t)bw - 1) / (uint32_t)bw * (uint32_t)bpb, hb = (h + (uint32_t)bh - 1) / (uint32_t)bh;
+    if (pitch < wb) return -1;
+    if (!x && !y && w == lw && h == lh) return nvn_deswizzle(d, level, layer, storage, rows, pitch);
+    return nvn_texels_box(d, level, layer, x / (uint32_t)bw * (uint32_t)bpb, y / (uint32_t)bh, 0, wb, hb, (void *)storage,
+                          rows, pitch, 1);
+}
+
 int nvn_deswizzle(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src, void *dst, size_t dst_pitch) {
     return move(d, level, layer, (uint8_t *)src, (uint8_t *)dst, dst_pitch, 1);
 }
