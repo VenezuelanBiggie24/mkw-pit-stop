@@ -30,7 +30,13 @@ from layout import output_lock, placement_defines, read_checked
 WORK = ROOT / "build/ps5-game"
 PROFILE = "ps5-high144"
 TITLE_ID = "PPSA99193"
-TITLE_NAME = "Mario Kart World PS5"
+TITLE_NAME = "Mario Kart World: Pit Stop"
+ICON = ROOT / "docs/images/icon0.png"
+# param.json flexibleMemorySize, MiB. Flexible and direct memory share the app's budget on the PS5: 1024 left 11,712
+# MiB of direct memory, which long sessions ran out of (docs/roadmap.md section 4), while flexible memory peaked at
+# ~460-490 MiB in use ("flex free 562 MiB" in run pack1, 16/11/2026; task 38's report). 640 keeps ~150 MiB of that
+# spare and should give the direct memory ~384 MiB more; the census line's "dmem free N of M MiB" shows M.
+FLEXIBLE_MIB = 640
 RUNTIME = ROOT / "runtime"
 PLATFORM_SOURCES = {
     "common", "prot_watch", "ps5_guest_memory", "ps5_memory", "ps5_mixed", "ps5_loader_io",
@@ -60,24 +66,41 @@ def source_files() -> list[Path]:
 
 def title_setup(template: Path, title: Path) -> None:
     if not title.is_dir():
+        # new-title.py rejects ':' in --name; pass a plain name and set the full title in param.json below.
+        safe_name = re.sub(r"[^A-Za-z0-9 ._-]", "", TITLE_NAME)[:40].strip()
         identity = dict(os.environ, GIT_AUTHOR_NAME=TITLE_NAME, GIT_COMMITTER_NAME=TITLE_NAME,
                         GIT_AUTHOR_EMAIL="mkw@localhost", GIT_COMMITTER_EMAIL="mkw@localhost")
         with tempfile.TemporaryDirectory(dir=title.parent) as directory:
             staged = Path(directory) / "title"
             subprocess.run([sys.executable, str(template / "ps5/tools/new-title.py"), str(staged),
-                            "--title-id", TITLE_ID, "--name", TITLE_NAME, "--refresh", "60",
-                            "--flexible-memory", "1024"], check=True, env=identity)
+                            "--title-id", TITLE_ID, "--name", safe_name, "--refresh", "60",
+                            "--flexible-memory", str(FLEXIBLE_MIB)], check=True, env=identity)
             (staged / "ps5/sce_sys/icon0.png").unlink(missing_ok=True)
             staged.rename(title)
+    # The home screen icon: our own "MKW: Pit Stop" drawing (tools/build/pit_stop_icon.py), rewritten on every build so a
+    # title made before it, or a changed drawing, picks it up; link-title.sh copies it into dist/<title>/sce_sys.
     icon = title / "ps5/sce_sys/icon0.png"
-    if not icon.is_file():
-        icon.write_bytes(png(512))
+    write_changed(icon, ICON.read_bytes() if ICON.is_file() else png(512))
     param_path = title / "ps5/sce_sys/param.json"
     param = json.loads(param_path.read_text(encoding="utf-8"))
+    changed = False
+    loc = param.setdefault("localizedParameters", {}).setdefault("en-US", {})
+    if loc.get("titleName") != TITLE_NAME:
+        loc["titleName"] = TITLE_NAME
+        changed = True
+    kernel = param.setdefault("kernel", {})
+    if kernel.get("flexibleMemorySize") != FLEXIBLE_MIB << 20:
+        kernel["flexibleMemorySize"] = FLEXIBLE_MIB << 20
+        changed = True
+    if "flexibleMemorySize" in param:   # a top-level key does nothing: the kernel section's is the one read
+        param.pop("flexibleMemorySize")
+        changed = True
     if "pagetableMemorySizeInMib" in param.get("amm", {}):
         param["amm"].pop("pagetableMemorySizeInMib", None)
         if not param["amm"]:
             param.pop("amm", None)
+        changed = True
+    if changed:
         param_path.write_text(json.dumps(param, indent=2) + "\n", encoding="utf-8")
 
 

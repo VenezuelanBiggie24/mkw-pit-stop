@@ -71,7 +71,8 @@ costs 2,903 units. In run 8 the game held four of them (11,612 units), asked for
   per process and never cleared.
 
 ShadowMountPlus keeps its own copy of `sce_sys` once a title is registered (`/user/app/<title>/sce_sys`), and the
-launcher reads that copy. `tools/ps5/deploy.py` refreshes its `param.json` after each publish when it exists.
+launcher reads that copy. `tools/ps5/deploy.py` refreshes its `param.json` and `icon0.png` (the home screen icon)
+after each publish when it exists.
 
 ## Hangs
 

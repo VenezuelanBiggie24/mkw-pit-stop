@@ -1,8 +1,8 @@
 """Upload the built PS5 smoke title with FTP staging and SHA-256 verification.
 
 Use `python3 tools/ps5/deploy.py CONSOLE [app] [--query-memory | --dualsense | --alias-subrange] [--dry-run]`.
-Set PS5_FTP_PORT for a console using a port other than 2121. After publishing, the param.json of a title that
-ShadowMountPlus has registered is copied over its copy in /user/app/<title>/sce_sys, which the launcher reads.
+Set PS5_FTP_PORT for a console using a port other than 2121. After publishing, the param.json and icon0.png of a title
+that ShadowMountPlus has registered are copied over its copy in /user/app/<title>/sce_sys, which the launcher reads.
 """
 
 import argparse
@@ -18,7 +18,8 @@ from build_game import TITLE_ID as GAME_TITLE_ID, WORK as GAME_WORK
 from build_smoke import ALIAS_WORK, DUALSENSE_WORK, PAGE_TABLE_WORK, QUERY_WORK, TITLE_ID, WORK
 
 HOMEBREW = "/data/homebrew"
-REGISTERED_APPS = "/user/app"  # ShadowMountPlus's copies of registered titles (refresh_registered_param)
+REGISTERED_APPS = "/user/app"  # ShadowMountPlus's copies of registered titles (refresh_registered_sce_sys)
+REGISTERED_FILES = ("param.json", "icon0.png")  # what the launcher reads from that copy
 DESTINATION = f"{HOMEBREW}/{TITLE_ID}"
 TEMP_PREFIX = f"{HOMEBREW}/.mkw-smoke-{TITLE_ID}"
 PUBLISH_LOCK = f"{TEMP_PREFIX}-publish"
@@ -149,19 +150,22 @@ def clean_stage(ftp: ftplib.FTP, files: list[str], folders: list[str]) -> None:
         print(f"deploy: staging cleanup was incomplete at {folders[0]}: {error}", file=sys.stderr)
 
 
-def refresh_registered_param(ftp: ftplib.FTP, source: Path, title_id: str) -> None:
+def refresh_registered_sce_sys(ftp: ftplib.FTP, source: Path, title_id: str) -> None:
     """ShadowMountPlus keeps its own copy of sce_sys once a title is registered, in /user/app/<title>, and the launcher
     reads that copy: a changed param.json (run 5: amm.pagetableMemorySizeInMib) did nothing until it was copied there by
-    hand. The idea is OcarinaPS5's tools/deploy.sh; this is our own code. Nothing to do before the title is registered."""
-    remote = f"{REGISTERED_APPS}/{title_id}/sce_sys/param.json"
+    hand, and the home screen icon (icon0.png) is read from there as well. The idea is OcarinaPS5's tools/deploy.sh;
+    this is our own code. Nothing to do before the title is registered."""
+    folder = f"{REGISTERED_APPS}/{title_id}/sce_sys"
     try:
-        listed = ftp.nlst(f"{REGISTERED_APPS}/{title_id}/sce_sys")
+        listed = {Path(name).name for name in ftp.nlst(folder)}
     except ftplib.error_perm:
         return
-    if not any(Path(name).name == "param.json" for name in listed):
+    if "param.json" not in listed:
         return
-    upload_file(ftp, source / "sce_sys/param.json", remote)
-    print(f"Refreshed the registered copy {remote}", flush=True)
+    for name in REGISTERED_FILES:
+        if (source / "sce_sys" / name).is_file():
+            upload_file(ftp, source / "sce_sys" / name, f"{folder}/{name}")
+            print(f"Refreshed the registered copy {folder}/{name}", flush=True)
 
 
 def deploy(address: str, port: int, source: Path, files: list[Path], folders: list[Path], title_id: str) -> None:
@@ -188,7 +192,7 @@ def deploy(address: str, port: int, source: Path, files: list[Path], folders: li
         except STAGE_REJECTED:
             clean_stage(ftp, started_files, made_folders)
             raise
-        refresh_registered_param(ftp, source, title_id)
+        refresh_registered_sce_sys(ftp, source, title_id)
     finally:
         ftp.close()
     print(f"Published {DESTINATION}")
@@ -234,7 +238,8 @@ def main() -> int:
             print(f"Would upload {len(files)} files from {source} to {args.console} on FTP port {port}")
             print(f"Would stage under {TEMP_PREFIX}-stage-<unique>, verify SHA-256, then publish {DESTINATION}")
             print(f"An existing title would be saved at {TEMP_PREFIX}-backup-<unique>")
-            print(f"{REGISTERED_APPS}/{title_id}/sce_sys/param.json would be refreshed if it exists (ShadowMountPlus)")
+            print(f"{REGISTERED_APPS}/{title_id}/sce_sys {' and '.join(REGISTERED_FILES)} would be refreshed if it exists "
+                  "(ShadowMountPlus)")
         else:
             deploy(args.console, port, source, files, folders, title_id)
     except DEPLOY_ERRORS as error:

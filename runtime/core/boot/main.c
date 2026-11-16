@@ -520,7 +520,7 @@ static void portable_paths(RtConfig *c) {
 extern void platform_init(const char *title_name);
 
 int main(void) {
-    platform_init("Mario Kart World PS5");
+    platform_init("Mario Kart World: Pit Stop");
     cfg = (RtConfig){.exefs = rt_default_exefs, .romfs = rt_default_romfs};
     mem_init();
     ldr_load(cfg.exefs);
@@ -562,7 +562,7 @@ static int run_launcher(void) {
 
 int main(int argc, char **argv) {
 #ifdef MKW_PS5_NATIVE
-    platform_init("Mario Kart World PS5");
+    platform_init("Mario Kart World: Pit Stop");
 #else
     if (want_launcher(argc, argv)) return run_launcher();
 #endif
