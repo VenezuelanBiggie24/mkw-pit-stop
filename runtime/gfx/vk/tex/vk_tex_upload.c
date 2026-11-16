@@ -352,6 +352,8 @@ static int upload(Tex *e) {
     int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
     if (!bpb || !t->mem) return 1;
     uint64_t p0 = perf_begin(), u0 = kern_now_ns();
+    uint64_t ph[UPH_N] = {0}, pt = u0;   // phase times (MKW_TRACE=perf)
+#define UP_PHASE(i) do { uint64_t now_ = kern_now_ns(); ph[i] += now_ - pt; pt = now_; } while (0)
     int linear = nvn_tex_is_linear(d), is3d = d->target == NVN_TEXTURE_TARGET_3D, one_d = e->pub.type == VK_IMAGE_TYPE_1D;
     uint32_t levels = linear ? 1 : e->pub.levels, layers = linear ? 1 : e->pub.layers;
     int astc = e->f.astc_bw != 0, rgb = e->f.expand_rgb;
@@ -360,7 +362,11 @@ static int upload(Tex *e) {
     int agpu = astc && vk_astc_gpu(),
         acheck = agpu && vk_astc_mode() == VK_ASTC_CHECK && (uint64_t)e->pub.width * e->pub.height * e->pub.layers * 4 <= (16ull << 20);
     uint32_t n = levels * layers, k = 0;
-    if (agpu && e->f.astc_bc7 == 1 && !acheck && !linear && vk_texpre_on() && upload_texpre(e, levels, layers)) goto counted;
+    if (agpu && e->f.astc_bc7 == 1 && !acheck && !linear && vk_texpre_on() && upload_texpre(e, levels, layers)) {
+        UP_PHASE(UPH_TEXPRE);
+        goto counted;
+    }
+    UP_PHASE(UPH_TEXPRE);
     VkBufferImageCopy *rg = calloc(n, sizeof *rg);
     VkAstcRegion *ar = agpu ? calloc(n, sizeof *ar) : NULL;
     VkDeviceSize total = 0, decoded = 0;
@@ -375,10 +381,12 @@ static int upload(Tex *e) {
             decoded += texels * 4;
         }
     vk_upload_flush_over(64ull << 20);   // as vk_tex_texel.c: the load of a capture sent its textures in one batch
+    UP_PHASE(UPH_FLUSH);
     VkBuffer sb, rbuf = VK_NULL_HANDLE;
     VmaAllocation ralloc = NULL;
     uint8_t *stg;
     VkCommandBuffer cb = vk_upload_begin_staging(total, &sb, (void **)&stg);
+    UP_PHASE(UPH_STAGING);
     if (!cb) {   // out of staging memory: the image keeps what it had, and the upload comes again next frame
         free(ar);
         free(rg);
@@ -421,6 +429,7 @@ static int upload(Tex *e) {
             }
             free(tmp);
         }
+    UP_PHASE(UPH_DESWIZZLE);
     static int bcc = -1;   // MKW_ASTC_BC_CHECK (bc_check)
     if (bcc < 0) bcc = cfg_get("MKW_ASTC_BC_CHECK") ? atoi(cfg_get("MKW_ASTC_BC_CHECK")) : 0;
     int bcheck = bcc > 0 && agpu && e->f.astc_bc7 && !acheck && !linear;
@@ -440,8 +449,10 @@ static int upload(Tex *e) {
     } else {
         vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, n, rg);
     }
+    UP_PHASE(UPH_RECORD);
     barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
     vk_upload_end();
+    UP_PHASE(UPH_END);
     if (acheck) {   // waits for the GPU
         vk_upload_flush(1);
         if (checked) {
@@ -455,7 +466,17 @@ static int upload(Tex *e) {
     free(ar);
     free(rg);
 counted:;
+#undef UP_PHASE
     uint64_t dt = kern_now_ns() - u0;
+    if (rt_trace & RT_TRACE_PERF) {
+        up_ph_n++;
+        for (int i = 0; i < UPH_N; i++) up_ph_ns[i] += ph[i];
+        if (dt > up_slow.total_ns) {
+            up_slow = (UpSlow){.addr = e->pub.addr, .bytes = t->L.size, .total_ns = dt, .w = d->width, .h = d->height,
+                               .levels = levels, .layers = layers, .fmt = (uint32_t)d->format, .again = e->uploaded};
+            memcpy(up_slow.ph, ph, sizeof ph);
+        }
+    }
     if (e->uploaded) {
         n_reuploads++, perf_count(PERF_CNT_TEX_REUP);
         ru_n++, ru_bytes += t->L.size, ru_ns += dt;

@@ -74,6 +74,13 @@ extern SampSlot *sslots;
 extern int nsslots, nreleased;
 extern Tex *rel_head, *rel_tail;
 extern uint64_t n_uploads, n_reuploads, ru_n, ru_bytes, ru_ns, ru_wt_n, ru_wt_bytes, ru_wt_ns;
+// MKW_TRACE=perf: where upload() spends its time (tex_lock), per perf line: the precomputed-texture path (hash and
+// copy), flushing the open batch, getting staging memory (may wait for the GPU), deswizzle/decode on the CPU, recording
+// the copy or ASTC decode; and the slowest single upload with its own split.
+enum { UPH_TEXPRE, UPH_FLUSH, UPH_STAGING, UPH_DESWIZZLE, UPH_RECORD, UPH_END, UPH_N };   // RECORD: the ASTC decode or copy call; END: barriers and closing the batch
+extern uint64_t up_ph_ns[UPH_N], up_ph_n;
+typedef struct { uint64_t addr, bytes, total_ns, ph[UPH_N]; uint32_t w, h, levels, layers, fmt; int again; } UpSlow;
+extern UpSlow up_slow;
 extern uint64_t rc_n, rc_bytes, rc_ns;   // vk_texture_region_copy (vk_tex_upload.c)
 extern int tex_alias;
 extern uint64_t n_alias_copied, n_alias_upload, n_alias_uninit;
@@ -97,9 +104,22 @@ void barrier(VkCommandBuffer cb, VkPipelineStageFlags2 src, VkAccessFlags2 sa, V
              VkAccessFlags2 da);
 #define ALL_RW VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT
 
+// With MKW_TRACE=perf, a lock() that has to wait is timed (tl_*, under tex_lock once taken): the PS5's race hitches
+// (run hang05, 16/11/2026) had the game's texture registration and the chunk threads waiting on tex_lock while the
+// replay re-uploaded whole textures under it.
+extern uint64_t tl_n, tl_ns, tl_max;
 static inline void lock(void) {
     if (!__atomic_load_n(&tex_ready, __ATOMIC_ACQUIRE)) plat_once(&tex_once, tex_init, NULL);
+    if (!(rt_trace & RT_TRACE_PERF)) {
+        plat_rmutex_lock(&tex_lock);
+        return;
+    }
+    if (plat_rmutex_trylock(&tex_lock)) return;
+    uint64_t t0 = plat_now_ns();
     plat_rmutex_lock(&tex_lock);
+    uint64_t dt = plat_now_ns() - t0;
+    tl_n++, tl_ns += dt;
+    if (dt > tl_max) tl_max = dt;
 }
 static inline void unlock(void) { plat_rmutex_unlock(&tex_lock); }
 

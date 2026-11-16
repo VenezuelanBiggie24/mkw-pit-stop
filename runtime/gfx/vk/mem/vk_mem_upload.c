@@ -43,9 +43,20 @@ typedef struct { int kind; uint64_t handle; VmaAllocation alloc; uint64_t seq, t
 static PlatRMutex cmd_lock;
 static uint32_t cmd_owner;               // the thread holding cmd_lock, for the hang watch (read with no lock)
 static _Thread_local int cmd_depth;
+// MKW_TRACE=perf: cmd_lock takes that had to wait, and wait_and_collect's GPU waits (read and reset by
+// vk_upload_wait_stats): an ASTC upload's recording took up to 1.9 s under the texture lock (run uptime, 16/11/2026).
+static uint64_t ct_n, ct_ns, ct_max, wc_n, wc_ns, wc_max;
 static inline __attribute__((always_inline)) void cmd_take(void) {
     const char *prev = hang_mark("upload: cmd_lock waiting");
-    plat_rmutex_lock(&cmd_lock);
+    if ((rt_trace & RT_TRACE_PERF) && !plat_rmutex_trylock(&cmd_lock)) {
+        uint64_t t0 = plat_now_ns();
+        plat_rmutex_lock(&cmd_lock);
+        uint64_t dt = plat_now_ns() - t0;
+        ct_n++, ct_ns += dt;
+        if (dt > ct_max) ct_max = dt;
+    } else if (!(rt_trace & RT_TRACE_PERF)) {
+        plat_rmutex_lock(&cmd_lock);
+    }
     hang_mark(prev);
     if (!cmd_depth++) __atomic_store_n(&cmd_owner, hang_tid(), __ATOMIC_RELAXED);
 }
@@ -200,7 +211,19 @@ static int stg_pool_tried;
 
 // Waits for the GPU up to the newest submission, its parts already sent (the one being recorded) and every upload batch
 // in flight, then frees what they held.
+void vk_upload_wait_stats(uint64_t out[6]) {   // cmd_lock waits (n, ns, max), wait_and_collect (n, ns, max); resets
+    out[0] = ct_n, out[1] = ct_ns, out[2] = ct_max, out[3] = wc_n, out[4] = wc_ns, out[5] = wc_max;
+    ct_n = ct_ns = ct_max = wc_n = wc_ns = wc_max = 0;
+}
+static void wait_and_collect_body(VkCtx *c);
 static void wait_and_collect(VkCtx *c) {
+    uint64_t t0 = plat_now_ns();
+    wait_and_collect_body(c);
+    uint64_t dt = plat_now_ns() - t0;
+    wc_n++, wc_ns += dt;
+    if (dt > wc_max) wc_max = dt;
+}
+static void wait_and_collect_body(VkCtx *c) {
     vk_sync_fence_wait(vk_sync_issued(), UINT64_MAX);
     cmd_take();
     uint64_t parts = tl_noted;

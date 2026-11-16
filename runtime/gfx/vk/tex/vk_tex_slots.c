@@ -252,6 +252,30 @@ void vk_texture_new_submit(void) {
                (unsigned long long)ru_wt_n, ru_wt_bytes / 1048576.0, ru_wt_ns / 1e6, (unsigned long long)rc_n,
                rc_bytes / 1048576.0, rc_ns / 1e6);
         ru_n = ru_bytes = ru_ns = ru_wt_n = ru_wt_bytes = ru_wt_ns = rc_n = rc_bytes = rc_ns = 0;
+        uint64_t ars[4], uw[6], ls_n, ls_ns, ls_max;
+        vk_astc_record_split(ars);
+        vk_upload_wait_stats(uw);
+        rt_log_slow_stats(&ls_n, &ls_ns, &ls_max);
+        rt_log("perf: frame %llu: uploads %llu by phase, ms: precomputed %.2f, batch flush %.2f, staging %.2f, deswizzle "
+               "%.2f, record %.2f, end %.2f; texture lock waited %llu times, %.2f ms (longest %.2f); ASTC record %llu calls: "
+               "setup %.2f, dispatches %.2f, after %.2f ms; upload lock waited %llu times, %.2f ms (longest %.2f); GPU "
+               "wait-and-collect %llu, %.2f ms (longest %.2f); slow log writes %llu, %.2f ms (longest %.2f)",
+               (unsigned long long)f * 60, (unsigned long long)up_ph_n, up_ph_ns[UPH_TEXPRE] / 1e6,
+               up_ph_ns[UPH_FLUSH] / 1e6, up_ph_ns[UPH_STAGING] / 1e6, up_ph_ns[UPH_DESWIZZLE] / 1e6,
+               up_ph_ns[UPH_RECORD] / 1e6, up_ph_ns[UPH_END] / 1e6, (unsigned long long)tl_n, tl_ns / 1e6, tl_max / 1e6,
+               (unsigned long long)ars[3], ars[0] / 1e6, ars[1] / 1e6, ars[2] / 1e6, (unsigned long long)uw[0],
+               uw[1] / 1e6, uw[2] / 1e6, (unsigned long long)uw[3], uw[4] / 1e6, uw[5] / 1e6,
+               (unsigned long long)ls_n, ls_ns / 1e6, ls_max / 1e6);
+        if (up_slow.total_ns > 20000000ull)   // the slowest upload, when over 20 ms
+            rt_log("perf: frame %llu: slowest upload %.2f ms%s: %#llx %ux%u fmt %#x levels %u layers %u, %.1f KiB; "
+                   "precomputed %.2f flush %.2f staging %.2f deswizzle %.2f record %.2f end %.2f",
+                   (unsigned long long)f * 60, up_slow.total_ns / 1e6, up_slow.again ? " (again)" : "",
+                   (unsigned long long)up_slow.addr, up_slow.w, up_slow.h, up_slow.fmt, up_slow.levels, up_slow.layers,
+                   up_slow.bytes / 1024.0, up_slow.ph[UPH_TEXPRE] / 1e6, up_slow.ph[UPH_FLUSH] / 1e6,
+                   up_slow.ph[UPH_STAGING] / 1e6, up_slow.ph[UPH_DESWIZZLE] / 1e6, up_slow.ph[UPH_RECORD] / 1e6,
+                   up_slow.ph[UPH_END] / 1e6);
+        memset(up_ph_ns, 0, sizeof up_ph_ns), up_ph_n = 0, tl_n = tl_ns = tl_max = 0;
+        memset(&up_slow, 0, sizeof up_slow);
         uint64_t ck, calls, untr;
         vk_mem_snap_stats(&ck, &calls, &untr);
         rt_log("perf: frame %llu: binding storage checks %llu (texture %llu), write-watch snapshot queries %llu, untracked %llu",

@@ -679,8 +679,16 @@ static void scratch_caps(const VkAstcRegion *rg, int n, uint32_t bw, uint32_t bh
 // The largest scratch so far, and what the call would have needed without the bands (logged when either grows).
 static VkDeviceSize max_scratch, max_unsplit;
 
+// MKW_TRACE=perf: vk_astc_record's time in its setup, its dispatch loop and after it (the summary log line), read and
+// reset by vk_astc_record_split; the callers hold the upload lock.
+static uint64_t ar_ns[3], ar_n;
+void vk_astc_record_split(uint64_t out[4]) {
+    out[0] = ar_ns[0], out[1] = ar_ns[1], out[2] = ar_ns[2], out[3] = ar_n;
+    ar_ns[0] = ar_ns[1] = ar_ns[2] = ar_n = 0;
+}
 int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, const VkAstcRegion *rg0, int n0, uint32_t bw,
                    uint32_t bh, int srgb, VkImage img, VkImageAspectFlags aspect, int bc7, VkBuffer readback) {
+    uint64_t ar_t0 = plat_now_ns(), ar_t1 = 0, ar_t2 = 0;
     static volatile int32_t n_fail;
     (void)src_size;
     VkCtx *c = vk_ctx();
@@ -803,6 +811,7 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     if (!copies || !bcp) rt_fatal("vk: out of memory (ASTC regions)");
     VkDeviceSize rb_off = 0;
     int chunks = 0;
+    ar_t1 = plat_now_ns();
     for (int i0 = 0; i0 < n; chunks++) {
         int i1 = i0;
         VkDeviceSize in = 0, out = 0;
@@ -874,6 +883,7 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
         }
         i0 = i1;
     }
+    ar_t2 = plat_now_ns();
     if (readback)
         mem_barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT,
                     VK_ACCESS_2_HOST_READ_BIT);
@@ -892,6 +902,8 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     free(copies), free(bcp);
     if (rg != rg0) free((void *)rg);
     if (!fixed) vk_defer_buffer_in(svma(), sb, sa);
+    uint64_t ar_t3 = plat_now_ns();
+    ar_ns[0] += ar_t1 - ar_t0, ar_ns[1] += ar_t2 - ar_t1, ar_ns[2] += ar_t3 - ar_t2, ar_n++;
     return 1;
 }
 

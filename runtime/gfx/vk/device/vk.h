@@ -332,6 +332,7 @@ int vk_exec_cb_trim_spare(int keep);              // free excess spare command-b
 VkCommandBuffer vk_upload_begin_staging(VkDeviceSize size, VkBuffer *buf, void **map);
 uint64_t vk_upload_flush(int wait);
 uint32_t vk_upload_owner(void);                 // the thread holding the upload lock, 0 if none (hang watch)
+void vk_upload_wait_stats(uint64_t out[6]);   // MKW_TRACE=perf: cmd_lock waits n/ns/max, wait_and_collect n/ns/max; resets
 void vk_upload_flush_over(VkDeviceSize limit);   // sends the open batch once it holds that much staging or ASTC work
 void vk_upload_work(uint64_t texels);            // ASTC texels the open batch decodes (vk_upload_flush_over)
 // Deferred destruction: freed once the upload batches recorded so far and the timeline value last noted have completed.
@@ -357,6 +358,7 @@ typedef struct { VkDeviceSize src; uint32_t w, h, slices, level, layer; VkOffset
 // into img (VK_IMAGE_LAYOUT_GENERAL). The caller records its usual barriers around an image copy before and after the
 // call. readback (optional, host-visible, TRANSFER_DST): also gets the decoded texels, the regions one after the other.
 // 0 when the decoder is unavailable or the scratch buffer cannot be allocated (nothing recorded).
+void vk_astc_record_split(uint64_t out[4]);   // MKW_TRACE=perf: setup, dispatch loop, after (ns), calls; resets
 int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, const VkAstcRegion *rg, int n, uint32_t bw,
                    uint32_t bh, int srgb, VkImage img, VkImageAspectFlags aspect, int bc7, VkBuffer readback);   // bc7: img is BC7
 // MKW_ASTC_TIME=1: GPU timestamps around each vk_astc_record's dispatches (logged per footprint and the largest one)
