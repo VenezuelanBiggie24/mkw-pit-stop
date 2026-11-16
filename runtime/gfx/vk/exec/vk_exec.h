@@ -132,6 +132,10 @@ void wpage_note(const VkExec *ex, uint64_t addr, uint64_t size, const char *what
 VkCommandBuffer vk_exec_inline_begin(int *reopen);
 void vk_exec_inline_end(int reopen);
 void vk_exec_inline_end_bound(int reopen);   // the same after commands that bound a pipeline and descriptors of their own
+// Outside vk_exec_inline_begin: sends what this submission recorded so far as a part (vk_sync_split) and goes on in a new
+// command buffer; *part gets the part value it signals (vk_sync_part_wait). 0 when it cannot: not the replay's own
+// recording (a MKW_REPLAY_PAR chunk, or no replay on this thread) or nothing recorded since the last part.
+int vk_exec_split_part(uint64_t *part);
 // vk_exec_draw.c: forget what the command buffer being recorded has bound (pipeline, sets, dynamic state, vertex
 // buffers): the replay continues in a new one (vk_sync_split).
 void vk_exec_draw_new_cb(void);

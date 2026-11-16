@@ -671,11 +671,52 @@ static void zero_census(const tex_t *src, const uint8_t *stg, size_t bytes, uint
            (unsigned long long)game, (long long)(game - sub), unmet > 0 ? "yes" : unmet == 0 ? "no" : "unknown");
 }
 
-typedef struct { VkBuffer b; VmaAllocation a; } InlineStg;
+typedef struct InlineStg { VkBuffer b; VmaAllocation a; struct InlineStg *next; } InlineStg;
 static void free_inline_stg(void *arg) {   // completion thread, once the submission that read it is done
     InlineStg *t = arg;
-    vmaDestroyBuffer(vk_ctx()->vma, t->b, t->a);
+    if (t->b) vmaDestroyBuffer(vk_ctx()->vma, t->b, t->a);   // VK_NULL_HANDLE: inline_stg_room freed it already
     free(t);
+}
+
+// The inline copies' staging lives until the submission is done, and only its last part signals that: MKW makes ~300
+// ASTC copies of up to 16 MiB each in one loading submission (8192x8192 ASTC 8x8 levels into the terrain arrays, the
+// PS5's 16/11 logs), several GiB of staging at once on a console with ~1 GiB free. Past INLINE_STG_CAP of staging in
+// the submission, what was recorded so far goes to the GPU as a part (vk_exec_split_part), the replay thread waits for
+// it and frees the staging the part read. A wait on the replay thread, at loading only: ~64 MiB of decodes. A
+// MKW_REPLAY_PAR chunk cannot send a part of its own: its staging waits for the submission, as before.
+// Per thread: the replay's own recording, or a chunk's (its list is reset at its next submission, before which the
+// completion thread may free the entries, untouched since).
+#define INLINE_STG_CAP (64ull << 20)
+static _Thread_local struct { uint64_t fence, bytes; InlineStg *held; } istg;
+uint64_t vk_astc_inline_cap_test;
+static uint64_t astc_counts[VK_ASTC_COPY_N];   // atomics
+
+void vk_texture_astc_copy_counts(uint64_t out[VK_ASTC_COPY_N]) {
+    for (int i = 0; i < VK_ASTC_COPY_N; i++) out[i] = __atomic_load_n(&astc_counts[i], __ATOMIC_RELAXED);
+}
+
+static void inline_stg_room(VkDeviceSize need) {
+    uint64_t fence = vk_exec_recording_fence();
+    if (istg.fence != fence) istg.fence = fence, istg.bytes = 0, istg.held = NULL;
+    uint64_t cap = vk_astc_inline_cap_test ? vk_astc_inline_cap_test : INLINE_STG_CAP;
+    if (!istg.held || istg.bytes + need <= cap) return;
+    uint64_t part, t0 = kern_now_ns();
+    if (!vk_exec_split_part(&part)) {
+        __atomic_fetch_add(&astc_counts[VK_ASTC_COPY_CHUNK_HELD], 1, __ATOMIC_RELAXED);
+        return;
+    }
+    __atomic_fetch_add(&astc_counts[VK_ASTC_COPY_PART_WAITS], 1, __ATOMIC_RELAXED);
+    vk_queue_lock();   // a part the submit thread holds (MKW_SUBMIT_THREAD) goes to the queue first
+    vk_queue_unlock();
+    vk_sync_part_wait(part);
+    uint64_t freed = istg.bytes;
+    for (InlineStg *t = istg.held; t; t = t->next) vmaDestroyBuffer(vk_ctx()->vma, t->b, t->a), t->b = VK_NULL_HANDLE;
+    istg.bytes = 0, istg.held = NULL;
+    static volatile int32_t n_logged;
+    if (plat_inc32(&n_logged) <= 16)
+        rt_log("vk: ASTC copies in the replay: %.1f MiB of staging in submission %llu, sent as part %llu and waited for "
+               "(%.2f ms) to free it", freed / 1048576.0, (unsigned long long)fence, (unsigned long long)part,
+               (kern_now_ns() - t0) / 1e6);
 }
 
 // A texture copy between ASTC textures that went to different Vulkan formats (one kept as RGBA8 under 256x256 into one
@@ -686,7 +727,9 @@ static void free_inline_stg(void *arg) {   // completion thread, once the submis
 // images, or skips).
 // Only a source whose storage is its content (cpu_content, as vk_texture_region_copy): one the GPU wrote (a copy into
 // it, a sparse array, a GPU-only pool) has stale or no blocks in its storage, which decoded as old texels or the error
-// colour. Under the texture lock, which WriteTexels into the storage take.
+// colour. The texture lock covers that check only on the replay's path: the storage is read after it as the game's own
+// writes are, and holding the lock over the deswizzle, the census and the staging (whose last resort waits for the GPU)
+// blocked the game threads that register textures (16 MiB copies at loading). Probes and the readback keep it.
 // A BC destination takes whole 4x4 blocks: dx and dy multiples of 4, and w and h too unless the region reaches the
 // level's edge; a region that ends inside a block would write the whole block, clamped texels over its neighbours.
 // Recorded in the replay's command buffer at the copy's place (vk_exec_inline_begin), not in the upload batch: the
@@ -712,6 +755,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
     VkAstcRegion *ar = calloc(layers, sizeof *ar);
     if (!ar) return 0;
     lock();
+    int locked = 1;
     uint32_t ups;
     if (!cpu_content(src, &ups)) {
         static volatile int32_t n_gpu;
@@ -729,7 +773,13 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
     if (probe == -2) probe = cfg_get("MKW_ASTC_PROBE_LEVEL") ? atoi(cfg_get("MKW_ASTC_PROBE_LEVEL")) : -1;
     int want_probe = probe == (int)dlevel && layers == 1 && w * h <= 64 && plat_inc32(&n_probed) <= 6;
     int reopen = 0;
-    VkCommandBuffer icb = want_probe ? VK_NULL_HANDLE : vk_exec_inline_begin(&reopen);
+    VkCommandBuffer icb = VK_NULL_HANDLE;
+    if (!want_probe && vk_exec_recording_fence()) {
+        unlock(), locked = 0;
+        inline_stg_room(per * layers);   // before vk_exec_inline_begin: a part sent there takes the command buffer
+        icb = vk_exec_inline_begin(&reopen);
+        if (!icb) lock(), locked = 1;
+    }
     VkBuffer sb;
     VmaAllocation sa = NULL;
     uint8_t *stg;
@@ -744,7 +794,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
     }
     if (!stg) {   // no staging memory: the caller copies the images or skips (logged by the staging)
         if (icb) vk_exec_inline_end(reopen);
-        unlock();
+        if (locked) unlock();
         free(ar);
         return 0;
     }
@@ -780,7 +830,8 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
         vk_exec_inline_end_bound(reopen);
         InlineStg *t = malloc(sizeof *t);
         if (!t) rt_fatal("vk: out of memory (ASTC copy staging)");
-        *t = (InlineStg){sb, sa};
+        *t = (InlineStg){sb, sa, istg.held};
+        istg.held = t, istg.bytes += per * layers;
         vk_completion_add(fence, free_inline_stg, t);
     } else {
         if (ok) {
@@ -792,7 +843,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
         }
         vk_upload_end();
     }
-    unlock();
+    if (locked) unlock();
     if (rmap) {
         vk_upload_flush(1);
         vmaInvalidateAllocation(vk_ctx()->vma, ralloc, 0, VK_WHOLE_SIZE);
@@ -811,6 +862,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
         rt_log("vk: ASTC %ux%u (fmt %#x) level %u layer %u x%u -> %s level %u layer %u at %d,%d: %s%s", w, h,
                src->d.format, level, layer, layers, bc7 == 2 ? "BC1" : bc7 ? "BC7" : "RGBA8", dlevel, dlayer, dx, dy,
                ok ? "decoded" : "failed", icb ? " (in the replay's command buffer)" : " (upload batch)");
+    if (ok) __atomic_fetch_add(&astc_counts[icb ? VK_ASTC_COPY_INLINE : VK_ASTC_COPY_BATCH], 1, __ATOMIC_RELAXED);
     return !ok ? 0 : icb ? VK_TEX_COPY_INLINE : VK_TEX_COPY_BATCH;
 }
 

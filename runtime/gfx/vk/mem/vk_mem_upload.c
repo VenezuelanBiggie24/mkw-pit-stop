@@ -194,9 +194,9 @@ void vk_upload_lock(void) {
 }
 void vk_upload_unlock(void) { cmd_give(); }
 
-void vk_upload_work(uint64_t texels) {
+void vk_upload_work(VkCommandBuffer cb, uint64_t texels) {
     cmd_take();
-    if (open_active) open_b.texels += texels;
+    if (open_active && open_b.cb == cb) open_b.texels += texels;
     cmd_give();
 }
 
