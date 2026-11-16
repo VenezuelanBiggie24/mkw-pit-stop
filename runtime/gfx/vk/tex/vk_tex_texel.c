@@ -69,6 +69,20 @@ int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, 
     return ok;
 }
 
+// A WriteTexels that did not reach the image (no staging, its ASTC decode not recorded). A write into a mirrored texture
+// is already in its storage (vk_write_texels): the storage is the newer content and make_fresh takes it back
+// (cpu_took_back), unless the GPU wrote the image since its last write-back (gpu_dirty), whose render the storage lacks:
+// uploading it would lose more than this region. Only the image held the texels of anything else, and no copy of them
+// is kept: that write is lost.
+static void write_lost(Tex *e) {
+    static volatile int32_t n_lost;
+    if (e->pub.mirrored && !e->gpu_dirty) e->cpu_newer = 1;
+    else
+        log_limited(&n_lost, "WriteTexels into texture %#llx (fmt %#x) lost: not written to its image%s",
+                    (unsigned long long)e->pub.addr, e->t.d.format,
+                    e->pub.mirrored ? " and its storage lacks the GPU's render" : "");
+}
+
 static int texels_pinned(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, int write) {
     static volatile int32_t n_astc, n_ds;
     VkCtx *c = vk_ctx();
@@ -98,15 +112,7 @@ static int texels_pinned(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_
     if (write) cb = vk_upload_begin_staging(slice * (size_t)g->nz, &sb, (void **)&stg);
     else stg = vk_staging_try(slice * (size_t)g->nz, &sb, &sa);
     if (!stg) {   // no staging memory even after relieving it (vk_upload_begin_staging): a read returns zeros
-        static volatile int32_t n_lost;
-        // A write into a mirrored texture is already in its storage (vk_write_texels): the storage is the newer content
-        // and make_fresh takes it back (cpu_took_back), unless the GPU wrote the image since its last write-back
-        // (gpu_dirty), whose render the storage lacks: uploading it would lose more than this region. Only the image
-        // held the texels of anything else, and no copy of them is kept: that write is lost.
-        if (write && e->pub.mirrored && !e->gpu_dirty) e->cpu_newer = 1;
-        else if (write)
-            log_limited(&n_lost, "WriteTexels into texture %#llx (fmt %#x) lost: no staging%s", (unsigned long long)e->pub.addr,
-                        e->t.d.format, e->pub.mirrored ? " and its storage lacks the GPU's render" : "");
+        if (write) write_lost(e);
         return 0;
     }
     VkBufferImageCopy *rg = calloc((size_t)g->nz, sizeof *rg);
@@ -154,6 +160,12 @@ static int texels_pinned(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_
         else if (!done) log_limited(&n_astc, "WriteTexels of ASTC texture %#llx not decoded on the GPU: left as it was",
                                     (unsigned long long)e->pub.addr);
         barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+        if (agpu && !done) {   // as without staging: the storage takes it back when it can
+            vk_upload_end();
+            free(rg);
+            write_lost(e);
+            return 0;
+        }
     } else {
         barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
         vkCmdCopyImageToBuffer(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, sb, (uint32_t)g->nz, rg);

@@ -448,8 +448,8 @@ static int upload(Tex *e) {
                                  e->pub.aspect, e->f.astc_bc7, rbuf);
         perf_end(PERF_ASTC, a0);
         if (!checked)
-            log_limited(&n_undecoded, "ASTC texture %#llx (fmt %#x %ux%u) not decoded on the GPU: left as it was",
-                        (unsigned long long)e->pub.addr, d->format, d->width, d->height);
+            log_limited(&n_undecoded, "ASTC texture %#llx (fmt %#x %ux%u) not decoded on the GPU: left as it was, tried "
+                        "again next frame", (unsigned long long)e->pub.addr, d->format, d->width, d->height);
     } else {
         vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, n, rg);
     }
@@ -469,6 +469,16 @@ static int upload(Tex *e) {
     free(raw_copy);
     free(ar);
     free(rg);
+    // A decode that was not recorded (its scratch buffer not made, memory short) wrote nothing: the image still holds
+    // what it held, for a first upload whatever its recycled memory held (other textures' texels, or zero blocks the
+    // samplers see as the error colour). Counted as uploaded, it was never tried again while the storage stayed clean.
+    // Deferred as a staging failure is: a first upload binds the zero stand-in meanwhile (tex_unready), a re-upload
+    // keeps the older image, and both come again next frame.
+    if (agpu && !checked) {
+        e->up_pending = 1, e->up_fail_frame = frame_now;
+        perf_end(PERF_TEX, p0);
+        return 0;
+    }
 counted:;
 #undef UP_PHASE
     uint64_t dt = kern_now_ns() - u0;

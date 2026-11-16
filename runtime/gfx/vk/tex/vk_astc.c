@@ -587,6 +587,11 @@ static VmaAllocator svma(void) {
 static VkBuffer fx_buf;
 static VmaAllocation fx_alloc;
 static int fx_tried;
+// A failed creation is tried again FX_RETRY_FRAMES later: memory short at one moment (a course load) left every later
+// call on a buffer of its own for the rest of the run, the 4.9 ms per call the kept buffer was made to save.
+#define FX_RETRY_FRAMES 120
+static uint64_t fx_retry_frame;
+static uint32_t fx_failures;
 
 // Scratch per vk_astc_record: texels of at most this many bytes at a time, so a large texture array (169 M texels, 677 MB
 // as RGBA8, on monsters2) or an 8192x8192 level (256 MiB as RGBA8) does not need its whole RGBA8 copy as scratch.
@@ -740,13 +745,17 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     VkResult ar = VK_SUCCESS;
     int fixed = 0;
     if (bi.size <= FIXED_SCRATCH && !readback) {   // the caller holds the upload lock: fx_* need no lock of their own
-        if (!fx_tried) {
+        uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        if (!fx_buf && (!fx_tried || fr >= fx_retry_frame)) {
             VkBufferCreateInfo fi = bi;
             fi.size = FIXED_SCRATCH;
             fx_tried = 1;
             if (vmaCreateBuffer(svma(), &fi, &aci, &fx_buf, &fx_alloc, NULL) != VK_SUCCESS) fx_buf = VK_NULL_HANDLE;
-            rt_log("vk: ASTC fixed scratch of %llu MiB: %s", (unsigned long long)(FIXED_SCRATCH >> 20),
-                   fx_buf ? "made" : "failed, one buffer per call");
+            if (!fx_buf) fx_retry_frame = fr + FX_RETRY_FRAMES, fx_failures++;
+            if (fx_buf || fx_failures <= 4 || !(fx_failures & (fx_failures - 1)))
+                rt_log("vk: ASTC fixed scratch of %llu MiB at frame %llu: %s (%u failed attempts)",
+                       (unsigned long long)(FIXED_SCRATCH >> 20), (unsigned long long)fr,
+                       fx_buf ? "made" : "failed, one buffer per call until it is tried again", fx_failures);
         }
         if (fx_buf) {   // its previous use (an earlier call or batch) has read and written it
             sb = fx_buf, fixed = 1;
@@ -934,7 +943,7 @@ void vk_astc_release(void) {
         if (G.err) vmaDestroyBuffer(c->vma, G.err, G.err_alloc);
         if (fx_buf) vmaDestroyBuffer(svma(), fx_buf, fx_alloc);
     }
-    fx_buf = VK_NULL_HANDLE, fx_alloc = NULL, fx_tried = 0;
+    fx_buf = VK_NULL_HANDLE, fx_alloc = NULL, fx_tried = 0, fx_retry_frame = 0, fx_failures = 0;
     memset(&G.dsl, 0, sizeof G - offsetof(__typeof__(G), dsl));
     G.dev = VK_NULL_HANDLE;
     G.mode = -1;
