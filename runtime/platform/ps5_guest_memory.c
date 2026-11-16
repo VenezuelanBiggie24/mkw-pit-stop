@@ -774,6 +774,7 @@ __attribute__((noinline)) int plat_mem_protect(uint64_t address, uint64_t bytes,
 }
 
 size_t plat_mem_early_page_size(void) { return PS5_MEM_PAGE; }
+size_t plat_mem_watch_page(void) { return PS5_MEM_PAGE; }   // prot_watch_init(PS5_MEM_PAGE, ...)
 
 static PlatEarlyResult early_protect_failed(uint64_t lo, uint64_t restore_hi, int on) {
     if (!on) return PLAT_EARLY_UNRESTORED;

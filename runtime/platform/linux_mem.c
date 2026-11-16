@@ -131,6 +131,9 @@ static int linux_prot_watch_on(void) {
     return v;
 }
 
+// The soft-dirty watch is per 4 KiB page; the protection watch uses the page size it was started with above.
+size_t plat_mem_watch_page(void) { return linux_prot_watch_on() && linux_early_16k() ? 16384 : PG; }
+
 static void fault_install(void);
 
 static void ww_open(void) {

@@ -872,11 +872,20 @@ int vk_texture_region_copy(const tex_t *src, uint32_t level, uint32_t layer, uin
     return ok;
 }
 
-// vk_mem_changed over the pages wholly inside e's storage (all of its pages when it fills none): a neighbour that shares
-// the first or last page does not count as a write to e.
+// The write-watch pages wholly inside e's storage, [*lo, *hi); 0 when it fills none. A write anywhere in a watch page
+// marks all of its 4 KiB pages (prot_watch_written), and on the PS5 that page is 16 KiB (plat_mem_watch_page): rounding
+// to 4 KiB let a neighbour's write in a shared edge page count as a write to e.
+static int watch_span(const Tex *e, uint64_t *lo, uint64_t *hi) {
+    uint64_t pg = plat_mem_watch_page();
+    *lo = (e->pub.addr + pg - 1) & ~(pg - 1), *hi = (e->pub.addr + e->t.L.size) & ~(pg - 1);
+    return *hi > *lo;
+}
+
+// vk_mem_changed over the watch pages wholly inside e's storage (all of its pages when it fills none): a neighbour that
+// shares the first or last page does not count as a write to e.
 int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now) {
-    uint64_t lo = (e->pub.addr + 0xfff) & ~0xfffull, hi = (e->pub.addr + e->t.L.size) & ~0xfffull;
-    if (hi <= lo) lo = e->pub.addr, hi = e->pub.addr + e->t.L.size;
+    uint64_t lo, hi;
+    if (!watch_span(e, &lo, &hi)) lo = e->pub.addr, hi = e->pub.addr + e->t.L.size;
     return vk_mem_changed(lo, hi - lo, since, now);
 }
 
@@ -896,16 +905,28 @@ void gpu_baseline(Tex *e) {
 // reached the storage only (cpu_newer), goes back to the CPU: on the console the storage is the texture, so the next
 // sample sees those bytes. Before, gpu_owned was never cleared (make_fresh returned on it, vk_texture_write_back only
 // dropped gpu_dirty, and a released entry taken back kept it), so such a texture showed its last render for good. The
-// rule is vk_texture_write_back's and alias_has_gpu_content's: a CPU write after the render makes the storage the
+// rule is vk_texture_write_back's and tex_has_gpu_content's: a CPU write after the render makes the storage the
 // content. Only a write the page check saw (1); untracked storage (-1) says nothing about the order. From the
 // submission's write-watch snapshot (vk_mem_changed_snap): render targets come through make_fresh at every pass, and a
-// write the snapshot missed shows at the next submission. 1 when the CPU owns it again (the caller uploads).
+// write the snapshot missed shows at the next submission. Only the watch pages wholly inside the storage count, and a
+// storage inside a single watch page is never taken back by a write: unlike storage_rewritten, which keeps the content
+// a render added, a wrong answer here overwrites a live render with the storage's bytes every pass (flicker), so a
+// write that may be a neighbour's says nothing. 1 when the CPU owns it again (the caller uploads).
 static int cpu_took_back(Tex *e) {
+    static int logged;
+    int why = 1;   // 1 WriteTexels reached the storage only, 2 a CPU write the watch saw
     if (!e->cpu_newer) {
-        uint64_t lo = (e->pub.addr + 0xfff) & ~0xfffull, hi = (e->pub.addr + e->t.L.size) & ~0xfffull;
-        if (hi <= lo) lo = e->pub.addr, hi = e->pub.addr + e->t.L.size;   // as storage_rewritten
+        uint64_t lo, hi;
         uint32_t now;
-        if (vk_mem_changed_snap(lo, hi - lo, e->gpu_gen, submit_epoch, &now) != 1) return 0;
+        if (!watch_span(e, &lo, &hi) || vk_mem_changed_snap(lo, hi - lo, e->gpu_gen, submit_epoch, &now) != 1) return 0;
+        why = 2;
+    }
+    if (logged < 32) {
+        logged++;
+        rt_log("vk: texture %#llx %ux%u (%llu bytes) taken back by the CPU after a GPU write: %s%s",
+               (unsigned long long)e->pub.addr, e->pub.width, e->pub.height, (unsigned long long)e->t.L.size,
+               why == 1 ? "a WriteTexels reached the storage only" : "the storage was written",
+               logged == 32 ? " (no more logged)" : "");
     }
     e->pub.gpu_owned = 0, e->gpu_dirty = 0, e->cpu_newer = 0;
     return 1;

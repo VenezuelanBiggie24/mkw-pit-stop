@@ -160,6 +160,7 @@ __attribute__((weak)) void plat_mem_back_causes(uint64_t out[PLAT_BACK_N]) {
     memset(out, 0, sizeof(uint64_t) * PLAT_BACK_N);
 }
 __attribute__((weak)) size_t plat_mem_early_page_size(void) { return 4096; }
+__attribute__((weak)) size_t plat_mem_watch_page(void) { return 4096; }
 __attribute__((weak)) PlatEarlyResult plat_mem_early_protect(uint64_t addr, size_t n, int on, int restore_prot) {
     if (plat_mem_protect(addr, n, on ? PLAT_PROT_NONE : restore_prot)) return PLAT_EARLY_OK;
     return on ? PLAT_EARLY_FAILED : PLAT_EARLY_UNRESTORED;
