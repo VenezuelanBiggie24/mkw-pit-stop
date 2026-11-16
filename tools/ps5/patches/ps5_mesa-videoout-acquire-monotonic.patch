@@ -1,0 +1,103 @@
+--- a/src/vulkan/wsi/wsi_common_videoout.c
++++ b/src/vulkan/wsi/wsi_common_videoout.c
+@@ -47,6 +47,7 @@
+ #include <string.h>
+ 
+ #include "c11/threads.h"
++#include "util/cnd_monotonic.h"
+ #include "util/macros.h"
+ #include "util/os_time.h"
+ #include "util/u_math.h"
+@@ -249,7 +250,12 @@
+ /* VideoOut, its framebuffers and what each holds, under lock. */
+ struct wsi_videoout_output {
+    mtx_t lock;
+-   cnd_t changed;
++   /* On CLOCK_MONOTONIC, the clock of the acquire's deadline (os_time_get_nano):
++    * as a C11 cnd_t (CLOCK_REALTIME) its 20 ms wait returned at once, so an
++    * acquire with no free buffer spun on the lock the flip thread needs, and on
++    * the console a frame could wait out the whole acquire timeout (~1 s steps,
++    * run mono 16/11/2026). */
++   struct u_cnd_monotonic changed;
+    bool opened;
+    int handle;
+    bool high_frame_rate;
+@@ -294,7 +300,7 @@
+ videoout_output_init_once(void)
+ {
+    mtx_init(&videoout_output.lock, mtx_plain);
+-   cnd_init(&videoout_output.changed);
++   u_cnd_monotonic_init(&videoout_output.changed);
+ }
+ 
+ struct wsi_videoout_swapchain {
+@@ -528,7 +534,7 @@
+    mtx_lock(&out->lock);
+    for (;;) {
+       while (out->queue_count == 0)
+-         cnd_wait(&out->changed, &out->lock);
++         u_cnd_monotonic_wait(&out->changed, &out->lock);
+       const struct wsi_videoout_present present = out->queue[out->queue_head];
+       mtx_unlock(&out->lock);
+ 
+@@ -551,7 +557,7 @@
+       out->queue_head = (out->queue_head + 1) % ARRAY_SIZE(out->queue);
+       out->queue_count--;
+       chain->in_flight--;
+-      cnd_broadcast(&out->changed);
++      u_cnd_monotonic_broadcast(&out->changed);
+    }
+    return 0;
+ }
+@@ -1039,7 +1045,7 @@
+          const uint64_t wake = MIN2(deadline, os_time_get_nano() + UINT64_C(20000000));
+          until.tv_sec = wake / 1000000000;
+          until.tv_nsec = wake % 1000000000;
+-         cnd_timedwait(&out->changed, &out->lock, &until);
++         u_cnd_monotonic_timedwait(&out->changed, &out->lock, &until);
+       }
+    }
+ }
+@@ -1052,7 +1058,7 @@
+    mtx_lock(&out->lock);
+    for (uint32_t i = 0; i < count; i++)
+       out->buffer[chain->first + indices[i]].held = false;
+-   cnd_broadcast(&out->changed);
++   u_cnd_monotonic_broadcast(&out->changed);
+    mtx_unlock(&out->lock);
+    return VK_SUCCESS;
+ }
+@@ -1068,7 +1074,7 @@
+    mtx_lock(&out->lock);
+    out->buffer[buffer].held = false;
+    if (chain->retired) {
+-      cnd_broadcast(&out->changed);
++      u_cnd_monotonic_broadcast(&out->changed);
+       mtx_unlock(&out->lock);
+       return VK_ERROR_OUT_OF_DATE_KHR;
+    }
+@@ -1088,7 +1094,7 @@
+    out->queue_count++;
+    out->buffer[buffer].pending = true;
+    chain->in_flight++;
+-   cnd_broadcast(&out->changed);
++   u_cnd_monotonic_broadcast(&out->changed);
+    mtx_unlock(&out->lock);
+    return VK_SUCCESS;
+ }
+@@ -1108,13 +1114,13 @@
+    /* Its flips use its fences: they go first. */
+    mtx_lock(&out->lock);
+    while (chain->in_flight)
+-      cnd_wait(&out->changed, &out->lock);
++      u_cnd_monotonic_wait(&out->changed, &out->lock);
+    for (uint32_t i = 0; i < chain->base.image_count; i++)
+       if (chain->images[i].acquired)
+          out->buffer[chain->first + i].held = false;
+    if (out->current == chain)
+       out->current = NULL;
+-   cnd_broadcast(&out->changed);
++   u_cnd_monotonic_broadcast(&out->changed);
+    mtx_unlock(&out->lock);
+ 
+    for (uint32_t i = 0; i < chain->base.image_count; i++) {

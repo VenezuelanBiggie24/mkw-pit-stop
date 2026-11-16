@@ -1,0 +1,71 @@
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.h
+@@ -11,6 +11,7 @@
+ #include "radv_ps5_winsys_public.h"
+ 
+ #include "c11/threads.h"
++#include "util/cnd_monotonic.h"
+ #include "util/simple_mtx.h"
+ #include "util/u_dynarray.h"
+ 
+@@ -65,7 +66,10 @@
+ 
+    /* Waiters for a sync object to be submitted for signalling. */
+    mtx_t sync_lock;
+-   cnd_t sync_cond;
++   /* On CLOCK_MONOTONIC, the clock of os_time_get_nano() and of every deadline
++    * here: a C11 cnd_t runs on CLOCK_REALTIME, and the monotonic deadlines it was
++    * given had always passed, so radv_ps5_sync_wait_many's 1 ms poll spun. */
++   struct u_cnd_monotonic sync_cond;
+ };
+ 
+ /* The process's queue, created by the first winsys; NULL if it cannot be. */
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_winsys.c
+@@ -45,7 +45,7 @@
+    radv_ps5_cpu_flush((const void *)queue->marker, sizeof(*queue->marker));
+    simple_mtx_init(&queue->submit_lock, mtx_plain);
+    mtx_init(&queue->sync_lock, mtx_plain);
+-   cnd_init(&queue->sync_cond);
++   u_cnd_monotonic_init(&queue->sync_cond);
+    radv_ps5_queue_instance = queue;
+ }
+ 
+--- a/src/amd/vulkan/winsys/ps5/radv_ps5_sync.c
++++ b/src/amd/vulkan/winsys/ps5/radv_ps5_sync.c
+@@ -62,7 +62,7 @@
+    sync->pending = pending;
+    sync->seq = seq;
+    if (pending)
+-      cnd_broadcast(&queue->sync_cond);
++      u_cnd_monotonic_broadcast(&queue->sync_cond);
+    mtx_unlock(&queue->sync_lock);
+ }
+ 
+@@ -95,7 +95,7 @@
+    s->pending = false;
+    s->seq = 0;
+    if (d->pending)
+-      cnd_broadcast(&queue->sync_cond);
++      u_cnd_monotonic_broadcast(&queue->sync_cond);
+    mtx_unlock(&queue->sync_lock);
+    return VK_SUCCESS;
+ }
+@@ -162,7 +162,7 @@
+       const uint64_t wake = MIN2(abs_timeout_ns, now + 1000000);
+       until.tv_sec = wake / 1000000000;
+       until.tv_nsec = wake % 1000000000;
+-      cnd_timedwait(&queue->sync_cond, &queue->sync_lock, &until);
++      u_cnd_monotonic_timedwait(&queue->sync_cond, &queue->sync_lock, &until);
+    }
+ }
+ 
+@@ -208,7 +208,7 @@
+       sync->pending = true;
+       sync->seq = seq;
+    }
+-   cnd_broadcast(&queue->sync_cond);
++   u_cnd_monotonic_broadcast(&queue->sync_cond);
+    mtx_unlock(&queue->sync_lock);
+ }
+ 
