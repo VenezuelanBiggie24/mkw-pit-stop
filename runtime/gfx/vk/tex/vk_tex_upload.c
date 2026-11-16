@@ -597,9 +597,12 @@ counted:;
     return 1;
 }
 
-// A mirrored texture whose storage holds its content: no entry at its address holds GPU-written content (gpu_owned,
-// gpu_dirty, as alias_has_gpu_content), so a full upload would make the image exactly the storage's bytes. *uploads:
-// the uploads of t's own entry so far (0 without one). Texture lock held.
+// A mirrored texture whose storage holds its content: no entry at its address holds GPU-written content the storage
+// lacks (tex_has_gpu_content, the alias copy's rule), so a full upload would make the image exactly the storage's
+// bytes. Refusing any entry that was GPU-owned or dirty (ce280b0) also refused textures the GPU wrote once and the CPU
+// rewrote since, or whose render was written back, whose storage is their content: the copy was skipped and its
+// destination kept what it held (from review; not seen in a run). *uploads: the uploads of t's own entry so far (0
+// without one). Texture lock held.
 static int cpu_content(const tex_t *t, uint32_t *uploads) {
     *uploads = 0;
     if (!tex_mirrored(t)) return 0;
@@ -608,7 +611,7 @@ static int cpu_content(const tex_t *t, uint32_t *uploads) {
     const Tex *own = nvn_hm_get(&by_key, &k);
     if (own) *uploads = own->n_up;
     for (const Tex *p = entries_at(k.addr); p; p = p->next_at)
-        if (!p->released && (p->pub.gpu_owned || p->gpu_dirty)) return 0;
+        if (!p->released && tex_has_gpu_content(p)) return 0;
     return 1;
 }
 
@@ -875,6 +878,13 @@ int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now) {
     uint64_t lo = (e->pub.addr + 0xfff) & ~0xfffull, hi = (e->pub.addr + e->t.L.size) & ~0xfffull;
     if (hi <= lo) lo = e->pub.addr, hi = e->pub.addr + e->t.L.size;
     return vk_mem_changed(lo, hi - lo, since, now);
+}
+
+int tex_has_gpu_content(const Tex *e) {
+    if (!e->pub.gpu_owned) return 0;
+    if (!e->pub.mirrored) return 1;
+    uint32_t now;
+    return e->gpu_dirty && !storage_rewritten(e, e->gpu_gen, &now);
 }
 
 void gpu_baseline(Tex *e) {

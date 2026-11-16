@@ -681,6 +681,9 @@ static const char *copy_t2t_do(VkExec *ex, const p_copy_t2t *p) {
             return "ASTC decoded from storage";
         }
     }
+    // TODO: a source the GPU wrote (vk_texture_astc_copy refuses it: its storage lacks the content) whose image went to
+    // another format than the destination's is skipped below; it needs a GPU-side transcode, image to image (decode
+    // the source's RGBA8 or BC texels, encode them as the destination's format), not the storage's ASTC blocks.
     if ((s.astc_bw || d.astc_bw) &&
         (s.astc_bw != d.astc_bw || s.astc_bh != d.astc_bh || s.img->format != d.img->format)) {
         warn_once(W_FORMAT, "copy between ASTC textures decoded to VkFormat %d and %d (or ASTC and not): skipped",

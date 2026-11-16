@@ -38,15 +38,6 @@ static int alias_compatible(const Tex *e, const Tex *src) {
     return eb && eb == sb && ew == sw && eh == sh;
 }
 
-// src holds content the storage bytes do not: the GPU wrote it and, for a mirrored texture, it was not written back
-// and the CPU has not rewritten the storage since (the new entry's upload then reads the newer bytes).
-static int alias_has_gpu_content(const Tex *src) {
-    if (!src->pub.gpu_owned) return 0;
-    if (!src->pub.mirrored) return 1;
-    uint32_t now;
-    return src->gpu_dirty && !storage_rewritten(src, src->gpu_gen, &now);
-}
-
 // Maxwell reads the same bytes through both descriptors: src's content goes into the new image e at the replay's
 // current position, before any later command of the submission uses e. Through a buffer, since bound images share
 // their memory and image copies may not overlap; e leaves UNDEFINED between the two halves, so its first transition
@@ -118,7 +109,7 @@ Tex *entry_of(const tex_t *t) {
             if (p->released) { destroy_idle(p); continue; }
             alias = 1;
             if (tex_alias && (!src || (same_but_swizzle(&p->key, &k) && !same_but_swizzle(&src->key, &k))) &&
-                alias_compatible(e, p) && alias_has_gpu_content(p))
+                alias_compatible(e, p) && tex_has_gpu_content(p))
                 src = p;
         }
         if (alias) perf_count(PERF_CNT_TEX_ALIAS);
