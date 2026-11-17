@@ -179,17 +179,17 @@ Start the PS5's FTP server with anonymous access. Use the console's IP address a
 uses a port other than `2121`. The `app` argument is optional.
 
 ```sh
-python3 tools/ps5/deploy.py 192.168.50.39 app --dry-run
-python3 tools/ps5/deploy.py 192.168.50.39 app
+python3 tools/ps5/deploy.py 192.168.1.50 app --dry-run
+python3 tools/ps5/deploy.py 192.168.1.50 app
 ```
 
 Select one optional package using the same flag as the build command. All packages publish to the same console title
 ID and retain the previous title in the backup folder.
 
 ```sh
-python3 tools/ps5/deploy.py 192.168.50.39 app --query-memory --dry-run
-python3 tools/ps5/deploy.py 192.168.50.39 app --dualsense --dry-run
-python3 tools/ps5/deploy.py 192.168.50.39 app --alias-subrange --dry-run
+python3 tools/ps5/deploy.py 192.168.1.50 app --query-memory --dry-run
+python3 tools/ps5/deploy.py 192.168.1.50 app --dualsense --dry-run
+python3 tools/ps5/deploy.py 192.168.1.50 app --alias-subrange --dry-run
 ```
 
 Remove `--dry-run` to upload the selected package.
