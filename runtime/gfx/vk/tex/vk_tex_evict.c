@@ -196,6 +196,7 @@ void destroy_tex(Tex *e) {
     uint64_t binds = e->sparse ? vk_sparse_destroy(e->pub.image) : 0, prev = 0;
     if (binds) prev = vk_mem_defer_fence(0), vk_mem_defer_fence(prev > binds ? prev : binds);
     vk_defer_image(e->pub.image, e->alloc);
+    if (e->rb) vk_defer_buffer(e->rb, e->rba);   // a readback the parts sent may still write (readback_record_locked)
     if (binds) vk_mem_defer_fence(prev);
     vk_mem_defer_use(0);
     free(e);

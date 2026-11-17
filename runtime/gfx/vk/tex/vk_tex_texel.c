@@ -463,6 +463,90 @@ void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, co
     unlock();
 }
 
+// ---------------------------------------------------------------- readback of compute-written pitch textures
+// MKW's water collision height maps (two 256x256 pitch R16G16B16A16_SNORM textures, 512 KiB, #410) are written by a
+// dispatch every frame and go back to their storage at the fence, on the game thread (vk_texture_write_back_small).
+// write_back read the image with its own submission and waited for it there; on the PS5 that was most of what the
+// write-back cost 2-player split, which is bound by the game thread (roadmap, 18/11/2026). Instead the copy into a
+// host-visible buffer of the entry is recorded right after the dispatch, in the replay's command buffer, and the fence
+// only copies bytes. The buffer serves a write-back while rb_fence is the submission of the image's last GPU write and
+// no other kind of write (render, copy, clear) was recorded in it: chunks of one submission are recorded in parallel,
+// so the order their marks take the lock in is not the GPU's. Copies from two dispatches of one submission land in GPU
+// order, the later last. The game thread holds the texture lock while it reads the buffer, and the next copy into it is
+// recorded under the same lock, so it cannot run before the read is done.
+// MKW_TEX_READBACK (default 1; 0: the image read at the fence, as before; "ab").
+static int rb_mode = -1;
+
+// The region write_back copies for a pitch texture: its one level and layer (nl: the NVN level of image level 0).
+static int rb_region(const Tex *e, Region *g, NVNcopyRegion *r) {
+    const nvn_texdesc *d = &e->t.d;
+    uint32_t nl = e->pub.drop;
+    view_t v = {.set_levels = 1, .set_layers = 1, .base_level = (uint8_t)nl, .min_layer = 0};
+    *r = (NVNcopyRegion){.width = (int)mip(d->width, nl), .height = d->target == 0 || d->target == 3 ? 1 : (int)mip(d->height, nl),
+                         .depth = 1};
+    return region_of(&e->t, &v, r, 0, 0, g);
+}
+
+void readback_record_locked(Tex *e, VkCommandBuffer cb) {
+    if (rb_mode < 0) rb_mode = rt_knob("TEX_READBACK", "1");
+    uint64_t f = e->gpu_fence;
+    e->rb_fence = 0;
+    if (!cb || !RT_KNOB_ON(rb_mode) || !e->pub.mirrored || !e->gpu_dirty || !f || e->rb_other == f) return;
+    const nvn_texdesc *d = &e->t.d;
+    if (!nvn_tex_is_linear(d) || d->target == NVN_TEXTURE_TARGET_3D || e->pub.drop || e->f.expand_rgb || e->f.astc_bw ||
+        e->f.depth || e->f.stencil)
+        return;
+    Region g;
+    NVNcopyRegion r;
+    if (!rb_region(e, &g, &r) || g.nz != 1 || g.bw != 1 || g.bh != 1) return;
+    size_t size = g.wb * g.hb;
+    if (!size || size > (16u << 20)) return;
+    VkCtx *c = vk_ctx();
+    if (!e->rb || e->rb_size < size) {
+        if (e->rb) vk_defer_buffer(e->rb, e->rba), e->rb = VK_NULL_HANDLE, e->rbp = NULL, e->rb_size = 0;
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+                                 .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        if (vmaCreateBuffer(c->vma, &bi, &ai, &e->rb, &e->rba, &info) != VK_SUCCESS) {
+            e->rb = VK_NULL_HANDLE;   // the write-back reads the image at the fence instead
+            return;
+        }
+        e->rbp = info.pMappedData, e->rb_size = size;
+    }
+    VkBufferImageCopy rg = {.bufferOffset = 0, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, g.level, 0, 1},
+                            .imageOffset = {0, 0, 0}, .imageExtent = {(uint32_t)r.width, (uint32_t)r.height, 1}};
+    barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    vkCmdCopyImageToBuffer(cb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, e->rb, 1, &rg);
+    // The host reads the buffer after the fence; later commands may write the image again once the copy is done.
+    barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_HOST_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            VK_ACCESS_2_HOST_READ_BIT | VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT);
+    e->rb_fence = f;
+}
+
+// write_back from the recorded copy: 1 done, 0 not possible (the image is read instead).
+static int write_back_rb(Tex *e) {
+    if (!e->rb || !e->rb_fence || e->rb_fence != e->gpu_fence || e->rb_other == e->rb_fence) return 0;
+    Region g;
+    NVNcopyRegion r;
+    if (!rb_region(e, &g, &r) || g.wb * g.hb > e->rb_size) return 0;
+    vmaInvalidateAllocation(vk_ctx()->vma, e->rba, 0, VK_WHOLE_SIZE);
+    uint8_t *buf = e->rbp;
+    if (g.row != g.wb) {   // storage_texels takes rows g.row apart
+        buf = malloc(g.img);
+        if (!buf) return 0;
+        for (size_t y = 0; y < g.hb; y++) memcpy(buf + y * g.row, e->rbp + y * g.wb, g.wb);
+    }
+    int ok = storage_texels(&e->t, &g, &r, buf, 1);
+    if (buf != e->rbp) free(buf);
+    static volatile int32_t n_rb;
+    if (ok) log_limited(&n_rb, "pitch texture %#llx %ux%u written back from the copy recorded after its dispatch (fence %llu)",
+                        (unsigned long long)e->pub.addr, e->t.d.width, e->t.d.height, (unsigned long long)e->rb_fence);
+    return ok;
+}
+
 // ---------------------------------------------------------------- CPU reads of GPU-written storage
 // A mirrored texture the GPU rendered into holds its texels in its image only; its storage keeps what the CPU last put
 // there. The game may still read that storage with the CPU: TotK moves its generated grass maps between pools with
@@ -478,6 +562,12 @@ static void write_back(Tex *e) {
     // and the runs, ab-split-batch, 18/11/2026). The pages end up marked written either way; gpu_baseline below makes
     // them the image's own bytes.
     int held = plat_mem_back_hold(e->pub.addr, e->t.L.size);
+    if (write_back_rb(e)) {
+        if (held) plat_mem_back_release(e->pub.addr, e->t.L.size);
+        e->gpu_dirty = 0;
+        gpu_baseline(e);
+        return;
+    }
     int linear = nvn_tex_is_linear(d), is3d = d->target == NVN_TEXTURE_TARGET_3D;
     uint32_t levels = linear ? 1 : e->pub.levels, layers = linear || is3d ? 1 : e->pub.layers;
     for (uint32_t lv = 0; lv < levels; lv++)

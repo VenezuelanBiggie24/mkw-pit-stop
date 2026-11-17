@@ -53,6 +53,12 @@ typedef struct Tex {
                                   // (the lock is recursive) and the caller goes on using the entry afterwards
     uint8_t cpu_newer;            // GPU-owned and mirrored: a WriteTexels reached the storage but not the image (no
                                   // staging), so the storage is the newer content (make_fresh takes it back)
+    VkBuffer rb;                  // readback of a compute-written pitch texture (readback_record_locked): host-visible
+    VmaAllocation rba;
+    uint8_t *rbp;                 // its mapping
+    size_t rb_size;
+    uint64_t rb_fence;            // the submission whose last write of the image the buffer's copy follows (0: none)
+    uint64_t rb_other;            // the newest submission with another GPU write of the image (not a dispatch)
 } Tex;
 
 // A slot keeps what vk_texture_by_id resolved for it, so a draw binding skips the key lookup and the address chain: the
@@ -192,6 +198,7 @@ Tex *entries_at(uint64_t addr);   // the first entry at that storage address; th
 
 // vk_tex_texel.c: texel reads and writes
 typedef struct { unsigned level, layer0; int nz, is3d, bw, bh, bpb; size_t wb, hb, row, img, x0, y0; } Region;
+void readback_record_locked(Tex *e, VkCommandBuffer cb);   // after a dispatch wrote e (texture lock held)
 int region_of(const tex_t *t, const view_t *v, const NVNcopyRegion *r, uint64_t row, uint64_t img, Region *g);
 int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t *mem, int write);
 int storage_texels(const tex_t *t, const Region *g, const NVNcopyRegion *r, uint8_t *mem, int write);

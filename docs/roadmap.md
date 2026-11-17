@@ -108,9 +108,11 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   split: 30.0 fps (76 % of windows at 33.3 ms) without the marks, 28.3 (30 %) with. Two 512 KiB pitch textures go back
   at every fence; the write watch arms their pages in between, and each page cost a fault or an unprotect (~70 a
   frame, ~34-40 us each). The write-back now holds the storage and holds unprotect a run of pages in one call
-  (prot_watch_hold): 1.9 -> 0.8 ms a frame (ab-split-batch, 18/11/2026). **Next**: the image is read back with its own
-  submission and wait on the game thread (image_texels); record the copy into a host-visible buffer in the replay's
-  command buffer after the dispatch and only copy bytes at the fence. ~27 more faults a frame remain, spread over pages.
+  (prot_watch_hold): 1.9 -> 0.8 ms a frame (ab-split-batch, 18/11/2026). The image is no longer read back with its own
+  submission and wait at the fence: the copy into a host-visible buffer is recorded after the dispatch in the replay's
+  command buffer (`MKW_TEX_READBACK`, vk_tex_texel.c). `MKW_TEX_READBACK=ab` in split: frame median the same (33.95
+  ms), render work -3.7 ms; both height maps go back from the copy and the kart rides the waves (Koopa Troopa Beach,
+  18/11/2026). ~27 more write-watch faults a frame with the marks remain, spread over pages, cause not found.
 - **Next: what misses the vertical blank in 2-player split** (the game's own frame, two ticks at 30 fps, is the
   suspect: `FRAME_TRACE = 1`). Heavy windows carry ~16 % more draws. Set aside in split: `MKW_REPLAY_PAR_PRECHECK`
   (0), `MKW_REPLAY_PAR_MORE` (6 recorders: 35.0 against 34.3 ms, the cores are taken). `MKW_REPLAY_PAR_MORE`/`SMALL`

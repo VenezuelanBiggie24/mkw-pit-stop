@@ -282,7 +282,7 @@ static void mark_compute_writes(VkExec *ex, const VkPipeInfo *info) {
             if (slot < 0 || slot >= 32) continue;
             uint64_t h = ex->img[NVN_STAGE_CS][slot];
             if (!h) continue;
-            vk_texture_compute_written((int)(h & 0xfffff));
+            vk_texture_compute_written((int)(h & 0xfffff), ex->cb);
         }
     }
 }

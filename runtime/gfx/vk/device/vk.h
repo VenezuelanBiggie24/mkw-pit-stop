@@ -557,7 +557,7 @@ void vk_texture_gpu_written(const tex_t *t);        // rendered or copied into b
 void vk_texture_gpu_copied(const tex_t *t);         // the same for a copy recorded into the upload batch: no make_fresh
                                                     // after it (its upload would land over the copy)
                                                     // until the CPU writes it after this
-void vk_texture_compute_written(int id);          // a compute dispatch wrote slot id as a storage image: the same,
+void vk_texture_compute_written(int id, VkCommandBuffer cb);   // a dispatch recorded in cb wrote slot id as a storage image: the same,
 // so a linear collision height map reaches its storage at the fence (MKW wave riding, #410)
 // runtime/gfx/cap: of the live image of t, if any (none is made): VK_TEXCAP_GPU its content is what the GPU wrote,
 // VK_TEXCAP_RECENT a draw sampled it within the last `recent` submissions, VK_TEXCAP_SPARSE it is a Vulkan sparse image
