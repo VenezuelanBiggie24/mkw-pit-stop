@@ -826,10 +826,14 @@ static uint64_t early_done(void) { return gfx_backend()->fence_done(); }   // MK
 
 // MKW_EARLY_READ: what this submit's GPU work writes, watched from now with its fence; under the submit's lock, as the
 // list nvn_submit_prepare filled.
-static void early_watch_submit(uint64_t f) {
+// fp (MKW_QORDER_PRE): the fence of the ops before the first wait not met, which write what was listed with at most
+// pre_waits waits before it; 0: all of it with f.
+static void early_watch_submit(uint64_t f, uint64_t fp, int pre_waits) {
     if (!nvn_sub_ndst) return;
     mem_early_set_done(early_done, gfx_backend()->fence_wait, gfx_backend()->fence_queued, gfx_backend()->fence_wait_issued);
-    for (int i = 0; i < nvn_sub_ndst; i++) mem_early_watch(nvn_sub_dst[i].addr, nvn_sub_dst[i].size, f, nvn_sub_dst[i].kind);
+    for (int i = 0; i < nvn_sub_ndst; i++)
+        mem_early_watch(nvn_sub_dst[i].addr, nvn_sub_dst[i].size, fp && nvn_sub_dst[i].waits <= pre_waits ? fp : f,
+                        nvn_sub_dst[i].kind);
     nvn_sub_ndst = 0;
 }
 
@@ -853,21 +857,24 @@ NVN_API(nvnQueueSubmitCommands) {
         plat_mutex_lock(&submit_lock);
         nvn_submit_prepare_async(h, hs, n);
         void *fe;
-        held = gfx_backend()->submit_held && nvn_qorder_submit(q, hs, n, &fe);
+        uint64_t pre = 0, fp = 0;
+        int pre_waits = 0;
+        held = gfx_backend()->submit_held && nvn_qorder_submit(q, hs, n, &fe, &pre, &pre_waits);
         if (held) {   // (work that waits for another queue's: nvn_qorder.c fills it in)
             void *slot;
+            if (pre) fp = gfx_backend()->submit(&pre, 1);   // (its ops before the wait, at once: MKW_QORDER_PRE)
             f = gfx_backend()->submit_held(&slot);
             nvn_qorder_attach(fe, slot);
         } else {
             f = gfx_backend()->submit(hs, n);
         }
-        early_watch_submit(f);
+        early_watch_submit(f, fp, pre_waits);
         plat_mutex_unlock(&submit_lock);
         if (hs != local) free(hs);
     } else {
         nvn_submit_prepare(h, n);
         f = gfx_backend()->submit(h, n);
-        early_watch_submit(f);
+        early_watch_submit(f, 0, 0);
     }
     // MKW_SUBMIT_CATCHUP (default 1, 0 when MKW_EARLY_READ waits: Linux; "ab"): the submit returns once its replay and GPU work are done, as on the console,
     // where the GPU runs a submit right after it and what it writes (timestamps the game decides what to draw with,

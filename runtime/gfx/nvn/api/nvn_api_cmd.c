@@ -510,9 +510,16 @@ NvnEarlyDst nvn_sub_dst[NVN_EARLY_MAX];
 int nvn_sub_ndst;
 static int early_watch;
 
-static void early_note(uint64_t a, uint64_t n, int kind) {
-    if (!a || !n || nvn_sub_ndst == NVN_EARLY_MAX || nvn_gpu_only(a)) return;
-    nvn_sub_dst[nvn_sub_ndst++] = (NvnEarlyDst){a, n, kind};
+// The storage buffers bound in this submission per stage and index (their nvn_sub_dst entry + 1; 0 none): a shader
+// writes one at a draw or dispatch, so its waits are those before its last use (MKW_QORDER_PRE: a buffer bound before
+// a wait and used after it is written after it).
+static int ssbo_dst[8][16];
+static uint8_t ssbo_set[128], nssbo_set;   // the stage * 16 + index set so far (the draws walk only those)
+
+static int early_note(uint64_t a, uint64_t n, int kind) {   // its entry + 1, 0 none
+    if (!a || !n || nvn_sub_ndst == NVN_EARLY_MAX || nvn_gpu_only(a)) return 0;
+    nvn_sub_dst[nvn_sub_ndst++] = (NvnEarlyDst){a, n, kind, (int)nvn_sub_waits};
+    return nvn_sub_ndst;
 }
 
 static void early_op(uint32_t op, const uint8_t *a) {
@@ -532,9 +539,20 @@ static void early_op(uint32_t op, const uint8_t *a) {
     case OP_CLEAR_BUF: early_note(((const p_clear_buf *)a)->addr, ((const p_clear_buf *)a)->size, 3); break;
     case OP_BIND_SSBO: {   // the shader may only read it: told apart by what the game touches
         const p_bind_buf *b = (const p_bind_buf *)a;
-        early_note(b->addr, b->size < (64u << 10) ? b->size : (64u << 10), 4);
+        int d = early_note(b->addr, b->size < (64u << 10) ? b->size : (64u << 10), 4);
+        if ((unsigned)b->stage < 8 && (unsigned)b->index < 16) {
+            int *k = &ssbo_dst[b->stage][b->index];
+            if (!*k && d) ssbo_set[nssbo_set++] = (uint8_t)(b->stage * 16 + b->index);
+            if (d || *k) *k = d ? d : -1;   // (-1: set before, now a buffer not watched)
+        }
         break;
     }
+    case OP_DRAW: case OP_DRAW_IDX: case OP_DRAW_IDX_IND: case OP_DRAW_MESH: case OP_DISPATCH: case OP_DISPATCH_IND:
+        for (int i = 0; i < nssbo_set; i++) {
+            int k = ssbo_dst[ssbo_set[i] / 16][ssbo_set[i] % 16];
+            if (k > 0) nvn_sub_dst[k - 1].waits = (int)nvn_sub_waits;
+        }
+        break;
     case OP_UPDATE_UB: early_note(((const p_update_ub *)a)->dst, ((const p_update_ub *)a)->size, 5); break;
     default: break;
     }
@@ -609,6 +627,7 @@ static int resolve_deferred(const uint8_t *p, int depth) {   // returns the defe
 void nvn_submit_prepare(const uint64_t *handles, int n) {
     nvn_sub_sp_reports = nvn_sub_reports = nvn_sub_events = nvn_sub_waits = 0;
     nvn_sub_ndst = 0, early_watch = mem_early_on();
+    memset(ssbo_dst, 0, sizeof ssbo_dst), nssbo_set = 0;
     uint64_t now = __atomic_add_fetch(&nsubmits, 1, __ATOMIC_RELAXED);
     for (int i = 0; i < n; i++) copy_touch(handles[i], now, "QueueSubmitCommands");
     for (int i = 0; i < n; i++) resolve_deferred((const uint8_t *)(uintptr_t)handles[i], 0);
@@ -619,6 +638,7 @@ void nvn_submit_prepare(const uint64_t *handles, int n) {
 void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
     nvn_sub_sp_reports = nvn_sub_reports = nvn_sub_events = nvn_sub_waits = 0;
     nvn_sub_ndst = 0, early_watch = mem_early_on();
+    memset(ssbo_dst, 0, sizeof ssbo_dst), nssbo_set = 0;
     uint64_t now = __atomic_add_fetch(&nsubmits, 1, __ATOMIC_RELAXED);
     uint64_t replayed = gfx_replayed_submits();
     plat_mutex_lock(&copy_lock);
@@ -658,7 +678,11 @@ void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
 uint64_t nvn_submit_count(void) { return __atomic_load_n(&nsubmits, __ATOMIC_RELAXED); }
 
 // A recording made of ops [ops, ops + n) (no OP_BEGIN or OP_END among them) for the replay alone (nvn_qorder.c's
-// streams): freed once the replay reached the newest submission, as the clones are.
+// streams): freed once the replay passed the newest submission. Not at it: a held submission's replay counts as the
+// submission that filled it (vk_backend.c held submit_no), so with MKW_QORDER_PARTS two parts made in one submit,
+// the first for an earlier held submission, carry the same number, and that earlier one's replay freed the second
+// before its own replay read it (PS5 qp-ab-20261117-135512: "corrupt command record ... op 24 size 0" at the first B
+// block). One submission later, the replay of whatever comes after them frees them.
 uint64_t nvn_stream_handle(const uint8_t *ops, size_t n) {
     copy_prefix *pf = malloc(sizeof *pf + n + 16);
     if (!pf) rt_fatal("nvn: out of memory (queue order stream, %zu bytes)", n);
@@ -667,10 +691,17 @@ uint64_t nvn_stream_handle(const uint8_t *ops, size_t n) {
     memcpy(p + 8, ops, n);
     put_hdr(p + 8 + n, OP_END, 8);
     plat_mutex_lock(&copy_lock);
-    *pf = (copy_prefix){0, n + 16, nsubmits, nsubmits, 1};
+    *pf = (copy_prefix){0, n + 16, nsubmits, nsubmits + 1, 1};
     zombie_add(pf);
     plat_mutex_unlock(&copy_lock);
     return (uintptr_t)p;
+}
+
+uint64_t nvn_stream_kept_until(uint64_t handle) {   // (--probe-nvn)
+    plat_mutex_lock_shared(&copy_lock);
+    uint64_t v = ((const copy_prefix *)(uintptr_t)handle - 1)->used_at;
+    plat_mutex_unlock_shared(&copy_lock);
+    return v;
 }
 
 const char *nvn_op_name(uint32_t op) {

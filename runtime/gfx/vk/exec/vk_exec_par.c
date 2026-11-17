@@ -218,7 +218,7 @@ static int plan(const VkExec *ex0, const uint64_t *handles, int n, int C) {
     P.nch = P.nupd = P.ncond = P.cplan.n = 0;
     P.plan_ops = 0;
     P.ndimg = P.dimg_over = 0, P.wdimg = P.dc_img = VK_NULL_HANDLE, P.wdlayers = P.dc_left = 0;
-    P.wq.n = 0, P.wq.cur = 0;   // as the serial replay's, per submission (vk_exec_record)
+    P.wq = vk_exec_qs;   // as the serial replay's (vk_exec_record: per submission, or per queue order episode)
     P.ntid = 0;
     if (P.precheck)
         for (int s = 0; s < NVN_BIND_STAGES; s++) tid_note(ex0->tex[s], 128);
@@ -588,6 +588,7 @@ int vk_exec_par(VkExec *ex, const uint64_t *handles, int n, int diag) {
     ex->in_pass = 0, ex->rt_resolved = 0, ex->dirty = VK_EXEC_DIRTY_ALL, ex->barrier_at = ex->last_dispatch = ex->clear_run_at = -1;
     ex->nfbl = 0, ex->fbl_mask = 0, ex->fb_dirty = 0, ex->fb_fs = NULL;
     vk_exec_draw_new_cb();
+    vk_exec_qs = P.wq;   // (the next part of a queue order episode goes on from them)
     P.n_par++, P.n_chunks += (uint64_t)P.nch, P.n_draws += (uint64_t)P.plan_draws, P.walk_ns += t1 - t0, P.rec_ns += t2 - t1;
     if (t2 - t1 > P.max_rec_ns) P.max_rec_ns = t2 - t1;
     return 1;

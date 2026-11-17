@@ -243,6 +243,10 @@ typedef struct {
     uint64_t cur;
 } VkExecQueues;
 int vk_exec_queue_swap(VkExecQueues *t, VkExec *ex, uint64_t id);
+// The serial replay's queue states (vk_exec.c; vk_exec_par.c starts its walk from them and leaves its own there), and
+// 1 when a submission is a later part of a queue order episode, whose states go on from the part before.
+extern VkExecQueues vk_exec_qs;
+int vk_exec_queue_cont(const uint64_t *handles, int n);
 // vk_exec_par.c: called by vk_exec_record before it walks; 1 when it recorded and submitted the submission's ops as
 // chunks (ex then holds the state after the last op and a new command buffer for the rest); 0: walk as usual. diag: a
 // diagnosis that times ops or passes is on (chunks stay off). vk_exec_par_log: the perf line (MKW_TRACE=perf).

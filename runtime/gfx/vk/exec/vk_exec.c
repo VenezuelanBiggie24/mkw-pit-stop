@@ -508,22 +508,39 @@ int vk_exec_state_op(VkExec *ex, uint32_t op, const void *a) {
 // with the replay state it had (Hookshot found in another MKW recomp that one queue's draws otherwise went on with what
 // the other had set). A queue first seen in the submission starts from the state the replay is at, as every
 // submission does. The switch ends the pass and puts a full barrier between the two queues' work: the wait it stands
-// for orders the other queue's writes before what follows.
-static VkExecQueues QS;
+// for orders the other queue's writes before what follows. The states go on into the next submission when it is a
+// later part of the same episode (its first op an OP_QUEUE with cont: nvn_qorder.c gives each held submission its
+// part of the stream).
+VkExecQueues vk_exec_qs;
+
+int vk_exec_queue_cont(const uint64_t *handles, int n) {
+    if (n <= 0 || !handles[0]) return 0;
+    const op_hdr *h = nvn_op_next(nvn_op_first(handles[0]));
+    // (a capture recorded before cont had the shorter op: never a later part)
+    return h->op == OP_QUEUE && h->size >= sizeof *h + sizeof(p_queue) && ((const p_queue *)nvn_op_payload(h))->cont;
+}
 
 // MKW_QORDER_LOG=N (diagnosis): the first N queue switches, each with what the queue before it ran since its turn
-// began (draws, dispatches, ops), to tell which stages the queues pass each other.
+// began (draws, dispatches, ops), to tell which stages the queues pass each other. MKW_QORDER_LOG_AT=F: from the first
+// present at frame F or later (a race: the menus' switches would use them all).
 static void queue_switch_log(uint64_t id) {
     static int left = -1;
-    static uint64_t d0, c0, o0;
-    if (left < 0) left = cfg_get("MKW_QORDER_LOG") ? atoi(cfg_get("MKW_QORDER_LOG")) : 0;
+    static uint64_t d0, c0, o0, at;
+    if (left < 0) {
+        left = cfg_get("MKW_QORDER_LOG") ? atoi(cfg_get("MKW_QORDER_LOG")) : 0;
+        at = cfg_get("MKW_QORDER_LOG_AT") ? strtoull(cfg_get("MKW_QORDER_LOG_AT"), NULL, 10) : 0;
+    }
     if (!left) return;
-    left--;
-    if (!QS.cur) o0 = 0;   // (op positions count from the submission's start)
-    rt_log("vk: queue %#llx after %#llx: %llu draws, %llu dispatches, %llu ops in its turn (fence %llu)",
-           (unsigned long long)id, (unsigned long long)QS.cur,
-           (unsigned long long)(vk_exec_frame.draws_seen - d0), (unsigned long long)(vk_exec_frame.dispatches - c0),
-           (unsigned long long)(x_pos - o0), (unsigned long long)vk_exec_recording_fence());
+    uint64_t frame = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (!vk_exec_qs.cur) o0 = 0;   // (op positions count from the submission's start)
+    if (frame >= at) {
+        left--;
+        rt_log("vk: queue %#llx after %#llx: %llu draws, %llu dispatches, %llu ops in its turn (fence %llu, submit %llu, "
+               "frame %llu)", (unsigned long long)id, (unsigned long long)vk_exec_qs.cur,
+               (unsigned long long)(vk_exec_frame.draws_seen - d0), (unsigned long long)(vk_exec_frame.dispatches - c0),
+               (unsigned long long)(x_pos - o0), (unsigned long long)vk_exec_recording_fence(),
+               (unsigned long long)__atomic_load_n(&vk_replay_submit, __ATOMIC_RELAXED), (unsigned long long)frame);
+    }
     d0 = vk_exec_frame.draws_seen, c0 = vk_exec_frame.dispatches, o0 = x_pos;
 }
 
@@ -553,11 +570,11 @@ int vk_exec_queue_swap(VkExecQueues *t, VkExec *ex, uint64_t id) {
 }
 
 static void queue_switch(VkExec *ex, uint64_t id) {
-    if (id == QS.cur) return;
+    if (id == vk_exec_qs.cur) return;
     queue_switch_log(id);
     vk_exec_pass_end(ex);
     vk_exec_barrier(ex);
-    if (vk_exec_queue_swap(&QS, ex, id) < 2) return;
+    if (vk_exec_queue_swap(&vk_exec_qs, ex, id) < 2) return;
     dc_drop("a queue switch");
     vk_exec_draw_new_cb();
 }
@@ -731,7 +748,9 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
     part_t0 = kern_now_ns();
     x_cur = x_here_ex = ex;
     x_pos = 0;
-    QS.n = 0, QS.cur = 0;   // queue states live within one submission (queue_switch)
+    // queue states live within one submission (queue_switch), or one queue order episode's parts; a submission without
+    // handles (an empty part) leaves them
+    if (n && !vk_exec_queue_cont(handles, n)) vk_exec_qs.n = 0, vk_exec_qs.cur = 0;
     uint64_t b0 = op_timing > 0 ? plat_cycles() : 0;
     if (n && rec_diff_on > 0) rec_diff_begin();
     if (n) ru_submission(ex);

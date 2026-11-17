@@ -87,14 +87,20 @@ uint64_t nvn_tex_view_offset(const tex_t *t, const view_t *v);
 typedef struct { volatile uint32_t *val; uint32_t mode, value; } p_signal_event;   // OP_SIGNAL_EVENT; mode: NVNeventSignalMode
 typedef p_signal_event p_wait_event;                                                // OP_WAIT_EVENT; mode: NVNeventWaitMode
 // OP_QUEUE: the game's queue whose ops follow (only in the streams nvn_qorder.c builds, where two queues' work takes
-// turns at their event waits: each queue goes on with its own replay state, vk_exec.c queue_switch)
-typedef struct { uint64_t id; } p_queue;
+// turns at their event waits: each queue goes on with its own replay state, vk_exec.c queue_switch). cont 1: the
+// first op of a later part of one episode's stream (each held submission gets its part): the queues' replay states go
+// on from the part before, the previous submission, instead of starting again from the replay's state.
+typedef struct { uint64_t id, cont; } p_queue;
 void nvn_event_cpu_signal(volatile uint32_t *val);   // nvnEventSignal: nvn_qorder.c reads the event's memory again
 // nvn_qorder.c, under the front end's submit lock after nvn_submit_prepare_async: 0, the submission goes to the back
 // end as it is; 1, it waits for another queue's work and is held (*fe: nvn_qorder_attach it to the back end's slot).
-int nvn_qorder_submit(const void *queue, const uint64_t *handles, int n, void **fe);
+// *pre (MKW_QORDER_PRE): when held, the ops before its first wait not met as a replay-only recording to submit (not
+// held) before it, 0 none; *pre_waits: the event waits among them (NvnEarlyDst.waits up to it: written by them).
+int nvn_qorder_submit(const void *queue, const uint64_t *handles, int n, void **fe, uint64_t *pre, int *pre_waits);
 void nvn_qorder_attach(void *fe, void *slot);
 uint64_t nvn_stream_handle(const uint8_t *ops, size_t n);   // nvn_api_cmd.c: a replay-only recording of these ops
+// The submit number whose replay frees a stream handle: past every submission made so far (nvn_api_cmd.c).
+uint64_t nvn_stream_kept_until(uint64_t handle);
 typedef struct { uint64_t type, addr; } p_report_counter;  // OP_REPORT_COUNTER: NVNcounterType, NVNcounterData address
 typedef struct { uint64_t type; } p_reset_counter;         // OP_RESET_COUNTER
 typedef struct { uint64_t src, dst, size; } p_copy_b2b;    // OP_COPY_B2B: GPU addresses
@@ -120,7 +126,8 @@ int nvn_handle_live(uint64_t handle);                      // 1 while the handle
 uint64_t nvn_handle_bytes(uint64_t handle);                // bytes of the copy, OP_BEGIN to OP_END; 0 if not live
 extern uint32_t nvn_sub_sp_reports, nvn_sub_reports, nvn_sub_events, nvn_sub_waits;
 #define NVN_EARLY_MAX 4096
-typedef struct { uint64_t addr, size; int kind; } NvnEarlyDst;   // MKW_EARLY_READ: a submit's GPU write destinations
+// MKW_EARLY_READ: a submit's GPU write destinations; waits: the submit's event waits before the op that writes it
+typedef struct { uint64_t addr, size; int kind, waits; } NvnEarlyDst;
 extern NvnEarlyDst nvn_sub_dst[NVN_EARLY_MAX];
 extern int nvn_sub_ndst;
 extern volatile uint32_t *nvn_sub_event_val[64];

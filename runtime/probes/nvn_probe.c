@@ -826,8 +826,11 @@ OBJ(NVNevent, evE);
 OBJ(NVNevent, evF);
 static int order_submit(const void *q, uint64_t h) {   // 1 held (filled once its episode closes)
     void *fe, *slot;
+    uint64_t pre;
+    int pre_waits;
     nvn_submit_prepare(&h, 1);
-    if (!nvn_qorder_submit(q, &h, 1, &fe)) return gfx_backend()->submit(&h, 1), 0;
+    if (!nvn_qorder_submit(q, &h, 1, &fe, &pre, &pre_waits)) return gfx_backend()->submit(&h, 1), 0;
+    if (pre) gfx_backend()->submit(&pre, 1);   // (its ops before the wait: MKW_QORDER_PRE)
     gfx_backend()->submit_held(&slot);
     nvn_qorder_attach(fe, slot);
     return 1;
@@ -838,6 +841,8 @@ static void probe_queue_order(void) {
     static const uint8_t bb[8] = {0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb}, cc[8] = {0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc};
     uint64_t base = U(pmem);
     plat_setenv("MKW_QUEUE_WAITS", "1");   // (the default; read on first use, which is here)
+    plat_setenv("MKW_QORDER_PARTS", "1");  // (the default, which the turn at a signal below needs)
+    plat_setenv("MKW_QORDER_PRE", "1");    // (the default, which the ops before a wait below need)
     memset(pmem + OFF_E, 0, 0x140);
     CALL(nvnEventBuilderSetStorage, U(&evb), U(&pool), OFF_E);
     CHECK((uint8_t)CALL(nvnEventInitialize, U(&evE), U(&evb)) == 1, "EventInitialize E");
@@ -875,6 +880,42 @@ static void probe_queue_order(void) {
     CHECK(order_submit(qa, hc) == 1 && !pmem[OFF_C], "a wait for a CPU signal is held");
     CALL(nvnEventSignal, U(&evE), NVN_EVENT_SIGNAL_MODE_WRITE, 5);
     CHECK(!memcmp(pmem + OFF_C, cc, 8), "the CPU signal lets it on");
+
+    // the turn goes to the waiting queue at the signal that meets its wait, before the rest of the signalling one (its
+    // held submission's part, and fence, then end there): A copies what B wrote before the signal, not after
+    begin(&cmdA, ctlmem1, 0x32000);
+    CALL(nvnCommandBufferWaitEvent, U(&cmdA), U(&evE), NVN_EVENT_WAIT_MODE_GEQUAL_WRAP, 6);
+    CALL(nvnCommandBufferCopyBufferToBuffer, U(&cmdA), base + OFF_Z, base + OFF_R1, 8, 0);
+    uint64_t hd = CALL(nvnCommandBufferEndRecording, U(&cmdA));
+    begin(&cmdB, ctlmem3, 0x34000);
+    CALL(nvnCommandBufferUpdateUniformBuffer, U(&cmdB), base + OFF_Z, 64, 0, 8, U(bb));
+    CALL(nvnCommandBufferSignalEvent, U(&cmdB), U(&evE), NVN_EVENT_SIGNAL_MODE_WRITE, NVN_EVENT_SIGNAL_LOCATION_BOTTOM, 0, 6);
+    CALL(nvnCommandBufferUpdateUniformBuffer, U(&cmdB), base + OFF_Z, 64, 0, 8, U(cc));
+    uint64_t he = CALL(nvnCommandBufferEndRecording, U(&cmdB));
+    memset(pmem + OFF_Z, 0, 8), memset(pmem + OFF_R1, 0, 8);
+    CHECK(order_submit(qa, hd) == 1 && order_submit(qb, he) == 1, "a wait for the other queue's later signal is held");
+    CHECK(!memcmp(pmem + OFF_R1, bb, 8) && !memcmp(pmem + OFF_Z, cc, 8),
+          "A ran at B's signal (%#x %#x; B whole first gives 0xcc 0xcc)", pmem[OFF_R1], pmem[OFF_Z]);
+    // that submit gave both held submissions their parts: the second part must outlive the replay of the first held
+    // submission, which counts as this submit (PS5 qp-ab-20261117-135512: freed early, a corrupt record)
+    static const uint8_t nop[1];
+    uint64_t hs = nvn_stream_handle(nop, 0);
+    CHECK(nvn_stream_kept_until(hs) > nvn_submit_count(), "a stream part is kept past the submit that made it (%llu at %llu)",
+          (unsigned long long)nvn_stream_kept_until(hs), (unsigned long long)nvn_submit_count());
+
+    // the ops before the first wait not met run at once, ahead of the held rest (MKW_QORDER_PRE), whose destinations
+    // are listed after that wait (the storage buffer by its use, a dispatch-free copy here: by its op)
+    begin(&cmdA, ctlmem1, 0x32000);
+    CALL(nvnCommandBufferUpdateUniformBuffer, U(&cmdA), base + OFF_C, 64, 0, 8, U(bb));
+    CALL(nvnCommandBufferWaitEvent, U(&cmdA), U(&evE), NVN_EVENT_WAIT_MODE_GEQUAL_WRAP, 7);
+    CALL(nvnCommandBufferCopyBufferToBuffer, U(&cmdA), base + OFF_C, base + OFF_R2, 8, 0);
+    uint64_t hp = CALL(nvnCommandBufferEndRecording, U(&cmdA));
+    memset(pmem + OFF_C, 0, 8), memset(pmem + OFF_R2, 0, 8);
+    CHECK(order_submit(qa, hp) == 1, "a submission with ops before its wait is held");
+    CHECK(!memcmp(pmem + OFF_C, bb, 8) && !pmem[OFF_R2], "its ops before the wait ran at once, the rest waits (%#x %#x)",
+          pmem[OFF_C], pmem[OFF_R2]);
+    CALL(nvnEventSignal, U(&evE), NVN_EVENT_SIGNAL_MODE_WRITE, 7);
+    CHECK(!memcmp(pmem + OFF_R2, bb, 8), "and the rest after the CPU's signal");
 
     CALL(nvnCommandBufferFinalize, U(&cmdA));
     CALL(nvnCommandBufferFinalize, U(&cmdB));
