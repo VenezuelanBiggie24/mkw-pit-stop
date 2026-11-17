@@ -97,11 +97,18 @@ static uint16_t ephemeral(const Fd *self) {
 }
 
 // Waits on the game's thread, the virtual core given up, until ready is signalled or ms pass (ms < 0: no limit).
+// The core is taken back with the lock released, as net_ldn.c's wait_for (a thread blocked on the lock keeps its core).
 static void wait_ready(int ms) {
     int away = kern_core_away();
-    if (ms < 0) plat_cond_wait(&ready, &lock);
-    else plat_cond_wait_ms(&ready, &lock, (uint32_t)ms);
+    // 1 ms sleeps with the lock released, as net_ldn.c's wait_for: the callers loop and look at their own deadline
+    // (PIA reads with MSG_DONTWAIT, so this path is rare)
+    (void)ms;
+    plat_mutex_unlock(&lock);
+    plat_sleep_ms(1);
+    plat_mutex_lock(&lock);
+    plat_mutex_unlock(&lock);
     kern_core_back(&away);
+    plat_mutex_lock(&lock);
 }
 
 // ---- from the session
@@ -427,3 +434,4 @@ HOST_OVERRIDE("_ZN2nn6socket9InetHtonsEt", ov_htons);
 HOST_OVERRIDE("_ZN2nn6socket9InetNtohsEt", ov_htons);
 HOST_OVERRIDE("_ZN2nn6socket8InetPtonEiPKcPv", ov_pton);
 HOST_OVERRIDE("_ZN2nn6socket8InetNtopEiPKvPcj", ov_ntop);
+

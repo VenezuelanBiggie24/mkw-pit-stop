@@ -32,6 +32,14 @@ static void wsa_start(void) {
 #define closesocket close
 static void wsa_start(void) {}
 #endif
+// Every read and send passes MSG_DONTWAIT and a read polls first: O_NONBLOCK alone did not keep recvfrom from waiting
+// on the PS5 (17/11/2026: the network thread read the socket with the session lock held and never came back, so the
+// first room search waited forever and the game showed a communication error). sdk/ov/ov_socket.c does the same.
+#ifdef _WIN32
+#define DONTWAIT 0
+#else
+#define DONTWAIT MSG_DONTWAIT
+#endif
 
 static __thread char err_text[96];
 
@@ -81,7 +89,7 @@ void net_udp_close(int s) {
 
 int net_udp_send(int s, const void *p, int n, NetAddr to) {
     struct sockaddr_in a = sin_of(to);
-    int k = (int)sendto(s, (const char *)p, n, 0, (struct sockaddr *)&a, sizeof a);
+    int k = (int)sendto(s, (const char *)p, n, DONTWAIT, (struct sockaddr *)&a, sizeof a);
     if (k >= 0) return k;
     int e = net_errno();
     if (WOULD_BLOCK(e)) return n;
@@ -91,9 +99,10 @@ int net_udp_send(int s, const void *p, int n, NetAddr to) {
 
 int net_udp_recv(int s, void *p, int max, NetAddr *from) {
     for (;;) {
+        if (!net_udp_wait(s, 0)) return 0;
         struct sockaddr_in a;
         socklen_t len = sizeof a;
-        int k = (int)recvfrom(s, (char *)p, max, 0, (struct sockaddr *)&a, &len);
+        int k = (int)recvfrom(s, (char *)p, max, DONTWAIT, (struct sockaddr *)&a, &len);
         if (k >= 0) {
             if (from) *from = (NetAddr){ntohl(a.sin_addr.s_addr), ntohs(a.sin_port)};
             return k;

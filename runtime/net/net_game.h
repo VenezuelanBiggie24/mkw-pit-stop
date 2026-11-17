@@ -8,7 +8,7 @@
 int net_game_send(uint16_t src_port, uint32_t dst_ip, uint16_t dst_port, const void *p, int n);
 uint32_t net_game_vip(void);
 uint32_t net_game_broadcast(void);
-int net_game_enabled(void);   // MKW_LOCAL_WIRELESS is not off
+int net_game_enabled(void);   // MKW_LOCAL_WIRELESS is not off and ldn is initialized: the sockets are ours
 void net_game_mode_reread(void);   // MKW_LOCAL_WIRELESS read again (probes)
 
 // net_socket.c. A game datagram for this node from the session (any thread, never under a socket's lock), and the
@@ -17,7 +17,8 @@ void net_sock_deliver(uint32_t src_ip, uint16_t src_port, uint32_t dst_ip, uint1
 void net_sock_session_ended(void);
 
 // nn::socket inside the local wireless session (net_socket.c): sdk/ov/ov_socket.c owns the entry points and hands
-// each call here while MKW_LOCAL_WIRELESS is on (net_game_enabled), to the host's sockets (MKW_LAN) otherwise.
+// each call here while local wireless is on and ldn initialized (net_game_enabled), to the host's sockets (MKW_LAN)
+// otherwise.
 #include "cpu.h"
 void net_ov_bind(Cpu *c);
 void net_ov_close(Cpu *c);

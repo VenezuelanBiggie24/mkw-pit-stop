@@ -2,11 +2,11 @@
 //
 // MKW's network layer (main+0x22477b4, mode 2) needs only nn::ldn and nn::socket for local wireless: it never asks
 // nn::nifm, so nifm stays a console without a network (sdk/ov/ov_net.c) and the game never tries Nintendo's online
-// service. With MKW_LOCAL_WIRELESS=off (the default until two consoles have raced together) nn::ldn::Initialize fails as
-// on a console in airplane mode, and nothing listens. With lan, a session is found by a UDP broadcast on the local
-// network; with online, also through the lobby (MKW_LOBBY, server/lobby): public sessions show as rooms in the game's
-// own room search, private ones by invite code (MKW_NET_JOIN), and the lobby's relay carries a session that a router
-// keeps from connecting directly.
+// service. lan (the default since a PS5 and a PC raced a whole race together, 17/11/2026) finds rooms by a UDP broadcast
+// and nothing listens until the game makes or joins a room. With MKW_LOCAL_WIRELESS=off nn::ldn::Initialize fails as
+// on a console in airplane mode. With online, rooms are also found through the lobby (MKW_LOBBY, server/lobby):
+// public sessions show as rooms in the game's own room search, private ones by invite code (MKW_NET_JOIN), and the
+// lobby's relay carries a session that a router keeps from connecting directly.
 //
 // The calls run on the game's thread and give the virtual core up while they wait (Scan, Connect). A thread of ours
 // ("mkw-net") reads the session's socket and runs its timers; every call takes g_lock. The ldn state machine follows
@@ -42,6 +42,8 @@ static int g_state, g_reason, g_mode = -1, g_thread;
 static uint64_t g_event;                    // the game's state change SystemEventType, 0 none
 static uint8_t g_compat[NET_COMPAT];
 static NetUiStatus g_ui;                    // what the Pit Stop page shows (net_ui.h)
+static uint8_t g_adv[LDN_ADVERTISE_MAX];    // advertise data set on an open access point, before CreateNetwork
+static uint16_t g_adv_size;
 // lobby client
 static NetAddr g_lobby;
 static uint8_t g_cookie[NET_COOKIE], g_token[NET_TOKEN];
@@ -67,7 +69,10 @@ static int mode(void) {
     }
     return g_mode;
 }
-int net_game_enabled(void) { return mode() != MODE_OFF; }
+// The game's sockets belong to local wireless only while ldn is initialized: MKW's local wireless mode initializes ldn
+// before it opens a socket (main+0x22477b4), its other modes never do, and their sockets stay the host's (sdk/ov/
+// ov_socket.c, MKW_LAN) now that lan is the default.
+int net_game_enabled(void) { return mode() != MODE_OFF && g_state != LDN_STATE_NONE; }
 void net_game_mode_reread(void) { g_mode = -1; }   // probes: MKW_LOCAL_WIRELESS read again at the next call
 
 // Only builds whose tag is equal play together: the protocol, the game's main executable, the runtime version.
@@ -274,11 +279,21 @@ static void session_close(void) {
 }
 
 // Waits on the game's thread with its virtual core given up, until done() or ms pass. Under g_lock.
+// Polls in 10 ms sleeps with g_lock released, so the session thread runs meanwhile and the wait ends on time whether or
+// not anything signals it; the virtual core is taken back with g_lock released too, as a game thread blocked on g_lock
+// keeps its core while it waits. (17/11/2026 on the PS5 the first Scan never returned: the session thread sat in a
+// blocking recvfrom with g_lock held, net_udp.c now never blocks.)
 static int wait_for(int (*done)(void), uint32_t ms) {
     uint64_t end = now_ms() + ms;
     int away = kern_core_away();
-    while (!done() && now_ms() < end) plat_cond_wait_ms(&g_cond, &g_lock, 20);
+    while (!done() && now_ms() < end) {
+        plat_mutex_unlock(&g_lock);
+        plat_sleep_ms(10);
+        plat_mutex_lock(&g_lock);
+    }
+    plat_mutex_unlock(&g_lock);
     kern_core_back(&away);
+    plat_mutex_lock(&g_lock);
     return done();
 }
 
@@ -304,6 +319,7 @@ static void ov_ldn_finalize(Cpu *c) {
     plat_mutex_lock(&g_lock);
     session_close();
     g_state = LDN_STATE_NONE;
+    g_event = 0;   // the game destroys its state change event after Finalize and attaches it again later
     plat_mutex_unlock(&g_lock);
 }
 
@@ -314,6 +330,7 @@ static void set_state(int st) { g_state = st, g_ui.ldn_state = st; signal_change
 
 static void ov_open_ap(Cpu *c) {
     plat_mutex_lock(&g_lock);
+    if (g_state == LDN_STATE_INITIALIZED) g_adv_size = 0, memset(g_adv, 0, sizeof g_adv);   // a new access point
     uint32_t r = g_state == LDN_STATE_INITIALIZED || g_state == LDN_STATE_AP ? (set_state(LDN_STATE_AP), 0u) : R_INVALID_STATE;
     plat_mutex_unlock(&g_lock);
     ret_x(c, r);
@@ -357,6 +374,8 @@ static void create(Cpu *c, const uint8_t *cfg, const uint8_t *sec, const uint8_t
     else {
         uint8_t ni[LDN_NETWORK_INFO];
         build_info(ni, cfg, sec, sp, user);
+        memcpy(ni + NI_ADV, g_adv, LDN_ADVERTISE_MAX);   // what SetAdvertiseData set before CreateNetwork
+        st16(ni + NI_ADV_SIZE, g_adv_size);
         net_session_host(g_sess, ni);
         net_session_security(g_sess, sec);
         g_ui.public_session = !strcmp(cfg_value("MKW_NET_HOST"), "public");
@@ -405,7 +424,15 @@ static void ov_advertise(Cpu *c) {
         st16(ni + NI_ADV_SIZE, (uint16_t)n);
         net_session_info_changed(g_sess);
         g_info_dirty_at = now_ms();
-    } else if (g_state != LDN_STATE_AP) r = R_INVALID_STATE;   // before CreateNetwork it is kept by the console; rare
+    } else if (g_state == LDN_STATE_AP) {
+        // Kept for the network CreateNetwork makes: MKW's PIA sets its room description between OpenAccessPoint and
+        // CreateNetwork, then reads it back with GetNetworkInfo and destroys the room when it is missing (17/11/2026: the
+        // character select showed for half a second, then error 2318-0008).
+        memset(g_adv, 0, sizeof g_adv);
+        if (n) memcpy(g_adv, p, n);
+        g_adv_size = (uint16_t)n;
+    } else
+        r = R_INVALID_STATE;
     plat_mutex_unlock(&g_lock);
     ret_x(c, r);
 }
@@ -581,6 +608,14 @@ static void ov_connect(Cpu *c) {
     if (!ni || !sec || !user) { ret_x(c, R_INVALID_ARGUMENT); return; }
     plat_mutex_lock(&g_lock);
     uint32_t r = connect_to(ni + NI_SESSION_ID, sec, user, (uint16_t)arg_x(c, 3));
+    if (r == R_CONNECT_NOT_FOUND && g_state == LDN_STATE_STATION && g_sess) {
+        // MKW finalizes ldn between its room search and the join, so the station that joins is a new one that has
+        // seen no host yet (17/11/2026: "Unable to find the room you tried to join"): search again, then join
+        scan_now();
+        wait_for(scan_done, g_lobby.ip ? SCAN_ONLINE_MS : SCAN_LAN_MS);
+        r = connect_to(ni + NI_SESSION_ID, sec, user, (uint16_t)arg_x(c, 3));
+    }
+    if (r) rt_log("net: the join failed (result %#x)", r);
     plat_mutex_unlock(&g_lock);
     ret_x(c, r);
 }

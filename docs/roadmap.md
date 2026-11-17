@@ -162,13 +162,16 @@ screen by screen against the console.
 
 ## 7. Multiplayer
 
-docs/multiplayer.md. Implemented 17/11/2026 and tested without the game (loopback sessions, lobby, relay, fuzzing);
-no console run yet.
+docs/multiplayer.md. 17/11/2026: a PS5 hosting and a Windows PC joining raced whole races over the LAN (30 fps
+against 60 fps works); `local_wireless = lan` is the default since. A 2-player split race ran on the PS5.
 
-- **Measure split screen on the PS5** (`build/run/ps5/mkw.ini.task44-split`): 1, 2 and 4 players on one course; frame,
-  busy, GPU, replay, the game threads' CPU, memory. Whether 4 players hold 30 fps at full speed, and what limits it.
-- **Two machines on a LAN** (`mkw.ini.task44-lan`): search, join, a full race, leave, a dropped peer; PIA's real
-  bandwidth and datagram sizes (the `net:` lines), a 30 fps PS5 with a 60 fps PC. Then `local_wireless` on by default.
+- **A player's first race on a course can drop them**: the 3.8 s pipeline stall at the race load made the PC's game
+  leave the room (docs/multiplayer.md, "what the console runs showed"). Watch for it; building the race's pipelines
+  before the start, or a shorter stall, would end it.
+- **Measure split screen on the PS5** (`build/run/ps5/mkw.ini.task44-split`, or unattended with `MKW_VIRTUAL_PADS`
+  and an input script: title menu "Multiplayer", then the player count): the first 2-player run gave 6-8 fps with
+  multi-second waits for the replay (pipelines cold); frame, busy, GPU, replay, CPU with warm caches. 4 players: later.
+- **More than two machines, a peer leaving and rejoining, online through a lobby**: not tried yet.
 - **Through routers without the relay**: UPnP and PCP/NAT-PMP mappings of the host's port while hosting (lease
   renewed, removed at the end; whether the PS5 may), so fewer sessions need the relay.
 - **Station to station directly**: today every datagram between two stations passes through the host (one more hop

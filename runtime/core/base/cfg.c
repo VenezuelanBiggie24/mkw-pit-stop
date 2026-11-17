@@ -144,7 +144,7 @@ static const CfgMeta metas[] = {
     {"MODS_PLAYED", "", NULL, LIVE},   // the mods of the last start: a new set backs the save up first (launcher)
     {"GAME_DIR", "", NULL, RESTART},   // unset: beside the executable; the launcher remembers the selection there
     // Multiplayer (runtime/net): local wireless off until two consoles have raced together over it
-    {"LOCAL_WIRELESS", "off", "off|lan|online", RESTART}, {"LOBBY", "", NULL, RESTART}, {"NET_NAME", "", NULL, LIVE},
+    {"LOCAL_WIRELESS", "lan", "off|lan|online", RESTART}, {"LOBBY", "", NULL, RESTART}, {"NET_NAME", "", NULL, LIVE},
     {"NET_PORT", "11460", "1024..65535", RESTART}, {"NET_HOST", "private", "private|public", LIVE},
     {"NET_REGION", "any", "any|eu|na|sa|asia|oc|af", LIVE}, {"NET_IFACE", "", NULL, RESTART}, {"NET_JOIN", "", NULL, LIVE},
     {"NET_RELAY_ONLY", "0", "0|1", LIVE},

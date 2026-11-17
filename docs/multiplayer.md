@@ -4,8 +4,8 @@ Mario Kart World has its own multiplayer; this port carries it, it invents no ga
 
 | Way | Status | Setting |
 |---|---|---|
-| Split screen, 2-4 players on one machine | The game's own; controllers mapped as the console's applet does. Not yet measured on the PS5 | none |
-| Local wireless over the LAN (PS5 with PS5, PS5 with the desktop build) | Implemented, tested on loopback without the game; not yet with two machines | `local_wireless = lan` |
+| Split screen, 2-4 players on one machine | The game's own; controllers mapped as the console's applet does. 2 players race split on the PS5 (17/11/2026), slow on a first run; not measured | none |
+| Local wireless over the LAN (PS5 with PS5, PS5 with the desktop build) | Works: a PS5 hosting and a Windows PC joining over Wi-Fi raced whole races (17/11/2026) | `local_wireless = lan` (default) |
 | Local wireless over the internet: public rooms, invite codes, relay | Implemented with the lobby (`server/lobby`), tested on loopback | `local_wireless = online`, `lobby = address:port` |
 
 Never Nintendo's online service: the game's online mode needs `nn::nifm`, which stays a console without a network, and
@@ -49,9 +49,38 @@ Found with the executable database (`tools/analisis/q.py`):
   (0x20), `SO_REUSEPORT` (0x200) and IP option 4 (`main+0x15182c0..0x1518550`), `SendTo`, `RecvFrom` with
   `MSG_DONTWAIT` (0x80, `main+0x15186a8`). No TCP, no `Connect`/`Listen`. 32 `nn::socket` imports in all; before this
   work every one of them reached the console's `bsd:u` service, which the runtime does not serve (a fatal IPC).
-- **Ticks and frame rate**: PIA sends from its own threads and the game's logic runs per tick; the PS5's 30 fps with
-  two ticks a frame (`fps = 30`) should only bunch a peer's datagrams two ticks at a time. Not verified: the LAN test
-  below runs a 30 fps PS5 against a 60 fps PC on purpose.
+- **Ticks and frame rate**: PIA sends from its own threads and the game's logic runs per tick. Players at different
+  frame rates race together: a 30 fps PS5 (two ticks a frame) and a PC at 50-57 fps finished a race (17/11/2026).
+
+## Local wireless: what the console runs showed (17/11/2026)
+
+A PS5 (host) and a Windows PC (station), both built from the same tree, on Wi-Fi.
+
+- **The game's calls, in order.** Wireless Play: `ldn::Initialize`, `GetNetworkInfo`, `GetState`,
+  `AttachStateChangeEvent`, `OpenStation`, `Scan` (the room list). Create Room or Join: the game **finalizes ldn,
+  destroys its state change event and initializes again**, then `OpenAccessPoint`, `SetAdvertiseData`, `CreateNetwork`
+  (host) or `OpenStation`, `Connect` (station); its socket binds `0.0.0.0:12345` with `SO_BROADCAST` and
+  `SO_REUSEPORT` and reads with `MSG_DONTWAIT`. The player's name in the room is the account nickname, which the game
+  passes in `UserConfig`.
+- **What broke, and was fixed:**
+  - The PS5's `recvfrom` blocked despite `O_NONBLOCK`, with the session lock held: the first `Scan` never returned,
+    and the game showed "A communication error has occurred" (`net_udp.c`: `MSG_DONTWAIT` and a poll first).
+  - A system event the game destroyed and attached again was not created again (the kernel skipped an address it had
+    bound once): `TryWaitSystemEvent` aborted on both machines after "Make a group to compete? Yes"
+    (`kernel.c` `kern_bind_system_event`).
+  - `SetAdvertiseData` before `CreateNetwork` was dropped; the game reads its room description back and destroyed
+    the room, error 2318-0008 after half a second of character select.
+  - The join came after the game's re-initialize, from a station that had seen no room: "Unable to find the room you
+    tried to join" (`Connect` searches again).
+- **Names**: the account nickname is the profile's `nickname.txt`, else the PSN online ID on the PS5
+  (`sceUserServiceGetUserName`), else `Player` and four random digits for the run; both machines showed "Player" before.
+- **Traffic in a race**, per player and each way: 6-8.5 KiB/s, 17-18 datagrams a second (~400-500 bytes each),
+  round trip 4-10 ms on Wi-Fi, nothing dropped. In the menus and free roam: 5-8 KiB/s, 30-60 datagrams a second.
+- **The first race of a course can drop a player.** In the first race the PC (first time on that course) froze 3.8 s
+  at the race load compiling pipelines (30 draws waiting 140-200 ms each), and its game left the room (`node 1 left
+  (reason 1)`: the station's own `Disconnect`, not a timeout of ours). With that course's pipelines cached, the same
+  setup raced to the end, at 30 and at 60 fps on the PC. If a player drops when a race starts, look for a long
+  pipeline stall on that player's side at the race load (`vk_exec: a draw waited ... for its pipeline`, `worst frame`).
 
 ## Local wireless: how it is carried
 
@@ -142,14 +171,14 @@ Monocypher 4.0.2.
 
 ### Running a lobby
 
-Who runs the public lobby, and pays for it, is the project owner's decision; anyone can run one. Per session, as
-designed (to confirm with the console run's `net:` lines every 10 s):
+Who runs the public lobby, and pays for it, is the project owner's decision; anyone can run one. Per session, from the
+LAN race above (the `net:` lines every 10 s):
 
 - **Direct sessions** cost the lobby almost nothing: a 1.2 KB `REGISTER` every 10 s per room, a few small messages per
   join.
-- **Relayed** players cost twice their traffic: in and out. PIA's local wireless traffic is not measured yet; at
-  30-60 datagrams a second of 100-300 bytes per peer plus our 72 bytes (44 ours, 28 UDP/IPv4), a relayed player is
-  roughly 10-25 KiB/s each way, so ~20-50 KiB/s of server bandwidth, a full room of 7 relayed stations ~0.3 MiB/s.
+- **Relayed** players cost twice their traffic: in and out. Measured in a two-player race: 6-8.5 KiB/s each way per
+  player (up to 8 KiB/s in the menus), so ~15 KiB/s of server bandwidth per relayed player, a full room of 7 relayed
+  stations ~0.1-0.2 MiB/s (a room's host sends each station what the others send, so more players add more).
 - **CPU**: the relay copies datagrams and checks limits, no cryptography: a single core forwards tens of thousands of
   datagrams a second. A small VPS (1 vCPU, 1 GB, 1 TB/month) holds hundreds of direct rooms and a few tens of fully
   relayed ones; traffic, not CPU, is the cost.
@@ -158,7 +187,7 @@ designed (to confirm with the console run's `net:` lines every 10 s):
 
 | Key | Default | What it does |
 |---|---|---|
-| `local_wireless` | `off` | `off` (the game sees airplane mode), `lan`, `online`; read at start |
+| `local_wireless` | `lan` | `off` (the game sees airplane mode), `lan`, `online`; read at start |
 | `lobby` | (none) | The lobby's `address:port` (a name on the desktop; the PS5 takes an address) |
 | `net_name` | "Mario Kart World room" | Your public rooms' name in the lobby |
 | `net_host` | `private` | Rooms you host online: `private` (invite code) or `public` |

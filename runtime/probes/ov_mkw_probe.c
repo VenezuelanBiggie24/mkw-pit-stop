@@ -41,6 +41,8 @@ enum { SOCK_ENETDOWN = 50, SOCK_EAI_FAIL = 4 };
 
 // ---- nifm, friends, ldn, nsd, socket: every call with writable guest buffers in x0..x7, its result against the table
 static void probe_offline(void) {
+    plat_setenv("MKW_LOCAL_WIRELESS", "off");   // the answers below are ldn switched off; the default is lan
+    net_game_mode_reread();
     enum { VOID = -1 };
     static const struct { const char *key; int64_t want; } cases[] = {
         {"nifm::Initialize", 0}, {"nifm::IsNetworkAvailable", 0}, {"nifm::SetLocalNetworkMode", VOID},
@@ -89,6 +91,8 @@ static void probe_offline(void) {
           "GetFriendList: %d friends", *count);
     printf("net: nifm, friends, ldn and nsd answer as a console with no network: %d of %d results as expected\n",
            (int)(sizeof cases / sizeof *cases) - bad, (int)(sizeof cases / sizeof *cases));
+    plat_setenv("MKW_LOCAL_WIRELESS", "");
+    net_game_mode_reread();
 
     // MKW_LAN=1: a local network request is connected and reports an address; an internet one stays unavailable
     plat_setenv("MKW_LAN", "1");
@@ -110,12 +114,14 @@ static void probe_offline(void) {
 }
 
 // ---- nn::socket with local wireless on and outside its session (runtime/net/net_socket.c, which ov_socket.c hands the
-// calls to while MKW_LOCAL_WIRELESS is on): UDP sockets open and bind, nothing leaves, no name resolves; the pure
+// calls to while ldn is initialized with MKW_LOCAL_WIRELESS on): UDP sockets open and bind, nothing leaves, no name resolves; the pure
 // helpers and an event fd work
 static void probe_sockets(void) {
     enum { E_AGAIN = 11, E_NETUNREACH = 101, MSG_DONTWAIT = 0x80 };
     plat_setenv("MKW_LOCAL_WIRELESS", "lan");
     net_game_mode_reread();
+    // the sockets are local wireless's only while ldn is initialized, as the game initializes it before its socket
+    CHECK(CALL("ldn::Initialize") == 0, "ldn::Initialize with local wireless on");
     uint8_t *b = ovp_alloc(0x400);
     memset(b, 0, 0x400);
     int fd = (int)CALL("socket::Socket(int)", 2, 2, 0);
@@ -176,6 +182,7 @@ static void probe_sockets(void) {
     const char *gai = (const char *)(uintptr_t)CALL("socket::GAIStrError", 8);
     CHECK(gai && *gai, "GAIStrError");
     printf("net: nn::socket outside a session: sockets open, nothing leaves, no name resolves\n");
+    CALL("ldn::Finalize");
     plat_setenv("MKW_LOCAL_WIRELESS", "");
     net_game_mode_reread();
 }
