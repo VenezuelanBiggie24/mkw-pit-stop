@@ -33,6 +33,10 @@ Unpack the new builder over your folder (or pass the same `--work` directory) an
 
 {known}
 
+## Licenses and source
+
+The PS5 files in this release are under **GPL-3.0-or-later** as a whole: the PS5 title links GPL-3.0-or-later code (the PS5 payload SDK fork's platform layer and PS5_Vulkan's start-up code). mkw-recomp's own code is MIT. Each package holds `LEGAL.txt` and `licenses/` with every part, its license, copyright and source revision. The complete source of every part is attached to this release as `source/*.tar.gz` (listed in `source/SOURCES.txt`, digests in `SHA256SUMS`).
+
 ## Reporting a problem
 
 Open an issue on GitHub and attach the console kernel log (`klog`) and `logs/setup.log` from the PC preparation folder.

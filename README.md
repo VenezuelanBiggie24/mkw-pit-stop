@@ -183,6 +183,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). For PS5 issues, attach the console kerne
 
 This repository's source code is under the [MIT License](LICENSE) (`Copyright (c) 2026 Adrià`).
 
+**The PS5 release files are GPL-3.0-or-later.** Every PS5 title links the payload SDK fork's platform layer and
+`PS5_Vulkan`'s start-up code (GPL-3.0-or-later), so the placeholder title, the builder's `ps5-bundle/` and every title
+you build with them are under GPL-3.0-or-later as a whole; mkw-recomp's own code stays MIT. Each release carries
+`LEGAL.txt` and `licenses/` (every part with its licence, copyright and source revision) and attaches the complete
+source of every part as `source/*.tar.gz` (`source/SOURCES.txt`), made by
+[tools/ps5/release_notices.py](tools/ps5/release_notices.py).
+
 - **Upstream project:** [**mkw-recomp**](https://github.com/adriadam10/mkw-recomp) by Adrià — the AArch64→C lifter,
   Switch 2 kernel and `nn::*` SDK replacements, NVN2-over-Vulkan renderer, and offline SM86→SPIR-V shader translator.
 - **MIT and permissive projects** (`LICENSE.*` files in [recomp/](recomp/), [runtime/](runtime/),

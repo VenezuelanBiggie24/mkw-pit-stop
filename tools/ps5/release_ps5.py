@@ -12,6 +12,9 @@ Why: a PS5 title release cannot carry game code (linked into eboot.bin), exefs/,
      When build/dist/<target>/mkw[.exe] exists, it is bundled too so players launch the UI directly and click
      "Build for PS5".
   3. SHA256SUMS and release notes, after check_no_game_ps5() passes on every staged asset.
+  4. LEGAL.txt and licenses/ in the placeholder, each builder package and its ps5-bundle/, and source/*.tar.gz with
+     the source of every part (release_notices.py): the PS5 parts link GPL-3.0-or-later code, so these releases are
+     GPL-3.0-or-later as a whole.
 
 Usage: python3 tools/ps5/release_ps5.py --version 0.1.0 [--target all|linux|windows|placeholder]
                                         [--with-toolchain] [--include-radv] [--check-dir DIR]
@@ -47,6 +50,7 @@ for _p in (ROOT / "tools/build", ROOT / "tools/ps5", ROOT / "tools/prepare", ROO
 import build  # noqa: E402
 import dist  # noqa: E402
 import prepare_ps5  # noqa: E402
+import release_notices  # noqa: E402
 
 GAME_MARKER = ("MKW_RECOMP_" + "GENERATED_FROM_GAME_CODE").encode()
 LIFTED_SYMBOL_RE = re.compile(rb"\bf_(?:28|70)[0-9a-f]{6,10}\b")
@@ -74,6 +78,8 @@ SOURCES = [
     "tools/ps5/prepare_ps5.py",
     "tools/ps5/send_ps5.py",
     "tools/ps5/release_ps5.py",
+    "tools/ps5/release_notices.py",
+    "tools/ps5/licenses",
     "runtime/cpu",
     "runtime/core/boot/gamelib.h",
 ]
@@ -298,9 +304,8 @@ def stage_ps5_bundle(bundle: Path, target_os: str, version: str, include_radv: b
         if src_m.is_file():
             shutil.copy2(src_m, sce_mod / mf)
 
-    stage_notices = title / "ps5/tools/stage-notices.py"
-    if stage_notices.is_file() and radv.is_file():
-        subprocess.run([sys.executable, str(stage_notices), str(bundle), str(vulkan), str(radv)], check=True)
+    # LEGAL.txt and licenses/ for every part (GPL-3.0-or-later as a whole); prepare_ps5 copies them into each title
+    release_notices.stage(bundle)
 
 
 def build_placeholder_title(bundle: Path, out_title: Path, version: str) -> None:
@@ -365,6 +370,7 @@ def _stage_builder_tree(stage: Path, target_os: str, version: str, include_radv:
     src_dir = setup_dir / "src"
     copy_sources(src_dir)
     stage_ps5_bundle(setup_dir / "ps5-bundle", target_os, version, include_radv=True)
+    release_notices.stage(stage)   # the package's own LEGAL.txt and licenses/, where a player sees them first
     if with_toolchain:
         _populate_toolchain(setup_dir, target_os)
 
@@ -493,8 +499,12 @@ def main() -> int:
         shutil.copy2(ROOT / "docs/images/icon0.png", icon_dst)
         artifacts.append(icon_dst)
 
+    # The complete source of the GPL parts (and of mkw-recomp and the title foundation), attached to the same release:
+    # GPL-3.0 section 6(a) and (d), since the placeholder and ps5-bundle/ are distributed as object code
+    artifacts += release_notices.source_archives(OUT)
+
     sums_path = OUT / "SHA256SUMS"
-    sums = [(sha256(p), p.name) for p in artifacts if p.is_file()]
+    sums = [(sha256(p), p.relative_to(OUT).as_posix()) for p in artifacts if p.is_file()]
     sums_path.write_text("".join(f"{h}  {n}\n" for h, n in sums), encoding="utf-8")
     print(f"{notes_path}")
     print(f"{sums_path}")
