@@ -101,6 +101,11 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   suspect: `FRAME_TRACE = 1`). Heavy windows carry ~16 % more draws. Set aside in split: `MKW_REPLAY_PAR_PRECHECK`
   (0), `MKW_REPLAY_PAR_MORE` (6 recorders: 35.0 against 34.3 ms, the cores are taken). `MKW_REPLAY_PAR_MORE`/`SMALL`
   drew whole-scene vertical streaks in their B blocks; MORE alone renders clean, so SMALL or the switching is the bug.
+- **Measured and set aside: profile-guided optimization** (17/11/2026). A fresh profile of the merged lift (Linux,
+  `MKW_GPU=null`, race weighted 3x) built into the PS5 eboot: single player at FPS=60 43.8 against 43.9 fps (22.84
+  against 22.76 ms, 210 s of race each), 2-player split at 30 fps 34.03 against 34.30-34.50 ms. The frame waits on
+  the game's job chain, not on the speed of its code. clang crashed now and then compiling the lift 16 jobs wide
+  (lower-expect, then two objects of the PS5 build); each file compiled alone.
 - A null read in the game's code at `sdk+0x776a60` from `main+0x70f154` ended a run at the title (17/11/2026,
   stream-vis), the place of the 16/11 fault below: intermittent, cause not known.
 - **Measured and set aside (17/11/2026):** `MKW_EARLY_WAIT_AWAY` (0.00 ms), host `memset`/`round` (within noise).
