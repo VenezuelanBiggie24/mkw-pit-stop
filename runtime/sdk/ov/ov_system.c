@@ -23,6 +23,7 @@
 #include "fs.h"
 #include "hacks.h"
 #include "host.h"
+#include "kernel.h"
 #include "ov.h"
 #include "players.h"
 #include "platform/platform.h"
@@ -292,6 +293,7 @@ static void ov_show_error(Cpu *c) {
     char lr[96];
     rt_log("err: game error dialog %04u-%04u (result %#x) from %s", 2000 + (r & 0x1ff), (r >> 9) & 0x1fff, r,
            caller(c, lr, sizeof lr));
+    kern_backtrace(c);   // which game code gave up: the error code alone names a module, not the check
 }
 
 // void err::ShowError(const ErrorResultVariant &): the same dialog, which MKW's menus use ("Mode sans fil local"
@@ -306,6 +308,7 @@ static void ov_show_error_variant(Cpu *c) {
     else if (v[0] == 1) rt_log("err: game error dialog %04u-%04u (result %#x) from %s", 2000 + (v[1] & 0x1ff),
                                (v[1] >> 9) & 0x1fff, v[1], caller(c, lr, sizeof lr));
     else rt_log("err: game error dialog without an error (state %u) from %s", v[0], caller(c, lr, sizeof lr));
+    kern_backtrace(c);
 }
 
 // void crypto::GenerateCryptographicallyRandomBytes(void *out, size_t size): the SDK asks the csrng service; the host's
