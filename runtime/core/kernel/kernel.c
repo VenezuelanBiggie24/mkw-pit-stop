@@ -586,8 +586,20 @@ static uint32_t se_find(uint64_t ev) {
     return wh;
 }
 
+// A SystemEventType's state byte (+0x28: 1 an event, 2 an inter-process event, 0 not initialized), as
+// nn::os::TryWaitSystemEvent reads it (sdk+0x141e00).
+enum { SE_STATE = 0x28 };
+
+// An address already bound is bound again when the game destroyed the event since and handed the same storage over
+// again (its state byte is 0 again): MKW's local wireless finalizes ldn, destroys its state change event and attaches
+// it again after ldn::Initialize; skipping the bind left it destroyed and the next TryWaitSystemEvent aborted (PS5 and
+// Windows, 17/11/2026). The old handles were closed by the game's DestroySystemEvent.
 void kern_bind_system_event(Cpu *c, uint64_t ev, int autoclear) {
-    if (se_find(ev)) return;
+    int again = 0;
+    if (se_find(ev)) {
+        if (LD8(ev + SE_STATE) != 0) return;
+        again = 1;
+    }
     if (!tcur || !c) rt_fatal("kern_bind_system_event(%#llx) on a host thread", (unsigned long long)ev);
     static uint64_t create, getw;
     if (!create) {
@@ -599,9 +611,14 @@ void kern_bind_system_event(Cpu *c, uint64_t ev, int autoclear) {
     if (r) rt_fatal("kern_bind_system_event: CreateSystemEvent(%#llx) failed %#x", (unsigned long long)ev, r);
     uint32_t wh = (uint32_t)rt_call(c, getw, 1, ev);
     plat_mutex_lock(&g_se_lock);
-    if (g_nse == (int)(sizeof g_se / sizeof *g_se)) rt_fatal("kern_bind_system_event: table full");
-    g_se[g_nse].ev = ev;
-    g_se[g_nse++].wh = wh;
+    int i = 0;
+    while (again && i < g_nse && g_se[i].ev != ev) i++;
+    if (!again || i == g_nse) {
+        if (g_nse == (int)(sizeof g_se / sizeof *g_se)) rt_fatal("kern_bind_system_event: table full");
+        i = g_nse++;
+    }
+    g_se[i].ev = ev;
+    g_se[i].wh = wh;
     plat_mutex_unlock(&g_se_lock);
 }
 
