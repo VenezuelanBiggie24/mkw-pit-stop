@@ -26,6 +26,7 @@
 #endif
 #include <SDL3/SDL_messagebox.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,6 +40,7 @@
 #include "gamelib.h"
 #include "hacks.h"
 #include "host.h"
+#include "ov.h"
 #include "players.h"
 #include "platform/platform.h"
 #include "sha256.h"
@@ -450,6 +452,37 @@ static void check_cpu(void) {
 #endif
 }
 
+// The C library's replacements (ov_round_away, ov_memset_host) against the host's round() and a byte loop.
+static void check_libc(void) {
+    int before = failures;
+    static const double rc[] = {0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.5, -2.5, 0.49999997f, -0.49999997f,
+                                0.49999999999999994, -0.49999999999999994, 4503599627370495.5, 9007199254740993.0,
+                                1e300, -1e300, 4.9e-324, -4.9e-324, 2.2250738585072009e-308, 0.7, -0.7, 3.4999, 1e-30,
+                                __builtin_inf(), -__builtin_inf()};
+    for (size_t i = 0; i < sizeof rc / sizeof *rc; i++) {
+        double a = ov_round_away(rc[i]), b = round(rc[i]);
+        uint64_t ua, ub;
+        memcpy(&ua, &a, 8), memcpy(&ub, &b, 8);
+        CHECK(ua == ub, "ov_round_away(%a) = %a, round gives %a", rc[i], a, b);
+    }
+    double n = ov_round_away(__builtin_nan(""));
+    CHECK(n != n, "ov_round_away(NaN) is not NaN");
+    Cpu *c = plat_aligned_alloc(sizeof(Cpu), 64);
+    static uint8_t buf[400], ref[400];
+    for (int len = 0; len <= 300; len++)
+        for (int off = 0; off < 8; off++) {
+            for (int i = 0; i < 400; i++) buf[i] = ref[i] = (uint8_t)(i * 7 + len);
+            for (int i = 0; i < len; i++) ref[off + i] = 0xff;
+            memset(c, 0, sizeof *c);
+            c->x[0] = (uint64_t)(uintptr_t)(buf + off), c->x[1] = 0x1ff, c->x[2] = (uint64_t)len;
+            ov_memset_host(c);
+            CHECK(!memcmp(buf, ref, sizeof buf) && c->x[0] == (uint64_t)(uintptr_t)(buf + off),
+                  "ov_memset_host length %d offset %d", len, off);
+        }
+    plat_aligned_free(c);
+    printf("libc: round, memset replacements: %s\n", failures > before ? "FAIL" : "ok");
+}
+
 // Layout: ascending, no overlap, below 2^39, and inside the window mem_init reserved.
 static void check_layout(void) {
     const RtGameModule *lay = rt_game()->modules;
@@ -603,6 +636,7 @@ static int selftest(void) {
 
     check_cpu();
     check_layout();
+    check_libc();
     uint64_t probe = hostfn_register("<selftest probe>", host_probe);
 
     double t0 = now_s();

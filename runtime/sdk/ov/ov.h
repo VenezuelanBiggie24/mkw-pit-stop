@@ -16,6 +16,10 @@ const char *ov_text_language(void);
 const char *ov_shared_font_dir(char *buf, size_t n);   // MKW_SHARED_FONTS, else <romfs>/../../firmware/shared-fonts
 uint64_t ov_bfttf_size(const uint8_t *p, uint64_t len); // decoded font size of a BFTTF image, 0 if it is not one
 
+// ---- the C library's hot calls (ov_system.c, nvn_api_core.c), checked by --selftest
+double ov_round_away(double x);            // round(): ties away from zero, exact
+void ov_memset_host(Cpu *c);               // memset(x0, w1 & 0xff, x2), returns x0
+
 // ---- ov_socket.c
 int ov_lan(void);                                    // MKW_LAN set: sockets and nifm's local mode are live
 int ov_lan_only(uint32_t host_order);   // 1 for an IPv4 address that never leaves a local network (ov_socket.c)

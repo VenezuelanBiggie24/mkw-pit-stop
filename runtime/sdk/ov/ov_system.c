@@ -833,6 +833,27 @@ HOST_OBSERVER("_ZN2nn2os19AllocateMemoryPagesEmm", obs_memory_pages);
 HOST_OBSERVER("nnosInitialize", obs_os_initialize);
 HOST_OBSERVER("nninitInitializeSdkModule", obs_sdk_initialize);
 HOST_OBSERVER("nninitStartup", obs_startup);
+
+// round without a libm call: the sdk's round (sdk+0x6bafc0) is one FRINTA, lifted to frint_d(rm 4), which clang lowers
+// on x86 to a call of the host libm's round() (no ties-away mode in ROUNDSD); sinf, cosf, sincosf, expf, pow and powf
+// call it through the sdk's PLT, 1.15 ms a frame summed in a PS5 race (prof-qw0-20261117-110437, part of it the
+// caller's code after the return). Exact for every double: x - trunc(x) is exact, so no x + 0.5 double rounding
+// (0.49999999999999994 -> 0); the sign of zero kept (-0.4 -> -0); inf and NaN pass through trunc. A subnormal gives
+// +-0 as FRINTA does, with FPCR.FZ or without. Only round: the bindb has no PLT call of roundf.
+double ov_round_away(double x) {
+    double t = __builtin_trunc(x);
+    if (__builtin_fabs(x - t) >= 0.5) t += __builtin_copysign(1.0, x);
+    return __builtin_copysign(t, x);
+}
+// MKW_HOST_ROUND (default 1; "ab"; 0: the game's own through rt_original).
+static void obs_round(Cpu *c) {
+    static int mode = -1;
+    int m = __atomic_load_n(&mode, __ATOMIC_RELAXED);
+    if (m < 0) __atomic_store_n(&mode, m = rt_knob("HOST_ROUND", "1"), __ATOMIC_RELAXED);
+    if (RT_KNOB_ON(m)) ret_d(c, ov_round_away(arg_d(c, 0)));
+    else rt_original(c);
+}
+HOST_OBSERVER("round", obs_round);
 HOST_OBSERVER("nnMain", obs_main);
 
 HOST_OVERRIDE("_ZN2nn7account10InitializeEv", ov_account_initialize);

@@ -66,6 +66,29 @@ static void ov_memcpy(Cpu *c) {
 }
 HOST_OVERRIDE("memcpy", ov_memcpy);
 
+// memset as the host's: the game's own (the sdk's, lifted, sdk+0x696960) took 0.54 ms a frame summed over the game
+// threads in a PS5 race (prof-qw0-20261117-110437, MKW_PROFILE_FN), byte stores through the lifted loop. Exact: the
+// byte is w1's low 8 bits, the count x2, x0 comes back. Like ov_memcpy the stores go straight to guest memory (guest
+// addresses are host addresses), and the write watch sees them as it sees the game's: it works on pages, not on the
+// code that writes (PS5: the fault handler of ps5_guest_memory.c takes prot_watch_fault and backs a lazily committed
+// unit for any faulting rip; Linux: userfaultfd write protection; Windows: MEM_WRITE_WATCH). memset reads no guest
+// bytes, so there is no guest_read as in memcpy. Called through every module's PLT (main, sdk, subsdk0).
+void ov_memset_host(Cpu *c) {
+    uint64_t dst = arg_x(c, 0);
+    memset((void *)(uintptr_t)dst, (int)(uint8_t)arg_x(c, 1), (size_t)arg_x(c, 2));
+    ret_x(c, dst);
+}
+// MKW_HOST_MEMSET (default 1; "ab" to compare in one run; 0: the game's own through rt_original): an observer rather
+// than an override so that the switch can hand the call back to the guest definition.
+static void obs_memset(Cpu *c) {
+    static int mode = -1;
+    int m = __atomic_load_n(&mode, __ATOMIC_RELAXED);
+    if (m < 0) __atomic_store_n(&mode, m = rt_knob("HOST_MEMSET", "1"), __ATOMIC_RELAXED);
+    if (RT_KNOB_ON(m)) ov_memset_host(c);
+    else ret_x(c, rt_original(c));
+}
+HOST_OBSERVER("memset", obs_memset);
+
 __attribute__((weak)) void nvn_submit_prepare(const uint64_t *handles, int n) { (void)handles, (void)n; }
 __attribute__((weak)) void nvn_event_cpu_signal(volatile uint32_t *val) { (void)val; }
 __attribute__((weak)) void nvn_submit_prepare_async(const uint64_t *handles, uint64_t *out, int n) {
