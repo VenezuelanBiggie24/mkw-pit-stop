@@ -91,9 +91,18 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   bytes come from `/app0/eboot.bin`, as the PS5 maps text execute-only). Single-stepping the load with the trap flag
   ended the title at its first step (`MKW_EARLY_SIBLING_STEP`, off). Race frame now ~24 ms of work with the ordering
   on; 2-player split at FPS=30: 34.35 ms average (29.1 fps), half the windows at 33.3 ms, recording 17-21 ms.
-- **Next: the heavy split windows** (2 players at 30 fps, ~1 ms off on average): what grows there, recording, GPU or
-  the game. `MKW_REPLAY_PAR_MORE`/`SMALL` drew whole-scene vertical streaks in their B blocks (17/11/2026): a bug to
-  find before more recorders can help.
+- **Done: chunks recorded while the walk goes on** (`MKW_REPLAY_PAR_STREAM`, 17/11/2026). The walk and the precheck
+  took 3.1-4.4 ms a frame before any chunk was recorded; the chunks now go out as the walk cuts them. 2-player split
+  at 30 fps, A/B in one race: the render side's work 22.5 -> 20.1 ms a frame, every submission streamed; frames the same
+  as serial (Linux capture, pixel for pixel) and split pictures clean on the console. The frame interval did not move
+  (34.1 against 34.5 ms): at 30 fps the render side has ~12 ms to spare, and the windows over 33.3 ms are occasional
+  missed vertical blanks (a 50 ms frame), not work.
+- **Next: what misses the vertical blank in 2-player split** (the game's own frame, two ticks at 30 fps, is the
+  suspect: `FRAME_TRACE = 1`). Heavy windows carry ~16 % more draws. Set aside in split: `MKW_REPLAY_PAR_PRECHECK`
+  (0), `MKW_REPLAY_PAR_MORE` (6 recorders: 35.0 against 34.3 ms, the cores are taken). `MKW_REPLAY_PAR_MORE`/`SMALL`
+  drew whole-scene vertical streaks in their B blocks; MORE alone renders clean, so SMALL or the switching is the bug.
+- A null read in the game's code at `sdk+0x776a60` from `main+0x70f154` ended a run at the title (17/11/2026,
+  stream-vis), the place of the 16/11 fault below: intermittent, cause not known.
 - **Measured and set aside (17/11/2026):** `MKW_EARLY_WAIT_AWAY` (0.00 ms), host `memset`/`round` (within noise).
   `MKW_SHOTS` stalls the PS5 6-8 s a picture on slow storage: never in a timing run.
 

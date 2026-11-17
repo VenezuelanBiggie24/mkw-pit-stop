@@ -115,6 +115,15 @@ static struct {
     uint64_t n_pre, pre_ns;   // slots checked ahead, and the time (precheck)
     int precheck;         // MKW_REPLAY_PAR_PRECHECK (default 1)
     int inpass;           // MKW_REPLAY_PAR_INPASS (default 1): those cuts made
+    // MKW_REPLAY_PAR_STREAM (see vk_exec_par): chunks handed out while the walk goes on
+    int stream_mode;      // the switch (1, 0 or 2 for "ab")
+    int streaming;        // this submission's walk hands its chunks out as it cuts them
+    int pub;              // chunks handed out (under lock): a chunk is whole once the next one is cut
+    int plan_done;        // the walk has ended (under lock): P.nch is final
+    int tid_done;         // texture slots prechecked so far (P.tids)
+    int q_reserve;        // queue switches ahead in the submission (prescan): cuts by draws leave room for them
+    PlatCond pubc;        // a chunk handed out, or the walk's end
+    uint64_t n_stream, stream_wait_ns;   // since the last perf line: submissions streamed; the walk's waits for chunks
 } P;
 
 
@@ -176,10 +185,55 @@ static void precheck(void) {
     uint64_t t0 = kern_now_ns();
     uint32_t ep = vk_texture_epoch();
     vk_texture_lock();
-    for (int i = 0; i < P.ntid; i++)
+    for (int i = P.tid_done; i < P.ntid; i++)
         if (!vk_texture_checked((int)P.tids[i], ep)) vk_texture_by_id_locked((int)P.tids[i], NULL, NULL), P.n_pre++;
     vk_texture_unlock();
+    P.tid_done = P.ntid;
     P.pre_ns += kern_now_ns() - t0;
+}
+
+// Streaming (MKW_REPLAY_PAR_STREAM): every chunk handed out is recorded (its ready flag set). The walk calls it before
+// it grows P.upd or P.cond, which a chunk being recorded reads (vk_exec_draw_upd_seed, vk_exec_cond_use).
+static void stream_quiesce(void) {
+    if (!P.streaming) return;
+    uint64_t t0 = kern_now_ns();
+    plat_mutex_lock(&P.lock);
+    for (int k = 0; k < P.pub; k++)
+        while (!__atomic_load_n(&P.ready[k], __ATOMIC_ACQUIRE)) plat_cond_wait(&P.finished, &P.lock);
+    plat_mutex_unlock(&P.lock);
+    P.stream_wait_ns += kern_now_ns() - t0;
+}
+
+static void send_ready(int wait);
+
+// Streaming: chunk P.nch - 2 is whole now that chunk P.nch - 1 was cut (or the walk ended: every chunk). Its texture
+// slots are checked first, as precheck does for the whole submission, so its recording skips the texture lock; then
+// the chunk threads may take it, and what is ready goes to the queue.
+static void stream_publish(int upto) {
+    if (P.precheck) precheck();
+    plat_mutex_lock(&P.lock);
+    P.pub = upto;
+    plat_cond_broadcast(&P.pubc);
+    plat_mutex_unlock(&P.lock);
+    send_ready(0);
+}
+
+// Streaming needs a walk that cannot end serial after chunks were handed out: a quick pass over the op headers. A
+// samples-passed report or reset leaves the submission serial (as plan would); the queue switches are counted so that
+// cuts by draws leave them room in MAX_CHUNKS. 0: not streamed.
+static int prescan(const uint64_t *handles, int n) {
+    Pos p = {0, 0, nvn_op_first(handles[0]), {0}};
+    int nq = 0;
+    while (settle(&p, handles, n)) {
+        const op_hdr *h = p.h;
+        const void *a = nvn_op_payload(h);
+        p.h = nvn_op_next(h);
+        if (h->op == OP_REPORT_COUNTER && ((const p_report_counter *)a)->type == NVN_COUNTER_TYPE_SAMPLES_PASSED) return 0;
+        if (h->op == OP_RESET_COUNTER && ((const p_reset_counter *)a)->type == NVN_COUNTER_TYPE_SAMPLES_PASSED) return 0;
+        if (h->op == OP_QUEUE && ++nq > MAX_CHUNKS / 2) return 0;
+    }
+    P.q_reserve = nq;
+    return 1;
 }
 
 static void chunk_add(const Pos *p, const VkExec *st) {
@@ -192,7 +246,9 @@ static void chunk_add(const Pos *p, const VkExec *st) {
     c->done.n = 0, c->ulog.nhit = c->ulog.nhpos = 0;
     memset(&c->counters, 0, sizeof c->counters);
     *c->ex = *st;
+    __atomic_store_n(&P.ready[P.nch], 0, __ATOMIC_RELEASE);
     P.nch++;
+    if (P.streaming && P.nch >= 2) stream_publish(P.nch - 1);   // the chunk before it is whole
 }
 
 // Draws of chunk k: the first ones grow from MKW_REPLAY_PAR_FIRST (64, doubling) up to C, so the GPU starts about as
@@ -219,7 +275,7 @@ static int plan(const VkExec *ex0, const uint64_t *handles, int n, int C) {
     P.plan_ops = 0;
     P.ndimg = P.dimg_over = 0, P.wdimg = P.dc_img = VK_NULL_HANDLE, P.wdlayers = P.dc_left = 0;
     P.wq = vk_exec_qs;   // as the serial replay's (vk_exec_record: per submission, or per queue order episode)
-    P.ntid = 0;
+    P.ntid = P.tid_done = 0;
     if (P.precheck)
         for (int s = 0; s < NVN_BIND_STAGES; s++) tid_note(ex0->tex[s], 128);
     Pos p = {0, 0, nvn_op_first(handles[0]), {0}};
@@ -240,7 +296,7 @@ static int plan(const VkExec *ex0, const uint64_t *handles, int n, int C) {
                 const p_set_rt *r = a;
                 const VkTexImage *di = r->depth ? vk_texture_get(r->depth) : NULL;
                 VkImage dimg = di ? di->image : VK_NULL_HANDLE;
-                if (!P.cut && !P.cut_op && in_chunk >= chunk_size(P.nch - 1, C) && P.nch < MAX_CHUNKS &&
+                if (!P.cut && !P.cut_op && in_chunk >= chunk_size(P.nch - 1, C) && P.nch < MAX_CHUNKS - P.q_reserve &&
                     (P.depth_off || ((!dimg || dimg != P.wdimg) && !P.dc_img)))
                     in_chunk = 0, chunk_add(&at, w);
                 P.wdimg = dimg, P.wdlayers = di ? di->layers : 0;
@@ -293,6 +349,7 @@ static int plan(const VkExec *ex0, const uint64_t *handles, int n, int C) {
             break;
         case OP_RENDER_COND: {
             if (P.ncond == P.ccond) {
+                stream_quiesce();   // (chunks being recorded read P.cond)
                 P.ccond = P.ccond ? P.ccond * 2 : 64;
                 if (!(P.cond = realloc(P.cond, sizeof *P.cond * (size_t)P.ccond))) rt_fatal("vk: out of memory (replay chunks)");
             }
@@ -304,6 +361,7 @@ static int plan(const VkExec *ex0, const uint64_t *handles, int n, int C) {
         }
         case OP_UPDATE_UB:
             if (P.nupd == P.cupd) {
+                stream_quiesce();   // (chunks being recorded read P.upd)
                 P.cupd = P.cupd ? P.cupd * 2 : 1024;
                 if (!(P.upd = realloc(P.upd, sizeof *P.upd * (size_t)P.cupd))) rt_fatal("vk: out of memory (replay chunks)");
             }
@@ -313,7 +371,8 @@ static int plan(const VkExec *ex0, const uint64_t *handles, int n, int C) {
             if (is_draw(h->op)) {
                 draws++;
                 if (P.cut_op ? 0 : P.cut ? draws == P.cut
-                             : ++in_chunk >= 2 * chunk_size(P.nch - 1, C) && P.inpass && P.nch < MAX_CHUNKS && !P.dc_img)
+                             : ++in_chunk >= 2 * chunk_size(P.nch - 1, C) && P.inpass && P.nch < MAX_CHUNKS - P.q_reserve &&
+                                   !P.dc_img)
                     P.plan_ops++, in_chunk = 0, chunk_add(&p, w), P.plan_ops--, P.n_inpass += !P.cut;
             } else if (!vk_exec_state_op(w, h->op, a) && !vk_exec_bind_state(w, h->op, a)) {
                 vk_exec_xfer_state(w, h->op, a);
@@ -404,7 +463,16 @@ static void take_chunks(int t, uint32_t gen) {
     for (;;) {
         uint64_t v = __atomic_fetch_add(&P.next, 1, __ATOMIC_ACQ_REL);
         int k = (int)(uint32_t)v;
-        if ((uint32_t)(v >> 32) != gen || k >= P.nch) return;
+        if ((uint32_t)(v >> 32) != gen) return;
+        if (P.streaming) {   // chunk k may not be cut yet: wait until it is handed out, or the walk ends without it
+            plat_mutex_lock(&P.lock);
+            while (k >= P.pub && !P.plan_done && P.gen == gen) plat_cond_wait(&P.pubc, &P.lock);
+            int take = k < P.pub && P.gen == gen;
+            plat_mutex_unlock(&P.lock);
+            if (!take) return;
+        } else if (k >= P.nch) {
+            return;
+        }
         k = P.reverse ? P.nch - 1 - k : k < P.norder && P.order[k] < P.nch ? P.order[k] : k;
         // Hang watch: the replay hung "in a submission" with every thread waiting (runs 25, t26-peek1, and 15/11/2026
         // at the title menu), and the chunks' waits named nothing. Which chunk each thread records, and which the
@@ -441,6 +509,7 @@ static void setup(void) {
 #else
     P.mode = rt_knob("REPLAY_PAR", "0");
 #endif
+    P.stream_mode = rt_knob("REPLAY_PAR_STREAM", "1");
     const char *e = cfg_get("MKW_REPLAY_WALK");
     P.walk_diag = e && atoi(e) > 0;
     e = cfg_get("MKW_REPLAY_PAR_DRAWS");
@@ -497,7 +566,7 @@ static void setup(void) {
     if (P.threads > MAX_THREADS) P.threads = MAX_THREADS;
     if (P.walk_diag) rt_log("vk: light walk of each submission before its replay (MKW_REPLAY_WALK, a measurement)");
     if (!P.mode) return;
-    plat_cond_init(&P.work), plat_cond_init(&P.finished);
+    plat_cond_init(&P.work), plat_cond_init(&P.finished), plat_cond_init(&P.pubc);
     for (int t = 1; t <= P.threads; t++)
         if (!plat_thread_spawn(worker_main, (void *)(intptr_t)t, "vk chunks", 0)) rt_fatal("vk: cannot start a replay chunk thread");
     rt_log("vk: replay in chunks of %d draws on %d threads besides the replay thread%s (MKW_REPLAY_PAR%s%s)", P.chunk_draws,
@@ -566,17 +635,59 @@ int vk_exec_par(VkExec *ex, const uint64_t *handles, int n, int diag) {
     int act = (P.more_threads && RT_KNOB_ON(P.more_threads)) ? P.more_count : P.base_threads;
     __atomic_store_n(&P.active_threads, act, __ATOMIC_RELEASE);
     int cd = (P.small_first && RT_KNOB_ON(P.small_first)) ? 256 : P.chunk_draws;
-    if (!plan(ex, handles, n, cd)) return 0;
+    // MKW_REPLAY_PAR_STREAM (default 1; "ab"; 0: as before): the chunks are handed out as the walk cuts them, each
+    // with its texture slots checked, instead of after the whole walk and precheck: those took 3.1-4.4 ms a frame on
+    // the replay thread before any chunk was recorded (1.3 walk + 1.7-3.1 precheck, 2-player split on the PS5,
+    // split2p-30-20261117-161940), on the critical path; with them the heavy split frames ran 2-3 ms over 33.3 ms.
+    // The replay thread then takes chunks with the others once the walk ends. Not with diagnosis orders, which need
+    // the chunk count first; a submission whose walk could still end serial (prescan) is planned as before.
+    P.streaming = 0, P.q_reserve = 0;
+    // (and only with chunk threads: the walk waits for them before it grows P.upd or P.cond, stream_quiesce)
+    if (RT_KNOB_ON(P.stream_mode) && act > 0 && !P.reverse && !P.norder && !P.cut && !P.cut_op && prescan(handles, n))
+        P.streaming = 1;
+    uint32_t gen = 0;
+    if (P.streaming) {
+        P.handles = handles, P.n = n, P.fence = ex->fence, P.ex = ex, P.sent = 0, P.t_job = t0;
+        plat_mutex_lock(&P.lock);
+        P.pub = 0, P.plan_done = 0;
+        gen = ++P.gen;
+        __atomic_store_n(&P.next, (uint64_t)gen << 32, __ATOMIC_RELEASE);
+        plat_cond_broadcast(&P.work);
+        plat_mutex_unlock(&P.lock);
+    }
+    int ok = plan(ex, handles, n, cd);
+    if (P.streaming) {
+        if (!ok && P.pub) rt_fatal("vk: replay chunks: the walk ended serial after %d chunks were handed out", P.pub);
+        if (ok && P.nch >= 2) {
+            if (P.precheck) precheck();
+            plat_mutex_lock(&P.lock);
+            P.pub = P.nch;
+            P.plan_done = 1;
+            plat_cond_broadcast(&P.pubc);
+            plat_mutex_unlock(&P.lock);
+            P.n_stream++;
+        } else {   // nothing handed out: the threads go back to waiting, the submission is replayed serially
+            plat_mutex_lock(&P.lock);
+            P.plan_done = 1;
+            plat_cond_broadcast(&P.pubc);
+            plat_mutex_unlock(&P.lock);
+            P.streaming = 0;
+        }
+    }
+    if (!ok) return 0;
     if (P.nch < 2) return P.n_serial[WHY_FEW]++, 0;
-    if (P.precheck) precheck();
     uint64_t t1 = kern_now_ns();
-    P.handles = handles, P.n = n, P.fence = ex->fence, P.ex = ex, P.sent = 0, P.t_job = t1;
-    for (int k = 0; k < P.nch; k++) __atomic_store_n(&P.ready[k], 0, __ATOMIC_RELEASE);
-    plat_mutex_lock(&P.lock);
-    uint32_t gen = ++P.gen;
-    __atomic_store_n(&P.next, (uint64_t)gen << 32, __ATOMIC_RELEASE);
-    plat_cond_broadcast(&P.work);
-    plat_mutex_unlock(&P.lock);
+    if (!P.streaming) {
+        if (P.precheck) precheck();
+        t1 = kern_now_ns();
+        P.handles = handles, P.n = n, P.fence = ex->fence, P.ex = ex, P.sent = 0, P.t_job = t1;
+        for (int k = 0; k < P.nch; k++) __atomic_store_n(&P.ready[k], 0, __ATOMIC_RELEASE);
+        plat_mutex_lock(&P.lock);
+        gen = ++P.gen;
+        __atomic_store_n(&P.next, (uint64_t)gen << 32, __ATOMIC_RELEASE);
+        plat_cond_broadcast(&P.work);
+        plat_mutex_unlock(&P.lock);
+    }
     take_chunks(0, gen);
     send_ready(1);
     uint64_t t2 = kern_now_ns();
@@ -591,6 +702,7 @@ int vk_exec_par(VkExec *ex, const uint64_t *handles, int n, int diag) {
     vk_exec_qs = P.wq;   // (the next part of a queue order episode goes on from them)
     P.n_par++, P.n_chunks += (uint64_t)P.nch, P.n_draws += (uint64_t)P.plan_draws, P.walk_ns += t1 - t0, P.rec_ns += t2 - t1;
     if (t2 - t1 > P.max_rec_ns) P.max_rec_ns = t2 - t1;
+    P.streaming = 0;
     return 1;
 }
 
@@ -608,7 +720,8 @@ void vk_exec_par_log(void) {
                "first send %.2f ms after the chunks start (a submission); "
                "uniform snapshot drops before the last chunk %llu, chunks recorded again for them %llu; conditions decided by the walk %llu; "
                "cuts inside a pass %.1f, at a queue switch %.1f a submission (MKW_REPLAY_PAR_INPASS); "
-               "slots checked ahead %.0f per frame in %.3f ms (MKW_REPLAY_PAR_PRECHECK)", (unsigned long long)P.n_par,
+               "slots checked ahead %.0f per frame in %.3f ms (MKW_REPLAY_PAR_PRECHECK); "
+               "streamed %llu, the walk waiting for chunks %.3f ms per frame (MKW_REPLAY_PAR_STREAM)", (unsigned long long)P.n_par,
                P.n_par ? (double)P.n_chunks / (double)P.n_par : 0, P.n_par ? (double)P.n_draws / (double)P.n_par : 0,
                (unsigned long long)(P.n_serial[WHY_REPORT] + P.n_serial[WHY_RESET] + P.n_serial[WHY_COND] +
                                     P.n_serial[WHY_QUEUE]),
@@ -618,8 +731,10 @@ void vk_exec_par_log(void) {
                (double)P.rec_ns / 1e6 / (double)nf, (double)P.max_rec_ns / 1e6,
                P.n_par ? (double)P.first_ns / 1e6 / (double)P.n_par : 0, (unsigned long long)P.drops_early, (unsigned long long)P.n_again,
                (unsigned long long)P.n_cond, P.n_par ? (double)P.n_inpass / (double)P.n_par : 0,
-               P.n_par ? (double)P.n_qcut / (double)P.n_par : 0, (double)P.n_pre / (double)nf, (double)P.pre_ns / 1e6 / (double)nf);
+               P.n_par ? (double)P.n_qcut / (double)P.n_par : 0, (double)P.n_pre / (double)nf, (double)P.pre_ns / 1e6 / (double)nf,
+               (unsigned long long)P.n_stream, (double)P.stream_wait_ns / 1e6 / (double)nf);
     P.walk_ns = P.rec_ns = P.max_rec_ns = P.first_ns = P.n_par = P.n_chunks = P.n_draws = P.drops_early = P.w_subs = P.n_cond = P.n_again = 0;
     P.n_inpass = P.n_qcut = P.n_pre = P.pre_ns = 0;
+    P.n_stream = P.stream_wait_ns = 0;
     memset(P.n_serial, 0, sizeof P.n_serial);
 }
