@@ -663,7 +663,10 @@ uint8_t *romfs_read_whole(const char *rel, uint64_t *size) {
     if (i >= file_count || strcmp(entry_name(entry(i)), rel)) return NULL;
     uint8_t *mem;
     PlatFile *f = row_open(i, &base, &mem);
-    *size = entry(i).size;
+    // the PS5's names-only walk leaves the index size PLAT_FS_SIZE_UNKNOWN until first asked (entry_size_of): read
+    // as is, the malloc failed and every whole read of a loose file came back NULL (MKW_RESOLUTION and
+    // MKW_DETAIL_DISTANCE found "no general_format archive" on the console, run lod1 18/11/2026)
+    *size = package || mem ? entry(i).size : entry_size_of(i, f);
     if (!f && !mem && package) return pack_read_whole(package, &package_rows[i]);   // a .nx row
     if (mem || !f) return mem;
     mem = malloc(*size ? *size : 1);
