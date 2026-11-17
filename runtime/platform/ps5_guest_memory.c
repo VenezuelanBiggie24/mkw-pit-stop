@@ -467,7 +467,18 @@ static void fault_handler(int sig, siginfo_t *si, void *uc) {
 
     if (!back_failed && (sig == SIGSEGV || sig == SIGBUS)) {
         int (*fault_fn)(uint64_t) = __atomic_load_n(&g_fault_hook, __ATOMIC_ACQUIRE);
-        if (fault_fn && fault_fn(addr)) { ps5_mem_batch_swap(batch); return; }
+        plat_fault_uc = uc;   // (plat_fault_emulate_load)
+        int retry = fault_fn && fault_fn(addr);
+        plat_fault_uc = NULL;
+        if (retry) {
+#ifdef __PROSPERO__
+            plat_fault_step_arm((uint64_t *)&u->uc_mcontext.mc_rflags);   // (the hook asked for one instruction)
+#elif defined(__linux__)
+            plat_fault_step_arm((uint64_t *)&u->uc_mcontext.gregs[REG_EFL]);
+#endif
+            ps5_mem_batch_swap(batch);
+            return;
+        }
         int (*watch_fn)(uint64_t, uint64_t) = __atomic_load_n(&g_watch_hook, __ATOMIC_ACQUIRE);
         if (is_write && watch_fn && watch_fn(addr, rip)) { ps5_mem_batch_swap(batch); return; }
     }
@@ -502,6 +513,21 @@ static void fault_handler(int sig, siginfo_t *si, void *uc) {
     else signal(sig, SIG_DFL);
 }
 
+// The debug trap after an instruction the fault hook let through (plat_fault_step); any other SIGTRAP as by default.
+static void trap_handler(int sig, siginfo_t *si, void *uc) {
+    (void)si;
+    ucontext_t *u = (ucontext_t *)uc;
+#ifdef __PROSPERO__
+    if (plat_fault_step_trap((uint64_t *)&u->uc_mcontext.mc_rflags)) return;
+#elif defined(__linux__)
+    if (plat_fault_step_trap((uint64_t *)&u->uc_mcontext.gregs[REG_EFL])) return;
+#else
+    (void)u;
+#endif
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 static void ensure_alt_stack(void) {
     stack_t cur = {0};
     if (sigaltstack(NULL, &cur) == 0 && !(cur.ss_flags & SS_DISABLE) && cur.ss_size >= ALT_STACK_BYTES) return;
@@ -521,6 +547,11 @@ static void install_signal_handlers(void) {
     sigaction(SIGBUS, &sa, &prev_sigbus);
     sigaction(SIGILL, &sa, &prev_sigill);
     sigaction(SIGFPE, &sa, &prev_sigfpe);
+    struct sigaction st = {0};
+    st.sa_sigaction = trap_handler;
+    sigemptyset(&st.sa_mask);
+    st.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER;
+    if (!sigaction(SIGTRAP, &st, NULL)) plat_fault_step_init();
 }
 
 static void fault_install(void) {

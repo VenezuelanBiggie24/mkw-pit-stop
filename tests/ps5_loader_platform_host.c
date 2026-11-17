@@ -1,5 +1,7 @@
 // Linux memory mappings model the SDK's 16 KiB protection and 64 KiB backing.
+#define _GNU_SOURCE   // (dladdr)
 #include <assert.h>
+#include <dlfcn.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -543,7 +545,102 @@ static void test_io_and_mutex(void) {
     plat_mutex_unlock(&lock);
 }
 
+// plat_fault_step (fault_guard.c, MKW_EARLY_SIBLING_STEP): a fault hook opens the page and asks for one instruction;
+// the access completes with the page's bytes, and the page is closed again right after it, so the next access faults.
+static uint64_t step_page;
+static volatile unsigned step_faults, step_closes;   // (changed in the signal handlers: volatile, or -O2 keeps them in registers across the faulting read)
+static void step_close(uint64_t page) {
+    assert(page == step_page && !mprotect((void *)(uintptr_t)page, PS5_KERNEL_PAGE_SIZE, PROT_NONE));
+    step_closes++;
+}
+static int step_hook(uint64_t addr) {
+    if (addr - step_page >= PS5_KERNEL_PAGE_SIZE) return 0;
+    step_faults++;
+    assert(plat_fault_step(step_close, step_page));
+    assert(!mprotect((void *)(uintptr_t)step_page, PS5_KERNEL_PAGE_SIZE, PROT_READ | PROT_WRITE));
+    return 1;
+}
+
+static void test_fault_step(void) {
+    plat_mem_fault_hook(step_hook);   // (installs the handlers, SIGTRAP's and its self-test too)
+    assert(plat_fault_step_init() == 1);
+    void *m = mmap(NULL, PS5_KERNEL_PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(m != MAP_FAILED);
+    step_page = (uintptr_t)m;
+    ((volatile unsigned char *)m)[PAGE + 5] = 0x5a;
+    assert(!mprotect(m, PS5_KERNEL_PAGE_SIZE, PROT_NONE));
+    for (unsigned i = 1; i <= 3; i++) {
+        assert(((volatile unsigned char *)m)[PAGE + 5] == 0x5a);
+        assert(step_faults == i && step_closes == i);
+    }
+    plat_mem_fault_hook(NULL);
+    assert(!munmap(m, PS5_KERNEL_PAGE_SIZE));
+    puts("fault step: three reads of a closed page went through, each closing it again after its instruction");
+}
+
+// plat_fault_emulate_load (fault_guard.c, MKW_EARLY_SIBLING_EMU): a load from a closed page is emulated by the fault
+// hook, which reads through the protection (here: opens and closes the page around the copy, as memory_early.c's
+// sibling_read does) and the page stays closed: every read faults. The forms of the PS5 race's six reader sites, then
+// SIB addressing, sign extension and a byte load that keeps the register's upper bytes.
+static uint64_t emu_page;
+static volatile unsigned emu_faults;
+static int emu_read(uint64_t ea, size_t n, void *dst) {
+    assert(!mprotect((void *)(uintptr_t)emu_page, PS5_KERNEL_PAGE_SIZE, PROT_READ));
+    memcpy(dst, (const void *)(uintptr_t)ea, n);
+    assert(!mprotect((void *)(uintptr_t)emu_page, PS5_KERNEL_PAGE_SIZE, PROT_NONE));
+    return 1;
+}
+static int emu_hook(uint64_t addr) {
+    if (addr - emu_page >= PS5_KERNEL_PAGE_SIZE) return 0;
+    emu_faults++;
+    assert(plat_fault_emulate_load(addr, emu_read));
+    return 1;
+}
+
+static void test_fault_emulate(void) {
+    // the code bytes from the executable's file, as the PS5 reads them (its text is execute-only): this test's ELF
+    Dl_info self;
+    assert(dladdr((void *)test_fault_emulate, &self) && self.dli_fbase);
+    assert(plat_code_file_init("/proc/self/exe", (uintptr_t)self.dli_fbase) && plat_code_check());
+    assert(!plat_code_file_init("/proc/self/maps", 0));   // (not an ELF: refused, the file reads kept)
+    plat_mem_fault_hook(emu_hook);
+    uint8_t *m = mmap(NULL, PS5_KERNEL_PAGE_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(m != MAP_FAILED);
+    emu_page = (uintptr_t)m;
+    uint8_t *b = m + PAGE;   // (the sibling 4 KiB page)
+    for (int i = 0; i < 0x200; i++) b[i] = (uint8_t)(0x80 + i);
+    memcpy(b + 0x10, &(uint64_t){0x1122334455667788ull}, 8);
+    memcpy(b + 0x100, &(uint64_t){0x99aabbccddeeff00ull}, 8);
+    memcpy(m + 0x3000 + 0x8a0, &(uint32_t){0xdeadbeef}, 4);
+    assert(!mprotect(m, PS5_KERNEL_PAGE_SIZE, PROT_NONE));
+    uint64_t r, base = (uintptr_t)b;
+    unsigned f = emu_faults;
+    __asm__ volatile("movq %1, %%rax\n\tmovq 0x10(%%rax), %%rax\n\tmovq %%rax, %0" : "=r"(r) : "r"(base) : "rax", "memory");
+    assert(r == 0x1122334455667788ull && emu_faults == ++f);   // 48 8b 40 10
+    __asm__ volatile("movq %1, %%rdi\n\tmovq $-1, %%r9\n\tmovzbl 0x4a(%%rdi), %%r9d\n\tmovq %%r9, %0" : "=r"(r) : "r"(base) : "rdi", "r9", "memory");
+    assert(r == (uint8_t)(0x80 + 0x4a) && emu_faults == ++f);   // 44 0f b6 4f 4a
+    __asm__ volatile("movq %1, %%r13\n\tmovq $-1, %%rax\n\tmovl 0x58a0(%%r13), %%eax\n\tmovq %%rax, %0" : "=r"(r) : "r"((uintptr_t)m - 0x58a0 + 0x38a0) : "rax", "r13", "memory");
+    assert(r == 0xdeadbeef && emu_faults == ++f);   // 41 8b 85 a0 58 00 00
+    __asm__ volatile("movq %1, %%rax\n\tmovq $-1, %%rcx\n\tmovzwl 0x8(%%rax), %%ecx\n\tmovq %%rcx, %0" : "=r"(r) : "r"(base) : "rax", "rcx", "memory");
+    assert(r == (uint16_t)(0x88 | 0x89 << 8) && emu_faults == ++f);   // 0f b7 48 08
+    __asm__ volatile("movq %1, %%rcx\n\tmovq 0x100(%%rcx), %%rcx\n\tmovq %%rcx, %0" : "=r"(r) : "r"(base) : "rcx", "memory");
+    assert(r == 0x99aabbccddeeff00ull && emu_faults == ++f);   // 48 8b 89 00 01 00 00
+    __asm__ volatile("movq %1, %%rcx\n\tmovq $-1, %%r8\n\tmovl 0x10(%%rcx), %%r8d\n\tmovq %%r8, %0" : "=r"(r) : "r"(base) : "rcx", "r8", "memory");
+    assert(r == 0x55667788 && emu_faults == ++f);   // 44 8b 41 10
+    __asm__ volatile("movq %1, %%r8\n\tmovq $2, %%rdi\n\tmovq 0x0(%%r8,%%rdi,8), %%rdi\n\tmovq %%rdi, %0" : "=r"(r) : "r"(base) : "rdi", "r8", "memory");
+    assert(r == 0x1122334455667788ull && emu_faults == ++f);   // SIB: base + index * 8
+    __asm__ volatile("movq %1, %%rax\n\tmovsbq 0x4a(%%rax), %%rax\n\tmovq %%rax, %0" : "=r"(r) : "r"(base) : "rax", "memory");
+    assert(r == (uint64_t)(int64_t)(int8_t)(0x80 + 0x4a) && emu_faults == ++f);   // movsx, REX.W
+    __asm__ volatile("movq %1, %%rax\n\tmovabsq $0x0102030405060708, %%r10\n\tmovb 0x4a(%%rax), %%r10b\n\tmovq %%r10, %0" : "=r"(r) : "r"(base) : "rax", "r10", "memory");
+    assert(r == (0x0102030405060700ull | (uint8_t)(0x80 + 0x4a)) && emu_faults == ++f);   // a byte, upper bytes kept
+    plat_mem_fault_hook(NULL);
+    assert(!munmap(m, PS5_KERNEL_PAGE_SIZE));
+    puts("fault emulate: nine loads from a closed page, their code read from the executable file, read its bytes into their registers, the page closed throughout");
+}
+
 int main(void) {
     test_memory();
     test_io_and_mutex();
+    test_fault_step();
+    test_fault_emulate();
 }

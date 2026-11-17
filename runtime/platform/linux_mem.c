@@ -496,7 +496,15 @@ static void fault_handler(int sig, siginfo_t *si, void *uc) {
     if (sig == SIGSEGV || sig == SIGBUS) plat_fault_guarded();   // a guarded copy (fault_guard.c): no hook, back to it
     plat_fault_write = (err & 2) != 0, plat_fault_pc = (uint64_t)UC_PC(u);   // for the hook
     plat_fault_ret = (uint64_t)UC_RET(u);   // a leaf (libc memcpy): its caller
-    if (sig == SIGSEGV && fault_hook && fault_hook((uint64_t)(uintptr_t)si->si_addr)) return;   // reads too: traps
+    plat_fault_uc = uc;   // (plat_fault_emulate_load)
+    int retry = sig == SIGSEGV && fault_hook && fault_hook((uint64_t)(uintptr_t)si->si_addr);
+    plat_fault_uc = NULL;
+    if (retry) {   // reads too: traps
+#if !defined(__aarch64__)
+        plat_fault_step_arm((uint64_t *)&u->uc_mcontext.gregs[REG_EFL]);   // (the hook asked for one instruction)
+#endif
+        return;
+    }
     uintptr_t rip = (uintptr_t)UC_PC(u);
     Dl_info at = {0}, self = {0};
     // Ours: this executable, the game code library (mkwgame.so), or no module at all (a jump to a wild address)
@@ -536,6 +544,17 @@ static void fault_handler(int sig, siginfo_t *si, void *uc) {
     signal(sig, SIG_DFL);   // returns into the faulting instruction, which faults again with the default action
 }
 
+#if !defined(__aarch64__)
+// The debug trap after an instruction the fault hook let through (plat_fault_step); any other SIGTRAP as by default.
+static void trap_handler(int sig, siginfo_t *si, void *uc) {
+    (void)si;
+    ucontext_t *u = uc;
+    if (plat_fault_step_trap((uint64_t *)&u->uc_mcontext.gregs[REG_EFL])) return;
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+#endif
+
 static void fault_install(void) {
     static int done;
     if (done) return;
@@ -547,6 +566,11 @@ static void fault_install(void) {
     sigaction(SIGBUS, &sa, NULL);
     sigaction(SIGILL, &sa, NULL);
     sigaction(SIGFPE, &sa, NULL);
+#if !defined(__aarch64__)
+    struct sigaction st = {.sa_sigaction = trap_handler, .sa_flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER};
+    sigemptyset(&st.sa_mask);
+    if (!sigaction(SIGTRAP, &st, NULL)) plat_fault_step_init();
+#endif
 }
 
 int plat_mem_back(uint64_t addr, size_t n) {

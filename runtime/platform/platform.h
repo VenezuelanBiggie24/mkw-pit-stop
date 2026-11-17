@@ -65,6 +65,28 @@ int plat_sample_self_name(char *out, size_t cap);
 // call plat_fault_guarded first, which returns to the copy when one is in progress on the thread.
 int plat_mem_copy_guarded(void *dst, const void *src, size_t n);
 void plat_fault_guarded(void);
+// Lets the faulting instruction run once, then calls fn(arg) on the same thread (x86 trap flag, Linux and PS5;
+// fault_guard.c). Called from the fault hook, which then returns 1 (retry): 1 accepted, 0 not available (no single
+// step on this system, or too many requests for one instruction). The platform's fault handler calls
+// plat_fault_step_arm on the context it returns to after a hook that retried; its SIGTRAP handler calls
+// plat_fault_step_trap (1: handled). plat_fault_step_init after the SIGTRAP handler is in place: 1 single step works.
+int plat_fault_step(void (*fn)(uint64_t arg), uint64_t arg);
+void plat_fault_step_arm(uint64_t *rflags);
+int plat_fault_step_trap(uint64_t *rflags);
+int plat_fault_step_init(void);
+// Emulates the faulting instruction when it is a plain load into a general register (fault_guard.c, x86-64 Linux and
+// PS5): rd reads its n bytes at ea (1 done); the register is written and the instruction skipped. Called from the
+// fault hook, which then returns 1. 0: not such a load (or rd refused): nothing changed. plat_fault_uc: the context
+// of the fault being handled on this thread (the platform's fault handler sets it around the hook).
+int plat_fault_emulate_load(uint64_t fault_addr, int (*rd)(uint64_t ea, size_t n, void *dst));
+extern _Thread_local void *plat_fault_uc;
+// The instruction bytes plat_fault_emulate_load decodes: from memory, or (the PS5, whose text is execute-only) from
+// the executable's file. plat_code_file_init: read them from this ELF or fake SELF, loaded at base (ET_DYN). plat_code_init:
+// what this platform does (PS5: its eboot) and plat_code_check, which compares read-only data read that way with
+// memory: 1 the decoder can read code; 0 it must not be used. Outside the signal handlers.
+int plat_code_file_init(const char *path, uint64_t base);
+int plat_code_check(void);
+int plat_code_init(void);
 // sigsample.c: each registered thread's stack (its interrupted rip first), read on the thread; emit runs on the caller.
 int plat_sample_stacks(void (*emit)(const char *name, uint32_t tid, void *const *frames, int n, void *ctx), void *ctx);   // the calling thread's name in the registry; 0 when not in it
 int plat_sample_start(uint32_t period_us, PlatSampleHook hook);   // SIGPROF to every registered thread each period

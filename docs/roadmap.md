@@ -81,6 +81,21 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   apart, the early-read line names its readers, and `MKW_LIST_WATCH=1` logs the list's length and calls; the console
   run decides between `MKW_EARLY_WAIT_AWAY` (the core back while waiting; skipping the wait gave nothing, see above)
   and the per-node cost (`--reg-loop-weight 8`).
+- **Done: the queues ordered by their event waits at the pre-merge frame time** (17/11/2026, A/Bs in one race, FPS=60,
+  busy = the work). Upstream's `MKW_QUEUE_WAITS=1` (#430) cost +6 ms on the PS5 (25.2 against 31.2): the first held
+  submission took the whole episode's stream, so its fence covered the frame's draws and the job threads' early-read
+  waits grew from ~2.3 to ~20 ms a frame. Each held submission now gets its own part (`MKW_QORDER_PARTS`, -5.0 ms) and
+  a submission's ops before its first unmet wait go at once (`MKW_QORDER_PRE`, -1.2 ms). The rest were false sibling
+  waits (another 4 KiB page of a watched 16 KiB native page): the fault handler now does that one load itself
+  (`MKW_EARLY_SIBLING_EMU`, -5.6 ms: 29.4 -> 23.9 ms; the six reader sites are plain `mov`/`movzx` loads; the code
+  bytes come from `/app0/eboot.bin`, as the PS5 maps text execute-only). Single-stepping the load with the trap flag
+  ended the title at its first step (`MKW_EARLY_SIBLING_STEP`, off). Race frame now ~24 ms of work with the ordering
+  on; 2-player split at FPS=30: 34.35 ms average (29.1 fps), half the windows at 33.3 ms, recording 17-21 ms.
+- **Next: the heavy split windows** (2 players at 30 fps, ~1 ms off on average): what grows there, recording, GPU or
+  the game. `MKW_REPLAY_PAR_MORE`/`SMALL` drew whole-scene vertical streaks in their B blocks (17/11/2026): a bug to
+  find before more recorders can help.
+- **Measured and set aside (17/11/2026):** `MKW_EARLY_WAIT_AWAY` (0.00 ms), host `memset`/`round` (within noise).
+  `MKW_SHOTS` stalls the PS5 6-8 s a picture on slow storage: never in a timing run.
 
 ## 2. The picture as on the console
 

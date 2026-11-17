@@ -136,6 +136,8 @@ static void hang_line(char *b, int n) {
     else b[0] = 0;
 }
 
+static void sibling_emu_init(void);
+
 int mem_early_on(void) {
     static int on = -1;
     if (on < 0) {
@@ -145,6 +147,7 @@ int mem_early_on(void) {
         if (on) {
             hang_reporter(hang_line);
             prof_names_init();   // the wait line names the reading function: the table is built here, not in the fault
+            sibling_emu_init();  // (its code reads checked here, outside the fault handler)
         }
         if (on) rt_log("mem: early-read watch on (MKW_EARLY_READ=%d, %zu KiB): what a submit's GPU work writes is watched until touched%s",
                        wait_mode + 1, plat_mem_early_page_size() >> 10,
@@ -521,11 +524,134 @@ static uint64_t early_release_page_locked(uint64_t p, uint64_t access_a, int acc
     return 0;
 }
 
+// MKW_EARLY_SIBLING_STEP (default 0: the PS5 ended the title at the first step, step-ab6-20261117-152909, no FATAL:
+// its sigreturn seems to refuse the trap flag the popf self-test accepts; "ab": in the B blocks): a read by the game's code of a 4 KiB page that is
+// not watched, in a 16 KiB native page with a watched one whose GPU writer has not finished, neither waits for that
+// writer nor gives the watch up: the native page opens for the one instruction (plat_fault_step, the x86 trap flag)
+// and closes again after it, still watched. On the console nothing waits there: the 4 KiB page is the game's own
+// memory, which the GPU does not write. Every early-read wait of a race on the PS5 was such a sibling ("storage buffer
+// 0 early reads": no read of a byte the GPU had yet to write), and with the queues ordered by their event waits the
+// writer's fence covers ~2/3 of the main queue's draws: 13.8 s of waits per 600 frames, ~23 ms a frame summed over
+// the job threads (qp-ab2-20261117-140208; pre-ab-20261117-141445 still 4.9 s for main+0x3d4f80 alone). Giving the
+// watch up instead (MKW_EARLY_SIBLING_WAIT=0) measured +1.4 ms (sib-ab-20261117-111010): the stale page is no longer
+// caught. Not when the access may reach the next 4 KiB page and that one is watched (64 bytes, a 512-bit load), and
+// not for writes (they release the watch as before). While the page is open another thread may read the watched
+// page without a fault (one instruction's window, counted as steps): it reads what the console's memory would hold
+// then, without the wait the watch adds. Without single step (plat_fault_step 0) the wait is as before.
+static int sib_step = -1;
+static uint64_t sib_steps;   // since the last log line
+
+static void sibling_close(uint64_t np) {   // after the instruction (SIGTRAP handler, same thread, no lock held)
+    size_t ep = plat_mem_early_page_size();
+    frz_take();
+    int any = 0;
+    for (uint64_t q = np; q < np + ep && q < RT_ADDRESS_LIMIT; q += PAGE) any |= trapped[q / PAGE] == 2;
+    if (any && !arm_watch(np, ep))   // (as flush_watch_run: a page that cannot be closed is watched no more)
+        for (uint64_t q = np; q < np + ep && q < RT_ADDRESS_LIMIT; q += PAGE)
+            if (trapped[q / PAGE] == 2) trapped[q / PAGE] = 0, mem_early_pages--;
+    frz_drop();
+}
+
+// A read by the game's code of a 4 KiB page not watched, in the native page np with a watched one whose unfinished
+// writer that read would wait for (as early_release_page_locked decides): 1, with the watched pages' protection to
+// restore and the newest such fence. Not when the access may reach the next 4 KiB page and that one is watched (64
+// bytes, a 512-bit load), and not for writes (they release the watch as before). frz_lock held.
+static int sibling_pending(uint64_t a, uint64_t p, uint64_t np, size_t ep, int *prot, uint64_t *key) {
+    if (!wait_mode || plat_fault_write || trapped[p / PAGE] == 2) return 0;
+    if (!tcur || !kern_fault_in_game(plat_fault_pc)) return 0;
+    if ((a & (PAGE - 1)) > PAGE - 64 && p + PAGE < np + ep && trapped[(p + PAGE) / PAGE] == 2) return 0;
+    uint64_t done = mem_fence_done ? mem_fence_done() : 0;
+    int pending = 0;
+    *prot = -1, *key = 0;
+    for (uint64_t q = np; q < np + ep && q < RT_ADDRESS_LIMIT; q += PAGE) {
+        if (trapped[q / PAGE] != 2) continue;
+        EarlyChunk *c = early_chunk(q, 0);
+        if (!c) continue;
+        size_t idx = early_idx(q);
+        uint64_t m = c->meta[idx], fence = m >> 8;
+        if (*prot < 0) *prot = (int)(m & 0xf);
+        if ((int)(m >> 4 & 0xf) < EW_KINDS && fence > done && c->gpu_wrote[idx] &&
+            (wait_mode == 1 || c->prevf[idx] > done || (mem_fence_early && c->lastf[idx] > done))) {
+            pending = 1;
+            if (fence > *key) *key = fence;
+        }
+    }
+    return pending;
+}
+
+static int sibling_step(uint64_t a, uint64_t p, uint64_t np, size_t ep) {   // frz_lock held
+    if (sib_step < 0) sib_step = rt_knob("EARLY_SIBLING_STEP", "0");
+    int prot;
+    uint64_t key;
+    if (!RT_KNOB_ON(sib_step) || !sibling_pending(a, p, np, ep, &prot, &key) || !plat_fault_step(sibling_close, np))
+        return 0;
+    if (plat_mem_early_protect(np, ep, 0, prot) != PLAT_EARLY_OK)
+        rt_fatal("memory: early-read watch: page %#llx kept no access", (unsigned long long)np);
+    sib_steps++;
+    return 1;
+}
+
+// MKW_EARLY_SIBLING_EMU (default 1; 0 off; "ab": in the B blocks): the same sibling read (sibling_pending), emulated
+// instead of stepped: the fault handler decodes the load (plat_fault_emulate_load: mov/movzx/movsx into a general
+// register, which are all six reader sites of the PS5 race: mov r64 [rax+0x10], movzx r9d byte [rdi+0x4a], mov eax
+// [r13+0x58a0], movzx ecx word [rax+8], mov rcx [rcx+0x100], mov r8d [rcx+0x10]; step-ab6-20261117-152909 against
+// llvm-pie.elf), reads its bytes with the native page opened for the copy and closed again under frz_lock (two
+// protects, ~44 us each on the PS5, against waits of 15-20 ms), writes the register and skips the instruction; the
+// watch stays. The single step died on the PS5 at its first use (step-ab6): no trap flag there. At most EMU_MAX reads
+// a native page for one writer fence: past that it waits as before (a loop over the page would cost more than the
+// wait). Only bytes of 4 KiB pages not watched are read; anything else waits as before (sib_emu_no counts it).
+#define EMU_MAX 32
+static int sib_emu = -1;
+static uint64_t sib_emus, sib_emu_no;   // since the last log line
+static struct { uint64_t np, key; int n; } emu_seen[16];
+static uint64_t emu_np;   // the native page sibling_read may open (frz_lock)
+static int emu_prot;
+
+static int sibling_read(uint64_t ea, size_t n, void *dst) {   // frz_lock held (inside mem_early_release_locked)
+    size_t ep = plat_mem_early_page_size();
+    if (ea < emu_np || ea + n > emu_np + ep) return 0;
+    for (uint64_t q = ea & ~(PAGE - 1); q < ea + n; q += PAGE)
+        if (trapped[q / PAGE] == 2) return 0;
+    if (plat_mem_early_protect(emu_np, ep, 0, emu_prot) != PLAT_EARLY_OK)
+        rt_fatal("memory: early-read watch: page %#llx kept no access", (unsigned long long)emu_np);
+    memcpy(dst, (const void *)(uintptr_t)ea, n);
+    if (!arm_watch(emu_np, ep))   // (as flush_watch_run: a page that cannot be closed is watched no more)
+        for (uint64_t q = emu_np; q < emu_np + ep && q < RT_ADDRESS_LIMIT; q += PAGE)
+            if (trapped[q / PAGE] == 2) trapped[q / PAGE] = 0, mem_early_pages--;
+    return 1;
+}
+
+// Once, from mem_early_on: the knob, and whether the decoder can read the game's code (plat_code_init: on the PS5
+// from /app0/eboot.bin, whose text is execute-only in memory). Off, with a line, when it cannot: never a crash.
+static void sibling_emu_init(void) {
+    if (plat_mem_early_page_size() == PAGE) return (void)(sib_emu = 0);   // (no siblings)
+    sib_emu = rt_knob("EARLY_SIBLING_EMU", "1");
+    if (!sib_emu) return;
+    int ok = plat_code_init();
+    rt_log("mem: sibling-page reads emulated%s (MKW_EARLY_SIBLING_EMU): the code-read check %s", sib_emu == 2 ? " in the B blocks" : "",
+           ok ? "passed" : "failed, so they wait as before");
+    if (!ok) sib_emu = 0;
+}
+
+static int sibling_emu(uint64_t a, uint64_t p, uint64_t np, size_t ep) {   // frz_lock held
+    int prot;
+    uint64_t key;
+    if (sib_emu <= 0 || !RT_KNOB_ON(sib_emu) || !sibling_pending(a, p, np, ep, &prot, &key)) return 0;
+    int k = (int)((np / ep) % 16);
+    if (emu_seen[k].np != np || emu_seen[k].key != key) emu_seen[k].np = np, emu_seen[k].key = key, emu_seen[k].n = 0;
+    if (emu_seen[k].n >= EMU_MAX) return sib_emu_no++, 0;
+    emu_np = np, emu_prot = prot;
+    if (!plat_fault_emulate_load(a, sibling_read)) return sib_emu_no++, 0;
+    emu_seen[k].n++, sib_emus++;
+    return 1;
+}
+
 uint64_t mem_early_release_locked(uint64_t a, int access) {
     size_t ep = plat_mem_early_page_size();
     uint64_t p = a & ~(PAGE - 1);
     if (ep == PAGE) return early_release_page_locked(p, a, access, 1, 1, PAGE);
     uint64_t np = a & ~(uint64_t)(ep - 1);
+    if (access && (sibling_emu(a, p, np, ep) || sibling_step(a, p, np, ep))) return 0;   // (the watch stays)
     uint64_t max_w = 0;
     int did_protect = 0;
     for (uint64_t q = np; q < np + ep && q < RT_ADDRESS_LIMIT; q += PAGE) {
@@ -594,12 +720,14 @@ void mem_early_log(uint64_t frame) {   // every frame
     mem_early_ev_counts(ev, sizeof ev);
     rt_log("mem: early reads at frame %llu (%lld pages watched now)%s; waits %lld, %.1f ms in all, %lld given up (fence "
            "not handed to the queue in %llu ms); touches by host code on game threads %lld (no wait); released by an "
-           "invalidate of other bytes %lld; sibling-page watches given up without a wait %llu; %s",
+           "invalidate of other bytes %lld; sibling-page watches given up without a wait %llu; sibling reads let through "
+           "(MKW_EARLY_SIBLING_STEP) %llu, emulated (MKW_EARLY_SIBLING_EMU) %llu, not emulated %llu; %s",
            (unsigned long long)frame, (long long)mem_early_pages, k ? b : ": none", (long long)waits,
            (double)wait_ns / 1e6, (long long)not_issued, (unsigned long long)(ISSUE_WAIT_NS / 1000000),
-           (long long)not_game, (long long)range_skips, (unsigned long long)siblings_released, ev);
+           (long long)not_game, (long long)range_skips, (unsigned long long)siblings_released,
+           (unsigned long long)sib_steps, (unsigned long long)sib_emus, (unsigned long long)sib_emu_no, ev);
     waits = wait_ns = range_skips = not_game = not_issued = 0;
-    siblings_released = 0;
+    siblings_released = 0, sib_steps = 0, sib_emus = 0, sib_emu_no = 0;
     char wr[1024];
     int wo = 0;
     plat_mutex_lock(&wread_lock);
