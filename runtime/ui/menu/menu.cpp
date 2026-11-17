@@ -527,7 +527,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     if (!g_test.parsed) test_parse();
     if (g_test.next_set < g_test.n_sets && frame >= g_test.sets[g_test.next_set].frame) test_apply_sets(frame);
     perf_tick(plat_now_ns(), frame, t);
-    classic_poll();   // MKW_CLASSIC_GP changed: the cups in the game's memory (core/hacks/classic.c)
+    classic_poll();   // MKW_CLASSIC_GP or _VS changed: the cups and routes in the game's memory (core/hacks/classic.c)
     MenuPlaceholderDraw placeholder = g_placeholder_fn.load(std::memory_order_acquire);
     void *placeholder_ctx = g_placeholder_ctx;
     bool open = g_open.load(std::memory_order_relaxed);

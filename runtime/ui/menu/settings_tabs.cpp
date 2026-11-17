@@ -626,6 +626,7 @@ static void rows_hacks(void) {
     opt_choice("MKW_BENCH", UI_MENU_BENCH, bench, 3, UI_MENU_BENCH_DESC);   // core/diag/bench.c
     opt_toggle("MKW_FREEZE_KEYS", UI_MENU_FREEZE_KEYS, UI_MENU_FREEZE_KEYS_DESC);
     opt_toggle("MKW_CLASSIC_GP", UI_MENU_CLASSIC_GP, UI_MENU_CLASSIC_GP_DESC);
+    opt_toggle("MKW_CLASSIC_VS", UI_MENU_CLASSIC_VS, UI_MENU_CLASSIC_VS_DESC);
 }
 
 static void tab_hacks(float scale) {

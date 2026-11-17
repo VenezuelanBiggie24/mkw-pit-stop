@@ -28,6 +28,8 @@
 #include "nvn_procs.inc"
 #undef NVN_PROC
 void nvnp_nvnCommandBufferDrawMeshTasks(Cpu *c);   // NVN2 (nvn2_procs.inc)
+void nvnp_nvnCommandBufferPushGraphicsConstants(Cpu *c);   // NVN2
+void nvnp_nvnCommandBufferPushComputeConstants(Cpu *c);    // NVN2
 
 typedef struct { const char *name; void (*fn)(Cpu *); } ProcRow;
 static const ProcRow procs[] = {
@@ -462,6 +464,10 @@ static uint64_t record_all(void) {
     REC(OP_CLEAR_BUF, CALL(nvnCommandBufferClearBuffer, U(c), 0xc200, 0x40, 0xdeadbeef));
     REC(OP_CLEAR_BUF, CALL(nvnCommandBufferReportValue, U(c), 0x1234, 0xc300));
     REC(OP_DRAW_MESH, CALL(nvnCommandBufferDrawMeshTasks, U(c), 3, 5));
+    static const uint8_t pushed[16] = {0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+                                       0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20};
+    REC(OP_PUSH_CONST, CALL(nvnCommandBufferPushGraphicsConstants, U(c), 1, 8, 16, U(pushed)));
+    REC(OP_PUSH_CONST, CALL(nvnCommandBufferPushComputeConstants, U(c), 0, 0, 4, U(pushed)));   // kept as stage 5
     static const int thresholds[4] = {1, 2, 3, 4};
     CALL(nvnCommandBufferSetColorReductionEnable, U(c), 1);   // hints: nothing recorded
     CALL(nvnCommandBufferSetColorReductionThresholds, U(c), 0, U(thresholds));
@@ -696,6 +702,13 @@ static void parse_all(uint64_t h) {
         case OP_DRAW_MESH: {
             const p_draw_mesh *p = a;
             CHECK(p->first == 3 && p->count == 5, "DRAW_MESH payload {%d, %d}", p->first, p->count);
+            break;
+        }
+        case OP_PUSH_CONST: {   // graphics: its stage; compute: stage 5 whatever the caller passes (nvn_api_cmd.c)
+            const p_push_const *p = a;
+            int gfx = p->stage == 1 && p->offset == 8 && p->size == 16, cs = p->stage == 5 && !p->offset && p->size == 4;
+            CHECK((gfx || cs) && p->data[0] == 0x11 && p->data[p->size - 1] == (gfx ? 0x20 : 0x14),
+                  "PUSH_CONST payload {stage %d, offset %d, size %d}", p->stage, p->offset, p->size);
             break;
         }
         default: CHECK(0, "unexpected op %s", nvn_op_name(o->op)); break;

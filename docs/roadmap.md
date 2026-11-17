@@ -97,10 +97,14 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   as serial (Linux capture, pixel for pixel) and split pictures clean on the console. The frame interval did not move
   (34.1 against 34.5 ms): at 30 fps the render side has ~12 ms to spare, and the windows over 33.3 ms are occasional
   missed vertical blanks (a 50 ms frame), not work.
+  Upstream did the same on 16/11/2026 (`MKW_REPLAY_PAR_PIPE`, with a serial head, `MKW_REPLAY_PAR_HEAD`); the merge of
+  0.1.13 keeps upstream's and drops `MKW_REPLAY_PAR_STREAM`. **To measure on the PS5**: PIPE and HEAD against the 22.5
+  -> 20.1 ms above (`MKW_REPLAY_PAR_PIPE=ab`, 2-player split at 30 fps).
 - **Next: what misses the vertical blank in 2-player split** (the game's own frame, two ticks at 30 fps, is the
   suspect: `FRAME_TRACE = 1`). Heavy windows carry ~16 % more draws. Set aside in split: `MKW_REPLAY_PAR_PRECHECK`
   (0), `MKW_REPLAY_PAR_MORE` (6 recorders: 35.0 against 34.3 ms, the cores are taken). `MKW_REPLAY_PAR_MORE`/`SMALL`
   drew whole-scene vertical streaks in their B blocks; MORE alone renders clean, so SMALL or the switching is the bug.
+  Both were removed in the merge of 0.1.13.
 - **Measured and set aside: profile-guided optimization** (17/11/2026). A fresh profile of the merged lift (Linux,
   `MKW_GPU=null`, race weighted 3x) built into the PS5 eboot: single player at FPS=60 43.8 against 43.9 fps (22.84
   against 22.76 ms, 210 s of race each), 2-player split at 30 fps 34.03 against 34.30-34.50 ms. The frame waits on
@@ -183,9 +187,10 @@ screen by screen against the console.
   runtime's addresses) is redone for it; the game cannot be shared, so this needs someone who owns that version to run
   the tools on their own dump and contribute the result.
 - 1.8.0 (11/11/2026): recognised by the setup (`recomp/versions.py`), its own patch table
-  (`recomp/patches-mkw-180.txt`: spin waits, zstd, output size and every set of 1.0.0 — aspect, shadow, seed and LAN
-  play) and runtime row (`runtime/core/boot/version.c`: frame update and game clock, zstd, NVN2 proc table and
-  `nvnDeviceGetInteger` answers, boot checkpoint, the new `subsdk1` module's constructors). Still to find in its
+  (`recomp/patches-mkw-180.txt`: spin waits, zstd, output size and every set of 1.0.0 — aspect, vertplus (the tall
+  Window's race FOV), shadow, seed and LAN play) and runtime row (`runtime/core/boot/version.c`: frame update and game
+  clock, zstd, NVN2 proc table and `nvnDeviceGetInteger` answers, boot checkpoint, the new `subsdk1` module's
+  constructors). Still to find in its
   executable: the menu focus probe; to check in a run: the 30 NVN2 procs new in its sdk (weak stubs but three
   scheduling hints), its 43 new shader stages and the button icon sheet's hash.
 

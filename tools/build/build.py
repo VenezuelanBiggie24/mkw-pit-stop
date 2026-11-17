@@ -404,6 +404,11 @@ def main() -> int:
         "in obj-pgo-gen, the executable mkw-pgo-gen",
     )  # fmt: skip
     args = ap.parse_args()
+    # Absolute, not resolved (game/ is a link): ninja puts $in in each command and ccache hashes the input's path, so a
+    # relative --gen next to the absolute default rebuilt all 623 objects for real on every switch (16/11/2026).
+    for name in ("gen", "exefs", "romfs", "out"):
+        if getattr(args, name):
+            setattr(args, name, getattr(args, name).absolute())
     if args.runtime_only and not args.dist:
         ap.error("--runtime-only needs --dist")
     if args.dist and args.guest_layout != DEFAULT:

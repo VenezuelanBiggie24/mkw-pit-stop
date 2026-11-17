@@ -7,7 +7,7 @@ sparse and precomputed BC7.
 |---|---|
 | `vk_texture.c`, `vk_tex_internal.h`, `vk_formats.c` | Image cache: its state, keys and statistics; the header is what the `vk_tex_*.c` parts share; NVN to Vulkan format table |
 | `vk_tex_image.c` | Image creation; which ASTC images go to BC7, BC1 or stay RGBA8 (arrays and cube maps with slices of 64x64 or more count their layers; `MKW_ASTC_BC_ARRAYS=0` keeps the per-slice rule) |
-| `vk_tex_evict.c` | Image destruction, freed entries, eviction under memory pressure (never of an entry pinned by an upload in progress, `tex_pin`) and the list of textures the GPU wrote |
+| `vk_tex_evict.c` | Image destruction, freed entries (kept up to a cap; past it, those a later image was written over go: `MKW_TEX_OVERWRITTEN`), eviction under memory pressure (never of an entry pinned by an upload in progress, `tex_pin`) and the list of textures the GPU wrote |
 | `vk_tex_upload.c` | Uploads with deswizzle and ASTC, the check of whether the storage changed, ASTC copies between images of different formats (decoded from the source's storage), copies out of CPU-written textures read region by region from their storage (`vk_texture_region_copy`, `MKW_TEX_REGION_COPY`), and `MKW_ASTC_BC_CHECK` (BC re-encoded uploads against their RGBA8 decode) |
 | `vk_tex_alias.c` | Storage aliases (`MKW_TEX_ALIAS`) and GPU writes to mirrored textures |
 | `vk_tex_slots.c` | Texture and sampler descriptor slots, and the VkSamplers |

@@ -168,6 +168,16 @@ msgid ""
 "Turns both assists on in your save if the game saves before the end."
 msgstr "En el próximo arranque va directo a la misma contrarreloj o Gran Premio y deja que «Volante inteligente» y «Autoaceleración» conduzcan. Al final, el registro recibe los fotogramas por segundo de las carreras y el juego se cierra. Activa las dos ayudas en tu partida guardada si el juego guarda antes del final."
 
+msgctxt "UI_MENU_CLASSIC_VS"
+msgid "Classic VS races"
+msgstr ""
+
+msgctxt "UI_MENU_CLASSIC_VS_DESC"
+msgid ""
+"VS races after the first take place on the next course instead of the road to it, whatever the "
+"course rule. Changes take several seconds and affect races started afterward."
+msgstr ""
+
 msgctxt "UI_MENU_ANISO"
 msgid "Texture filtering"
 msgstr "Filtrado de texturas"
