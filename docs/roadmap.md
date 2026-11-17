@@ -98,8 +98,19 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   (34.1 against 34.5 ms): at 30 fps the render side has ~12 ms to spare, and the windows over 33.3 ms are occasional
   missed vertical blanks (a 50 ms frame), not work.
   Upstream did the same on 16/11/2026 (`MKW_REPLAY_PAR_PIPE`, with a serial head, `MKW_REPLAY_PAR_HEAD`); the merge of
-  0.1.13 keeps upstream's and drops `MKW_REPLAY_PAR_STREAM`. **To measure on the PS5**: PIPE and HEAD against the 22.5
-  -> 20.1 ms above (`MKW_REPLAY_PAR_PIPE=ab`, 2-player split at 30 fps).
+  0.1.13 keeps upstream's and drops `MKW_REPLAY_PAR_STREAM`. Measured on the PS5 (17-18/11/2026): the 0.1.13 build ran
+  a race frame 25.6-26.3 ms against 22.4-22.8 for the 17/11 one (single player, FPS=60). Upstream's serial head records
+  ~600 draws on the replay thread alone (~6 ms), and the prescan prechecks every slot before the walk (2,960 slots,
+  3.1 ms). The PS5 profile now turns the head off (`MKW_REPLAY_PAR_HEAD=0`), checks slots by chunk
+  (`MKW_REPLAY_PAR_CHECK_BY_CHUNK`) and has the replay thread record chunks after its walk (`MKW_REPLAY_PAR_JOIN`):
+  replay 20.1 -> 16.6 ms a frame, race 24.7 ms. `MKW_REPLAY_PAR_PIPE=ab` in split: 0.19 ms (none).
+- **PS5 2-player split: the water height maps' write-back (#410) on the game thread.** `MKW_COMPUTE_WRITTEN=ab` in
+  split: 30.0 fps (76 % of windows at 33.3 ms) without the marks, 28.3 (30 %) with. Two 512 KiB pitch textures go back
+  at every fence; the write watch arms their pages in between, and each page cost a fault or an unprotect (~70 a
+  frame, ~34-40 us each). The write-back now holds the storage and holds unprotect a run of pages in one call
+  (prot_watch_hold): 1.9 -> 0.8 ms a frame (ab-split-batch, 18/11/2026). **Next**: the image is read back with its own
+  submission and wait on the game thread (image_texels); record the copy into a host-visible buffer in the replay's
+  command buffer after the dispatch and only copy bytes at the fence. ~27 more faults a frame remain, spread over pages.
 - **Next: what misses the vertical blank in 2-player split** (the game's own frame, two ticks at 30 fps, is the
   suspect: `FRAME_TRACE = 1`). Heavy windows carry ~16 % more draws. Set aside in split: `MKW_REPLAY_PAR_PRECHECK`
   (0), `MKW_REPLAY_PAR_MORE` (6 recorders: 35.0 against 34.3 ms, the cores are taken). `MKW_REPLAY_PAR_MORE`/`SMALL`
@@ -111,7 +122,8 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   the game's job chain, not on the speed of its code. clang crashed now and then compiling the lift 16 jobs wide
   (lower-expect, then two objects of the PS5 build); each file compiled alone.
 - A null read in the game's code at `sdk+0x776a60` from `main+0x70f154` ended a run at the title (17/11/2026,
-  stream-vis), the place of the 16/11 fault below: intermittent, cause not known.
+  stream-vis), the place of the 16/11 fault below: intermittent, cause not known. Again 17/11 at frame 405 in a split
+  run (fix-split2), the same stack.
 - **Measured and set aside (17/11/2026):** `MKW_EARLY_WAIT_AWAY` (0.00 ms), host `memset`/`round` (within noise).
   `MKW_SHOTS` stalls the PS5 6-8 s a picture on slow storage: never in a timing run.
 

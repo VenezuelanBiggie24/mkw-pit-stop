@@ -265,6 +265,13 @@ static void dispatch_barrier(VkExec *ex) {
 // (vk_texture_storage_bound_locked), so the write-back never saw them and physics read a flat road (#410, Eglantine
 // #553 publishes the same map to guest memory after its compute pass).
 static void mark_compute_writes(VkExec *ex, const VkPipeInfo *info) {
+    // MKW_COMPUTE_WRITTEN (default 1; "ab"; 0: not marked, as before #410: a measurement, the water reads flat). On the
+    // PS5 the marks cost 2-player split 30.0 -> 28.3 fps (ab-split-cw, 17/11/2026): the height maps' write-back at each
+    // fence runs on the game thread, which split is bound by (vk_tex_texel.c write_back; 0.8 ms a frame left after its
+    // hold, ab-split-batch).
+    static int mode = -1;
+    if (mode < 0) mode = rt_knob("COMPUTE_WRITTEN", "1");
+    if (!RT_KNOB_ON(mode)) return;
     for (uint32_t i = 0; i < info->n_bindings; i++) {
         const VkPipeBinding *bd = &info->bindings[i];
         if (bd->kind != GFX_RES_IMG || bd->type != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) continue;

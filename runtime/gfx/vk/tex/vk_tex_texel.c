@@ -470,6 +470,14 @@ void vk_write_texels(const tex_t *t, const view_t *v, const NVNcopyRegion *r, co
 static void write_back(Tex *e) {
     int ok = 1;
     const nvn_texdesc *d = &e->t.d;
+    // The storage is held writable for the whole write-back (plat_mem_back_hold: one protection call for each run of
+    // armed pages, prot_watch_hold) instead of taking a write-watch fault on each page the copy reaches. MKW's water
+    // collision height maps (two 256x256 pitch textures, 512 KiB, #410) go back at every fence on the game thread, and
+    // the watch arms their pages again in between: on the PS5 ~70 page faults or unprotects a frame at ~34-40 us each,
+    // while 2-player split is bound by the game thread (COMPUTE_WRITTEN=ab in split: 1.9 ms a frame, 0.8 with this
+    // and the runs, ab-split-batch, 18/11/2026). The pages end up marked written either way; gpu_baseline below makes
+    // them the image's own bytes.
+    int held = plat_mem_back_hold(e->pub.addr, e->t.L.size);
     int linear = nvn_tex_is_linear(d), is3d = d->target == NVN_TEXTURE_TARGET_3D;
     uint32_t levels = linear ? 1 : e->pub.levels, layers = linear || is3d ? 1 : e->pub.layers;
     for (uint32_t lv = 0; lv < levels; lv++)
@@ -487,6 +495,7 @@ static void write_back(Tex *e) {
             else ok = 0;
             free(buf);
         }
+    if (held) plat_mem_back_release(e->pub.addr, e->t.L.size);
     if (!ok) return;   // a level not read back (no staging): still dirty, written back at the next read
     e->gpu_dirty = 0;
     gpu_baseline(e);   // these storage writes are the image's own bytes, not a CPU write after the render

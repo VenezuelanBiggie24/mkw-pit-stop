@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// rw: 0 read-only, otherwise writable; 3 says the call is a hold's (prot_watch_hold), for the platform's statistics.
 typedef int (*ProtWatchProtectFn)(uint64_t addr, size_t size, int rw);
 typedef int (*ProtWatchStateFn)(uint64_t addr);
 

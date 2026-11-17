@@ -128,6 +128,8 @@ static struct {
     uint64_t t_walk, ch0_draws, ch0_pub_ns, ch0_rdy_ns;
     int wdraws;           // the walk's draws so far
     int precheck;         // MKW_REPLAY_PAR_PRECHECK (default 1)
+    int by_chunk, by_chunk_now;   // MKW_REPLAY_PAR_CHECK_BY_CHUNK (the switch; this submission's walk)
+    int join;             // MKW_REPLAY_PAR_JOIN
     int inpass;           // MKW_REPLAY_PAR_INPASS (default 1): those cuts made
     // MKW_REPLAY_PAR_PIPE: chunks handed out while the walk goes on (pipe_now: in this submission)
     int pipe, pipe_now;
@@ -253,7 +255,7 @@ static int prescan(const Pos *from, const uint64_t *handles, int n, int *nupd, i
         case OP_RENDER_COND: ++*ncond; break;
         case OP_QUEUE: ++*nqueue; break;
         case OP_BIND_TEX:
-            if (P.precheck) {
+            if (P.precheck && !P.by_chunk_now) {   // (by chunk: the walk notes them, publish checks each chunk's)
                 const p_bind_handles *b = nvn_op_payload(h);
                 tid_note(b->h, b->n < 0 ? 0 : b->n > 32 ? 32 : b->n);
             }
@@ -365,8 +367,8 @@ static int plan(const VkExec *ex0, const uint64_t *handles, int n, int C) {
     P.plan_ops = 0;
     P.ndimg = P.dimg_over = 0, P.wdimg = P.dc_img = VK_NULL_HANDLE, P.wdlayers = P.dc_left = 0;
     P.wq = vk_exec_qs;   // as the serial replay's (vk_exec_record: per submission, or per queue order episode)
-    if (!P.pipe_now) P.ntid = P.pre_from = 0;   // (with it, prescan noted and checked them all)
-    if (P.precheck && !P.pipe_now)
+    if (!P.pipe_now || P.by_chunk_now) P.ntid = P.pre_from = 0;   // (with PIPE, prescan noted and checked them all)
+    if (P.precheck && (!P.pipe_now || P.by_chunk_now))
         for (int s = 0; s < NVN_BIND_STAGES; s++) tid_note(ex0->tex[s], 128);
     Pos p = {0, 0, nvn_op_first(handles[0]), {0}};
     chunk_add(&p, w);
@@ -439,7 +441,7 @@ static int plan(const VkExec *ex0, const uint64_t *handles, int n, int C) {
             }
             break;
         case OP_BIND_TEX:
-            if (P.precheck && !P.pipe_now) {
+            if (P.precheck && (!P.pipe_now || P.by_chunk_now)) {
                 const p_bind_handles *b = a;
                 tid_note(b->h, b->n < 0 ? 0 : b->n > 32 ? 32 : b->n);
             }
@@ -637,6 +639,16 @@ static void setup(void) {
     // MKW_REPLAY_PAR_PIPE (default 1; "ab"; 0: the walk in full first, as before 16/11/2026): each chunk handed out
     // to the threads, and sent when ready, as soon as the walk is past its end (publish).
     P.pipe = rt_knob("REPLAY_PAR_PIPE", "1");
+    // MKW_REPLAY_PAR_CHECK_BY_CHUNK (default 0; "ab"; 1 in the PS5 profile): with PIPE and no serial head, each chunk's
+    // texture slots are checked as publish hands it out, not all of the submission's before the walk. The check of all
+    // ahead held the PS5's replay thread 1.3-3.1 ms a frame before the first chunk (18/11/2026, reg-1p60-head0: 2,960
+    // slots in 3.1 ms); checked by chunk, the 17/11 build's replay ran 16.3 against 20.1 ms a frame (bis-par1711 against
+    // bis-headctl). On the desktop the check by chunk held tex_lock while the threads recorded (lk62, 16/11/2026).
+    P.by_chunk = rt_knob("REPLAY_PAR_CHECK_BY_CHUNK", "0");
+    // MKW_REPLAY_PAR_JOIN (default 0; "ab"; 1 in the PS5 profile): with PIPE, the replay thread takes chunks too once
+    // its walk has ended, as before PIPE. Only sending got the GPU its first chunk sooner on the desktop (pp60a); on
+    // the PS5's three chunk threads it leaves a quarter of the recording out.
+    P.join = rt_knob("REPLAY_PAR_JOIN", "0");
     e = cfg_get("MKW_REPLAY_PAR_HEAD");   // draws of the serial head (with PIPE and threads); 0: none
     P.head_draws = e ? atoi(e) : 256;
     e = cfg_get("MKW_REPLAY_PAR_THREADS");   // threads besides the replay thread
@@ -743,17 +755,18 @@ int vk_exec_par(VkExec *ex, const uint64_t *handles, int n, int diag) {
     // the diagnoses that pick the chunks' order need them all first
     P.pipe_now = RT_KNOB_ON(P.pipe) && !P.reverse && !P.norder;
     P.head_now = P.pipe_now && P.threads && P.head_draws > 0, P.head_at = -1;
+    P.by_chunk_now = P.pipe_now && !P.head_now && RT_KNOB_ON(P.by_chunk);
     if (P.pipe_now && !P.head_now) {
         int nupd, ncond, nq;
         P.ntid = P.pre_from = 0;
-        if (P.precheck)
+        if (P.precheck && !P.by_chunk_now)
             for (int s = 0; s < NVN_BIND_STAGES; s++) tid_note(ex->tex[s], 128);
         Pos p0 = {0, 0, nvn_op_first(handles[0]), {0}};
         if (!prescan(&p0, handles, n, &nupd, &ncond, &nq)) return 0;
         // Every slot checked here, before any chunk is out: checked chunk by chunk during the walk, the check held
         // tex_lock while the threads recorded, 298 ms a second of their sleeps, and chunk 0's 60 draws took 3.3 ms
         // instead of ~1.2 (lk62, 16/11/2026).
-        if (P.precheck) precheck();
+        if (P.precheck && !P.by_chunk_now) precheck();
         if (nupd > P.cupd && !(P.upd = realloc(P.upd, sizeof *P.upd * (size_t)(P.cupd = nupd + 1024))))
             rt_fatal("vk: out of memory (replay chunks)");
         if (ncond > P.ccond && !(P.cond = realloc(P.cond, sizeof *P.cond * (size_t)(P.ccond = ncond + 64))))
@@ -783,7 +796,7 @@ int vk_exec_par(VkExec *ex, const uint64_t *handles, int n, int diag) {
     // order as they are ready. Taking a chunk too, it sent the ready ones only after recording its own (a 384-768 draw
     // one, 3-4 ms): first send 4.6 ms after the chunks began against 1.3, the GPU starting 7-12 ms after the game's last
     // submit against 2-4 serial (pp60a, 16/11/2026).
-    if (!P.pipe_now || !P.threads) take_chunks(0, P.gen);
+    if (!P.pipe_now || !P.threads || RT_KNOB_ON(P.join)) take_chunks(0, P.gen);
     send_ready(1);
     uint64_t t2 = kern_now_ns();
     // The rest of the submission continues from the state after its last op, in the command buffer of the last send.

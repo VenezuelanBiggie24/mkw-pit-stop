@@ -192,14 +192,26 @@ void prot_watch_mark_written(uint64_t addr, uint64_t n) {
     }
 }
 
+// The armed pages a hold finds are made writable in runs, one protection call for each run of adjacent pages, as the
+// arm side does (pw_flush_arm_run). A page at a time, MKW's water height maps (two 512 KiB pitch textures written back
+// at every fence on the game thread, #410) cost ~70 calls a frame at ~34 us each on the PS5 (ab-split-fsite3,
+// 18/11/2026). Until its run is flushed a held page may still be read-only: a write to it from another thread faults
+// and prot_watch_fault makes it writable, as for any held page; the holder writes only after the hold returns.
 void prot_watch_hold(uint64_t addr, uint64_t n) {
     if (!n || !pw_page_size) return;
     uint64_t lo = addr & ~(uint64_t)(pw_page_size - 1);
     uint64_t hi = (addr + n + pw_page_size - 1) & ~(uint64_t)(pw_page_size - 1);
+    uint64_t run_lo = 0, run_hi = 0;
+    uint32_t *run_c = NULL;
+#define PW_HOLD_FLUSH()                                                                                                \
+    do {                                                                                                               \
+        if (run_hi > run_lo) pw_protect_fn(run_lo, (size_t)(run_hi - run_lo), 3); /* 3: rw, counted as a hold's */ \
+        run_lo = run_hi = 0;                                                                                           \
+    } while (0)
     for (uint64_t p = lo; p < hi; p += pw_page_size) {
-        if (!pw_range_covered(p, p + pw_page_size)) continue;
+        if (!pw_range_covered(p, p + pw_page_size)) { PW_HOLD_FLUSH(); continue; }
         uint32_t *c = pw_chunk(p, 1);
-        if (!c) continue;
+        if (!c) { PW_HOLD_FLUSH(); continue; }
         pw_chunk_dirty(p, PW_CH_WRITTEN | PW_CH_UNARMED);
         size_t idx = pw_slot_idx(p);
         uint32_t cur = __atomic_load_n(&c[idx], __ATOMIC_ACQUIRE);
@@ -210,9 +222,18 @@ void prot_watch_hold(uint64_t addr, uint64_t n) {
             if (__atomic_compare_exchange_n(&c[idx], &cur, next, 1, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE))
                 break;
         }
-        if ((cur & PW_ARMED) && pw_state_fn(p) == PLAT_PROT_RW)
-            pw_protect_fn(p, pw_page_size, 1);
+        if ((cur & PW_ARMED) && pw_state_fn(p) == PLAT_PROT_RW) {
+            if (p != run_hi || c != run_c) {   // a new run (adjacent pages of one chunk)
+                PW_HOLD_FLUSH();
+                run_lo = p;
+            }
+            run_hi = p + pw_page_size, run_c = c;
+        } else {
+            PW_HOLD_FLUSH();
+        }
     }
+    PW_HOLD_FLUSH();
+#undef PW_HOLD_FLUSH
 }
 
 void prot_watch_release(uint64_t addr, uint64_t n) {

@@ -418,7 +418,7 @@ static void pstat_report(uint64_t frame, uint64_t frames) {
     uintptr_t base = plat_exe_base();
     for (int i = 0; i < t.n && i < 12; i++) {
         char who[48];
-        if (t.r[i].ra <= 2) snprintf(who, sizeof who, "%s", t.r[i].ra == 1 ? "write watch: fault unprotect" : "write watch: arm");
+        if (t.r[i].ra <= 3) snprintf(who, sizeof who, "%s", t.r[i].ra == 1 ? "write watch: fault unprotect" : t.r[i].ra == 3 ? "write watch: hold unprotect" : "write watch: arm");
         else snprintf(who, sizeof who, "exe+%#llx", (unsigned long long)(t.r[i].ra - base));
         rt_log("perf:   %-32s %8.1f calls/f %8.3f ms/f (%.1f us each)", who, (double)t.r[i].n / frames,
                t.r[i].ns / 1e6 / frames, t.r[i].ns / 1e3 / t.r[i].n);

@@ -55,13 +55,14 @@ static const char *const known[] = {
     "SKIP_PROGRAMS", "SWKBD_TEST", "TEX_ALIAS", "TEX_MEMO", "TEX_QUALITY", "TEX_OVERWRITTEN", "TEX_RELEASED_MIB", "TIMER_1MS", "TRACE", "TURBO", "TURBO_SPEED", "SKIP_MOVIES", "SEED", "UNLOCK_ALL", "QUICK_RACE", "FREEZE_KEYS", "QUALITY", "TRACE_UBO", "TRACE_UBO_OUT", "UBO_SNAPSHOT", "UPSCALER", "VRR", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
     "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_TEX_POOL_MIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "VRAM_LOG", "VRAM_MARGIN", "VS_OUTS",
     // the PS5 port's (ps5-port-60fps)
-    "ADDR_SPIN", "ADDR_SPIN_US", "ASTC_BC_ARRAYS", "ASTC_BC_CHECK", "ASTC_ERRORS", "ASTC_ERRORS_LAG", "CORE_HANDOFF",
+    "ADDR_SPIN", "ADDR_SPIN_US", "ASTC_BC_ARRAYS", "ASTC_BC_CHECK", "ASTC_ERRORS", "ASTC_ERRORS_LAG", "COMPUTE_WRITTEN", "CORE_HANDOFF",
     "EARLY_BATCH", "EARLY_SIBLING_EMU", "EARLY_SIBLING_STEP", "EARLY_SIBLING_WAIT", "EARLY_WAIT_AWAY", "GPU_ONLY_RELEASE", "HEADLESS", "HEAP_SHRINK_RELEASE",
     "HOST_MEMSET", "HOST_ROUND",
     "LIST_WATCH", "PACK", "PACK_COLD_S", "PACK_STORE_MIB", "PACK_VERIFY", "POOL_RELEASE", "PROFILE_FN", "PROFILE_FROM",
     "PROFILE_ONLY", "PROFILE_US", "PS5_FAST_LOCK", "PS5_OVERLAP", "PS5_PW_BATCH", "PS5_TSC_CLOCK", "PW_HOT",
     "QORDER_LOG", "QORDER_LOG_AT", "QORDER_PARTS", "QORDER_PRE", "QUEUE_HOLD_MS", "QUEUE_WAITS",
-    "REPLAY_PAR", "REPLAY_PAR_FIRST", "REPLAY_PAR_HEAD", "REPLAY_PAR_PIPE", "REPLAY_PAR_PRECHECK", "REPLAY_PAR_THREADS",
+    "REPLAY_PAR", "REPLAY_PAR_CHECK_BY_CHUNK", "REPLAY_PAR_FIRST", "REPLAY_PAR_HEAD", "REPLAY_PAR_JOIN", "REPLAY_PAR_PIPE",
+    "REPLAY_PAR_PRECHECK", "REPLAY_PAR_THREADS",
     "SEQ_UNTIL",
     "SEQ_WATCH", "SHADOW_TRIM", "SNAP_BG", "SPARSE_EVICT", "SVC_STATS", "TEX_EVICT_IDLE", "TEX_UP_DUMP",
     "TEX_UP_DUMP_DIR", "TEX_UP_LOG", "TEX_UP_LOG_AT", "TEX_ZERO_LOG", "YIELD_NOLOCK", "ZERO_SCAN_CACHE",
@@ -278,6 +279,12 @@ static const struct { const char *key, *value; } PS5[] = {
     // console does: the user's choice for the PS5 (16/11/2026, then on upstream's MKW_FRAMEGEN, 17/11/2026), which the
     // Pit Stop menu turns off. Untested on the console so far.
     {"FRAMEGEN", "2"},
+    // The parallel replay as before the 0.1.13 merge (18/11/2026, one player at MKW_FPS=60): the serial head records
+    // ~600 draws a frame on the replay thread alone, 5.8-6.3 ms on these cores (reg-1p60: race median 25.9 against
+    // 25.1 ms without); the slots checked by chunk and the replay thread recording after its walk (vk_exec_par.c).
+    {"REPLAY_PAR_HEAD", "0"},
+    {"REPLAY_PAR_CHECK_BY_CHUNK", "1"},
+    {"REPLAY_PAR_JOIN", "1"},
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 

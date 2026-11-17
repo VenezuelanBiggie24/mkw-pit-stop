@@ -379,7 +379,7 @@ static int ps5_pw_protect(uint64_t addr, size_t size, int rw) {
     if (prot_watch_has_gpu(addr, size)) prot |= PS5_KERNEL_PROT_GPU_READ | PS5_KERNEL_PROT_GPU_WRITE;
     uint64_t t0 = plat_now_ns();
     int ok = sceKernelMprotect((void *)(uintptr_t)addr, size, prot) == 0;
-    pstat_add(rw ? 1 : 2, plat_now_ns() - t0);
+    pstat_add(rw == 3 ? 3 : rw ? 1 : 2, plat_now_ns() - t0);   // 3: a hold's unprotect (prot_watch_hold)
     return ok;
 }
 
