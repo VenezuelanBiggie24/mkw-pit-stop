@@ -123,6 +123,19 @@ void plat_local_time(struct tm *out) {
     if (!localtime_r(&now, out)) memset(out, 0, sizeof *out);
 }
 
+// libSceUserService, as the template's pad code uses it (PS5_VulkanTemplate ps5/src/platform.c): the user who started
+// the title and their online ID (16 characters at most).
+int sceUserServiceGetInitialUser(int32_t *user_id);
+int sceUserServiceGetUserName(int32_t user_id, char *name, size_t size);
+
+int plat_user_name(char *out, size_t n) {
+    int32_t user = -1;
+    if (!out || n < 2 || sceUserServiceGetInitialUser(&user) < 0 || user < 0) return 0;
+    memset(out, 0, n);
+    if (sceUserServiceGetUserName(user, out, n - 1) < 0) return 0;
+    return out[0] != 0;
+}
+
 int plat_random(void *out, size_t n) {
     arc4random_buf(out, n);
     return 1;

@@ -50,7 +50,19 @@ void player_name(const char *dir, char *out) {
         player_name_clean(text, out);
         free(text);
     }
-    if (!out[0]) snprintf(out, PLAYER_NAME_BYTES, "%s", PLAYER_DEFAULT_NAME);
+    if (out[0]) return;
+    // No name set: the system's (the PSN online ID on the PS5), else a random one for this run, so two machines in
+    // a local wireless room are told apart (17/11/2026: both showed "Player")
+    char sys[64];
+    if (plat_user_name(sys, sizeof sys)) player_name_clean(sys, out);
+    if (out[0]) return;
+    static char random_name[PLAYER_NAME_BYTES];
+    if (!random_name[0]) {
+        uint16_t r = 0;
+        if (!plat_random(&r, sizeof r)) r = (uint16_t)time(NULL);
+        snprintf(random_name, sizeof random_name, "%s%04u", PLAYER_DEFAULT_NAME, r % 10000u);
+    }
+    snprintf(out, PLAYER_NAME_BYTES, "%s", random_name);
 }
 
 static int write_name(const char *dir, const char *name) {

@@ -124,6 +124,8 @@ int plat_run_self(const char *env_name, const char *env_value, char *out, size_t
     return (int)code;
 }
 
+int plat_user_name(char *out, size_t n) { (void)out, (void)n; return 0; }
+
 int plat_random(void *out, size_t n) {
     return BCryptGenRandom(NULL, out, (ULONG)n, BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
 }

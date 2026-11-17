@@ -395,6 +395,9 @@ void plat_ipc_close(PlatIpc *c);
 
 // ---- randomness
 int plat_random(void *out, size_t n);     // cryptographically random bytes; 1 on success
+// The system's name for the user playing, UTF-8 (PS5: the PSN online ID of the user who started the title); 0 when the
+// system has none (desktop).
+int plat_user_name(char *out, size_t n);
 
 // ---- files. Paths are UTF-8 with either separator; each implementation converts to what the OS wants.
 int plat_file_exists(const char *path);                   // 1 for a file (not a directory)

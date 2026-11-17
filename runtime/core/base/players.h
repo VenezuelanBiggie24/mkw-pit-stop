@@ -5,7 +5,7 @@
 //   <base>/players/<n>/          every other player, n a number
 //   <base>/players/deleted/      players taken off the list (their folder moved here, never deleted: a save is the
 //                                player's progress, and a wrong click must not lose it)
-//   <folder>/nickname.txt        the player's name, UTF-8; missing: PLAYER_DEFAULT_NAME
+//   <folder>/nickname.txt        the player's name, UTF-8; missing: the system's user name (PS5), else Player####
 //
 // base is the profile folder of main.c (MKW_PROFILE_DIR, profile/ in the selected installation, or --profile).
 // mkw.ini's MKW_PLAYER names the player the next start plays: n, or empty for the first one.
@@ -30,7 +30,8 @@ typedef struct {
 int players_list(const char *base, Player *out, int cap);
 // The folder of player id ("" the first one).
 void player_dir(const char *base, const char *id, char *out, size_t cap);
-// The name in folder dir: its nickname.txt, else PLAYER_DEFAULT_NAME. out holds PLAYER_NAME_BYTES.
+// The name in folder dir: its nickname.txt, else the system's user name (plat_user_name), else Player and four random
+// digits, the same for the whole run. out holds PLAYER_NAME_BYTES.
 void player_name(const char *dir, char *out);
 // name cut to what the console takes: control characters dropped, spaces trimmed, at most PLAYER_NAME_CHARS
 // characters and 32 bytes, whole UTF-8 sequences only. out holds PLAYER_NAME_BYTES; "" when nothing is left.

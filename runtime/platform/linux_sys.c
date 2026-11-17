@@ -293,6 +293,8 @@ int plat_run_self(const char *env_name, const char *env_value, char *out, size_t
     return WIFEXITED(status) ? WEXITSTATUS(status) : 128 + (WIFSIGNALED(status) ? WTERMSIG(status) : 0);
 }
 
+int plat_user_name(char *out, size_t n) { (void)out, (void)n; return 0; }
+
 int plat_random(void *out, size_t n) {
     uint8_t *p = out;
     while (n) {
