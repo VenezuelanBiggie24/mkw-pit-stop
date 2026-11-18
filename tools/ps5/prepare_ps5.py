@@ -33,6 +33,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -628,6 +629,48 @@ def save_state(work: Path, state: dict) -> None:
     tmp.replace(p)
 
 
+def _size(n: float) -> str:
+    return f"{n / 2**30:.1f} GiB" if n >= 2**30 else f"{n / 2**20:.0f} MiB"
+
+
+class TransferReport:
+    """The send step's progress for the launcher: 'progress' in its unit (files, then MiB) and a 'note' line saying
+    which phase it is in, how fast and how long is left. A first send spent minutes checksumming 23 GB before any
+    byte went out, and the launcher showed only a moving band (18/11/2026)."""
+
+    def __init__(self) -> None:
+        self.t0 = self.last = 0.0
+        self.total = 0
+
+    def _due(self, done: int, total: int) -> bool:
+        now = time.monotonic()
+        if done < total and now - self.last < 0.5:
+            return False
+        self.last = now
+        return True
+
+    def phase(self, name: str, done: int, total: int) -> None:
+        if name == "send":
+            self.t0, self.total = time.monotonic(), total
+            emit("note", f"Sending {_size(total)} to the PS5")
+            return
+        if not self._due(done, total):
+            return
+        what = "Checking the files here" if name == "hash" else "Asking the PS5 which files it has"
+        emit("note", f"{what}: {done:,} / {total:,}")
+        emit("progress", done, total)
+
+    def progress(self, bytes_done: int, bytes_total: int, files_done: int, files_total: int) -> None:
+        if not self._due(bytes_done, bytes_total):
+            return
+        rate = bytes_done / max(time.monotonic() - self.t0, 1e-3)
+        left = (bytes_total - bytes_done) / rate if rate > 0 else 0
+        eta = f"about {left / 60:.0f} min left" if left >= 90 else f"about {left:.0f} s left"
+        emit("note", f"Sending {_size(bytes_done)} / {_size(bytes_total)}, {rate / 2**20:.0f} MiB/s, {eta}, "
+                     f"file {files_done:,} / {files_total:,}")  # fmt: skip
+        emit("progress", bytes_done >> 20, max(1, bytes_total >> 20))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--source", type=Path, required=True, help="decrypted dump folder (exefs/+romfs/) or .nup file")
@@ -804,12 +847,14 @@ def main() -> int:
         if args.send:
             emit("step", "deploy")
             cache_tsv = work / "send-sha256.tsv"
+            transfer = TransferReport()
             try:
                 sent, skipped, total_bytes = send_directory(
                     args.send,
                     out_dir,
                     cache_path=cache_tsv,
-                    on_progress=lambda bd, bt, fd, ft: emit("progress", fd, ft),
+                    on_progress=transfer.progress,
+                    on_phase=transfer.phase,
                 )
             except (TransferError, OSError) as e:
                 raise Failed(f"sending to PS5 {args.send} failed: {e}") from None

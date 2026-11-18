@@ -896,6 +896,11 @@ static void setup_progress(const SetupState &st) {
             dl->AddRectFilled(ImVec2(fmaxf(a.x, x0), a.y), ImVec2(fminf(b.x, x0 + band), b.y), LOOK_ACCENT, 5 * s);
         }
     }
+    // The running step's own line (a PS5 send: checking files, then the transfer's size, speed and time left)
+    if (st.running && st.note[0]) {
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + r * 2 + 14 * s);
+        ImGui::TextColored(col4(LOOK_HEADING), "%s", st.note);
+    }
 }
 
 // The indent of a step's contents, past its number.

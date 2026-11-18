@@ -16,6 +16,7 @@ typedef struct {
     char code[16];              // why, when it failed: prepare.py's error code (its header), or "stopped", "cancelled",
                                 // "no_setup" (the tools missing) and "" for a message of SDL's
     char error[512];            // the detail: a folder, a build id, a tool's English message...
+    char note[200];             // the running step's own line (prepare_ps5.py's 'note': which phase, speed, time left)
 } SetupState;
 
 int setup_available(const char *exe_dir);       // the Python and the script are there
