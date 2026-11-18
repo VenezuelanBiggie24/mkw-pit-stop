@@ -28,6 +28,7 @@ CHUNK_SIZE = 256 * 1024
 STAT_BATCH = 4096
 ACK_EVERY_FILES = 128
 ACK_SIZE_THRESHOLD = 256 * 1024
+RESUME_MIN = 64 * 1024 * 1024   # files this large go on where a broken send left them (receivers with "resume")
 CACHE_NAME = ".pitstop-client-sha256.tsv"
 
 
@@ -160,6 +161,16 @@ def query_info(host: str, port: int = DEFAULT_PORT, timeout: float = 10.0) -> di
         return json.loads(payload)
 
 
+def usable_free(info: dict) -> int | None:
+    """The console's free bytes, or None when its receiver cannot tell: before "free_real" it measured /app0, the
+    title's mounted view, which claimed 16.00 GiB on a console with 231 GiB free (a full disk still fails the write)."""
+    return int(info.get("free_bytes", 0)) if info.get("free_real") else None
+
+
+def _no_space(need: int, free: int) -> str:
+    return f"not enough free space on PS5 ({need / 2**30:.2f} GiB needed, {max(free, 0) / 2**30:.2f} GiB free)"
+
+
 def send_directory(
     host_spec: str,
     stage_dir: Path,
@@ -188,6 +199,8 @@ def send_directory(
         info = json.loads(_recv_exact(sock, info_len).decode("utf-8"))
         if info.get("title_id") != "PPSA99193":
             raise TransferError(f"unexpected console title {info.get('title_id')!r}")
+        can_resume = bool(info.get("resume"))
+        can_remove = bool(info.get("remove"))
 
         need: list[tuple[str, Path, int, bytes]] = []
         skipped = 0
@@ -215,27 +228,57 @@ def send_directory(
 
         send_files = len(need)
         send_bytes = sum(item[2] for item in need)
-        free_bytes = int(info.get("free_bytes", 0))
-        if free_bytes and send_bytes > free_bytes:
-            raise TransferError(
-                f"not enough free space on PS5 ({send_bytes / (1024**3):.2f} GiB needed, "
-                f"{free_bytes / (1024**3):.2f} GiB free)"
-            )
+        # romfs.nup replaces a loose romfs/ an earlier send left beside it (23 GB the console would keep twice)
+        def remove_loose() -> None:
+            for rel, *_ in entries:
+                if rel == "romfs.nup" or rel.endswith("/romfs.nup"):
+                    loose = (rel[: -len("romfs.nup")] + "romfs").encode("utf-8")
+                    sock.sendall(b"PIT1X" + struct.pack("<H", len(loose)) + loose)
+                    _expect_ack(sock)
+
+        free_bytes = usable_free(info)
+        resumable = sum(item[2] for item in need if can_resume and item[2] >= RESUME_MIN)
+        removed = False
+        if free_bytes is not None and send_bytes > free_bytes and can_remove:
+            remove_loose()   # it may be what fills the console: gone first, then counted again
+            removed = True
+            sock.sendall(b"PIT1I")
+            (info_len,) = struct.unpack("<I", _recv_exact(sock, 4))
+            free_bytes = usable_free(json.loads(_recv_exact(sock, info_len).decode("utf-8")))
+        # a resumable file may be partly there already: it is checked once the receiver says how much (below)
+        if free_bytes is not None and send_bytes - resumable > free_bytes:
+            raise TransferError(_no_space(send_bytes - resumable, free_bytes))
 
         sock.sendall(b"PIT1B" + struct.pack("<QQ", send_files, send_bytes))
         _expect_ack(sock)
         if on_phase:
             on_phase("send", 0, send_bytes)
 
-        bytes_sent = 0
+        bytes_sent = skipped_bytes = 0   # skipped: what a resumed file already had on the console
         for idx, (rel, path, sz, digest) in enumerate(need, 1):
             is_last = idx == send_files
             ack = 1 if (is_last or rel == "eboot.bin" or sz >= ACK_SIZE_THRESHOLD or idx % ACK_EVERY_FILES == 0) else 0
+            resume = can_resume and sz >= RESUME_MIN
             rel_b = rel.encode("utf-8")
-            hdr = b"PIT1P" + struct.pack("<BH", ack, len(rel_b)) + rel_b + struct.pack("<Q", sz) + digest
+            hdr = b"PIT1P" + struct.pack("<BH", ack | (2 if resume else 0), len(rel_b)) + rel_b + struct.pack("<Q", sz) + digest
             sock.sendall(hdr)
+            start = 0
+            if resume:   # the receiver answers where its .part of this very file ends (0: from the start)
+                first = _recv_exact(sock, 1)
+                if first == b"E":
+                    (mlen,) = struct.unpack("<H", _recv_exact(sock, 2))
+                    raise TransferError(_recv_exact(sock, mlen).decode("utf-8", errors="replace"))
+                (start,) = struct.unpack("<Q", first + _recv_exact(sock, 7))
+                if start > sz:
+                    raise TransferError(f"receiver resumes {rel} past its end")
+                bytes_sent += start
+                skipped_bytes += start
+                left = send_bytes - bytes_sent
+                if free_bytes is not None and left > free_bytes - (bytes_sent - skipped_bytes):
+                    raise TransferError(_no_space(left, free_bytes - (bytes_sent - skipped_bytes)))
             with path.open("rb") as f:
-                rem = sz
+                f.seek(start)
+                rem = sz - start
                 while rem > 0:
                     chunk = f.read(min(CHUNK_SIZE, rem))
                     if not chunk:
@@ -250,6 +293,8 @@ def send_directory(
             if ack:
                 _expect_ack(sock)
 
+        if can_remove and not removed:
+            remove_loose()
         sock.sendall(b"PIT1D")
         _expect_ack(sock)
         if on_progress:

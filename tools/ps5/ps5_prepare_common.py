@@ -37,8 +37,13 @@ EMIT_HOOKS: list = []   # each gets an event's words (prepare_ps5.py: send_ps5.S
 
 
 def emit(*words: object) -> None:
-    print(*words, flush=True)
-    print(*words, file=sys.stderr)
+    # The launcher reading the pipe may be gone (closed, or replaced by an update): on Windows the write then fails with
+    # EINVAL, which hid the real error behind a second traceback (18/11/2026). The build's result does not depend on it.
+    for out in (sys.stdout, sys.stderr):
+        try:
+            print(*words, file=out, flush=True)
+        except (OSError, ValueError):
+            pass
     for hook in EMIT_HOOKS:
         hook(" ".join(str(w) for w in words).split())
 

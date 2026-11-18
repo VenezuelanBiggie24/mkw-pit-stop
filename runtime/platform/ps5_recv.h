@@ -53,8 +53,12 @@ void ps5_game_set_main_sha256(const char *hex);
 
 // The folder under root_dir holding exefs/ + romfs/ of the version the game code was built for: the dump as the
 // player copied it, so updates/<title version>/ (a console dump's 1.8.0, 917504) as well as root_dir itself, newest
-// first, matched by exefs/main's SHA-256 when more than one is there. NULL when none is (reason in why).
+// first, then the folders listed in root_dir/pitstop-game-dirs.txt (the copy already on the console elsewhere), each
+// with romfs/ or romfs.nup; matched by exefs/main's SHA-256 when more than one is there. NULL when none is.
 const char *ps5_game_dir(const char *root_dir, char *why, size_t why_cap);
+
+// The RomFS of a game folder (ps5_game_dir's): dir/romfs.nup when there, else dir/romfs; 0 when neither exists.
+int ps5_game_romfs(const char *dir, char *out, size_t cap);
 
 // Start the receiver listener thread on 0.0.0.0:port (0 selects PS5_RECV_PORT or MKW_PS5_RECV_PORT).
 // Returns 1 on success, 0 on bind/listen/thread failure.

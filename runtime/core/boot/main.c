@@ -714,10 +714,12 @@ static void portable_paths(RtConfig *c) {
     // The dump as the player copied it: its version may be in updates/<title version>/ (ps5_recv.c), not at the top
     // of the title folder. mkw.ini's EXEFS / ROMFS still win.
     const char *ex = cfg_get("MKW_EXEFS"), *ro = cfg_get("MKW_ROMFS"), *dir = ps5_game_dir(exe, NULL, 0);
-    if (dir && strcmp(dir, exe)) {
-        if (!ex || !*ex) snprintf(pp_exefs, sizeof pp_exefs, "%s/exefs", dir), c->exefs = pp_exefs;
-        if (!ro || !*ro) snprintf(pp_romfs, sizeof pp_romfs, "%s/romfs", dir), c->romfs = pp_romfs;
-        rt_log("game files: %s", dir);
+    // (the RomFS may be romfs.nup, one package read in place, also in the title's own folder; or the folder is one
+    // pitstop-game-dirs.txt names: the player's copy already on the console)
+    if (dir) {
+        if ((!ex || !*ex) && strcmp(dir, exe)) snprintf(pp_exefs, sizeof pp_exefs, "%s/exefs", dir), c->exefs = pp_exefs;
+        if ((!ro || !*ro) && ps5_game_romfs(dir, pp_romfs, sizeof pp_romfs)) c->romfs = pp_romfs;
+        rt_log("game files: %s (RomFS %s)", dir, c->romfs);
     }
 #endif
     c->profile = portable_path(exe, "MKW_PROFILE_DIR", "profile", ".", pp_profile, sizeof pp_profile, c->profile);

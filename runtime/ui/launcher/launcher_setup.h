@@ -28,6 +28,8 @@ int setup_tool(const char *exe_dir, const char *rel, char *python, char *script,
 // from the files page's cards (0 copy, 1 link), or < 0 for neither and prepare.py's own record of both.
 void setup_start(const char *exe_dir, const char *game_dir, const char *source, int link_romfs);
 // usb set: the title goes to usb/homebrew/PPSA99193 (prepare_ps5.py --usb), else to ps5_ip's receiver (--send).
-void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip, const char *usb);
+// console_game set: the copy is already on the PS5 in that folder (--console-game): no game files are sent.
+void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip, const char *usb,
+                     const char *console_game);
 void setup_cancel(void);
 SetupState setup_state(void);                   // a copy, any time

@@ -74,8 +74,12 @@ Early, and moving fast. On 18/11/2026 on a base PS5:
    complete!** when every file has arrived and been checked: press
    **Cross**, then launch **Mario Kart World: Pit Stop** again.
 
+**Your copy already on the PS5?** Tick **My game files are already on the PS5** and type its folder there (for
+example `/data/mkw`, with `exefs` and `romfs` in it or in its `updates\<version>`): only the game code and
+shaders are sent, and the title finds the game in that folder. The PC still needs your dump to build.
+
 **No network? Use a USB drive.** In step 3, pick **To a USB drive** and **Choose drive** instead of typing the PS5's
-address: the title is written to `homebrew\PPSA99193` on the drive (exFAT or FAT32, about 25 GB free), and
+address: the title is written to `homebrew\PPSA99193` on the drive (**exFAT**, about 25 GB free), and
 ShadowMountPlus finds it there once the drive is plugged into the PS5 (it scans `/mnt/usb0`-`usb7/homebrew/`).
 The placeholder of step 1 is not needed for this; if it is installed, remove `/data/homebrew/PPSA99193` first so
 only one copy of the title is registered. Building again updates only what changed on the drive.

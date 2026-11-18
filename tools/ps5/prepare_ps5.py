@@ -48,6 +48,7 @@ import build  # noqa: E402
 from layout import output_lock, read_checked  # noqa: E402
 from machine import Failed, default_cc, default_glslc, mem_gb, own_children, shader_jobs, tool_env  # noqa: E402
 from nup_reader import NupError, NupReader, is_nup  # noqa: E402
+from nup_writer import write_nup  # noqa: E402
 from ps5_prepare_common import EMIT_HOOKS, check, copy_tree, emit, remove_stale, run, sm86_spec  # noqa: E402
 from send_ps5 import StatusNotifier, TransferError, send_directory  # noqa: E402
 
@@ -677,12 +678,25 @@ class TransferReport:
 USB_MIRRORED = ("spirv", "exefs")
 
 
+def drive_filesystem(path: Path) -> str:
+    """The file system of the drive holding path ("exFAT", "FAT32", "NTFS"...), on Windows; "" elsewhere or unknown."""
+    if os.name != "nt":
+        return ""
+    import ctypes
+
+    root = os.path.splitdrive(str(path.resolve()))[0] + "\\"
+    name = ctypes.create_unicode_buffer(64)
+    ok = ctypes.windll.kernel32.GetVolumeInformationW(ctypes.c_wchar_p(root), None, 0, None, None, None, name, 64)
+    return name.value if ok else ""
+
+
 def copy_to_usb(stage: Path, drive: Path) -> Path:
     """The staged title into DRIVE/homebrew/PPSA99193: ShadowMountPlus scans /mnt/usb0..7/homebrew/ and /mnt/ext0..1/
     for title folders and registers them (its README, 18/11/2026), so a drive plugged into the PS5 needs no network.
     Each file goes to a .part name and is renamed when complete (a drive pulled out leaves no half file); a file
     already there with the same size and time (FAT32 keeps 2 s) is skipped, so an update copies what changed. The
-    largest file is 465 MiB (1.8.0's RomFS), so FAT32 drives do too."""
+    largest loose file is 465 MiB (1.8.0's RomFS), so FAT32 takes the loose RomFS; romfs.nup (23 GB in one file)
+    needs exFAT. The PS5 reads no NTFS drive."""
     dest = drive / "homebrew" / TITLE_ID
     files = sorted((p for p in stage.rglob("*") if p.is_file() and not p.is_symlink()),
                    key=lambda p: (p.name == "eboot.bin", str(p)))  # eboot.bin last, as the network send
@@ -699,6 +713,13 @@ def copy_to_usb(stage: Path, drive: Path) -> Path:
             todo.append((src, dst, st.st_size))
         report.phase("hash", i, len(files))   # (shown as checking the files)
     need = sum(n for _, _, n in todo)
+    fs = drive_filesystem(drive)
+    if fs and fs.upper() not in ("EXFAT", "FAT32", "FAT"):
+        raise Failed(f"{drive} is {fs}: the PS5 reads exFAT and FAT32 drives only (format it as exFAT)")
+    big = max((n for _, _, n in todo), default=0)
+    if fs.upper().startswith("FAT") and big >= 4 << 30:
+        raise Failed(f"{drive} is FAT32, which holds no file over 4 GiB, and romfs.nup is {big / 2**30:.1f} GiB: "
+                     "format the drive as exFAT, or build with the loose RomFS (--romfs copy)")  # fmt: skip
     try:
         dest.mkdir(parents=True, exist_ok=True)
         free = shutil.disk_usage(dest).free
@@ -711,13 +732,19 @@ def copy_to_usb(stage: Path, drive: Path) -> Path:
     for n, (src, dst, size) in enumerate(todo, 1):
         dst.parent.mkdir(parents=True, exist_ok=True)
         part = dst.with_name(dst.name + ".part")
-        with src.open("rb") as fi, part.open("wb") as fo:
-            while chunk := fi.read(4 << 20):
-                fo.write(chunk)
-                done += len(chunk)
-                report.progress(done, need, n, len(todo))
-            fo.flush()
-            os.fsync(fo.fileno())
+        try:
+            with src.open("rb") as fi, part.open("wb") as fo:
+                while chunk := fi.read(1 << 20):   # (larger reads failed through WSL's 9p, nup_writer.py)
+                    fo.write(chunk)
+                    done += len(chunk)
+                    report.progress(done, need, n, len(todo))
+                fo.flush()
+                os.fsync(fo.fileno())
+        except OSError as e:
+            part.unlink(missing_ok=True)
+            if e.errno == 27:   # EFBIG: a FAT32 drive the check above could not name (not Windows)
+                raise Failed(f"{drive} cannot hold {src.name} ({size / 2**30:.1f} GiB): format it as exFAT") from None
+            raise
         shutil.copystat(src, part)
         os.replace(part, dst)
     report.progress(need, need, len(todo), len(todo))
@@ -735,7 +762,12 @@ def main() -> int:
     ap.add_argument("--out", type=Path, help=f"output title folder (default: <work>/stage/{TITLE_ID} or ./{TITLE_ID})")
     ap.add_argument("--work", type=Path, help="working directory for generated C, unpacked NUP, and objects")
     ap.add_argument("--bundle", type=Path, help="PS5 builder bundle directory (ps5-bundle/ or build/ps5-game/)")
-    ap.add_argument("--romfs", choices=("copy", "skip"), default="copy", help="stage romfs/ into out_dir (default copy)")
+    ap.add_argument("--romfs", choices=("nup", "copy", "skip"), default="nup",
+                    help="the RomFS in out_dir: nup (default: one romfs.nup the PS5 reads in place), copy (the loose "
+                         "files) or skip")
+    ap.add_argument("--console-game", metavar="PS5_PATH",
+                    help="the copy is already on the PS5 in this folder (exefs/ and romfs/ or romfs.nup in it or in its "
+                         "updates/<version>/): send no game files, only point the title there (pitstop-game-dirs.txt)")
     ap.add_argument("--send", metavar="PS5_IP", help="send staged PPSA99193 to Pit Stop TCP receiver (port 19913)")
     ap.add_argument("--deploy", metavar="PS5_IP", help="upload via legacy FTP (deploy.py) instead of PIT1 TCP")
     ap.add_argument("--usb", type=Path, metavar="DRIVE",
@@ -824,7 +856,26 @@ def main() -> int:
         game_rel = Path() if from_nup else exefs_checked.parent.relative_to(src)
         game_out = out_dir / game_rel
 
-        if done_map.get("exefs") == src_id and (game_out / "exefs/main").is_file():
+        dirs_txt = out_dir / "pitstop-game-dirs.txt"
+        if args.console_game:
+            # the copy is on the console already: the title looks there (ps5_recv.c ps5_game_dir); none is staged here,
+            # and an earlier build's copy goes, or it would be sent
+            if not args.console_game.startswith("/"):
+                raise Failed(f"--console-game wants a path on the PS5 such as /data/mkw, not {args.console_game!r}")
+            dirs_txt.parent.mkdir(parents=True, exist_ok=True)
+            dirs_txt.write_text(args.console_game.rstrip("/") + "\n", encoding="utf-8")
+            for old in (game_out / "exefs", game_out / "romfs", game_out / "romfs.nup"):
+                if old.is_dir():
+                    shutil.rmtree(old)
+                elif old.exists():
+                    old.unlink()
+            done_map.pop("exefs", None)
+            done_map.pop("romfs", None)
+        else:
+            dirs_txt.unlink(missing_ok=True)
+        if args.console_game:
+            emit("skip", "exefs")
+        elif done_map.get("exefs") == src_id and (game_out / "exefs/main").is_file():
             emit("skip", "exefs")
         else:
             emit("step", "exefs")
@@ -834,14 +885,31 @@ def main() -> int:
             save_state(work, state)
 
         rom_key = f"{args.romfs}:{src_id}"
-        if args.romfs == "skip":
+        rom_out = game_out / ("romfs.nup" if args.romfs == "nup" else "romfs")
+        if args.romfs == "skip" or args.console_game:
             emit("skip", "romfs")
-        elif done_map.get("romfs") == rom_key and (game_out / "romfs").is_dir():
+        elif done_map.get("romfs") == rom_key and rom_out.exists():
             emit("skip", "romfs")
         else:
             emit("step", "romfs")
-            copy_tree(romfs_src, game_out / "romfs", version.romfs_files)
-            remove_stale(romfs_src, game_out / "romfs", version.name)
+            if args.romfs == "nup":
+                # one package the title reads in place (nup_writer.py): one file to send or copy, not ~206,000
+                shutil.rmtree(game_out / "romfs", ignore_errors=True)
+                game_out.mkdir(parents=True, exist_ok=True)
+                last = [0.0]
+
+                def nup_progress(done: int, total: int) -> None:
+                    now = time.monotonic()
+                    if done == total or now - last[0] >= 0.5:
+                        last[0] = now
+                        emit("progress", done >> 20, max(1, total >> 20))
+
+                n = write_nup(romfs_src, rom_out, on_progress=nup_progress)
+                print(f"romfs: {n} files in {rom_out.name} ({rom_out.stat().st_size / 2**30:.1f} GiB)", file=sys.stderr)
+            else:
+                (game_out / "romfs.nup").unlink(missing_ok=True)
+                copy_tree(romfs_src, game_out / "romfs", version.romfs_files)
+                remove_stale(romfs_src, game_out / "romfs", version.name)
             done_map["romfs"] = rom_key
             save_state(work, state)
 

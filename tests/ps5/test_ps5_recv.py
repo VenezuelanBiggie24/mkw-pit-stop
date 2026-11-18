@@ -289,3 +289,89 @@ def test_ps5_send_reports_phases(tmp_path: Path) -> None:
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+@pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
+def test_ps5_recv_resumes_large_file(tmp_path: Path) -> None:
+    """A large file whose send broke goes on from where the receiver's .part ends (romfs.nup is one 23 GB file)."""
+    sys.path.insert(0, str(ROOT / "tools/ps5"))
+    import send_ps5
+
+    exe = _compile_helper(tmp_path)
+    title, stage = tmp_path / "PPSA99193", tmp_path / "stage"
+    title.mkdir()
+    stage.mkdir()
+    big = os.urandom(send_ps5.RESUME_MIN + (6 << 20))
+    (stage / "romfs.nup").write_bytes(big)
+    (stage / "eboot.bin").write_bytes(b"eboot")
+    port_file = tmp_path / "port.txt"
+    proc = subprocess.Popen([str(exe), "serve", str(title), str(port_file)], env=dict(os.environ, MKW_PS5_RECV_PORT="0"))
+    try:
+        for _ in range(200):
+            if port_file.is_file() and port_file.read_text().strip():
+                break
+            time.sleep(0.01)
+        port = int(port_file.read_text().strip())
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+            s.sendall(b"PIT1I")
+            info = json.loads(_recv_exact(s, struct.unpack("<I", _recv_exact(s, 4))[0]).decode("utf-8"))
+            assert info["resume"] == 1
+            rel = b"romfs.nup"
+            s.sendall(b"PIT1P" + struct.pack("<BH", 3, len(rel)) + rel + struct.pack("<Q", len(big))
+                      + hashlib.sha256(big).digest())
+            assert struct.unpack("<Q", _recv_exact(s, 8))[0] == 0
+            s.sendall(big[: 30 << 20])   # then the connection breaks
+        time.sleep(0.3)
+        assert (title / "romfs.nup.pitstop.part").stat().st_size == 30 << 20
+        progress = []
+        send_ps5.send_directory(f"127.0.0.1:{port}", stage, on_progress=lambda bd, bt, fd, ft: progress.append(bd))
+        assert proc.wait(timeout=10) == 0
+        assert progress[0] >= 30 << 20   # it went on from the part, not from the start
+        assert (title / "romfs.nup").read_bytes() == big
+        assert not (title / "romfs.nup.pitstop.part").exists() and not (title / "romfs.nup.pitstop.part.want").exists()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+@pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
+def test_ps5_recv_nup_replaces_loose_romfs(tmp_path: Path) -> None:
+    """After romfs.nup arrives, the loose romfs/ an earlier send left beside it is removed (PIT1X); a path outside
+    the title folder is refused; the manifest (now hash-indexed) still answers a 20,000-file batch right."""
+    sys.path.insert(0, str(ROOT / "tools/ps5"))
+    import send_ps5
+
+    exe = _compile_helper(tmp_path)
+    title, stage = tmp_path / "PPSA99193", tmp_path / "stage"
+    (title / "updates/917504/romfs/Sub").mkdir(parents=True)
+    (title / "updates/917504/romfs/Sub/old.bin").write_bytes(b"old")
+    (tmp_path / "outside").mkdir()
+    (stage / "updates/917504").mkdir(parents=True)
+    (stage / "updates/917504/romfs.nup").write_bytes(b"NUP" * 100)
+    (stage / "eboot.bin").write_bytes(b"eboot")
+    for i in range(20000):
+        (stage / "spirv").mkdir(exist_ok=True)
+        (stage / f"spirv/{i:05d}.spv").write_bytes(b"%d" % i)
+    port_file = tmp_path / "port.txt"
+    proc = subprocess.Popen([str(exe), "serve", str(title), str(port_file)], env=dict(os.environ, MKW_PS5_RECV_PORT="0"))
+    try:
+        for _ in range(200):
+            if port_file.is_file() and port_file.read_text().strip():
+                break
+            time.sleep(0.01)
+        port = int(port_file.read_text().strip())
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as s:
+            bad = b"../outside"
+            s.sendall(b"PIT1X" + struct.pack("<H", len(bad)) + bad)
+            assert _recv_exact(s, 1) == b"E"
+        assert (tmp_path / "outside").is_dir()
+        t0 = time.monotonic()
+        sent, skipped, _ = send_ps5.send_directory(f"127.0.0.1:{port}", stage)
+        assert proc.wait(timeout=30) == 0
+        assert sent == 20002 and skipped == 0
+        assert not (title / "updates/917504/romfs").exists()
+        assert (title / "updates/917504/romfs.nup").read_bytes() == b"NUP" * 100
+        assert time.monotonic() - t0 < 60
+    finally:
+        if proc.poll() is None:
+            proc.kill()

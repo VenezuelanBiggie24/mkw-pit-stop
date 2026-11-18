@@ -18,6 +18,7 @@ First release of **Mario Kart World: Pit Stop** (`PPSA99193`), a native PlayStat
 - Multiplayer: the game's split screen with one DualSense per signed-in player, and the game's local wireless mode over the LAN, between PS5s or with the PC build of the same version.
 - Fixes for magenta and corrupted textures (terrain copies into BC images, textures under memory pressure), hitches from blocking log writes, and the title-screen pause.
 - Game-free PC builder for Windows (no WSL: a zip with its own Python, zig and glslc, and the start screen's **Build for PS5**) and Linux, from a dump folder or `.nup` of 1.8.0 or 1.0.0; a placeholder title that shows the console's address and the PC build's progress, and receives the built game from the PC; and a verified FTP deployer.
+- Installing is faster and has more ways: the RomFS goes as one `romfs.nup` (read in place by the title, not unpacked) instead of ~206,000 files; a broken send goes on where it stopped; the send shows its speed and time left; the title can be written to an exFAT USB drive that ShadowMountPlus finds on the PS5; and a copy already on the console can be used as it is, so only the game code and shaders are sent.
 - Licences: the PS5 files are GPL-3.0-or-later as a whole (they link the PS5 payload SDK's platform layer and PS5_Vulkan's start-up code); each package carries `LEGAL.txt` and `licenses/`, and the source of every part is attached as `source/*.tar.gz`.
 
 ### Tested

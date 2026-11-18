@@ -27,7 +27,9 @@
    ```
 4. While the PC builds, the PS5 screen shows its step and progress; then **Receiving from PC builder...** and **Transfer complete!**. Press **Cross**, then launch **Mario Kart World: Pit Stop** again. Press **Options + touchpad click** at any time in game to open the **Pit Stop** settings overlay.
 
-**Without the network:** choose **To a USB drive** and **Choose drive** in step 3: the title goes to `homebrew\PPSA99193` on the drive (exFAT or FAT32, about 25 GB free), where ShadowMountPlus finds it on the PS5. The placeholder is not needed then; remove `/data/homebrew/PPSA99193` if it is installed, so only one copy is registered.
+**Copy already on the PS5:** tick **My game files are already on the PS5** and type its folder there (with `exefs` and `romfs` in it or in its `updates\<version>`): only the game code and shaders are sent.
+
+**Without the network:** choose **To a USB drive** and **Choose drive** in step 3: the title goes to `homebrew\PPSA99193` on the drive (exFAT, about 25 GB free), where ShadowMountPlus finds it on the PS5. The placeholder is not needed then; remove `/data/homebrew/PPSA99193` if it is installed, so only one copy is registered.
 
 If the PS5 stays on **Waiting for connection**, check the IP and that the PC and the PS5 are on the same network. A failed build is explained in `logs/setup.log` beside `mkw.exe`.
 

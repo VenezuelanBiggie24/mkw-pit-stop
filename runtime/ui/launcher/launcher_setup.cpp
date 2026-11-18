@@ -191,7 +191,8 @@ void setup_start(const char *exe_dir, const char *game_dir, const char *source, 
     SDL_DetachThread(SDL_CreateThread(reader, "setup", nullptr));
 }
 
-void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip, const char *usb) {
+void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip, const char *usb,
+                     const char *console_game) {
     if (!g_lock) g_lock = SDL_CreateMutex();
     if (setup_state().running) return;
     char python[1200], script[1200], bundle[1200], work_dir[1200], shader_cache[1200];
@@ -211,11 +212,15 @@ void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip
     snprintf(work_dir, sizeof work_dir, "%s/ps5-work", exe_dir);
     snprintf(shader_cache, sizeof shader_cache, "%s/shaders", exe_dir);
 
-    const char *args[16];
+    const char *args[20];
     int n = 0;
     args[n++] = python;
     args[n++] = "-I";
     args[n++] = script;
+    if (console_game && console_game[0]) {
+        args[n++] = "--console-game";
+        args[n++] = console_game;
+    }
     args[n++] = "--source";
     args[n++] = source;
     args[n++] = "--bundle";
