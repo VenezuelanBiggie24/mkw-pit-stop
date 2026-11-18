@@ -734,7 +734,7 @@ def copy_to_usb(stage: Path, drive: Path) -> Path:
         part = dst.with_name(dst.name + ".part")
         try:
             with src.open("rb") as fi, part.open("wb") as fo:
-                while chunk := fi.read(4 << 20):
+                while chunk := fi.read(1 << 20):   # (larger reads failed through WSL's 9p, nup_writer.py)
                     fo.write(chunk)
                     done += len(chunk)
                     report.progress(done, need, n, len(todo))

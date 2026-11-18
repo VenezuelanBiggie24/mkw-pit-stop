@@ -32,7 +32,7 @@ TOC_HEAD = struct.Struct("<4sIQQQQQ")            # 0x30
 PKG = struct.Struct("<QIIIIBBHIQI20s")          # 0x40
 DIR = struct.Struct("<IIIIQ")                    # 0x18
 FILE = struct.Struct("<IIQQQ32sBBH12s")         # 0x50
-CHUNK = 8 << 20
+CHUNK = 1 << 20   # 8 MiB reads failed in WSL's 9p client for a Windows drive (an order-4 kernel allocation, 18/11/2026)
 MKW_TITLE_ID = 0x0100152000022000   # informational only: the readers use the last package whatever its id
 
 
