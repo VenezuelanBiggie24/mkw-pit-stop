@@ -94,6 +94,8 @@ static struct {
     char source[1024];              // the player's copy: a folder, or a .nup file, from the dialogs
     int link_romfs;                 // 0 copy it into the game folder, 1 use it where it is
     int tools;                      // the setup tools are there
+    int ps5_tools;                  // prepare_ps5.py and the PS5 link bundle are there (the PS5 builder package)
+    char ps5_ip[64];                // the PS5's address from its Game files missing screen, kept in ps5-ip.txt
     char shortcut_note[1200];       // what the shortcut button did
     // the last setup's record (read_setup_info): the game version, the port version, the copy and how its RomFS is kept
     char game_version[32], setup_port[48], setup_source[1024], setup_mode[8];
@@ -787,6 +789,33 @@ static const UiTextId kStepText[SETUP_STEPS] = {UI_LAUNCH_STEP_CHECK, UI_LAUNCH_
                                                 UI_LAUNCH_STEP_GENERATE, UI_LAUNCH_STEP_COMPILE, UI_LAUNCH_STEP_SHADERS,
                                                 UI_LAUNCH_STEP_WARM, UI_LAUNCH_STEP_CLEANUP};
 
+static const UiTextId kPs5StepText[SETUP_PS5_STEPS] = {
+    UI_LAUNCH_STEP_CHECK,    UI_LAUNCH_STEP_NUP,     UI_LAUNCH_STEP_EXEFS, UI_LAUNCH_STEP_ROMFS, UI_LAUNCH_STEP_GENERATE,
+    UI_LAUNCH_STEP_COMPILE, UI_LAUNCH_STEP_LINK, UI_LAUNCH_STEP_SHADERS, UI_LAUNCH_STEP_DEPLOY};
+
+// The PS5's address, kept beside the program so the next build (an update) sends to the same console.
+static void load_ps5_ip(void) {
+    char p[1100];
+    snprintf(p, sizeof p, "%s/ps5-ip.txt", L.exe_dir);
+    FILE *f = fopen(p, "r");
+    if (!f) return;
+    if (fgets(L.ps5_ip, (int)sizeof L.ps5_ip, f)) {
+        size_t n = strlen(L.ps5_ip);
+        while (n && (L.ps5_ip[n - 1] == '\n' || L.ps5_ip[n - 1] == '\r' || L.ps5_ip[n - 1] == ' ')) L.ps5_ip[--n] = 0;
+    }
+    fclose(f);
+}
+
+static void save_ps5_ip(void) {
+    if (!L.ps5_ip[0]) return;
+    char p[1100];
+    snprintf(p, sizeof p, "%s/ps5-ip.txt", L.exe_dir);
+    if (FILE *f = fopen(p, "w")) {
+        fprintf(f, "%s\n", L.ps5_ip);
+        fclose(f);
+    }
+}
+
 static void SDLCALL picked(void *kind, const char *const *files, int) {
     SDL_Event e = {};
     e.type = L.picked_event;
@@ -811,7 +840,7 @@ static void setup_error_text(const SetupState &st, char *out, size_t cap) {
     snprintf(why, sizeof why, "%s", st.error);
     for (const auto &w : kWhy)
         if (!strcmp(st.code, w.code)) snprintf(why, sizeof why, menu_text(w.text), st.error);
-    snprintf(out, cap, menu_text(UI_LAUNCH_SETUP_FAILED), why);
+    snprintf(out, cap, menu_text(st.mode == SETUP_MODE_PS5 ? UI_LAUNCH_PS5_FAILED : UI_LAUNCH_SETUP_FAILED), why);
 }
 
 // A step's mark, drawn (the font has no ticks): done a green disc with a dark tick, under way a ring with a blue arc going
@@ -837,13 +866,15 @@ static void step_mark(ImDrawList *dl, ImVec2 c, float r, bool done, bool now) {
 static void setup_progress(const SetupState &st) {
     float s = L.scale, lh = ImGui::GetTextLineHeight(), row = lh + 14 * s, r = lh * 0.48f;
     ImDrawList *dl = ImGui::GetWindowDrawList();
-    for (int i = 0; i < SETUP_STEPS; i++) {
+    const UiTextId *texts = st.mode == SETUP_MODE_PS5 ? kPs5StepText : kStepText;
+    int count = st.step_count > 0 ? st.step_count : SETUP_STEPS;
+    for (int i = 0; i < count; i++) {
         bool now = st.running && st.step == i;
         ImVec2 p = ImGui::GetCursorScreenPos();
         float avail = ImGui::GetContentRegionAvail().x, cy = p.y + row * 0.5f, ty = cy - lh * 0.5f;
         ImGui::Dummy(ImVec2(avail, row - ImGui::GetStyle().ItemSpacing.y));
         step_mark(dl, ImVec2(p.x + r, cy), r, st.done[i] != 0, now);
-        const char *name = menu_text(kStepText[i]);
+        const char *name = menu_text(texts[i]);
         float x = p.x + r * 2 + 14 * s;
         dl->AddText(ImVec2(x, ty), st.done[i] || now ? LOOK_TEXT : LOOK_DIM, name);
         x += ImGui::CalcTextSize(name).x + 18 * s;
@@ -940,7 +971,27 @@ static void game_dir_notes(void) {
     }
 }
 
-// The setup's three steps: the player's copy, how its RomFS is kept, then Set up with the folder it installs to.
+// Step 2 of the PS5 builder package: the copy chosen in step 1 is built into the PS5 title by prepare_ps5.py and sent
+// to the address the console's Game files missing screen shows (its receiver, port 19913). The desktop's RomFS and
+// Set up steps do not apply there (the package builds no desktop game), so they are not drawn. Without it a Windows
+// player had only a command line (lost in the 0.1.13 merge, put back 18/11/2026).
+static void ps5_step(float act_h) {
+    step_head(2, false, menu_text(UI_LAUNCH_PS5_HEADING));
+    ImGui::TextColored(col4(LOOK_DIM), "%s", menu_text(UI_LAUNCH_PS5_IP));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(fminf(ImGui::GetContentRegionAvail().x, 320 * L.scale));
+    ImGui::InputTextWithHint("##ps5_ip", "192.168.1.50", L.ps5_ip, sizeof L.ps5_ip, ImGuiInputTextFlags_CharsNoBlank);
+    ImGui::BeginDisabled(!L.source[0] || !L.ps5_ip[0]);
+    if (accent_button(menu_text(UI_LAUNCH_PS5_BUILD), ImVec2(0, act_h))) {
+        save_ps5_ip();
+        setup_ps5_start(L.exe_dir, L.source, L.ps5_ip);
+    }
+    ImGui::EndDisabled();
+    step_end();
+}
+
+// The setup's three steps: the player's copy, how its RomFS is kept, then Set up with the folder it installs to (the
+// PS5 builder package: the copy, then Build for PS5).
 static void setup_steps(const SetupState &st, bool ready, float act_h) {
     float s = L.scale;
     ImGui::BeginDisabled(st.running);
@@ -958,6 +1009,11 @@ static void setup_steps(const SetupState &st, bool ready, float act_h) {
         SDL_ShowOpenFileDialog(picked, nullptr, L.win, kPack, 1, nullptr, false);
     }
     step_end();
+    if (L.ps5_tools) {
+        ps5_step(act_h);
+        ImGui::EndDisabled();
+        return;
+    }
     step_head(2, false, menu_text(UI_LAUNCH_ROMFS_MODE));
     float cw = fminf((ImGui::GetContentRegionAvail().x - 12 * s) * 0.5f, 440 * s);
     if (romfs_card("##copy", !L.link_romfs, UI_LAUNCH_ROMFS_COPY, UI_LAUNCH_ROMFS_COPY_NOTE, cw)) L.link_romfs = 0;
@@ -1025,12 +1081,15 @@ static void setup_failed_card(const SetupState &st) {
     setup_error_text(st, msg, sizeof msg);
     card_begin(fminf(ImGui::GetContentRegionAvail().x, 1100 * L.scale));
     ImGui::TextColored(col4(LOOK_BAD), "%s", msg);
-    if (accent_button(menu_text(UI_LAUNCH_RETRY)))
-        setup_start(L.exe_dir, cfg_game_dir(), L.source[0] ? L.source : nullptr, L.link_romfs);
+    if (accent_button(menu_text(UI_LAUNCH_RETRY))) {
+        if (st.mode == SETUP_MODE_PS5) setup_ps5_start(L.exe_dir, L.source, L.ps5_ip);   // its steps done are kept too
+        else setup_start(L.exe_dir, cfg_game_dir(), L.source[0] ? L.source : nullptr, L.link_romfs);
+    }
     ImGui::SameLine();
     if (ImGui::Button(menu_text(UI_MENU_OPEN_LOG))) {
         char logs[PLAT_PATH_MAX + 16];
-        snprintf(logs, sizeof logs, "%s/logs", cfg_game_dir());
+        // (a PS5 build logs beside the program: launcher_setup.cpp prepare_log_file)
+        snprintf(logs, sizeof logs, "%s/logs", st.mode == SETUP_MODE_PS5 ? L.exe_dir : cfg_game_dir());
         plat_open_folder(logs);
     }
     card_end(LOOK_BAD, with_alpha(LOOK_BAD, 22));
@@ -1058,7 +1117,9 @@ static void page_files(float w, float h) {
     if (!cfg_last_save_ok()) ImGui::TextColored(col4(LOOK_BAD), "%s", menu_text(UI_MENU_SAVE_FAILED));
     ImGui::Dummy(ImVec2(0, 4 * L.scale));
     if (st.finished < 0) setup_failed_card(st);
-    if (st.finished > 0) ImGui::TextColored(col4(LOOK_OK), "%s", menu_text(UI_LAUNCH_SETUP_DONE));
+    if (st.finished > 0)
+        ImGui::TextColored(col4(LOOK_OK), "%s",
+                           menu_text(st.mode == SETUP_MODE_PS5 ? UI_LAUNCH_PS5_DONE : UI_LAUNCH_SETUP_DONE));
     if (st.running || st.finished) {
         setup_progress(st);
         if (st.running && ImGui::Button(menu_text(UI_LAUNCH_CANCEL), ImVec2(0, act_h))) setup_cancel();
@@ -1078,7 +1139,7 @@ static void page_files(float w, float h) {
     } else {
         // a line of some 75 letters at most: wider, the eye loses its place on the way back
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + fminf(ImGui::GetContentRegionAvail().x, 940 * L.scale));
-        ImGui::TextUnformatted(menu_text(UI_LAUNCH_FILES_HELP));
+        ImGui::TextUnformatted(menu_text(L.ps5_tools ? UI_LAUNCH_PS5_HELP : UI_LAUNCH_FILES_HELP));
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 8 * L.scale));
         setup_steps(st, ready, act_h);
@@ -1662,6 +1723,8 @@ extern "C" int launcher_run(void) {
         }
     }
     L.tools = setup_available(L.exe_dir);
+    L.ps5_tools = setup_ps5_available(L.exe_dir);
+    load_ps5_ip();
     if (!rt_game_present() && !L.shot_at) L.page = PAGE_FILES;
     pads_refresh();
     char state[PLAT_PATH_MAX * 3];

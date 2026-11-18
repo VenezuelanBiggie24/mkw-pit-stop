@@ -7,28 +7,34 @@ before publishing) and optionally `### Known issues`.
 
 ## ps5-0.1.0
 
-First release of **Mario Kart World: Pit Stop** (`PPSA99193`), a native PlayStation 5 port of [mkw-recomp](https://github.com/adriadam10/mkw-recomp).
+First release of **Mario Kart World: Pit Stop** (`PPSA99193`), a native PlayStation 5 port of [mkw-recomp](https://github.com/adriadam10/mkw-recomp), built on mkw-recomp 0.1.13. You build the title on your PC from your own *Mario Kart World* 1.0.0 dump; nothing of the game is in the release.
 
 ### Changes
 
-- Native PS5 platform layer (`ps5-high144` 39-bit guest layout at 64–160 GiB, 64 KiB direct-memory backing units, 16 KiB hardware write tracking with `MKW_PW_HOT` hot-page batching and merged `sceKernelMprotect` runs, early-read watch, and `MKW_PACK` cold-memory zstd packing).
-- Direct Vulkan display (`VK_KHR_display` at 1080p60 over RADV for PS5), DualSense input and rumble for up to four signed-in players, and 48 kHz stereo `sceAudioOut` sound.
-- **Pit Stop** in-game settings overlay (**Options + touchpad click**): controller-first menu with quick rows (**Master volume**, **Vibration strength**, **Performance HUD**), full settings categories, live controller remapping and PlayStation button prompts.
-- PS5 device profile (`runtime/core/base/cfg.c`): races run at a steady 30 fps (33.3 ms, 1.00x game speed) by default while keeping 60 fps as an option in Pit Stop; profile-guided optimization (`--pgo-use`) support for the lifted C.
-- Game-free PC builder package (`tools/ps5/release_ps5.py`, `tools/ps5/prepare_ps5.py`) and verified FTP deployer (`tools/ps5/deploy.py --game`) that refreshes ShadowMountPlus's registered `param.json` and `icon0.png`.
+- Native PS5 platform layer: the `ps5-high144` guest layout, direct-memory backing, hardware write tracking with hot-page batching, and the early-read watch.
+- Direct Vulkan display over RADV for the PS5, DualSense input with rumble and PlayStation button prompts for up to four signed-in players, and stereo sound through `sceAudioOut`.
+- **Pit Stop**, the in-game settings overlay (**Options + touchpad click**): quick rows (**Master volume**, **Vibration strength**, **Performance HUD**), every settings category (Display, Graphics, Controls, Audio, General, Advanced, Hacks, Multiplayer) and live controller remapping.
+- PS5 device profile: races at the game's 30 fps mode at full speed, shown at 60 with frame generation (Pit Stop turns it off). 60 fps stays an option; races then run slower than real time.
+- Multiplayer: the game's split screen with one DualSense per signed-in player, and the game's local wireless mode over the LAN, between PS5s or with the PC build of the same version.
+- Fixes for magenta and corrupted textures (terrain copies into BC images, textures under memory pressure), hitches from blocking log writes, and the title-screen pause.
+- Game-free PC builder for Windows (no WSL: a zip with its own Python, zig and glslc, and the start screen's **Build for PS5**) and Linux (a dump folder or `.nup`), a placeholder title that shows the console's address and receives the built game from the PC, and a verified FTP deployer.
+- Licences: the PS5 files are GPL-3.0-or-later as a whole (they link the PS5 payload SDK's platform layer and PS5_Vulkan's start-up code); each package carries `LEGAL.txt` and `licenses/`, and the source of every part is attached as `source/*.tar.gz`.
 
 ### Tested
 
 From this build before publishing:
 
-- Full boot, intro movies, menus and multi-race sessions on a base PS5 (33.3 ms frame time, 1.00x game speed at the 30 fps console default), Pit Stop overlay navigation and persistence in `/app0/mkw.ini`, Linux host `--selftest`, and PS5 loader platform tests (`tests/test_ps5_loader_platform.py`).
+- On a base PS5: boot, intro movies, menus, single-player races and 5 minutes of 2-player split-screen races without a crash; a PS5 hosting and a Windows PC joining over the LAN finished whole races.
+- Linux: `--selftest`, `--probe-cfg`, `--probe-nvn`, `--probe-vkmem`, `--probe-astc`; the 25 runtime files changed by the 0.1.13 merge compile with the PS5 toolchain; the placeholder and the Linux builder package pass the release's no-game-content check.
+- The Linux builder package, unpacked into a clean folder, checks a 1.8.0 dump (`--check-only`); its start screen shows **Build for PS5**.
+- Still to do before tagging: a builder package run end to end on a clean folder (prepare, send, boot), on Windows and on Linux, and the placeholder installed on the console.
 
 ### Known issues
 
-- Across three or more races in one session, free direct memory drops as the game's 2.4 GiB `CPU_CACHED|GPU_CACHED` pool retains earlier courses' data; when free memory falls near 100 MiB, ASTC texture decoding can run out of scratch space and leave textures corrupted or missing (`MKW_PACK=1` compresses cold guest units and is under console testing).
-- Up to 128 MiB of sparse tiles log non-resident from boot, causing minor texture corruption near the start line and a black-and-white race intro.
-- Intermittent magenta blocks on some ASTC textures (character select cards, scenery); clearing the shader/pipeline caches or restarting the title resolves it when it appears.
-- Mode, character and vehicle select menus still have minor visual differences against the Switch 2 console; local split screen is untested; there is no online play.
+- Long sessions: free memory falls race after race as the game keeps earlier courses' data; when it runs low, textures can come out corrupted or missing. Restart the title after a few races if that happens.
+- From boot, a few sparse texture tiles stay unloaded: minor texture corruption near the start line and a black-and-white race intro.
+- Multiplayer: the first race on a course can drop a player whose shaders are still compiling (a stall at race load); later races on that course work. Split screen runs slower than single player, below 30 fps in busy scenes.
+- Mode, character and vehicle select screens still differ slightly from the console. There is no Nintendo online play.
 
 ## 0.1.13
 

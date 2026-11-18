@@ -16,28 +16,26 @@ SDK functions (`nn::*`) are replaced by name with our own code.
 
 ## Status (PS5)
 
-Early, and moving fast. On 16/11/2026 on a base PS5:
+Early, and moving fast. On 17/11/2026 on a base PS5:
 
-- **Boot, movies, menus and races work.** The title outputs 1080p60 over direct Vulkan display (`VK_KHR_display`), plays
-  48 kHz stereo audio through `sceAudioOut`, and supports up to four signed-in DualSense controllers with rumble and
-  PlayStation button prompts.
-- **Races run at 30 fps at full speed (1.00x).** The PS5 device profile defaults to the game's 30 fps mode (two game
-  ticks per frame, steady 33.3 ms frame times on busy courses; 60 fps remains an option in **Pit Stop > Display > Frame
-  rate**). With hardware page-protection batching and `MKW_PW_HOT`, a race frame's work is ~26–28 ms.
+- **Boot, movies, menus and races work**, with direct Vulkan display over RADV, stereo sound through `sceAudioOut`, and
+  up to four signed-in DualSense controllers with rumble and PlayStation button prompts.
+- **Races run at 30 fps at full speed**, shown at 60 with frame generation (the PS5 profile's default; Pit Stop turns
+  it off). 60 fps is an option in **Pit Stop > Display > Frame rate**, but races then run slower than real time.
+- **Multiplayer:** the game's split screen (one DualSense per signed-in player) and its local wireless mode over the
+  LAN, between PS5s or with the PC build of the same version ([docs/multiplayer.md](docs/multiplayer.md)). There is no
+  Nintendo online play.
 - **Pit Stop in-game overlay.** Press **Options + touchpad click** at any time to open **Pit Stop**, a controller-first
-  settings menu with quick controls (**Master volume**, **Vibration strength**, **Performance HUD**), full graphics and
-  game settings, and live DualSense button remapping, saved to `/app0/mkw.ini`.
+  settings menu with quick rows (**Master volume**, **Vibration strength**, **Performance HUD**), every settings
+  category and live DualSense button remapping, saved to `/app0/mkw.ini`.
 - **Known issues ([docs/roadmap.md](docs/roadmap.md)):**
-  - *Memory in long sessions:* across three or more races in one session, free direct memory falls as the game's 2.4 GiB
-    `CPU_CACHED|GPU_CACHED` pool keeps earlier courses' data; near 100 MiB free, ASTC texture decoding can run out of
-    scratch space and leave textures corrupted or missing (`MKW_PACK=1` compresses cold guest memory with zstd and is in
-    console testing).
-  - *Sparse tile cap:* up to 128 MiB of sparse tiles log non-resident from boot (`MKW_SPARSE_MIB=1536`), causing minor
-    texture corruption near the start line and a black-and-white race intro.
-  - *Intermittent magenta blocks:* occasional magenta ASTC error blocks on character select cards or scenery; restarting
-    the title or clearing the shader cache clears them.
-  - *Menus and modes:* mode, character and vehicle select screens still have minor differences from the Switch 2; local
-    split screen is untested; there is no online play.
+  - *Long sessions:* free memory falls race after race as the game keeps earlier courses' data; when it runs low,
+    textures can come out corrupted or missing. Restart the title after a few races if that happens.
+  - *Sparse tiles:* from boot a few sparse texture tiles stay unloaded: minor texture corruption near the start line
+    and a black-and-white race intro.
+  - *Multiplayer:* the first race on a course can drop a player whose shaders are still compiling; later races work.
+    Split screen runs below 30 fps in busy scenes.
+  - *Menus:* mode, character and vehicle select screens still differ slightly from the console.
 
 ## What you need ("You bring")
 
@@ -46,10 +44,35 @@ Early, and moving fast. On 16/11/2026 on a base PS5:
 2. **A jailbroken PS5** running a homebrew payload loader (`etaHEN` or `elfldr`), `kstuff`, and **ShadowMountPlus 1.7
    Beta 5** or newer (which mounts and registers `/data/homebrew/PPSA99193` on the home screen). Firmware support
    follows your jailbreak, `kstuff`, and RADV homebrew environment (see [docs/ps5.md](docs/ps5.md)).
-3. **A PC (Linux x86-64 or WSL2 on Windows)** with `clang`, `lld`, Python 3, and about 30 GB of free disk space to
-   prepare the PS5 title folder from your dump.
+3. **A PC with about 30 GB free** on the same network as the PS5, to build the title from your dump:
+   - **Windows 10 or 11 (64-bit):** nothing else to install, no WSL. The Windows builder carries its own Python, zig
+     and glslc ([Windows steps](#installing-on-windows-no-wsl)).
+   - **Linux x86-64 or WSL2:** `clang`, `lld` and Python 3 ([Linux steps](#installing-and-updating-on-ps5-linux-or-wsl2)).
 
-## Installing and updating on PS5
+## Installing on Windows (no WSL)
+
+1. **Put the placeholder title on the PS5.** Unzip `mkw-pit-stop-<version>-ps5-placeholder-PPSA99193.zip` from
+   **Releases** and upload its `PPSA99193` folder to `/data/homebrew/` with an FTP client (FileZilla, WinSCP), so that
+   `/data/homebrew/PPSA99193/eboot.bin` exists. Once ShadowMountPlus registers it, launch **Mario Kart World: Pit
+   Stop**: it shows **Game files missing** and `Console IP: <address> (port 19913)`. Leave that screen open; the PS5
+   receives files only while it is shown.
+2. **Unpack the builder on the PC.** Download `mkw-pit-stop-<version>-ps5-builder-windows-x86_64.zip`, right-click it,
+   **Properties**, tick **Unblock**, then extract it to a short folder on a drive with 30 GB free, such as
+   `C:\PitStop` (not `Program Files` or OneDrive).
+3. **Build and send.** Run `mkw.exe` from that folder. On **Game files**, choose your dump with **Choose folder** (or
+   **Choose .nup or .nx file**); under **Build for PS5**, type the address from the PS5 screen into **PS5 IP** and
+   press **Build for PS5**. The desktop **Set up** button is not needed for the PS5. Or, from a Command Prompt in that
+   folder:
+   ```bat
+   prepare_ps5.bat --source "D:\Dumps\MKW" --send 192.168.1.50
+   ```
+4. **Start the game.** The PS5 shows **Transfer complete!** when every file has arrived and been checked: press
+   **Cross**, then launch **Mario Kart World: Pit Stop** again.
+
+If the PS5 stays on **Waiting for connection**, check the address and that both are on the same network; a failed
+build is explained in `logs/setup.log` beside `mkw.exe`. To update, unpack the new builder and build again.
+
+## Installing and updating on PS5 (Linux or WSL2)
 
 Because `eboot.bin` links the recompiled game code and `spirv/` holds the game's translated shaders, **no ready-to-run
 `eboot.bin` or `spirv/` is distributed**. You build the `PPSA99193` title folder on your PC from the game-free release
@@ -94,8 +117,8 @@ Press **Options + touchpad click** on the DualSense (or **F1** on desktop) from 
 - **Quick rows** on the first screen adjust **Master volume** (0–100%), **Vibration strength** (0–300%), and
   **Performance HUD** (Off, FPS, Full) live.
 - **All settings** opens **Display**, **Graphics**, **Controls** (with live per-action button capture), **Audio**,
-  **Game**, **Menu**, **Advanced**, **Hacks** (unlock all drivers, vehicles, stickers and Special Cup), and **Quit
-  game**. Changes save automatically to `/app0/mkw.ini`.
+  **General**, **Advanced**, **Hacks** (unlock all drivers, vehicles, stickers and Special Cup) and **Multiplayer**.
+  Changes save automatically to `/app0/mkw.ini`.
 
 ## Playing on PC (Linux and Windows)
 

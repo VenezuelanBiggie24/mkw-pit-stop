@@ -190,6 +190,13 @@ __attribute__((weak)) int plat_sample_start(uint32_t period_us, PlatSampleHook h
 __attribute__((weak)) void plat_sample_stop(void) {}
 __attribute__((weak)) int plat_mem_copy_guarded(void *dst, const void *src, size_t n) { memcpy(dst, src, n); return 1; }
 __attribute__((weak)) void plat_fault_guarded(void) {}
+// fault_guard.c's decoder and single step, which it builds only on Linux and the PS5: Windows has neither (0, so
+// memory_early.c waits for a watched page's neighbour as before b907279, whose Windows link failed without these).
+__attribute__((weak)) int plat_code_init(void) { return 0; }
+__attribute__((weak)) int plat_fault_emulate_load(uint64_t fault_addr, int (*rd)(uint64_t, size_t, void *)) {
+    return (void)fault_addr, (void)rd, 0;
+}
+__attribute__((weak)) int plat_fault_step(void (*fn)(uint64_t), uint64_t arg) { return (void)fn, (void)arg, 0; }
 __attribute__((weak)) int plat_sample_stacks(void (*emit)(const char *, uint32_t, void *const *, int, void *), void *ctx) {
     (void)emit, (void)ctx;
     return 0;

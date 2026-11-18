@@ -60,29 +60,21 @@ FORBIDDEN_NAMES = {
     "eboot.bin", "mkw.sym", "seq_nodes.tsv",
 }
 SOURCE_ALLOW = {"gen.py", "release.py", "release_ps5.py", "prepare.py"}
-SOURCES = [
+# The sources the PS5 builder runs: the desktop package's list (dist.SOURCES: what prepare_ps5.py imports, kept with
+# it upstream) and the PS5 release's own tools. Its own copy of the list fell behind (no tools/i18n/catalog.py, which
+# build.py imports since 519de2c): the 18/11/2026 builder stopped at its first import.
+PS5_SOURCES = [
     "LICENSE",
     "README.md",
-    "recomp",
-    "sm86",
-    "tools/build/build.py",
     "tools/build/icon.py",
-    "tools/prepare",
-    "tools/romfs/resolution.py",
-    "tools/shaders/extract.py",
-    "tools/shaders/translate.py",
     "tools/ps5/build_game.py",
     "tools/ps5/build_smoke.py",
     "tools/ps5/build_radv.py",
-    "tools/ps5/deploy.py",
-    "tools/ps5/prepare_ps5.py",
-    "tools/ps5/send_ps5.py",
     "tools/ps5/release_ps5.py",
     "tools/ps5/release_notices.py",
     "tools/ps5/licenses",
-    "runtime/cpu",
-    "runtime/core/boot/gamelib.h",
 ]
+SOURCES = list(dict.fromkeys(dist.SOURCES + PS5_SOURCES))
 
 
 def sha256(path: Path) -> str:
@@ -130,6 +122,8 @@ def copy_sources(dst: Path) -> None:
             shutil.copytree(s, d, ignore=skip, dirs_exist_ok=True)
         elif s.is_file():
             shutil.copy2(s, d)
+        else:   # a missing source used to be skipped quietly, and the player's builder failed instead
+            raise SystemExit(f"release_ps5: source {rel} is missing")
 
 
 def _ensure_host_zig() -> Path:
