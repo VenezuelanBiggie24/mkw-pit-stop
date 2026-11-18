@@ -7,17 +7,17 @@ before publishing) and optionally `### Known issues`.
 
 ## ps5-0.1.0
 
-First release of **Mario Kart World: Pit Stop** (`PPSA99193`), a native PlayStation 5 port of [mkw-recomp](https://github.com/adriadam10/mkw-recomp), built on mkw-recomp 0.1.13. You build the title on your PC from your own *Mario Kart World* 1.0.0 dump; nothing of the game is in the release.
+First release of **Mario Kart World: Pit Stop** (`PPSA99193`), a native PlayStation 5 port of [mkw-recomp](https://github.com/adriadam10/mkw-recomp), built on mkw-recomp 0.1.13. You build the title on your PC, on Windows or Linux, from your own *Mario Kart World* 1.8.0 or 1.0.0 dump; nothing of the game is in the release.
 
 ### Changes
 
 - Native PS5 platform layer: the `ps5-high144` guest layout, direct-memory backing, hardware write tracking with hot-page batching, and the early-read watch.
 - Direct Vulkan display over RADV for the PS5, DualSense input with rumble and PlayStation button prompts for up to four signed-in players, and stereo sound through `sceAudioOut`.
 - **Pit Stop**, the in-game settings overlay (**Options + touchpad click**): quick rows (**Master volume**, **Vibration strength**, **Performance HUD**), every settings category (Display, Graphics, Controls, Audio, General, Advanced, Hacks, Multiplayer) and live controller remapping.
-- PS5 device profile: races at the game's 30 fps mode at full speed, shown at 60 with frame generation (Pit Stop turns it off). 60 fps stays an option; races then run slower than real time.
+- PS5 device profile: races in the game's 30 fps mode, shown at 60 with frame generation (Pit Stop turns it off). 60 fps stays an option; races then run slower than real time. The parallel replay finishes its walk before handing work out, which removes single black frames in races for about 2 fps.
 - Multiplayer: the game's split screen with one DualSense per signed-in player, and the game's local wireless mode over the LAN, between PS5s or with the PC build of the same version.
 - Fixes for magenta and corrupted textures (terrain copies into BC images, textures under memory pressure), hitches from blocking log writes, and the title-screen pause.
-- Game-free PC builder for Windows (no WSL: a zip with its own Python, zig and glslc, and the start screen's **Build for PS5**) and Linux (a dump folder or `.nup`), a placeholder title that shows the console's address and receives the built game from the PC, and a verified FTP deployer.
+- Game-free PC builder for Windows (no WSL: a zip with its own Python, zig and glslc, and the start screen's **Build for PS5**) and Linux, from a dump folder or `.nup` of 1.8.0 or 1.0.0; a placeholder title that shows the console's address and the PC build's progress, and receives the built game from the PC; and a verified FTP deployer.
 - Licences: the PS5 files are GPL-3.0-or-later as a whole (they link the PS5 payload SDK's platform layer and PS5_Vulkan's start-up code); each package carries `LEGAL.txt` and `licenses/`, and the source of every part is attached as `source/*.tar.gz`.
 
 ### Tested
@@ -26,8 +26,9 @@ From this build before publishing:
 
 - On a base PS5: boot, intro movies, menus, single-player races and 5 minutes of 2-player split-screen races without a crash; a PS5 hosting and a Windows PC joining over the LAN finished whole races.
 - Linux: `--selftest`, `--probe-cfg`, `--probe-nvn`, `--probe-vkmem`, `--probe-astc`; the 25 runtime files changed by the 0.1.13 merge compile with the PS5 toolchain; the placeholder and the Linux builder package pass the release's no-game-content check.
-- The Linux builder package, unpacked into a clean folder, checks a 1.8.0 dump (`--check-only`); its start screen shows **Build for PS5**.
-- Still to do before tagging: a builder package run end to end on a clean folder (prepare, send, boot), on Windows and on Linux, and the placeholder installed on the console.
+- The Linux builder package, unpacked into a clean folder, builds the whole title from a 1.8.0 console dump (17.5 minutes at 8 jobs); its start screen shows **Build for PS5**.
+- Windows: the shader spec step through the Windows builder's own Python and NVIDIA tools, accepted on its first capture three times out of three.
+- Still to do before tagging: the Windows builder end to end on a clean folder (build, send, boot), the placeholder's progress screen on the console, and an update over an installed title.
 
 ### Known issues
 

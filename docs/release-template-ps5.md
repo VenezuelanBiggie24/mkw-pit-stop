@@ -10,7 +10,7 @@
 
 ## Requirements
 
-- **Your own game copy:** *Mario Kart World* version 1.0.0 (`exefs/` and `romfs/`, decrypted), dumped from your own Nintendo Switch 2. Nothing of the game is in this release or repository.
+- **Your own game copy:** *Mario Kart World* version 1.8.0 or 1.0.0 (`exefs/` and `romfs/`, decrypted, or a `.nup` file), dumped from your own Nintendo Switch 2; a console dump with the 1.8.0 update in `updates/` is used as it is. Nothing of the game is in this release or repository.
 - **A jailbroken PS5:** running a payload loader (`etaHEN` or `elfldr`), `kstuff`, and **ShadowMountPlus 1.7 Beta 5** or newer to register homebrew titles in `/data/homebrew/`.
 - **A PC with about 30 GB free** to build the title from your dump, on the same network as the PS5:
   - **Windows 10 or 11 (64-bit):** nothing to install; the Windows builder carries its own Python, zig and glslc. No WSL needed.
@@ -25,18 +25,18 @@
    ```bat
    prepare_ps5.bat --source "D:\Dumps\MKW" --send 192.168.1.50
    ```
-4. The PS5 shows **Receiving from PC builder...**, then **Transfer complete!**. Press **Cross**, then launch **Mario Kart World: Pit Stop** again. Press **Options + touchpad click** at any time in game to open the **Pit Stop** settings overlay.
+4. While the PC builds, the PS5 screen shows its step and progress; then **Receiving from PC builder...** and **Transfer complete!**. Press **Cross**, then launch **Mario Kart World: Pit Stop** again. Press **Options + touchpad click** at any time in game to open the **Pit Stop** settings overlay.
 
 If the PS5 stays on **Waiting for connection**, check the IP and that the PC and the PS5 are on the same network. A failed build is explained in `logs/setup.log` beside `mkw.exe`.
 
 ## Install on Linux or WSL2
 
 1. Download `mkw-pit-stop-<version>-ps5-builder-linux-x86_64.tar.zst` from this release, verify it against `SHA256SUMS`, and unpack it (`tar --zstd -xf mkw-pit-stop-*.tar.zst`).
-2. Run `prepare_ps5.py` pointing at your decrypted *Mario Kart World* 1.0.0 dump:
+2. Run `prepare_ps5.py` pointing at your *Mario Kart World* dump (a folder or a `.nup` file):
    ```sh
    python3 prepare_ps5.py --source /path/to/your/mkw-dump --out ./PPSA99193
    ```
-   The first run checks that `exefs/main` is version 1.0.0 (`9e244438c3d8ef1c`), generates and compiles the game's C code for the PS5 (`ps5-high144`), links and signs `eboot.bin` against the bundled runtime and RADV driver, Downloads NVIDIA's `nvdisasm` and `ptxas` (pinned by SHA-256) to build the SM86 shader specification on your machine, translates the game's 11,561 shaders to `spirv/`, and copies `exefs/` and `romfs/` into `PPSA99193/`.
+   The first run finds the dump's version by `exefs/main`'s build ID (1.8.0 `d00e4f399e411d06`, preferred, or 1.0.0 `9e244438c3d8ef1c`), generates and compiles the game's C code for the PS5 (`ps5-high144`), links and signs `eboot.bin` against the bundled runtime and RADV driver, downloads NVIDIA's `nvdisasm` and `ptxas` (pinned by SHA-256) to build the SM86 shader specification on your machine, translates the game's 11,561 shaders to `spirv/`, and copies `exefs/` and `romfs/` into `PPSA99193/`.
 3. Copy `PPSA99193` to `/data/homebrew/PPSA99193` on your PS5 over FTP or USB, or pass `--deploy <PS5_IP>` to upload, verify by SHA-256, and refresh ShadowMountPlus's registered `sce_sys`.
 4. Launch **Mario Kart World: Pit Stop** (`PPSA99193`) from the PS5 home screen. Press **Options + touchpad click** at any time in game to open the **Pit Stop** settings overlay.
 
@@ -54,6 +54,6 @@ The PS5 files in this release are under **GPL-3.0-or-later** as a whole: the PS5
 
 ## Reporting a problem
 
-Open an issue on GitHub and attach the console kernel log (`klog`) and `logs/setup.log` from the PC builder folder.
+Open an issue at https://github.com/exploitizm/mkw-pit-stop/issues and attach the console kernel log (`klog`) and `logs/setup.log` from the PC builder folder.
 
 *Mario Kart World is © Nintendo. Mario Kart World: Pit Stop is an unofficial fan project and is not affiliated with or endorsed by Nintendo, Sony Interactive Entertainment, or any game publisher.*

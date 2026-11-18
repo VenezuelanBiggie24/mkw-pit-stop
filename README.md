@@ -3,7 +3,7 @@
 # Mario Kart World: Pit Stop
 
 A native PlayStation 5 homebrew port (`PPSA99193`) of [**mkw-recomp**](https://github.com/adriadam10/mkw-recomp),
-Adrià's static recompilation of *Mario Kart World* (Nintendo Switch 2, version 1.0.0). It needs your own copy of the
+Adrià's static recompilation of *Mario Kart World* (Nintendo Switch 2, versions 1.8.0 and 1.0.0). It needs your own copy of the
 game, dumped from your own Switch 2 console: nothing of the game is in this repository or in its releases.
 
 **It is a static recompilation, not an emulator.** The game's AArch64 code is translated to C ahead of time and
@@ -16,12 +16,13 @@ SDK functions (`nn::*`) are replaced by name with our own code.
 
 ## Status (PS5)
 
-Early, and moving fast. On 17/11/2026 on a base PS5:
+Early, and moving fast. On 18/11/2026 on a base PS5:
 
 - **Boot, movies, menus and races work**, with direct Vulkan display over RADV, stereo sound through `sceAudioOut`, and
   up to four signed-in DualSense controllers with rumble and PlayStation button prompts.
-- **Races run at 30 fps at full speed**, shown at 60 with frame generation (the PS5 profile's default; Pit Stop turns
-  it off). 60 fps is an option in **Pit Stop > Display > Frame rate**, but races then run slower than real time.
+- **Races run in the game's 30 fps mode**, about 28 fps on average in a Grand Prix benchmark, shown at 60 with frame
+  generation (the PS5 profile's default; Pit Stop turns it off). 60 fps is an option in **Pit Stop > Display > Frame
+  rate**, but races then run slower than real time.
 - **Multiplayer:** the game's split screen (one DualSense per signed-in player) and its local wireless mode over the
   LAN, between PS5s or with the PC build of the same version ([docs/multiplayer.md](docs/multiplayer.md)). There is no
   Nintendo online play.
@@ -39,8 +40,9 @@ Early, and moving fast. On 17/11/2026 on a base PS5:
 
 ## What you need ("You bring")
 
-1. **Your own *Mario Kart World* 1.0.0 dump** from your own Nintendo Switch 2 (`exefs/` and `romfs/`, decrypted;
-   `exefs/main` build ID `9e244438c3d8ef1c`).
+1. **Your own *Mario Kart World* dump** from your own Nintendo Switch 2: version **1.8.0** (`exefs/main` build ID
+   `d00e4f399e411d06`) or 1.0.0 (`9e244438c3d8ef1c`), as decrypted `exefs/` and `romfs/` folders or a `.nup` file. A
+   console dump that holds the 1.8.0 update in `updates/` is used as it is, and 1.8.0 is built when both are there.
 2. **A jailbroken PS5** running a homebrew payload loader (`etaHEN` or `elfldr`), `kstuff`, and **ShadowMountPlus 1.7
    Beta 5** or newer (which mounts and registers `/data/homebrew/PPSA99193` on the home screen). Firmware support
    follows your jailbreak, `kstuff`, and RADV homebrew environment (see [docs/ps5.md](docs/ps5.md)).
@@ -52,7 +54,7 @@ Early, and moving fast. On 17/11/2026 on a base PS5:
 ## Installing on Windows (no WSL)
 
 1. **Put the placeholder title on the PS5.** Unzip `mkw-pit-stop-<version>-ps5-placeholder-PPSA99193.zip` from
-   **Releases** and upload its `PPSA99193` folder to `/data/homebrew/` with an FTP client (FileZilla, WinSCP), so that
+   [**Releases**](https://github.com/exploitizm/mkw-pit-stop/releases) and upload its `PPSA99193` folder to `/data/homebrew/` with an FTP client (FileZilla, WinSCP), so that
    `/data/homebrew/PPSA99193/eboot.bin` exists. Once ShadowMountPlus registers it, launch **Mario Kart World: Pit
    Stop**: it shows **Game files missing** and `Console IP: <address> (port 19913)`. Leave that screen open; the PS5
    receives files only while it is shown.
@@ -79,17 +81,17 @@ Because `eboot.bin` links the recompiled game code and `spirv/` holds the game's
 `eboot.bin` or `spirv/` is distributed**. You build the `PPSA99193` title folder on your PC from the game-free release
 builder and your own dump:
 
-1. Download `mkw-pit-stop-<version>-ps5-builder-linux-x86_64.tar.zst` from **Releases**, check its digest against
+1. Download `mkw-pit-stop-<version>-ps5-builder-linux-x86_64.tar.zst` from [**Releases**](https://github.com/exploitizm/mkw-pit-stop/releases), check its digest against
    `SHA256SUMS`, and unpack it on Linux or WSL2:
    ```sh
    tar --zstd -xf mkw-pit-stop-*-ps5-builder-linux-x86_64.tar.zst
    cd mkw-pit-stop-*
    ```
-2. Run `prepare_ps5.py` pointing at your decrypted *Mario Kart World* 1.0.0 dump:
+2. Run `prepare_ps5.py` pointing at your *Mario Kart World* dump (a folder or a `.nup` file):
    ```sh
    python3 prepare_ps5.py --source /path/to/your/mkw-dump --out ./PPSA99193
    ```
-   The script verifies your 1.0.0 dump, translates the AArch64 ExeFS to C (`ps5-high144`), compiles and links
+   The script finds your dump's version (1.8.0 or 1.0.0), translates the AArch64 ExeFS to C (`ps5-high144`), compiles and links
    `eboot.bin` against the prebuilt runtime and PS5 RADV archive, downloads NVIDIA's `nvdisasm` and `ptxas` (pinned by
    SHA-256) to generate the SM86 instruction spec locally, translates all 11,561 shaders into `PPSA99193/spirv/`, and
    stages `exefs/` and `romfs/` into `PPSA99193/`.
@@ -130,7 +132,7 @@ From upstream [mkw-recomp](https://github.com/adriadam10/mkw-recomp):
   <img src="docs/images/launcher-main.png" width="400" alt="The start screen once the game is set up">
 </p>
 
-1. Dump Mario Kart World 1.0.0 from your Switch 2 (`exefs/` and `romfs/`, decrypted).
+1. Dump Mario Kart World 1.0.0 or 1.8.0 from your Switch 2 (`exefs/` and `romfs/`, decrypted).
 2. Download the PC launcher from [mkw-recomp Releases](https://github.com/adriadam10/mkw-recomp/releases): on Linux the
    `.AppImage` (keeps the game it builds in `~/.local/share/mkw-recomp`; glibc 2.31 or newer), on Windows the `.zip`.
    Either needs about 30 GB free.
@@ -199,7 +201,7 @@ Measured frame times, each with its date, are in [docs/performance.md](docs/perf
 
 ## Reporting bugs
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). For PS5 issues, attach the console kernel log (`klog`, prefixed with
+See [CONTRIBUTING.md](CONTRIBUTING.md). Report PS5 issues on [this fork's issues](https://github.com/exploitizm/mkw-pit-stop/issues) and attach the console kernel log (`klog`, prefixed with
 `[Mario Kart World: Pit Stop]`) and `logs/setup.log` from the PC builder. For desktop issues, attach `logs/mkw.log` and
 `logs/setup.log`. Never attach game files, dumps, or `eboot.bin` binaries built from your dump.
 
