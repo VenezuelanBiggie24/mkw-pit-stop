@@ -642,7 +642,8 @@ class TransferReport:
     def __init__(self, verb: str = "Sending") -> None:
         self.verb = verb   # "Copying" for a USB drive
         self.t0 = self.last = 0.0
-        self.total = 0
+        self.total = self.base = 0
+        self.started = False
 
     def _due(self, done: int, total: int) -> bool:
         now = time.monotonic()
@@ -665,7 +666,11 @@ class TransferReport:
     def progress(self, bytes_done: int, bytes_total: int, files_done: int, files_total: int) -> None:
         if not self._due(bytes_done, bytes_total):
             return
-        rate = bytes_done / max(time.monotonic() - self.t0, 1e-3)
+        if not self.started:   # what a resumed file already had on the console was not sent now
+            self.started, self.base, self.t0 = True, bytes_done, time.monotonic()
+            emit("progress", bytes_done >> 20, max(1, bytes_total >> 20))
+            return
+        rate = (bytes_done - self.base) / max(time.monotonic() - self.t0, 1e-3)
         left = (bytes_total - bytes_done) / rate if rate > 0 else 0
         eta = f"about {left / 60:.0f} min left" if left >= 90 else f"about {left:.0f} s left"
         emit("note", f"{self.verb} {_size(bytes_done)} / {_size(bytes_total)}, {rate / 2**20:.0f} MiB/s, {eta}, "
@@ -698,7 +703,9 @@ def copy_to_usb(stage: Path, drive: Path) -> Path:
     largest loose file is 465 MiB (1.8.0's RomFS), so FAT32 takes the loose RomFS; romfs.nup (23 GB in one file)
     needs exFAT. The PS5 reads no NTFS drive."""
     dest = drive / "homebrew" / TITLE_ID
-    files = sorted((p for p in stage.rglob("*") if p.is_file() and not p.is_symlink()),
+    packed = (stage / "spirv.nup").is_file()   # then the translator's spirv/ folder is not part of the title
+    files = sorted((p for p in stage.rglob("*") if p.is_file() and not p.is_symlink() and not p.name.endswith(".nup.part")
+                    and not (packed and p.relative_to(stage).parts[0] == "spirv")),
                    key=lambda p: (p.name == "eboot.bin", str(p)))  # eboot.bin last, as the network send
     todo, report = [], TransferReport("Copying")
     for i, src in enumerate(files, 1):
@@ -970,6 +977,14 @@ def main() -> int:
             for gfile in (out_dir / "spirv").glob("*.glsl"):
                 gfile.unlink()
             done_map["shaders"] = sh_key
+            save_state(work, state)
+        # The shaders as one package: what the title reads (.spv, .cs.spv, .res.json; the translator's .done and .result
+        # stay here). 46,000 small files went at ~50 a second to the PS5, some 15 minutes for 350 MB (18/11/2026).
+        spirv_nup = out_dir / "spirv.nup"
+        if done_map.get("spirv_nup") != sh_key or not spirv_nup.is_file():
+            n = write_nup(out_dir / "spirv", spirv_nup, keep=lambda name: name.endswith((".spv", ".res.json")))
+            print(f"shaders: {n} files in spirv.nup ({spirv_nup.stat().st_size / 2**20:.0f} MiB)", file=sys.stderr)
+            done_map["spirv_nup"] = sh_key
             save_state(work, state)
 
         if args.send:

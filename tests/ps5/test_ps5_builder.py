@@ -163,3 +163,17 @@ def test_free_space_only_from_a_receiver_that_measures_it() -> None:
 
     assert send_ps5.usable_free({"free_bytes": 16 << 30}) is None   # an older placeholder: /app0's made-up size
     assert send_ps5.usable_free({"free_bytes": 16 << 30, "free_real": 1}) == 16 << 30
+
+
+def test_nup_writer_keeps_only_what_is_asked(tmp_path: Path) -> None:
+    import nup_reader
+    import nup_writer
+
+    src = tmp_path / "spirv"
+    src.mkdir()
+    for name in ("a.spv", "a.cs.spv", "a.res.json", "a.done", "a.result", "failed.tsv"):
+        (src / name).write_bytes(name.encode())
+    out = tmp_path / "spirv.nup"
+    assert nup_writer.write_nup(src, out, keep=lambda n: n.endswith((".spv", ".res.json"))) == 3
+    with nup_reader.NupReader(out) as r:
+        assert sorted(r.romfs) == ["a.cs.spv", "a.res.json", "a.spv"]

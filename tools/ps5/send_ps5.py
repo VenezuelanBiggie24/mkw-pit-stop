@@ -93,6 +93,18 @@ def _save_hash_cache(cache_path: Path | None, entries: dict[str, tuple[int, int,
     tmp.replace(cache_path)
 
 
+def send_rank(rel: str, size: int) -> int:
+    """The order of a send. Large files first: most of the time is theirs, so the speed and time left mean something
+    at once. What the title starts from last, eboot.bin at the very end: a send that breaks leaves the placeholder's
+    own eboot.bin, sce_module/ and sce_sys/ untouched, so it still starts and takes the rest (a broken send left a
+    title that crashed at launch, with no way back to the receiver, 18/11/2026)."""
+    if rel == "eboot.bin":
+        return 3
+    if rel.startswith(("sce_module/", "sce_sys/")):
+        return 2
+    return 0 if size >= RESUME_MIN else 1
+
+
 def collect_stage_files(
     stage_dir: Path,
     cache_path: Path | None = None,
@@ -113,12 +125,13 @@ def collect_stage_files(
             if p.is_symlink() or not p.is_file():
                 continue
             rel = p.relative_to(stage_dir).as_posix()
-            if rel in (".pitstop-manifest.tsv", CACHE_NAME) or rel.endswith(".pitstop.part"):
+            if rel in (".pitstop-manifest.tsv", CACHE_NAME) or rel.endswith((".pitstop.part", ".nup.part")):
                 continue
+            if rel.startswith("spirv/") and (stage_dir / "spirv.nup").is_file():
+                continue   # the translator's folder: spirv.nup is what the title reads
             raw.append((rel, p))
 
-    # Send metadata/assets/shaders before eboot.bin so eboot.bin lands last once all data is on the console.
-    raw.sort(key=lambda item: (1 if item[0] == "eboot.bin" else 0, item[0]))
+    raw.sort(key=lambda item: (send_rank(item[0], item[1].stat().st_size), item[0]))
 
     old_cache = _load_hash_cache(cache_path)
     new_cache: dict[str, tuple[int, int, bytes]] = {}
@@ -228,11 +241,11 @@ def send_directory(
 
         send_files = len(need)
         send_bytes = sum(item[2] for item in need)
-        # romfs.nup replaces a loose romfs/ an earlier send left beside it (23 GB the console would keep twice)
+        # a package replaces the loose folder an earlier send left beside it (romfs/: 23 GB kept twice otherwise)
         def remove_loose() -> None:
             for rel, *_ in entries:
-                if rel == "romfs.nup" or rel.endswith("/romfs.nup"):
-                    loose = (rel[: -len("romfs.nup")] + "romfs").encode("utf-8")
+                if rel == "spirv.nup" or rel == "romfs.nup" or rel.endswith("/romfs.nup"):
+                    loose = rel[: -len(".nup")].encode("utf-8")   # romfs/ or spirv/ beside its package
                     sock.sendall(b"PIT1X" + struct.pack("<H", len(loose)) + loose)
                     _expect_ack(sock)
 
