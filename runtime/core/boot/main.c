@@ -46,6 +46,10 @@
 #include "sha256.h"
 #include "ui/launcher/launcher.h"
 #ifdef MKW_PS5_NATIVE
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+
 #include "platform/ps5_recv.h"
 #include "ui/menu/ps5_placeholder.h"
 extern const char rt_port_version[];
@@ -80,10 +84,21 @@ void rt_log_slow_stats(uint64_t *n, uint64_t *ns, uint64_t *max) {
     *max = __atomic_exchange_n(&g_slow_max, 0, __ATOMIC_RELAXED);
 }
 
+#ifdef MKW_PS5_NATIVE
+// The platform's stderr, the stream into the kernel log, once stderr_capture has replaced it: only the log thread (or
+// a flush) waits for it.
+static FILE *g_klog;
+#endif
+
 // The slow part: stderr and the log file. One writer at a time (the log thread, or rt_log_flush).
 static void log_sink(const char *p, size_t n) {
     uint64_t t0 = plat_now_ns();
+#ifdef MKW_PS5_NATIVE
+    FILE *out = __atomic_load_n(&g_klog, __ATOMIC_ACQUIRE);
+    fwrite(p, 1, n, out ? out : stderr);
+#else
     fwrite(p, 1, n, stderr);
+#endif
     if (__atomic_load_n(&g_log_state, __ATOMIC_ACQUIRE) == LOG_FILE) {
         uint64_t at = __atomic_fetch_add(&g_log_bytes, n, __ATOMIC_RELAXED);
         if (at + n <= LOG_CAP) {
@@ -132,9 +147,38 @@ static void log_drain_locked(void) {   // g_drain_lock held
     }
 }
 
+#ifdef MKW_PS5_NATIVE
+// What stderr_capture's pipe holds, whole lines into the ring. One reader at a time: the log thread or a flush.
+static int g_err_read = -1, g_err_busy;
+static char g_err_line[2048];
+static size_t g_err_n;
+
+static void stderr_drain(void) {
+    int fd = __atomic_load_n(&g_err_read, __ATOMIC_ACQUIRE);
+    if (fd < 0 || __atomic_exchange_n(&g_err_busy, 1, __ATOMIC_ACQUIRE)) return;
+    for (;;) {
+        ssize_t k = read(fd, g_err_line + g_err_n, sizeof g_err_line - g_err_n);
+        if (k <= 0) break;
+        g_err_n += (size_t)k;
+        size_t keep = g_err_n;   // a line longer than the buffer goes out as it is
+        while (keep && g_err_line[keep - 1] != '\n') keep--;
+        if (!keep && g_err_n == sizeof g_err_line) keep = g_err_n;
+        if (keep) {
+            rt_log_raw(g_err_line, keep);
+            memmove(g_err_line, g_err_line + keep, g_err_n - keep);
+            g_err_n -= keep;
+        }
+    }
+    __atomic_store_n(&g_err_busy, 0, __ATOMIC_RELEASE);
+}
+#endif
+
 static void log_thread(void *arg) {
     (void)arg;
     for (;;) {
+#ifdef MKW_PS5_NATIVE
+        stderr_drain();
+#endif
         if (__atomic_load_n(&g_ring_tail, __ATOMIC_ACQUIRE) == __atomic_load_n(&g_ring_head, __ATOMIC_ACQUIRE) &&
             !__atomic_load_n(&g_ring_dropped, __ATOMIC_RELAXED)) {
             plat_sleep_ms(2);
@@ -150,6 +194,9 @@ static void log_thread(void *arg) {
 // 0.5 s of it, drain without it.
 void rt_log_flush(void) {
     if (!__atomic_load_n(&g_log_async, __ATOMIC_ACQUIRE)) return;
+#ifdef MKW_PS5_NATIVE
+    stderr_drain();
+#endif
     for (int i = 0; i < 250; i++) {
         if (plat_rmutex_trylock(&g_drain_lock)) {
             log_drain_locked();
@@ -186,6 +233,40 @@ void rt_log_raw(const char *p, size_t n) {
         log_sink(p, n);
     }
 }
+
+#ifdef MKW_PS5_NATIVE
+// stderr as a non-blocking pipe the log thread reads. The platform's stderr (PS5 payload SDK, klog.c) is a blocking pipe
+// to a thread that hands the kernel log one line at a time, a call that can take seconds; once our log output has
+// filled that pipe, every other writer waits. RADV prints its 10 s submission statistics there (radv_ps5_cs.c) under
+// its submit lock, inside vkQueueSubmit, with our queue lock held: the replay, the uploads and the game's fence waits
+// all stopped behind one fprintf while the GPU had nothing left to do (every breadcrumb finished). Stalls of 3.8-18.8 s
+// in three of four races of the upstream merge (runs d1, d3, d4, 18/11/2026; worst frame 15-18 s), and before the race
+// on the branch before it (A-3, c1: 9.8-14 s). A writer now never waits: a full pipe loses its line. The stream is
+// replaced, as the platform does, because a title may not dup descriptor 2 (EPERM). The log thread reads the pipe: with
+// a thread of its own, 4 of 5 races ran ~2 ms a frame slower (25.4-26.1 ms, cause not found); read here, four races
+// took 23.4-23.8 ms against 23.2-23.7 without the merge, worst frame 150 ms, no stall (t1-t4, c2, c3).
+static void stderr_capture(void) {
+    int fds[2];
+    const char *step = "pipe";
+    if (pipe(fds)) goto failed;
+    step = "non-blocking pipe";
+    if (fcntl(fds[0], F_SETFL, O_NONBLOCK) || fcntl(fds[1], F_SETFL, O_NONBLOCK)) goto failed_pipe;
+    step = "stream";
+    FILE *w = fdopen(fds[1], "w");
+    if (!w) goto failed_pipe;
+    setvbuf(w, NULL, _IOLBF, 0);
+    fflush(stderr);
+    __atomic_store_n(&g_klog, stderr, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_err_read, fds[0], __ATOMIC_RELEASE);
+    stderr = w;
+    fprintf(stderr, "[host] log: stderr goes through the log thread\n");
+    return;
+failed_pipe:
+    close(fds[0]), close(fds[1]);
+failed:
+    rt_log("log: stderr left as it was (%s, errno %d): prints there can still block their thread", step, errno);
+}
+#endif
 
 void rt_vlogf(const char *fmt, va_list ap) {
     char buf[2048];
@@ -265,7 +346,12 @@ static void log_open(int game) {
     plat_append_write(g_log_file, g_log_early, n);
     g_log_bytes = n;
     __atomic_store_n(&g_log_state, LOG_FILE, __ATOMIC_RELEASE);
-    if (plat_thread_spawn(log_thread, NULL, "log", 0)) __atomic_store_n(&g_log_async, 1, __ATOMIC_RELEASE);
+    if (plat_thread_spawn(log_thread, NULL, "log", 0)) {
+        __atomic_store_n(&g_log_async, 1, __ATOMIC_RELEASE);
+#ifdef MKW_PS5_NATIVE
+        stderr_capture();
+#endif
+    }
     // the port's version as git describe gave it at build time (tools/build/build.py port_version): "-dirty" or a
     // commit no release has tells a report from a build with local changes (#88 on 11/11/2026: a log line of a
     // transcoder that is in no commit)
