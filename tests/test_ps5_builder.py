@@ -142,3 +142,24 @@ def test_nup_writer_round_trip(tmp_path: Path) -> None:
         for rel, data in files.items():
             assert r.read_entry(r.romfs[rel]) == data
             assert r.romfs[rel].codec == nup_reader.CODEC_RAW   # read in place on the PS5, never decoded
+
+
+def test_builder_package_ships_what_prepare_imports() -> None:
+    """Every tools/ps5 module the builder imports is in the package: nup_writer.py was not, and the packaged builder
+    could not start (18/11/2026)."""
+    import ast
+
+    for script in ("prepare_ps5.py", "send_ps5.py", "ps5_prepare_common.py", "nup_reader.py", "nup_writer.py"):
+        assert f"tools/ps5/{script}" in release_ps5.SOURCES
+        for node in ast.walk(ast.parse((ROOT / "tools/ps5" / script).read_text(encoding="utf-8"))):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module] if isinstance(node, ast.ImportFrom) and node.module else []
+            for name in names:
+                if (ROOT / "tools/ps5" / f"{name}.py").is_file():
+                    assert f"tools/ps5/{name}.py" in release_ps5.SOURCES, f"{script} imports {name}"
+
+
+def test_free_space_only_from_a_receiver_that_measures_it() -> None:
+    import send_ps5
+
+    assert send_ps5.usable_free({"free_bytes": 16 << 30}) is None   # an older placeholder: /app0's made-up size
+    assert send_ps5.usable_free({"free_bytes": 16 << 30, "free_real": 1}) == 16 << 30

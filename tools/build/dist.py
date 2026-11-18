@@ -113,6 +113,7 @@ SOURCES = ["recomp", "sm86", "tools/build/build.py", "tools/prepare", "tools/mod
            "tools/i18n/catalog.py", "tools/i18n/game_texts.py", "i18n/game",
            "tools/shaders/extract.py", "tools/shaders/translate.py", "tools/shaders/shaderc_lib.py",
            "tools/ps5/prepare_ps5.py", "tools/ps5/ps5_prepare_common.py", "tools/ps5/nup_reader.py",
+           "tools/ps5/nup_writer.py",
            "tools/ps5/send_ps5.py", "tools/ps5/deploy.py",
            "runtime/cpu",
            "runtime/core/boot/gamelib.h",
