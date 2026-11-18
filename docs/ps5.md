@@ -357,7 +357,7 @@ builds see the same functions:
 
 ```sh
 uv run tools/build/build.py --guest-layout ps5-high144 --gen build/ps5-game/generated --pgo-gen build/pgo/raw
-MKW_GPU=null MKW_PGO_AT=1500,4500 build/layout-ps5-high144/mkw-pgo-gen --seconds 280   # menus, then a race
+MKW_GPU=null MKW_PGO_AT=1500,4500 MKW_INPUT_SCRIPT=race-drive.txt build/layout-ps5-high144/mkw-pgo-gen --seconds 280
 llvm-profdata merge -o build/pgo/mkw.profdata build/pgo/raw/*.profraw
 uv run tools/ps5/build_game.py ... --pgo-use build/pgo/mkw.profdata
 ```
@@ -365,6 +365,9 @@ uv run tools/ps5/build_game.py ... --pgo-use build/pgo/mkw.profdata
 The instrumentation is clang's front end (`-fprofile-instr-generate`): its function hashes come from the C's syntax
 tree, so the other target, `-march` and `-fPIC` of the PS5 build do not change them. `MKW_GPU=null` runs the game's
 CPU side without the software GPU's stalls; the counts are of the game code, which does not depend on the GPU.
+`race-drive.txt` is an input script of your own (`tools/run/press-race.txt`'s menu presses, then the race driven):
+not `MKW_QUICK_RACE` or `MKW_SEQ_WATCH`, which turn on the function-entry hook and would mark it hot in every
+function (`pgo.c` warns). Only a clean end (`plat_exit(0)`) writes the `-exit` stretch; a crash writes nothing.
 `MKW_PGO_AT` cuts the profile into stretches (`runtime/core/diag/pgo.c`), so the race can be weighted above the menus
 (`llvm-profdata merge --weighted-input=W,FILE`). A profile goes stale when the generator or `runtime/cpu`'s headers
 change: `build_game.py --pgo-use` prints how many functions clang found out of date or without data, and those are
