@@ -58,6 +58,7 @@ Early, and moving fast. On 18/11/2026 on a base PS5:
    `/data/homebrew/PPSA99193/eboot.bin` exists. Once ShadowMountPlus registers it, launch **Mario Kart World: Pit
    Stop**: it shows **Game files missing** and `Console IP: <address> (port 19913)`. Leave that screen open; the PS5
    receives files only while it is shown.
+   <p align="center"><img src="docs/images/placeholder-ps5.png" width="560" alt="The placeholder title on the PS5: Game files missing, the console's address, and the PC build's step and progress"></p>
 2. **Unpack the builder on the PC.** Download `mkw-pit-stop-<version>-ps5-builder-windows-x86_64.zip`, right-click it,
    **Properties**, tick **Unblock**, then extract it to a short folder on a drive with 30 GB free, such as
    `C:\PitStop` (not `Program Files` or OneDrive).
@@ -68,6 +69,7 @@ Early, and moving fast. On 18/11/2026 on a base PS5:
    ```bat
    prepare_ps5.bat --source "D:\Dumps\MKW" --send 192.168.1.50
    ```
+   <p align="center"><img src="docs/images/launcher-ps5.png" width="560" alt="The PS5 builder's start screen: your copy chosen, the PS5's address typed in, and the Build for PS5 button"></p>
 4. **Start the game.** While the PC builds, the PS5 screen shows its step and progress; it shows **Transfer
    complete!** when every file has arrived and been checked: press
    **Cross**, then launch **Mario Kart World: Pit Stop** again.
@@ -128,7 +130,7 @@ Press **Options + touchpad click** on the DualSense (or **F1** on desktop) from 
 From upstream [mkw-recomp](https://github.com/adriadam10/mkw-recomp):
 
 <p align="center">
-  <img src="docs/images/launcher-setup.png" width="400" alt="The start screen setting the game up from the player's dump">
+  <img src="docs/images/launcher-files.png" width="400" alt="The start screen's Game files page before the setup">
   <img src="docs/images/launcher-main.png" width="400" alt="The start screen once the game is set up">
 </p>
 
