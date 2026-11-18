@@ -77,9 +77,10 @@ def title_setup(template: Path, title: Path) -> None:
                         GIT_AUTHOR_EMAIL="mkw@localhost", GIT_COMMITTER_EMAIL="mkw@localhost")
         with tempfile.TemporaryDirectory(dir=title.parent) as directory:
             staged = Path(directory) / "title"
+            # No --flexible-memory: the template offers only 448 or 1024 and refused 640, so a fresh checkout's first
+            # build failed (18/11/2026; older checkouts had a title already). param.json gets FLEXIBLE_MIB below.
             subprocess.run([sys.executable, str(template / "ps5/tools/new-title.py"), str(staged),
-                            "--title-id", TITLE_ID, "--name", safe_name, "--refresh", "60",
-                            "--flexible-memory", str(FLEXIBLE_MIB)], check=True, env=identity)
+                            "--title-id", TITLE_ID, "--name", safe_name, "--refresh", "60"], check=True, env=identity)
             (staged / "ps5/sce_sys/icon0.png").unlink(missing_ok=True)
             staged.rename(title)
     # The home screen icon: our own "MKW: Pit Stop" drawing (tools/build/pit_stop_icon.py), rewritten on every build so a
