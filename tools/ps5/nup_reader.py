@@ -1,6 +1,6 @@
 """Clean-room NUP (NX Package v1) reader and extractor for unencrypted Switch 1/2 dumps.
 
-Why: players often store their decrypted Mario Kart World 1.0.0 dump as a single .nup container rather than a loose
+Why: players often store their decrypted Mario Kart World dump (1.0.0, or with its 1.8.0 update) as a single .nup container rather than a loose
 exefs/ + romfs/ folder. Reading NUP directly (verifying exefs/main's build ID before unpacking 23 GB) lets both the
 desktop setup and the PS5 builder accept .nup inputs with no console keys or external tools.
 
@@ -22,6 +22,9 @@ from pathlib import Path
 import struct
 import sys
 from typing import Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "recomp"))
+from versions import VERSIONS  # noqa: E402
 
 MAGIC = b"NUP\x01"
 TOC_MAGIC = b"TOC\x01"
@@ -342,20 +345,23 @@ class NupReader:
             raise NupError(f"{self.path.name}: unpacked SHA-256 mismatch for {entry.rel_path}")
         part.replace(dst)
 
-    def check_mkw_100(self, expected_build_id: str, min_romfs_files: int) -> tuple[int, int]:
-        """Verify exefs/main build ID and RomFS file count before unpacking."""
+    def check_mkw(self, versions, margin: float):
+        """The version of exefs/main (with the updates merged over the base, the newest update's) among versions
+        (recomp/versions.py rows), checked against that version's RomFS size, before unpacking."""
         if "main" not in self.exefs:
             raise NupError(f"{self.path.name}: missing exefs/main")
         main_bytes = self.read_entry(self.exefs["main"])
         if main_bytes[:4] != b"NSO0":
             raise NupError(f"{self.path.name}: exefs/main is not an NSO0 (decrypted dump required)")
         got = main_bytes[0x40:0x48].hex()
-        if got != expected_build_id:
-            raise NupError(f"{self.path.name}: exefs/main is not Mario Kart World 1.0.0 (build id {got})")
+        v = next((v for v in versions if v.main_build_id == got), None)
+        if v is None:
+            names = ", ".join(v.name for v in sorted(versions, key=lambda v: v.number))
+            raise NupError(f"{self.path.name}: exefs/main is not Mario Kart World {names} (build id {got})")
         n_romfs = len(self.romfs)
-        if n_romfs < min_romfs_files:
-            raise NupError(f"{self.path.name}: RomFS has {n_romfs} files, 1.0.0 has ~205660 (incomplete copy)")
-        return len(self.exefs), n_romfs
+        if n_romfs < int(v.romfs_files * margin):
+            raise NupError(f"{self.path.name}: RomFS has {n_romfs} files, {v.name} has ~{v.romfs_files} (incomplete copy)")
+        return v
 
     def unpack_tree(
         self,
@@ -388,7 +394,7 @@ class NupReader:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p_chk = sub.add_parser("check", help="validate a .nup container and verify MKW 1.0.0")
+    p_chk = sub.add_parser("check", help="validate a .nup container and print its MKW version")
     p_chk.add_argument("nup", type=Path)
     p_unp = sub.add_parser("unpack", help="unpack exefs/ and romfs/ from a .nup container")
     p_unp.add_argument("nup", type=Path)
@@ -397,9 +403,10 @@ def main() -> int:
     args = ap.parse_args()
     try:
         with NupReader(args.nup) as reader:
-            n_exe, n_rom = reader.check_mkw_100("9e244438c3d8ef1c", int(205_660 * 0.95))
+            v = reader.check_mkw(VERSIONS, 0.95)
+            n_exe, n_rom = len(reader.exefs), len(reader.romfs)
             if args.cmd == "check":
-                print(f"OK: {args.nup.name}: {n_exe} exefs files, {n_rom} romfs files, uuid={reader.uuid.hex()}")
+                print(f"OK: {args.nup.name}: MKW {v.name}, {n_exe} exefs files, {n_rom} romfs files, uuid={reader.uuid.hex()}")
                 return 0
             reader.unpack_tree("exefs", args.out / "exefs")
             if not args.exefs_only:

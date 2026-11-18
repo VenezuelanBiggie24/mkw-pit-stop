@@ -11,7 +11,7 @@
 
 // ---- virtual cores
 // Horizon runs at most one thread per core, and TotK keys per-core data (allocators, job queues) by the current core
-// number without locks. A guest thread therefore holds one of the three application cores while it runs guest code
+// number without locks. A guest thread therefore holds one of the six application cores (NCORE) while it runs guest code
 // and gives it up only where Horizon would switch threads (waits, sleep, yield, exit, blocking host calls); a free
 // core goes to the best waiting thread. A waiter better than a holder asks one holder to give its core up (core_kick),
 // which it does at its next SVC or indirect call (kern_checkpoint, rt_dispatch), as Horizon runs the better thread at

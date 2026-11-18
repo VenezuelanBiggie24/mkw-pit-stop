@@ -220,6 +220,13 @@ def pgo_report(text: str) -> None:
         print(f"PGO: {line}")
 
 
+def game_interface(sdk: Path, env: dict[str, str], runtime: Path) -> list[str]:
+    """The runtime's global rt_* and fnprof_* functions (runtime/cpu/*.h: what the lifted code calls)."""
+    out = subprocess.check_output([str(sdk / "bin/llvm-nm"), "--defined-only", "--extern-only", "--format=just-symbols",
+                                   str(runtime)], env=env, text=True)
+    return sorted({n for n in out.split() if n.startswith(("rt_", "fnprof_"))})
+
+
 def import_inventory(sdk: Path, objects: list[Path], env: dict[str, str], out: Path, reachable: bool) -> Path | None:
     if not objects:
         return None
@@ -227,7 +234,13 @@ def import_inventory(sdk: Path, objects: list[Path], env: dict[str, str], out: P
     aggregate = out / f"{label}-inventory.o"
     log = out / f"{label}-link.log"
     report = out / f"{label}-imports.txt"
-    gc = ["--gc-sections", "-u", "main", "-u", "catchReturnFromMain"] if reachable else []
+    # The loader object is what a game-free build (the placeholder, the PC builder's bundle) links: cut from main with
+    # no game code, it would lose what only the game code calls, so that interface is kept by name: the runtime's rt_*
+    # entry points and the function profiler's counter, each by name (lld's --undefined-glob makes no GC root) (rt_sj_owner, rt_spin_gate and rt_udf, new in upstream 0.1.13,
+    # were cut and the builder's link failed, 17/11/2026). The whole runtime object instead keeps desktop-only code
+    # whose SDL calls the PS5 has no library for.
+    gc = ["--gc-sections", "-u", "main", "-u", "catchReturnFromMain",
+          *(f"-u{name}" for name in game_interface(sdk, env, out / "runtime-inventory.o"))] if reachable else []
     result = subprocess.run([str(sdk / "bin/ld.lld"), "-r", *gc, *map(str, objects), "-o", str(aggregate)],
                             env=env, text=True, capture_output=True, check=False)
     log.write_text(result.stdout + result.stderr)
@@ -332,9 +345,8 @@ def main() -> int:
         "title_id": TITLE_ID, "port_version": port_version(), "rt_game_id": game_id(PROFILE), "profile": PROFILE,
     }, indent=2) + "\n").encode())
     write_symbols(sdk, env, link / "link/llvm-pie.elf", package / "mkw.sym")
-    seq_nodes = ROOT / "build/seq_nodes.tsv"
-    if seq_nodes.is_file():
-        shutil.copy2(seq_nodes, package / "seq_nodes.tsv")
+    for seq_nodes in ROOT.glob("build/seq_nodes*.tsv"):   # each version's (1.0.0: seq_nodes.tsv, 1.8.0: -180)
+        shutil.copy2(seq_nodes, package / seq_nodes.name)
     if exefs is not None:
         destination = package / "exefs"
         destination.mkdir(exist_ok=True)

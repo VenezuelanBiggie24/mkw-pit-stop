@@ -37,9 +37,19 @@ int ps5_recv_validate_path(const char *rel);
 // Returns 1 if an IP was obtained, 0 otherwise.
 int ps5_console_ip(char *out, size_t cap);
 
-// Check whether exefs/main, romfs/, spirv/ exist under root_dir and (if pitstop-game.id is present) match
-// expected_game_id. Returns 1 if ready, 0 if missing/mismatched (writing a short reason to why).
+// Check whether the game's exefs/main and romfs/ (ps5_game_dir), and spirv/ exist under root_dir and (if
+// pitstop-game.id is present) match expected_game_id. Returns 1 if ready, 0 if missing/mismatched (writing a short
+// reason to why).
 int ps5_game_files_ready(const char *root_dir, const char *expected_game_id, char *why, size_t why_cap);
+
+// The SHA-256 (hex) of the exefs/main the built-in game code was generated from (RtGame.exefs_sha256), set before
+// ps5_game_files_ready / ps5_game_dir so they pick the dump's matching version.
+void ps5_game_set_main_sha256(const char *hex);
+
+// The folder under root_dir holding exefs/ + romfs/ of the version the game code was built for: the dump as the
+// player copied it, so updates/<title version>/ (a console dump's 1.8.0, 917504) as well as root_dir itself, newest
+// first, matched by exefs/main's SHA-256 when more than one is there. NULL when none is (reason in why).
+const char *ps5_game_dir(const char *root_dir, char *why, size_t why_cap);
 
 // Start the receiver listener thread on 0.0.0.0:port (0 selects PS5_RECV_PORT or MKW_PS5_RECV_PORT).
 // Returns 1 on success, 0 on bind/listen/thread failure.

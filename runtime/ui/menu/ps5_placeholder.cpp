@@ -85,8 +85,8 @@ static void draw_placeholder(float width, float height, void *raw_ctx) {
                 ImGui::TextDisabled("Fix the issue and try again from the PC builder, or press Cross / A to exit.");
             } else {
                 ImGui::TextWrapped(
-                    "Open the Pit Stop launcher on your PC (Windows or Linux), select your Mario Kart World 1.0.0 "
-                    "dump or .nup file, enter this console's IP below, and click Build for PS5.");
+                    "Open the Pit Stop launcher on your PC (Windows or Linux), select your Mario Kart World dump "
+                    "folder or .nup file (version 1.8.0), enter this console's IP below, and click Build for PS5.");
                 ImGui::Spacing();
 
                 ImGui::SetWindowFontScale(1.35f);
@@ -102,7 +102,7 @@ static void draw_placeholder(float width, float height, void *raw_ctx) {
                 ImGui::Spacing();
 
                 ImGui::Text("Expected Pit Stop runtime: %s   (game id: %s)", ver, gid);
-                ImGui::Text("Required game dump: Mario Kart World 1.0.0  (main build ID 9e244438c3d8ef1c)");
+                ImGui::Text("Required game dump: Mario Kart World 1.8.0 (or 1.0.0), dumped from your own Switch 2");
                 ImGui::Spacing();
                 ImGui::Separator();
                 ImGui::Spacing();

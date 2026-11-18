@@ -3,12 +3,13 @@
 
 Why: a PS5 release cannot ship game code (which links statically into eboot.bin), exefs/, romfs/, or translated
 shaders (spirv/). This builder runs on Windows or Linux without a PS5 SDK or bash installed, validates Mario Kart
-World 1.0.0 (folder or .nup), unpacks .nup if needed, lifts AArch64 code to C, compiles with zig cc (or clang),
+World 1.8.0 or 1.0.0 (folder or .nup; recomp/versions.py), unpacks .nup if needed, lifts AArch64 code to C, compiles with zig cc (or clang),
 links and signs eboot.bin with ps5-native-tool[.exe], translates shaders (reusing desktop caches if present), stages
 PPSA99193/, and streams changed files to the Pit Stop placeholder receiver over TCP (PIT1) or FTP.
 
 Steps (tracked in <work>/setup-state.json so interrupted or updated runs rebuild and send only what changed):
-  check     verify Mario Kart World 1.0.0 (main build id 9e244438c3d8ef1c) and builder bundle
+  check     find the dump's version by exefs/main's build id (1.8.0 preferred when a dump holds both, as a console
+            dump with its update in updates/917504 does) and check the builder bundle
   nup       unpack .nup into <work>/nup once (skipped for folder dumps or cached .nup)
   exefs     stage exefs/ into <out>/exefs/
   romfs     stage romfs/ into <out>/romfs/ (or skip with --romfs skip)
@@ -46,7 +47,7 @@ import build  # noqa: E402
 from layout import output_lock, read_checked  # noqa: E402
 from machine import Failed, default_cc, default_glslc, mem_gb, own_children, shader_jobs, tool_env  # noqa: E402
 from nup_reader import NupError, NupReader, is_nup  # noqa: E402
-from ps5_prepare_common import ROMFS_FILES, check, copy_tree, emit, run, sm86_spec  # noqa: E402
+from ps5_prepare_common import check, copy_tree, emit, remove_stale, run, sm86_spec  # noqa: E402
 from send_ps5 import TransferError, send_directory  # noqa: E402
 
 TITLE_ID = "PPSA99193"
@@ -579,9 +580,8 @@ def link_ps5_eboot(layout: dict, rt_obj: Path, extra_objs: list[Path], work: Pat
                     "rt_game_id": layout["rt_game_id"], "profile": PROFILE}, indent=2) + "\n",
         encoding="utf-8",
     )
-    seq_nodes = ROOT / "build/seq_nodes.tsv"
-    if seq_nodes.is_file():
-        shutil.copy2(seq_nodes, out_dir / "seq_nodes.tsv")
+    for seq_nodes in ROOT.glob("build/seq_nodes*.tsv"):   # a source checkout's (each version's: seqwatch.c)
+        shutil.copy2(seq_nodes, out_dir / seq_nodes.name)
 
 
 # ---- shader reuse + setup state
@@ -670,7 +670,9 @@ def main() -> int:
     try:
         emit("step", "check")
         src = args.source.resolve()
-        exefs_checked, romfs_checked = check(src)
+        exefs_checked, romfs_checked, version = check(src)
+        emit("version", version.name)
+        print(f"prepare_ps5: Mario Kart World {version.name} from {exefs_checked}", file=sys.stderr)
         from_nup = is_nup(src)
 
         bundle = find_bundle(args.bundle)
@@ -684,9 +686,9 @@ def main() -> int:
 
         if from_nup:
             with NupReader(src) as nr:
-                src_id = f"nup:{nr.toc_sha256.hex()}"
+                src_id = f"nup:{nr.toc_sha256.hex()}:{version.number}"
         else:
-            src_id = f"dir:{exefs_checked}:{romfs_checked}"
+            src_id = f"dir:{exefs_checked}:{romfs_checked}:{version.number}"
 
         if args.check_only:
             emit("done")
@@ -711,35 +713,41 @@ def main() -> int:
         else:
             emit("skip", "nup")
             exefs_src, romfs_src = exefs_checked, romfs_checked
+        # The title folder keeps the dump's layout (a console dump's 1.8.0 in updates/917504/): the runtime finds the
+        # version there (ps5_recv.c ps5_game_dir), so a dump the player copied to the console by hand is the same.
+        game_rel = Path() if from_nup else exefs_checked.parent.relative_to(src)
+        game_out = out_dir / game_rel
 
-        if done_map.get("exefs") == src_id and (out_dir / "exefs/main").is_file():
+        if done_map.get("exefs") == src_id and (game_out / "exefs/main").is_file():
             emit("skip", "exefs")
         else:
             emit("step", "exefs")
-            copy_tree(exefs_src, out_dir / "exefs", sum(1 for p in exefs_src.iterdir() if p.is_file()))
+            copy_tree(exefs_src, game_out / "exefs", sum(1 for p in exefs_src.iterdir() if p.is_file()))
+            remove_stale(exefs_src, game_out / "exefs", version.name)   # 1.0.0 has no subsdk1: one left would be loaded
             done_map["exefs"] = src_id
             save_state(work, state)
 
         rom_key = f"{args.romfs}:{src_id}"
         if args.romfs == "skip":
             emit("skip", "romfs")
-        elif done_map.get("romfs") == rom_key and (out_dir / "romfs").is_dir():
+        elif done_map.get("romfs") == rom_key and (game_out / "romfs").is_dir():
             emit("skip", "romfs")
         else:
             emit("step", "romfs")
-            copy_tree(romfs_src, out_dir / "romfs", ROMFS_FILES)
+            copy_tree(romfs_src, game_out / "romfs", version.romfs_files)
+            remove_stale(romfs_src, game_out / "romfs", version.name)
             done_map["romfs"] = rom_key
             save_state(work, state)
 
         gen = work / "generated"
-        gen_key = f"{PROFILE}:{src_id}:{hashlib.sha256((ROOT / 'recomp/patches-mkw.txt').read_bytes()).hexdigest()[:16]}"
+        gen_key = f"{PROFILE}:{src_id}:{hashlib.sha256(version.patches.read_bytes()).hexdigest()[:16]}"
         if done_map.get("generate") == gen_key and (gen / "layout.json").is_file():
             emit("skip", "generate")
         else:
             emit("step", "generate")
             run([sys.executable, str(ROOT / "recomp/gen.py"), "--guest-layout", PROFILE,
                  "--exefs", str(exefs_src), "--out", str(gen), "--jobs", str(jobs),
-                 "--patches", str(ROOT / "recomp/patches-mkw.txt")])
+                 "--patches", str(version.patches)])
             done_map["generate"] = gen_key
             save_state(work, state)
 

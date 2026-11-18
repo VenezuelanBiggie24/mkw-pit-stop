@@ -4,6 +4,7 @@
 #include "ps5_recv.h"
 
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netinet/in.h>
@@ -632,21 +633,82 @@ int ps5_console_ip(char *out, size_t cap) {
 #endif
 }
 
+static char g_main_sha[65];
+
+void ps5_game_set_main_sha256(const char *hex) { snprintf(g_main_sha, sizeof g_main_sha, "%s", hex ? hex : ""); }
+
+static int has_game(const char *dir) {
+    char p[768];
+    struct stat st;
+    snprintf(p, sizeof p, "%s/exefs/main", dir);
+    if (stat(p, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) return 0;
+    snprintf(p, sizeof p, "%s/romfs", dir);
+    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static int main_matches(const char *dir) {
+    char p[768], hex[65];
+    uint8_t d[32];
+    snprintf(p, sizeof p, "%s/exefs/main", dir);
+    if (!sha256_file(p, d)) return 0;
+    for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", d[i]);
+    return strcmp(hex, g_main_sha) == 0;
+}
+
+static int by_version_desc(const void *a, const void *b) {
+    unsigned long x = strtoul(*(char *const *)a, NULL, 10), y = strtoul(*(char *const *)b, NULL, 10);
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+const char *ps5_game_dir(const char *root_dir, char *why, size_t why_cap) {
+    // once per boot: the placeholder check, the receiver's status and the paths ask the same (each hash of a
+    // candidate's main, ~55 MB, would cost a read of it again)
+    static char found[768], done_for[512];
+    static int done;
+    if (why && why_cap) why[0] = 0;
+    if (done && !strcmp(done_for, root_dir)) return found[0] ? found : NULL;
+    char *cands[33];
+    int n = 0;
+    char up[640];
+    snprintf(up, sizeof up, "%s/updates", root_dir);
+    DIR *d = opendir(up);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) && n < 32) {
+            if (e->d_name[0] == '.') continue;
+            char c[768];
+            snprintf(c, sizeof c, "%s/%s", up, e->d_name);
+            if (has_game(c)) cands[n++] = strdup(e->d_name);
+        }
+        closedir(d);
+    }
+    qsort(cands, (size_t)n, sizeof *cands, by_version_desc);   // updates/917504 (1.8.0) before an older update
+    for (int i = 0; i < n; i++) {
+        char c[768];
+        snprintf(c, sizeof c, "%s/%s", up, cands[i]);
+        free(cands[i]);
+        cands[i] = strdup(c);
+    }
+    if (has_game(root_dir)) cands[n++] = strdup(root_dir);
+    found[0] = 0;
+    for (int i = 0; i < n; i++) {
+        // one candidate: the loader's hash check says if it is the wrong version; several: the one this build matches
+        if (!found[0] && (n == 1 || !g_main_sha[0] || main_matches(cands[i]))) snprintf(found, sizeof found, "%s", cands[i]);
+        free(cands[i]);
+    }
+    if (!found[0] && why && why_cap)
+        snprintf(why, why_cap, n ? "no exefs/main of the game version this build was made for" : "missing exefs/main or romfs/");
+    snprintf(done_for, sizeof done_for, "%s", root_dir);
+    done = 1;
+    return found[0] ? found : NULL;
+}
+
 int ps5_game_files_ready(const char *root_dir, const char *expected_game_id, char *why, size_t why_cap) {
     if (why && why_cap) why[0] = 0;
     if (!root_dir || !*root_dir) return 0;
     char p[768];
     struct stat st;
-    snprintf(p, sizeof p, "%s/exefs/main", root_dir);
-    if (stat(p, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
-        if (why && why_cap) snprintf(why, why_cap, "missing exefs/main");
-        return 0;
-    }
-    snprintf(p, sizeof p, "%s/romfs", root_dir);
-    if (stat(p, &st) != 0 || !S_ISDIR(st.st_mode)) {
-        if (why && why_cap) snprintf(why, why_cap, "missing romfs/");
-        return 0;
-    }
+    if (!ps5_game_dir(root_dir, why, why_cap)) return 0;
     snprintf(p, sizeof p, "%s/spirv", root_dir);
     if (stat(p, &st) != 0 || !S_ISDIR(st.st_mode)) {
         if (why && why_cap) snprintf(why, why_cap, "missing spirv/");

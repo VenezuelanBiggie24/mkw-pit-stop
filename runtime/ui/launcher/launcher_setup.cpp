@@ -200,7 +200,7 @@ void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip
         return;
     }
     if (!source || !source[0]) {
-        set_finished(-1, "source", "choose a Mario Kart World 1.0.0 dump folder or .nup file first");
+        set_finished(-1, "source", "choose a Mario Kart World dump folder or .nup file first");
         return;
     }
     prepare_log_file(exe_dir, "PS5 build");

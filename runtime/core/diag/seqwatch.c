@@ -133,8 +133,10 @@ void seqwatch_init(void) {
     if (!path || !*path) path = rt_version()->number == 100 ? "build/seq_nodes.tsv" : own;
     FILE *f = fopen(path, "r");
 #ifdef __PROSPERO__
-    if (!f && rt_version()->number == 100) {   // the title's own copy (tools/ps5/deploy.py puts it in /app0)
-        path = "/app0/seq_nodes.tsv";
+    char app[64];
+    if (!f) {   // the title's own copy (tools/ps5/build_game.py puts the version's table in /app0)
+        snprintf(app, sizeof app, "/app0/%s", strrchr(rt_version()->number == 100 ? "/seq_nodes.tsv" : own, '/') + 1);
+        path = app;
         f = fopen(path, "r");
     }
 #endif

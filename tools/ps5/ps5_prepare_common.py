@@ -1,7 +1,8 @@
-"""The 1.0.0 dump check, copies and tool runs of the PS5 builder (tools/ps5/prepare_ps5.py).
+"""The dump check, copies and tool runs of the PS5 builder (tools/ps5/prepare_ps5.py).
 
 Why: prepare_ps5.py used these from tools/prepare/prepare.py, which upstream split into modules with other signatures
-(several game versions, .nx packages; 17/11/2026). The PS5 build is 1.0.0 only, so it keeps its own copies.
+(several game versions, .nx packages; 17/11/2026), so the PS5 builder keeps its own copies. The versions themselves
+(build ids, RomFS sizes, patch files) come from recomp/versions.py, as upstream's setup takes them.
 
 Not run on its own: prepare_ps5.py imports it.
 """
@@ -15,14 +16,18 @@ import subprocess
 import sys
 from pathlib import Path
 
-from machine import Failed, crt_spec
-from nup_reader import NupError, NupReader, is_nup
-
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT / "recomp") not in sys.path:
+    sys.path.insert(0, str(ROOT / "recomp"))
 
+from machine import Failed, crt_spec  # noqa: E402
+from nup_reader import NupError, NupReader, is_nup  # noqa: E402
+from versions import ROMFS_PRODUCT, VERSIONS, Version, build_id_of, detect_id, romfs_mismatch  # noqa: E402
 
-MAIN_BUILD_ID = "9e244438c3d8ef1c"  # MKW 1.0.0 exefs/main, the first 8 bytes of the NSO build id at 0x40
-ROMFS_FILES = 205_660  # files of the 1.0.0 RomFS (06/11/2026)
+# The versions the PS5 build takes, the preferred first: a dump holding several (a console dump with its update in
+# updates/<title version>/, as G:/Downloads/base on the dev PC: 1.0.0 at the top, 1.8.0 in updates/917504) builds the
+# first found. 1.8.0 is the release's version (user's choice, 17/11/2026); 1.0.0 is what the port ran on until then.
+PS5_VERSIONS = tuple(sorted(VERSIONS, key=lambda v: -v.number))
 ROMFS_MARGIN = 0.95  # a few short still passes: some dumping tools skip empty files
 STEPS = ("check", "exefs", "romfs", "generate", "compile", "shaders", "warm", "cleanup")
 LINK_TIMEOUT = 30 * 60  # far past a slow link: only a hung linker (issue #2: "stuck" after the last object)
@@ -32,13 +37,27 @@ def emit(*words: object) -> None:
     print(*words, flush=True)
     print(*words, file=sys.stderr)
 
-def find_game(src: Path) -> tuple[Path, Path]:
-    """exefs/ and romfs/ in src or up to two levels below it."""
-    for depth in range(3):
-        for d in [src, *src.glob("/".join(["*"] * depth))] if depth else [src]:
+def known_names() -> str:
+    return ", ".join(v.name for v in reversed(PS5_VERSIONS))
+
+
+def find_games(src: Path) -> list[tuple[Path, Path]]:
+    """Every exefs/ + romfs/ pair in src or up to two levels below it (a console dump's updates/<version>/), never
+    looking inside an exefs/ or romfs/ (a glob into the RomFS's 200,000 files took minutes on a USB drive)."""
+    found, level = [], [src]
+    for _ in range(3):
+        below = []
+        for d in level:
             if (d / "exefs/main").is_file() and (d / "romfs").is_dir():
-                return d / "exefs", d / "romfs"
-    raise Failed(f"no exefs/main and romfs/ in {src}")
+                found.append((d / "exefs", d / "romfs"))
+            try:
+                below += sorted(e for e in d.iterdir() if e.is_dir() and e.name.lower() not in ("exefs", "romfs"))
+            except OSError:
+                pass
+        level = below
+    if not found:
+        raise Failed(f"no exefs/main and romfs/ in {src}")
+    return found
 
 
 def count_files(top: Path, enough: int) -> int:
@@ -50,26 +69,55 @@ def count_files(top: Path, enough: int) -> int:
     return n
 
 
-def check(src: Path) -> tuple[Path, Path]:
+def romfs_products_dir(romfs: Path) -> list[str]:
+    """The RomFS's ResourceSizeTable.Product.* names, as versions.romfs_mismatch reads them (one folder listed, not
+    the 200,000 files)."""
+    d = romfs / Path(ROMFS_PRODUCT).parent
+    stem = Path(ROMFS_PRODUCT).name
+    try:
+        return [f"{Path(ROMFS_PRODUCT).parent.as_posix()}/{n}" for n in os.listdir(d) if n.startswith(stem)]
+    except OSError:
+        return []
+
+
+def version_of(head: bytes, where: str) -> Version:
+    try:
+        got = build_id_of(head, where)
+    except ValueError as e:
+        raise Failed(str(e)) from None
+    try:
+        return detect_id(got)
+    except ValueError:
+        raise Failed(f"{where} is not Mario Kart World {known_names()} (build id {got})") from None
+
+
+def check(src: Path) -> tuple[Path, Path, Version]:
+    """The dump's exefs/, romfs/ and version (for a .nup: the package itself twice, its base with its updates over it,
+    as nup_reader merges them). Several versions in a folder: the first of PS5_VERSIONS."""
     if is_nup(src):
         try:
             with NupReader(src) as reader:
-                reader.check_mkw_100(MAIN_BUILD_ID, int(ROMFS_FILES * ROMFS_MARGIN))
+                v = reader.check_mkw(PS5_VERSIONS, ROMFS_MARGIN)
         except NupError as e:
             raise Failed(str(e)) from None
-        return src, src
-    exefs, romfs = find_game(src)
-    head = (exefs / "main").read_bytes()[:0x48]
-    if head[:4] != b"NSO0":
-        raise Failed(f"{exefs / 'main'} is not an NSO: decrypted exefs needed")
-    got = head[0x40:0x48].hex()
-    if got != MAIN_BUILD_ID:
-        raise Failed(f"exefs/main is not Mario Kart World 1.0.0 (build id {got})")
-    need = int(ROMFS_FILES * ROMFS_MARGIN)
+        return src, src, v
+    games, errors = [], []
+    for exefs, romfs in find_games(src):
+        try:
+            games.append((version_of((exefs / "main").read_bytes()[:0x48], str(exefs / "main")), exefs, romfs))
+        except Failed as e:
+            errors.append(str(e))
+    if not games:
+        raise Failed(errors[0])
+    games.sort(key=lambda g: PS5_VERSIONS.index(g[0]))
+    v, exefs, romfs = games[0]
+    if why := romfs_mismatch(v, romfs_products_dir(romfs)):
+        raise Failed(why)
+    need = int(v.romfs_files * ROMFS_MARGIN)
     n = count_files(romfs, need)
     if n < need:
-        raise Failed(f"the RomFS has {n} files, 1.0.0 has {ROMFS_FILES}: an incomplete copy")
-    return exefs, romfs
+        raise Failed(f"the RomFS has {n} files, {v.name} has {v.romfs_files}: an incomplete copy")
+    return exefs, romfs, v
 
 
 # ---- copies
@@ -88,6 +136,24 @@ def copy_tree(src: Path, dst: Path, total: int) -> None:
             done += 1
             if done % 500 == 0 or done == total:
                 emit("progress", done, total)
+
+def remove_stale(src: Path, dst: Path, version: str) -> None:
+    """dst's files that src does not have removed: a folder built from another version keeps that version's files
+    otherwise (1.0.0's Product_100 tables among 1.8.0's Product_180, upstream #261; an exefs/subsdk1 under 1.0.0)."""
+    if not dst.is_dir() or dst.resolve() == src.resolve():
+        return
+    removed = 0
+    for d, _, files in os.walk(dst, topdown=False):
+        for f in files:
+            t = Path(d, f)
+            if f.endswith(".part") or not (src / t.relative_to(dst)).exists():
+                t.unlink()
+                removed += 1
+        if Path(d) != dst and not any(Path(d).iterdir()):
+            Path(d).rmdir()
+    if removed:
+        print(f"copy: removed {removed} files that {version} does not have from {dst}", file=sys.stderr)
+
 
 def run(cmd: list[str], env: dict[str, str] | None = None, progress_prefix: str = "") -> None:
     """A tool's run; its 'progress n total' lines (translate.py) pass through, the rest goes to stderr."""

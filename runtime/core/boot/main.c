@@ -709,6 +709,16 @@ static void portable_paths(RtConfig *c) {
     // The RomFS: a romfs/ folder of loose files in the selected game folder, as exefs/ (MKW_ROMFS, mkw.ini's romfs and
     // --romfs may also name a .nup package, romfs.c).
     c->romfs = portable_path(exe, "MKW_ROMFS", "romfs", NULL, pp_romfs, sizeof pp_romfs, c->romfs);
+#ifdef MKW_PS5_NATIVE
+    // The dump as the player copied it: its version may be in updates/<title version>/ (ps5_recv.c), not at the top
+    // of the title folder. mkw.ini's EXEFS / ROMFS still win.
+    const char *ex = cfg_get("MKW_EXEFS"), *ro = cfg_get("MKW_ROMFS"), *dir = ps5_game_dir(exe, NULL, 0);
+    if (dir && strcmp(dir, exe)) {
+        if (!ex || !*ex) snprintf(pp_exefs, sizeof pp_exefs, "%s/exefs", dir), c->exefs = pp_exefs;
+        if (!ro || !*ro) snprintf(pp_romfs, sizeof pp_romfs, "%s/romfs", dir), c->romfs = pp_romfs;
+        rt_log("game files: %s", dir);
+    }
+#endif
     c->profile = portable_path(exe, "MKW_PROFILE_DIR", "profile", ".", pp_profile, sizeof pp_profile, c->profile);
     if (!*c->profile) {   // the player's build bakes no path in: saves go to profile/ in the selected game folder
         snprintf(pp_profile, sizeof pp_profile, "%s/profile", exe);
@@ -808,6 +818,8 @@ int main(int argc, char **argv) {
     {
         const RtGame *builtin = rt_game_builtin();
         char why[256] = "";
+        for (int i = 0; builtin && i < builtin->nexefs; i++)
+            if (!strcmp(builtin->exefs_sha256[i].file, "main")) ps5_game_set_main_sha256(builtin->exefs_sha256[i].sha256);
         int ready = builtin != NULL && ps5_game_files_ready("/app0", RT_GAME_ID, why, sizeof why);
         if (!builtin && !why[0])
             snprintf(why, sizeof why, "Game-free Pit Stop placeholder (build from PC)");

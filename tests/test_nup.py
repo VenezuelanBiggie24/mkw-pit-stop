@@ -166,20 +166,22 @@ def _fake_nso(build_id_hex: str) -> bytes:
 
 def test_nup_roundtrip_and_update_overlay(tmp_path: Path) -> None:
     p = tmp_path / "mkw.nup"
-    n_rom = int(prepare.ROMFS_FILES * prepare.ROMFS_MARGIN)
+    v100 = next(v for v in prepare.PS5_VERSIONS if v.name == "1.0.0")
+    n_rom = int(v100.romfs_files * prepare.ROMFS_MARGIN)
     # Build just enough romfs entries for a fast test check with custom min_romfs_files, plus test full check rejection.
     romfs_base = {"a.bin": b"base-a", "sub/b.bin": b"hello-zstd" * 10, "empty.bin": b""}
     romfs_upd = {"a.bin": b"upd-a"}
     _build_nup(
         p,
         [
-            (0x0400C3F00006E000, 0x10000, nup.KIND_BASE, {"main": _fake_nso(prepare.MAIN_BUILD_ID), "sdk": b"s"}, romfs_base),
+            (0x0400C3F00006E000, 0x10000, nup.KIND_BASE, {"main": _fake_nso("9e244438c3d8ef1c"), "sdk": b"s"}, romfs_base),
             (0x0400C3F00006E000, 0x20000, nup.KIND_UPDATE, {"sdk": b"s2"}, romfs_upd),
         ],
         compress_names={"main", "sub/b.bin"},
     )
     with nup.NupReader(p) as r:
-        assert r.check_mkw_100(prepare.MAIN_BUILD_ID, 3) == (2, 3)
+        assert r.check_mkw(prepare.PS5_VERSIONS, 3 / v100.romfs_files) == v100
+        assert (len(r.exefs), len(r.romfs)) == (2, 3)
         assert r.read_entry(r.exefs["sdk"]) == b"s2"
         assert r.read_entry(r.romfs["a.bin"]) == b"upd-a"
         assert r.read_entry(r.romfs["sub/b.bin"]) == b"hello-zstd" * 10
@@ -190,7 +192,7 @@ def test_nup_roundtrip_and_update_overlay(tmp_path: Path) -> None:
     assert (out / "romfs/a.bin").read_bytes() == b"upd-a"
     assert (out / "romfs/sub/b.bin").read_bytes() == b"hello-zstd" * 10
     assert (out / "romfs/empty.bin").read_bytes() == b""
-    # Default prepare.check() rejects incomplete romfs count (< 95% of 205,660) cleanly.
+    # Default prepare.check() rejects an incomplete RomFS (< 95% of 1.0.0's 205,660) cleanly.
     with pytest.raises(prepare.Failed, match="RomFS has 3 files"):
         prepare.check(p)
     assert n_rom > 190_000
@@ -199,22 +201,62 @@ def test_nup_roundtrip_and_update_overlay(tmp_path: Path) -> None:
 def test_nup_rejects_bad_version_toc_hash_and_traversal(tmp_path: Path) -> None:
     wrong_ver = tmp_path / "180.nup"
     _build_nup(wrong_ver, [(1, 0x80000, nup.KIND_BASE, {"main": _fake_nso("deadbeefcafebabe")}, {"x": b"1"})])
-    with pytest.raises(prepare.Failed, match="not Mario Kart World 1.0.0"):
+    with pytest.raises(prepare.Failed, match="not Mario Kart World 1.0.0, 1.8.0"):
         prepare.check(wrong_ver)
 
     bad_hash = tmp_path / "badhash.nup"
-    _build_nup(bad_hash, [(1, 0, nup.KIND_BASE, {"main": _fake_nso(prepare.MAIN_BUILD_ID)}, {"x": b"1"})],
+    _build_nup(bad_hash, [(1, 0, nup.KIND_BASE, {"main": _fake_nso("9e244438c3d8ef1c")}, {"x": b"1"})],
                corrupt_toc_sha=True)
     with pytest.raises(nup.NupError, match="SHA-256 mismatch"):
         nup.NupReader(bad_hash)
 
     trav = tmp_path / "trav.nup"
-    _build_nup(trav, [(1, 0, nup.KIND_BASE, {"main": _fake_nso(prepare.MAIN_BUILD_ID)}, {"x": b"1"})],
+    _build_nup(trav, [(1, 0, nup.KIND_BASE, {"main": _fake_nso("9e244438c3d8ef1c")}, {"x": b"1"})],
                bad_name=b"../evil")
     with pytest.raises(nup.NupError, match="illegal path character"):
         nup.NupReader(trav)
 
     upd_only = tmp_path / "upd.nup"
-    _build_nup(upd_only, [(1, 0x20000, nup.KIND_UPDATE, {"main": _fake_nso(prepare.MAIN_BUILD_ID)}, {"x": b"1"})])
+    _build_nup(upd_only, [(1, 0x20000, nup.KIND_UPDATE, {"main": _fake_nso("9e244438c3d8ef1c")}, {"x": b"1"})])
     with pytest.raises(nup.NupError, match="no base game package"):
         nup.NupReader(upd_only)
+
+
+def _dump(top: Path, build_id: str, product: int, files: int) -> None:
+    (top / "exefs").mkdir(parents=True)
+    (top / "exefs/main").write_bytes(_fake_nso(build_id))
+    res = top / "romfs/System/Resource"
+    res.mkdir(parents=True)
+    (res / f"ResourceSizeTable.Product.{product}.rsizetable.zs").write_bytes(b"t")
+    for i in range(files - 1):
+        (top / "romfs" / f"f{i}").write_bytes(b"")
+
+
+def test_console_dump_with_update_builds_180(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A console dump keeps 1.0.0 at its top and the 1.8.0 update in updates/917504 (dev PC's G:/Downloads/base): the
+    PS5 build takes 1.8.0; the same folder without the update, 1.0.0; a 1.8.0 exefs over 1.0.0's RomFS is refused."""
+    small = tuple(type(v)(v.name, v.number, v.main_build_id, 4, v.patches) for v in prepare.PS5_VERSIONS)
+    monkeypatch.setattr(prepare, "PS5_VERSIONS", small)
+    monkeypatch.setattr(prepare, "detect_id", lambda got: next(v for v in small if v.main_build_id == got))
+    base = tmp_path / "base"
+    _dump(base, "9e244438c3d8ef1c", 100, 4)
+    assert prepare.check(base)[2].name == "1.0.0"
+    _dump(base / "updates/917504", "d00e4f399e411d06", 180, 4)
+    exefs, romfs, v = prepare.check(base)
+    assert (v.name, exefs, romfs) == ("1.8.0", base / "updates/917504/exefs", base / "updates/917504/romfs")
+    mixed = tmp_path / "mixed"
+    _dump(mixed, "d00e4f399e411d06", 100, 4)
+    with pytest.raises(prepare.Failed, match="1.0.0"):
+        prepare.check(mixed)
+
+
+def test_remove_stale(tmp_path: Path) -> None:
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    (src / "a").mkdir(parents=True)
+    (src / "a/keep").write_bytes(b"1")
+    (dst / "a").mkdir(parents=True)
+    (dst / "old").mkdir()
+    for f in ("a/keep", "a/gone", "old/x", "a/keep.part"):
+        (dst / f).write_bytes(b"1")
+    prepare.remove_stale(src, dst, "1.8.0")
+    assert sorted(p.relative_to(dst).as_posix() for p in dst.rglob("*")) == ["a", "a/keep"]
