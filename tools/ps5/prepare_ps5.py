@@ -638,7 +638,8 @@ class TransferReport:
     which phase it is in, how fast and how long is left. A first send spent minutes checksumming 23 GB before any
     byte went out, and the launcher showed only a moving band (18/11/2026)."""
 
-    def __init__(self) -> None:
+    def __init__(self, verb: str = "Sending") -> None:
+        self.verb = verb   # "Copying" for a USB drive
         self.t0 = self.last = 0.0
         self.total = 0
 
@@ -652,11 +653,11 @@ class TransferReport:
     def phase(self, name: str, done: int, total: int) -> None:
         if name == "send":
             self.t0, self.total = time.monotonic(), total
-            emit("note", f"Sending {_size(total)} to the PS5")
+            emit("note", f"{self.verb} {_size(total)}")
             return
         if not self._due(done, total):
             return
-        what = "Checking the files here" if name == "hash" else "Asking the PS5 which files it has"
+        what = "Checking the files" if name == "hash" else "Asking the PS5 which files it has"
         emit("note", f"{what}: {done:,} / {total:,}")
         emit("progress", done, total)
 
@@ -666,9 +667,66 @@ class TransferReport:
         rate = bytes_done / max(time.monotonic() - self.t0, 1e-3)
         left = (bytes_total - bytes_done) / rate if rate > 0 else 0
         eta = f"about {left / 60:.0f} min left" if left >= 90 else f"about {left:.0f} s left"
-        emit("note", f"Sending {_size(bytes_done)} / {_size(bytes_total)}, {rate / 2**20:.0f} MiB/s, {eta}, "
+        emit("note", f"{self.verb} {_size(bytes_done)} / {_size(bytes_total)}, {rate / 2**20:.0f} MiB/s, {eta}, "
                      f"file {files_done:,} / {files_total:,}")  # fmt: skip
         emit("progress", bytes_done >> 20, max(1, bytes_total >> 20))
+
+
+# Generated folders whose leftovers go: another build's shaders, another version's exefs (1.0.0 has no subsdk1, and one
+# left there would be loaded). mkw.ini, profile/ (the saves) and logs/ on the drive are the player's and stay.
+USB_MIRRORED = ("spirv", "exefs")
+
+
+def copy_to_usb(stage: Path, drive: Path) -> Path:
+    """The staged title into DRIVE/homebrew/PPSA99193: ShadowMountPlus scans /mnt/usb0..7/homebrew/ and /mnt/ext0..1/
+    for title folders and registers them (its README, 18/11/2026), so a drive plugged into the PS5 needs no network.
+    Each file goes to a .part name and is renamed when complete (a drive pulled out leaves no half file); a file
+    already there with the same size and time (FAT32 keeps 2 s) is skipped, so an update copies what changed. The
+    largest file is 465 MiB (1.8.0's RomFS), so FAT32 drives do too."""
+    dest = drive / "homebrew" / TITLE_ID
+    files = sorted((p for p in stage.rglob("*") if p.is_file() and not p.is_symlink()),
+                   key=lambda p: (p.name == "eboot.bin", str(p)))  # eboot.bin last, as the network send
+    todo, report = [], TransferReport("Copying")
+    for i, src in enumerate(files, 1):
+        dst = dest / src.relative_to(stage)
+        st = src.stat()
+        try:
+            dt = dst.stat()
+            same = dt.st_size == st.st_size and abs(dt.st_mtime - st.st_mtime) <= 2
+        except OSError:
+            same = False
+        if not same:
+            todo.append((src, dst, st.st_size))
+        report.phase("hash", i, len(files))   # (shown as checking the files)
+    need = sum(n for _, _, n in todo)
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(dest).free
+    except OSError as e:
+        raise Failed(f"cannot write to {drive}: {e}") from None
+    if need > free:
+        raise Failed(f"not enough space on {drive}: {need / 2**30:.1f} GiB needed, {free / 2**30:.1f} GiB free")
+    report.phase("send", 0, need)
+    done = 0
+    for n, (src, dst, size) in enumerate(todo, 1):
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        part = dst.with_name(dst.name + ".part")
+        with src.open("rb") as fi, part.open("wb") as fo:
+            while chunk := fi.read(4 << 20):
+                fo.write(chunk)
+                done += len(chunk)
+                report.progress(done, need, n, len(todo))
+            fo.flush()
+            os.fsync(fo.fileno())
+        shutil.copystat(src, part)
+        os.replace(part, dst)
+    report.progress(need, need, len(todo), len(todo))
+    keep = {p.relative_to(stage) for p in files}
+    for old in [p for p in dest.rglob("*") if p.is_file()]:
+        rel = old.relative_to(dest)
+        if rel not in keep and (rel.parts[0] in USB_MIRRORED or "exefs" in rel.parts[:-1] or old.suffix == ".part"):
+            old.unlink()
+    return dest
 
 
 def main() -> int:
@@ -680,6 +738,8 @@ def main() -> int:
     ap.add_argument("--romfs", choices=("copy", "skip"), default="copy", help="stage romfs/ into out_dir (default copy)")
     ap.add_argument("--send", metavar="PS5_IP", help="send staged PPSA99193 to Pit Stop TCP receiver (port 19913)")
     ap.add_argument("--deploy", metavar="PS5_IP", help="upload via legacy FTP (deploy.py) instead of PIT1 TCP")
+    ap.add_argument("--usb", type=Path, metavar="DRIVE",
+                    help="write the title to DRIVE/homebrew/PPSA99193, where ShadowMountPlus finds it on the PS5")
     ap.add_argument("--shader-cache", type=Path, help="reuse translated desktop shaders/ directory if present")
     ap.add_argument("--log", type=Path, help="write detailed subprocess output to this log file")
     ap.add_argument("--events", action="store_true", help="emit machine-readable step lines (default)")
@@ -860,6 +920,10 @@ def main() -> int:
                 raise Failed(f"sending to PS5 {args.send} failed: {e}") from None
             print(f"deploy: sent {sent} files ({total_bytes / (1024**2):.1f} MiB), skipped {skipped} unchanged",
                   file=sys.stderr)
+        elif args.usb:
+            emit("step", "deploy")
+            dest = copy_to_usb(out_dir, args.usb)
+            print(f"deploy: the title is in {dest}", file=sys.stderr)
         elif args.deploy:
             emit("step", "deploy")
             run([sys.executable, str(HERE / "deploy.py"), args.deploy, "--game"])

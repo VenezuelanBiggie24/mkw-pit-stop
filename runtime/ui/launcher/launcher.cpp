@@ -96,6 +96,8 @@ static struct {
     int tools;                      // the setup tools are there
     int ps5_tools;                  // prepare_ps5.py and the PS5 link bundle are there (the PS5 builder package)
     char ps5_ip[64];                // the PS5's address from its Game files missing screen, kept in ps5-ip.txt
+    char ps5_usb[1024];             // or the USB drive the title is written to (ps5-usb.txt: the drive, then net|usb)
+    int ps5_use_usb;                // 1: Build for PS5 writes to ps5_usb instead of sending over the network
     char shortcut_note[1200];       // what the shortcut button did
     // the last setup's record (read_setup_info): the game version, the port version, the copy and how its RomFS is kept
     char game_version[32], setup_port[48], setup_source[1024], setup_mode[8];
@@ -806,6 +808,26 @@ static void load_ps5_ip(void) {
     fclose(f);
 }
 
+// The USB drive and which way was used last (ps5-usb.txt: the drive on the first line, "usb" or "net" on the second).
+static void load_ps5_usb(void) {
+    char p[1100], mode[16] = "";
+    snprintf(p, sizeof p, "%s/ps5-usb.txt", L.exe_dir);
+    FILE *f = fopen(p, "r");
+    if (!f) return;
+    if (fgets(L.ps5_usb, (int)sizeof L.ps5_usb, f)) L.ps5_usb[strcspn(L.ps5_usb, "\r\n")] = 0;
+    if (fgets(mode, (int)sizeof mode, f)) L.ps5_use_usb = !strncmp(mode, "usb", 3);
+    fclose(f);
+}
+
+static void save_ps5_usb(void) {
+    char p[1100];
+    snprintf(p, sizeof p, "%s/ps5-usb.txt", L.exe_dir);
+    if (FILE *f = fopen(p, "w")) {
+        fprintf(f, "%s\n%s\n", L.ps5_usb, L.ps5_use_usb ? "usb" : "net");
+        fclose(f);
+    }
+}
+
 static void save_ps5_ip(void) {
     if (!L.ps5_ip[0]) return;
     char p[1100];
@@ -819,7 +841,7 @@ static void save_ps5_ip(void) {
 static void SDLCALL picked(void *kind, const char *const *files, int) {
     SDL_Event e = {};
     e.type = L.picked_event;
-    e.user.code = kind ? 1 : 0;   // installation directory, else the source dump
+    e.user.code = kind == (void *)L.ps5_usb ? 2 : kind ? 1 : 0;   // the PS5's USB drive, installation directory, the dump
     e.user.data1 = files && files[0] ? SDL_strdup(files[0]) : nullptr;
     if (!SDL_PushEvent(&e)) SDL_free(e.user.data1);
 }
@@ -982,14 +1004,36 @@ static void game_dir_notes(void) {
 // player had only a command line (lost in the 0.1.13 merge, put back 18/11/2026).
 static void ps5_step(float act_h) {
     step_head(2, false, menu_text(UI_LAUNCH_PS5_HEADING));
-    ImGui::TextColored(col4(LOOK_DIM), "%s", menu_text(UI_LAUNCH_PS5_IP));
+    // Over the network to the placeholder's receiver, or to a USB drive: ShadowMountPlus scans /mnt/usbN/homebrew/
+    // for title folders, so the drive plugged into the PS5 is the install (prepare_ps5.py copy_to_usb).
+    if (ImGui::RadioButton("Over the network##ps5net", !L.ps5_use_usb)) L.ps5_use_usb = 0;
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(fminf(ImGui::GetContentRegionAvail().x, 320 * L.scale));
-    ImGui::InputTextWithHint("##ps5_ip", "192.168.1.50", L.ps5_ip, sizeof L.ps5_ip, ImGuiInputTextFlags_CharsNoBlank);
-    ImGui::BeginDisabled(!L.source[0] || !L.ps5_ip[0]);
+    if (ImGui::RadioButton("To a USB drive##ps5usb", L.ps5_use_usb != 0)) L.ps5_use_usb = 1;
+    bool ready;
+    if (!L.ps5_use_usb) {
+        ImGui::TextColored(col4(LOOK_DIM), "%s", menu_text(UI_LAUNCH_PS5_IP));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(fminf(ImGui::GetContentRegionAvail().x, 320 * L.scale));
+        ImGui::InputTextWithHint("##ps5_ip", "192.168.1.50", L.ps5_ip, sizeof L.ps5_ip, ImGuiInputTextFlags_CharsNoBlank);
+        ready = L.ps5_ip[0] != 0;
+    } else {
+        ImGui::TextColored(col4(L.ps5_usb[0] ? LOOK_TEXT : LOOK_DIM), "%s",
+                           L.ps5_usb[0] ? L.ps5_usb : "No drive chosen yet");
+        if (ImGui::Button("Choose drive", ImVec2(0, act_h))) {
+            L.picking = 1;
+            SDL_ShowOpenFolderDialog(picked, (void *)L.ps5_usb, L.win, L.ps5_usb[0] ? L.ps5_usb : nullptr, false);
+        }
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + fminf(ImGui::GetContentRegionAvail().x, 760 * L.scale));
+        ImGui::TextColored(col4(LOOK_HEADING), "The title goes to homebrew\\PPSA99193 on the drive (exFAT or FAT32, "
+                                               "about 25 GB free). Plug it into the PS5 and ShadowMountPlus finds it.");
+        ImGui::PopTextWrapPos();
+        ready = L.ps5_usb[0] != 0;
+    }
+    ImGui::BeginDisabled(!L.source[0] || !ready);
     if (accent_button(menu_text(UI_LAUNCH_PS5_BUILD), ImVec2(0, act_h))) {
         save_ps5_ip();
-        setup_ps5_start(L.exe_dir, L.source, L.ps5_ip);
+        save_ps5_usb();
+        setup_ps5_start(L.exe_dir, L.source, L.ps5_ip, L.ps5_use_usb ? L.ps5_usb : nullptr);
     }
     ImGui::EndDisabled();
     step_end();
@@ -1087,7 +1131,8 @@ static void setup_failed_card(const SetupState &st) {
     card_begin(fminf(ImGui::GetContentRegionAvail().x, 1100 * L.scale));
     ImGui::TextColored(col4(LOOK_BAD), "%s", msg);
     if (accent_button(menu_text(UI_LAUNCH_RETRY))) {
-        if (st.mode == SETUP_MODE_PS5) setup_ps5_start(L.exe_dir, L.source, L.ps5_ip);   // its steps done are kept too
+        if (st.mode == SETUP_MODE_PS5)   // its steps done are kept too
+            setup_ps5_start(L.exe_dir, L.source, L.ps5_ip, L.ps5_use_usb ? L.ps5_usb : nullptr);
         else setup_start(L.exe_dir, cfg_game_dir(), L.source[0] ? L.source : nullptr, L.link_romfs);
     }
     ImGui::SameLine();
@@ -1730,6 +1775,7 @@ extern "C" int launcher_run(void) {
     L.tools = setup_available(L.exe_dir);
     L.ps5_tools = setup_ps5_available(L.exe_dir);
     load_ps5_ip();
+    load_ps5_usb();
     if (!rt_game_present() && !L.shot_at) L.page = PAGE_FILES;
     pads_refresh();
     char state[PLAT_PATH_MAX * 3];
@@ -1783,7 +1829,9 @@ extern "C" int launcher_run(void) {
             if (e.type == L.picked_event) {
                 L.picking = 0;
                 const char *path = (const char *)e.user.data1;
-                if (path && e.user.code) {
+                if (path && e.user.code == 2) {
+                    snprintf(L.ps5_usb, sizeof L.ps5_usb, "%s", path);
+                } else if (path && e.user.code) {
                     if (cfg_select_game_dir(path)) {
                         L.directory_restart = 1;
                         L.result = LAUNCHER_QUIT;

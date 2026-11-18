@@ -190,7 +190,7 @@ void setup_start(const char *exe_dir, const char *game_dir, const char *source, 
     SDL_DetachThread(SDL_CreateThread(reader, "setup", nullptr));
 }
 
-void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip) {
+void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip, const char *usb) {
     if (!g_lock) g_lock = SDL_CreateMutex();
     if (setup_state().running) return;
     char python[1200], script[1200], bundle[1200], work_dir[1200], shader_cache[1200];
@@ -226,13 +226,16 @@ void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip
         args[n++] = "--shader-cache";
         args[n++] = shader_cache;
     }
-    if (ps5_ip && ps5_ip[0]) {
+    if (usb && usb[0]) {
+        args[n++] = "--usb";
+        args[n++] = usb;
+    } else if (ps5_ip && ps5_ip[0]) {
         args[n++] = "--send";
         args[n++] = ps5_ip;
     }
     args[n++] = nullptr;
-    rt_log("setup-ps5: %s %s --source %s --bundle %s --send %s", python, script, source, bundle,
-           (ps5_ip && ps5_ip[0]) ? ps5_ip : "(none)");
+    rt_log("setup-ps5: %s %s --source %s --bundle %s %s %s", python, script, source, bundle,
+           usb && usb[0] ? "--usb" : "--send", usb && usb[0] ? usb : (ps5_ip && ps5_ip[0]) ? ps5_ip : "(none)");
     g_proc = SDL_CreateProcess(args, true);
     if (!g_proc) {
         set_finished(-1, "", SDL_GetError());

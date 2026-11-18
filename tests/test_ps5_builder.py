@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import struct
 import sys
 from pathlib import Path
@@ -94,3 +95,29 @@ def test_elf64_symbol_and_ar_readers(tmp_path: Path) -> None:
     ar_path.write_bytes(b"!<arch>\n" + hdr + obj_bytes + (b"\n" if len(obj_bytes) & 1 else b""))
     syms = prepare_ps5.read_ar_defined(ar_path)
     assert "ps5_localeconv" in syms
+
+
+def test_copy_to_usb_updates_in_place(tmp_path: Path, capsys) -> None:
+    """--usb writes DRIVE/homebrew/PPSA99193 (where ShadowMountPlus looks), copies only what changed, removes another
+    build's leftovers in exefs/ and spirv/, and keeps the player's mkw.ini and saves on the drive."""
+    stage, drive = tmp_path / "stage", tmp_path / "drive"
+    for rel, data in {"eboot.bin": "e1", "exefs/main": "m", "spirv/a.spv": "s"}.items():
+        (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+        (stage / rel).write_text(data)
+    dest = prepare_ps5.copy_to_usb(stage, drive)
+    assert dest == drive / "homebrew/PPSA99193" and (dest / "eboot.bin").read_text() == "e1"
+    (dest / "exefs/subsdk1").write_text("old")
+    (dest / "spirv/gone.spv").write_text("old")
+    (dest / "mkw.ini").write_text("user")
+    (dest / "profile").mkdir()
+    (dest / "profile/save.bin").write_text("save")
+    (stage / "eboot.bin").write_text("e2")
+    st = (stage / "eboot.bin").stat()
+    os.utime(stage / "eboot.bin", ns=(st.st_atime_ns, st.st_mtime_ns + 10 * 10**9))   # a rebuild, later than the copy
+    capsys.readouterr()
+    prepare_ps5.copy_to_usb(stage, drive)
+    out = capsys.readouterr().out
+    assert "Copying 2 B" in out or "Copying 0 MiB" in out   # only eboot.bin went again
+    files = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
+    assert files == ["eboot.bin", "exefs/main", "mkw.ini", "profile/save.bin", "spirv/a.spv"]
+    assert (dest / "eboot.bin").read_text() == "e2"

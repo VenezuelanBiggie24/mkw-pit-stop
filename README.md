@@ -74,6 +74,12 @@ Early, and moving fast. On 18/11/2026 on a base PS5:
    complete!** when every file has arrived and been checked: press
    **Cross**, then launch **Mario Kart World: Pit Stop** again.
 
+**No network? Use a USB drive.** In step 3, pick **To a USB drive** and **Choose drive** instead of typing the PS5's
+address: the title is written to `homebrew\PPSA99193` on the drive (exFAT or FAT32, about 25 GB free), and
+ShadowMountPlus finds it there once the drive is plugged into the PS5 (it scans `/mnt/usb0`-`usb7/homebrew/`).
+The placeholder of step 1 is not needed for this; if it is installed, remove `/data/homebrew/PPSA99193` first so
+only one copy of the title is registered. Building again updates only what changed on the drive.
+
 If the PS5 stays on **Waiting for connection**, check the address and that both are on the same network; a failed
 build is explained in `logs/setup.log` beside `mkw.exe`. To update, unpack the new builder and build again.
 
