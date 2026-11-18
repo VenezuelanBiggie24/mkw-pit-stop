@@ -7,7 +7,8 @@ scaled down by area (premultiplied alpha), in plain Python. tools/build/build.py
 resource (runtime/platform/mkw.rc names "mkw.ico"); the output is made in build/, never committed. A .c name writes
 app_icon_set(SDL_Window *), which gives the window a 128-pixel copy (build.py, every target): Wayland compositors with
 xdg_toplevel_icon (KWin) show it in the taskbar. With an .svg name it still writes upstream's chequered-flag logo as
-vector shapes (docs/logo.svg; the start screen draws that logo itself, launcher_logo.cpp).
+vector shapes (docs/images/logo.svg; the start screen draws that logo itself, launcher_logo.cpp). tools/prepare/steam.py
+draws Steam's library images with render() (the flag) and png().
 
 Usage: uv run tools/build/icon.py OUT.ico | OUT.svg | OUT.png | OUT.c
 """

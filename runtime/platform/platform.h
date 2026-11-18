@@ -102,6 +102,11 @@ void plat_sample_stop(void);
 // kernel copy into write-watched guest memory (plat_file_pread), which a signal made fail on Linux (t20-linux: a RomFS
 // read returned -1 with userfaultfd write protection on its buffer, 14/11/2026). Calls nest only once.
 void plat_sample_hold(int on);
+// Called by a thread doing background work (pipeline builds, prewarming, video decoding): plat_process_affinity leaves
+// it, and the threads it starts with plat_thread_new, on every processor the process had at start, so a hybrid CPU's
+// efficiency cores keep that work while the frame's threads stay on the fast ones (vk_backend.c replay_core). Linux
+// only; on Windows the process mask bounds every thread, so it does nothing there.
+void plat_thread_background(void);
 
 // Interrupting a thread (kernel.c's asynchronous preemption). A thread makes its own handle; another thread stops it
 // wherever it runs, reads where it is, may send it elsewhere, and lets it go on. While it is stopped the caller must not
@@ -586,4 +591,6 @@ void plat_mem_info(float *used_mb, float *total_mb, float *proc_mb);
 // This process's memory in bytes: resident (the working set) and private (Windows: committed private bytes; Linux: the
 // resident anonymous pages). 0 when unknown.
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes);
+// Hands the C heap's free pages back to the system after a large release of small blocks.
+void plat_heap_trim(void);
 

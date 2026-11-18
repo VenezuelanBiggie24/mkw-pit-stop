@@ -9,8 +9,8 @@
 // as the console's does: with players 1 and 3 connected (player 2's signed out or its gamepad went away), ids 0 and 1
 // are theirs; until the first applet, id N is player N + 1. Mouse and keyboard report no input. Each controller has two vibration
 // devices (left, right) played on its gamepad's motors (MKW_RUMBLE=0: none); player 1's six-axis sensor is fed by its
-// gamepad's gyro and accelerometer (MKW_MOTION=0, live: reads at rest), the others read at rest. State layouts follow
-// libnx HID.
+// gamepad's gyro and accelerometer or a DSU server's (input/dsu.c) (MKW_MOTION=0, live: reads at rest), the others read
+// at rest. State layouts follow libnx HID.
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>

@@ -2,7 +2,7 @@
 
 Local wireless play (the game's own Wireless Play, `nn::ldn`) carried over UDP on the local network or through a
 lobby on the internet, and the game's sockets carried inside it. Design, protocol, security and limits:
-[docs/multiplayer.md](../../docs/multiplayer.md). Off by default (`local_wireless = off` in `mkw.ini`).
+[docs/ps5/multiplayer.md](../../docs/ps5/multiplayer.md). Off by default (`local_wireless = off` in `mkw.ini`).
 
 | File | What it is |
 |---|---|

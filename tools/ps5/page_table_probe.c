@@ -722,7 +722,7 @@ static void log_modules(void) {
 
 // Where the title's AMM (address memory manager) VA lives: the kernel prints "[Amm config] ... VA range size 512 GiB,
 // MultiMap VA range size 0 GiB" for the title; libSceAmpr hands the range out. Read-only: no AMM command is written (the
-// public sources disagree on sceAmprCommandBufferSetBuffer, which the map path needs; docs/research.md).
+// public sources disagree on sceAmprCommandBufferSetBuffer, which the map path needs; docs/project/research.md).
 static void probe_amm_ranges(void) {
     log_modules();
     int status = 0;
@@ -1048,7 +1048,7 @@ bool mkw_page_table_probe(VkPhysicalDevice phys, VkDevice dev, VkQueue queue, ui
 
     probe_amm_ranges();
     probe_prt_aperture(phys, queue_family);
-    say("PS5 page-table amm-map: skipped (public sources disagree on sceAmprCommandBufferSetBuffer; docs/research.md)");
+    say("PS5 page-table amm-map: skipped (public sources disagree on sceAmprCommandBufferSetBuffer; docs/project/research.md)");
 
     bool ok = ok_sparse && ok_gpu_1g && ok_64k && ok_2m;
     say("PS5 page-table probe: %s (sparse=%d, gpu_1g=%d, 2g-64k=%d, 2g-2m=%d)",

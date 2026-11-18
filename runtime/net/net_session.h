@@ -1,7 +1,7 @@
-// One local wireless session over UDP (docs/multiplayer.md): the host (the game's access point) or a station, its
+// One local wireless session over UDP (docs/ps5/multiplayer.md): the host (the game's access point) or a station, its
 // node table and the game's datagrams. No threads, no runtime: the caller owns the lock, calls net_session_poll when
 // the socket is readable (net_session_fd) or every few tens of milliseconds, and gets the game's datagrams through
-// on_data. The nn::ldn and nn::socket replacements (net_ldn.c, net_socket.c) drive it; tests/test_net.py drives two of
+// on_data. The nn::ldn and nn::socket replacements (net_ldn.c, net_socket.c) drive it; tests/runtime/test_net.py drives two of
 // them over loopback.
 //
 // Star topology: every station talks to the host only, the host forwards datagrams between stations. Only the host

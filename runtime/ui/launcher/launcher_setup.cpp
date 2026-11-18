@@ -165,7 +165,8 @@ void setup_start(const char *exe_dir, const char *game_dir, const char *source, 
     if (setup_state().running) return;
     char python[1200], script[1200];
     SDL_LockMutex(g_lock);
-    g_state = SetupState{1, SETUP_MODE_DESKTOP, -1, SETUP_STEPS, {}, 0, 0, 0, {}, {}, {}};
+    unsigned generation = g_state.generation + 1;
+    g_state = SetupState{1, SETUP_MODE_DESKTOP, -1, SETUP_STEPS, {}, 0, 0, 0, {}, {}, {}, generation};
     SDL_UnlockMutex(g_lock);
     if (!find_tool(exe_dir, "prepare/prepare.py", python, script, sizeof python)) {
         set_finished(-1, "no_setup", "");
@@ -196,7 +197,8 @@ void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip
     if (setup_state().running) return;
     char python[1200], script[1200], bundle[1200], work_dir[1200], shader_cache[1200];
     SDL_LockMutex(g_lock);
-    g_state = SetupState{1, SETUP_MODE_PS5, -1, SETUP_PS5_STEPS, {}, 0, 0, 0, {}, {}, {}};
+    unsigned generation = g_state.generation + 1;
+    g_state = SetupState{1, SETUP_MODE_PS5, -1, SETUP_PS5_STEPS, {}, 0, 0, 0, {}, {}, {}, generation};
     SDL_UnlockMutex(g_lock);
     if (!find_ps5_tools(exe_dir, python, script, bundle, sizeof python)) {
         set_finished(-1, "no_setup", "the PS5 bundle tools are missing (setup/ps5-bundle/)");

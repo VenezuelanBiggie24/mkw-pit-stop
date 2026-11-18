@@ -1,10 +1,10 @@
 # server/lobby
 
-`mkw-lobby`, the lobby and relay of local wireless play over the internet ([docs/multiplayer.md](../../docs/multiplayer.md)):
+`mkw-lobby`, the lobby and relay of local wireless play over the internet ([docs/ps5/multiplayer.md](../../docs/ps5/multiplayer.md)):
 public sessions listed (the game's room search shows them as rooms), private ones found by the number in an invite
 code, stations introduced to their host, and a relay for players whose routers block direct connections. It never
 reads game traffic (sealed by keys it does not have) and keeps nothing on disk. Linux first; tested by
-`tests/test_net.py` without the game.
+`tests/runtime/test_net.py` without the game.
 
 | File | What it is |
 |---|---|
@@ -19,4 +19,4 @@ build/mkw-lobby --port 11461 [--words FILE] [--max-sessions 1024] [--no-relay] [
 ```
 
 Players then set `lobby = <address>:11461` and `local_wireless = online` in `mkw.ini` (the PS5 takes an address, not
-a name). What one session costs the server: docs/multiplayer.md, "Running a lobby".
+a name). What one session costs the server: docs/ps5/multiplayer.md, "Running a lobby".

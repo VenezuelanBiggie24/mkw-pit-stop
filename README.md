@@ -24,12 +24,12 @@ Early, and moving fast. On 18/11/2026 on a base PS5:
   generation (the PS5 profile's default; Pit Stop turns it off). 60 fps is an option in **Pit Stop > Display > Frame
   rate**, but races then run slower than real time.
 - **Multiplayer:** the game's split screen (one DualSense per signed-in player) and its local wireless mode over the
-  LAN, between PS5s or with the PC build of the same version ([docs/multiplayer.md](docs/multiplayer.md)). There is no
+  LAN, between PS5s or with the PC build of the same version ([docs/ps5/multiplayer.md](docs/ps5/multiplayer.md)). There is no
   Nintendo online play.
 - **Pit Stop in-game overlay.** Press **Options + touchpad click** at any time to open **Pit Stop**, a controller-first
   settings menu with quick rows (**Master volume**, **Vibration strength**, **Performance HUD**), every settings
   category and live DualSense button remapping, saved to `/app0/mkw.ini`.
-- **Known issues ([docs/roadmap.md](docs/roadmap.md)):**
+- **Known issues ([docs/project/roadmap.md](docs/project/roadmap.md)):**
   - *Long sessions:* free memory falls race after race as the game keeps earlier courses' data; when it runs low,
     textures can come out corrupted or missing. Restart the title after a few races if that happens.
   - *Sparse tiles:* from boot a few sparse texture tiles stay unloaded: minor texture corruption near the start line
@@ -45,7 +45,7 @@ Early, and moving fast. On 18/11/2026 on a base PS5:
    console dump that holds the 1.8.0 update in `updates/` is used as it is, and 1.8.0 is built when both are there.
 2. **A jailbroken PS5** running a homebrew payload loader (`etaHEN` or `elfldr`), `kstuff`, and **ShadowMountPlus 1.7
    Beta 5** or newer (which mounts and registers `/data/homebrew/PPSA99193` on the home screen). Firmware support
-   follows your jailbreak, `kstuff`, and RADV homebrew environment (see [docs/ps5.md](docs/ps5.md)).
+   follows your jailbreak, `kstuff`, and RADV homebrew environment (see [docs/ps5/ps5.md](docs/ps5/ps5.md)).
 3. **A PC with about 30 GB free** on the same network as the PS5, to build the title from your dump:
    - **Windows 10 or 11 (64-bit):** nothing else to install, no WSL. The Windows builder carries its own Python, zig
      and glslc ([Windows steps](#installing-on-windows-no-wsl)).
@@ -119,7 +119,7 @@ settings (`mkw.ini`) on the console are kept.
 ## Pit Stop settings overlay
 
 Press **Options + touchpad click** on the DualSense (or **F1** on desktop) from any screen to open **Pit Stop**
-([docs/pit-stop.md](docs/pit-stop.md)):
+([docs/ps5/pit-stop.md](docs/ps5/pit-stop.md)):
 
 | Control | Action |
 |---|---|
@@ -154,7 +154,7 @@ From upstream [mkw-recomp](https://github.com/adriadam10/mkw-recomp):
 
 ### PS5 native target (`PPSA99193`)
 
-See [docs/ps5.md](docs/ps5.md) and [tools/ps5/README.md](tools/ps5/README.md) for the pinned `PS5_VulkanTemplate`,
+See [docs/ps5/ps5.md](docs/ps5/ps5.md) and [tools/ps5/README.md](tools/ps5/README.md) for the pinned `PS5_VulkanTemplate`,
 `PS5_Vulkan`, `PS5_Mesa` and `PS5_PayloadSDK` checkouts:
 
 ```sh
@@ -202,8 +202,8 @@ release and CI flows), `.gitignore`, `LICENSE`,
 
 ## Performance
 
-Measured frame times, each with its date, are in [docs/performance.md](docs/performance.md) and
-[docs/ps5.md](docs/ps5.md#frame-rate).
+Measured frame times, each with its date, are in [docs/project/performance.md](docs/project/performance.md) and
+[docs/ps5/ps5.md](docs/ps5/ps5.md#frame-rate).
 
 | Date | Platform / GPU | Internal resolution | Race frame time |
 |---|---|---|---|
@@ -249,7 +249,7 @@ source of every part as `source/*.tar.gz` (`source/SOURCES.txt`), made by
   (`LEGAL.txt` and `licenses/` inside the built title).
 - **Research and design ideas only** (no code copied from GPL or unlicensed projects): eden-nx2, Hookshot,
   PS5_Hookshot, EglantinePS5, AnyPS5, prosper, and shadPS4. Every source is documented in
-  [docs/research.md](docs/research.md#sources).
+  [docs/project/research.md](docs/project/research.md#sources).
 
 **Disclaimer:** *Mario Kart World* and *Mario* are trademarks of Nintendo. "PlayStation" and "PS5" are trademarks of
 Sony Interactive Entertainment Inc. This project is not affiliated with or endorsed by Nintendo, Sony Interactive

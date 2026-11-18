@@ -1,6 +1,6 @@
-// The wire format of local wireless play carried over UDP (docs/multiplayer.md): one datagram is one message, an 8-byte
+// The wire format of local wireless play carried over UDP (docs/ps5/multiplayer.md): one datagram is one message, an 8-byte
 // header then a body of a fixed type with fixed limits. Pure: no sockets, no runtime; the session engine
-// (net_session.c), the lobby client and the lobby server (server/lobby) share it, and tests/test_net.py fuzzes it.
+// (net_session.c), the lobby client and the lobby server (server/lobby) share it, and tests/runtime/test_net.py fuzzes it.
 //
 // After the join handshake every message is sealed (XChaCha20-Poly1305, Monocypher): keys from an X25519 exchange and
 // the session's join password, the password never sent. The design follows Squadala's (daurosk/oot-remake-multiplayer

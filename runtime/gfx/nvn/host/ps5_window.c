@@ -1,6 +1,6 @@
 // Direct display through RADV's VideoOut WSI. The enumeration and surface
 // sequence follows PS5_VulkanTemplate base/VulkanSwapChain.cpp @ 91179df
-// (MIT, Sascha Willems and Mihawk). See docs/research.md.
+// (MIT, Sascha Willems and Mihawk). See docs/project/research.md.
 #include "gfx_wsys.h"
 
 #include <stdlib.h>

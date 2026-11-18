@@ -3,5 +3,5 @@
 // binds them at process start. Why: a title's sceKernelDlsym finds nothing on this console (PS5_Vulkan
 // docs/HARDWARE_FINDINGS.md), so a linked import is the only way in. How: build_smoke.py --page-table compiles it into
 // libSceAmpr.so (soname libSceAmpr.prx), as the template's link-title.sh does for libSceAgc. The bodies never run.
-// Names checked against the export NIDs of libSceAmpr (docs/research.md, DNNDHH/PS5-3.20_Libs).
+// Names checked against the export NIDs of libSceAmpr (docs/project/research.md, DNNDHH/PS5-3.20_Libs).
 void sceAmprAmmGetVirtualAddressRanges(void) {}

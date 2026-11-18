@@ -1,5 +1,5 @@
 // Clear and present a diagnostic frame through PS5_VulkanTemplate's MIT
-// foundation (91179df760df1e6c6f2d4d172bc435319d79ff3c). See docs/research.md.
+// foundation (91179df760df1e6c6f2d4d172bc435319d79ff3c). See docs/project/research.md.
 #include "vulkanexamplebase.h"
 
 #include <chrono>

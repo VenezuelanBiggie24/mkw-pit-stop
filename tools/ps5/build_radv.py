@@ -29,7 +29,7 @@ def ensure_radv(vulkan: Path, mesa_revision: str, radv_sdk: str) -> tuple[Path, 
     archive = radv / "lib/libvulkan_radeon.ps5.a"
     provenance = radv / "PROVENANCE.txt"
 
-    patches = sorted((Path(__file__).resolve().parent / "patches").glob("*.patch"))
+    patches = sorted((Path(__file__).resolve().parent).glob("ps5_mesa-*.patch"))
     patch_digest: str | None = None
     if patches:
         import hashlib

@@ -1,4 +1,4 @@
-// The lobby and relay's messages (server/lobby, docs/multiplayer.md): public sessions listed and found, a station
+// The lobby and relay's messages (server/lobby, docs/ps5/multiplayer.md): public sessions listed and found, a station
 // introduced to a host, and the relay that carries a session for routers that block direct connections. The lobby
 // never reads game traffic: what it relays is the session's sealed datagrams.
 //

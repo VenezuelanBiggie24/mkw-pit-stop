@@ -75,7 +75,7 @@ def probe_layouts() -> bytes:
     # The desktop trial uses the first addresses its runtime would try.
     candidate = PLACEMENTS["ps5-smoke"]
     # Hookshot's PS5 beta (a3551c6) reserved [64, 128) GiB in 16 GiB pieces.
-    # See docs/research.md. Keep this survey independent of the runtime profile.
+    # See docs/project/research.md. Keep this survey independent of the runtime profile.
     alternate = replace(candidate, low_base=32 * GIB, alias_base=64 * GIB)
     low36 = PLACEMENTS["ps5-low36"]
     validate_placement(alternate)

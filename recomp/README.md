@@ -31,7 +31,7 @@ names the dump's version and its table).
 
 Use `--guest-layout ps5-high144` with a separate `--out` to generate the console-tested PS5 placements for a host build.
 The generator records the selected profile in `placement.json`. If interrupted, rerun the same command to finish
-before building. See [the PS5 layout test](../docs/ps5.md#test-the-guest-layout-on-linux).
+before building. See [the PS5 layout test](../docs/ps5/ps5.md#test-the-guest-layout-on-linux).
 
 | File | What it does |
 |---|---|

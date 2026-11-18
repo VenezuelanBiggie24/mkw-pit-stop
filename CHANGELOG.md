@@ -1,7 +1,7 @@
 # Changelog
 
-Each version's section is that release's notes: `tools/build/notes.py` puts it into `docs/release-template.md` (or
-`docs/release-template-ps5.md` for PS5 releases: install, updating, known issues, reporting) for the GitHub release. A
+Each version's section is that release's notes: `tools/build/notes.py` puts it into `docs/project/release-template.md` (or
+`docs/ps5/release-template-ps5.md` for PS5 releases: install, updating, known issues, reporting) for the GitHub release. A
 section has a summary paragraph, `### Changes` (each with its issue, #N), `### Tested` (what was run from the packages
 before publishing) and optionally `### Known issues`.
 
