@@ -27,7 +27,8 @@ totk-pc-recomp, MIT; −10.6 % recorder instructions on Steam Deck; no measurabl
 - **Recording in parallel**: chunks of a submit on several threads; today they fight over the texture lock, which has
   to be split first.
 - **The kernel's global lock**: waits by address are done (−1.3 ms\*); the rest of the lock remains.
-- **The game thread**: the generated C at `-O1`, with profile-guided optimization next (12-15 % in totk-pc-recomp).
+- **The game thread**: the generated C at `-O1`. Profile-guided optimization, 12-15 % in totk-pc-recomp, gave no
+  measurable gain here (section 1, 19/11/2026).
 
 \* Our numbers (not the ones said to come from totk-pc-recomp) were measured on 07-09/11/2026 on our test machine:
 Radeon 660M APU (Ryzen 5 7535HS), Linux, 720p internal resolution.
@@ -50,7 +51,7 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   were no loop). More locals, or locals chosen by loop use, cost more than they saved on random functions;
   `--reg-loop-weight 8` helps `main+0x154e14`'s list walk (`x11` no longer stored and reloaded per node) and is
   for a second build to measure. -O2 gave more instructions and memory operands than -O1 on the race's 24 hottest
-  functions, so the generated code stays at -O1; PGO is next. Measured on the console (15/11/2026): no hang, every
+  functions, so the generated code stays at -O1. Measured on the console (15/11/2026): no hang, every
   hot function within noise, the game threads' total 74.7 -> 74.0 ms a frame. Next on this line: `frinta` lifted to a
   libm `round()` call (1.3 ms a frame, from `sinf`), and the `--reg-loop-weight 8` build.
 - **Tried and dropped: a gentler memory governor.** A race sits at ~836 MiB of direct memory, so the governor runs its
@@ -69,7 +70,7 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   (+0.6 ms busy), they overlap other work. Slow wakes (`MKW_SVC_STATS`): ~11 a frame take 200 us or more, 98 % of it
   waiting for the virtual core, held by an equal-priority worker of the other job pool (two pools of six, one per
   core, priority 44, as main on core 0); main loses ~0.3 ms a frame to them. What is left is the game's own work as
-  translated: profile-guided optimization of the generated C next (task 35).
+  translated.
 - **Found, to measure: `main+0x154e14` is a wait, not a walk** (task 36, 16/11/2026). Its 6.3-7 ms a frame
   (`MKW_PROFILE_FN`) are an early-read wait for the GPU at its start: a read at 0x25a052c0e8 of a 16 KiB native page
   whose other 4 KiB page 0x25a052f000 the GPU writes (a sibling wait). In the sibling A/B run 58 of the 60 logged waits
@@ -118,11 +119,18 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   (0), `MKW_REPLAY_PAR_MORE` (6 recorders: 35.0 against 34.3 ms, the cores are taken). `MKW_REPLAY_PAR_MORE`/`SMALL`
   drew whole-scene vertical streaks in their B blocks; MORE alone renders clean, so SMALL or the switching is the bug.
   Both were removed in the merge of 0.1.13.
-- **Measured and set aside: profile-guided optimization** (17/11/2026). A fresh profile of the merged lift (Linux,
-  `MKW_GPU=null`, race weighted 3x) built into the PS5 eboot: single player at FPS=60 43.8 against 43.9 fps (22.84
-  against 22.76 ms, 210 s of race each), 2-player split at 30 fps 34.03 against 34.30-34.50 ms. The frame waits on
-  the game's job chain, not on the speed of its code. clang crashed now and then compiling the lift 16 jobs wide
-  (lower-expect, then two objects of the PS5 build); each file compiled alone.
+- **Measured and set aside: profile-guided optimization** (19/11/2026). 1.8.0 on the PS5, Grand Prix at FPS=60, frame
+  generation off, 210 s of race per run, in the order A B A B: `-O1` 23.87 and 24.85 ms, `-O2` with PGO 24.12 and
+  23.97 ms. One run of each build had a single 4-6 s stall; without it `-O1` is 23.87 and 24.14 ms, PGO 23.64 and
+  23.97 ms, so about 0.2 ms against 0.27 ms between two runs of the same build. The profile: one race on Windows with
+  the real GPU, 210 s at about half speed, 13,217 functions run, the function-entry hook in none, and no function
+  mismatched or missing in the PS5 build. It does not cover the menus, other courses or split screen. No gain fits the
+  frame waiting on the game's job chain rather than on the speed of its code, which this test does not prove. The 4-6 s
+  stalls were not looked into.
+  **The 17/11/2026 test (22.84 against 22.76 ms) says nothing:** `MKW_SEQ_WATCH` kept the hook on during that profile,
+  marking its branch hot in 44,564 of 44,565 functions run. Commit 38a9398 says that profile avoided the hook; it did
+  not. clang crashed now and then compiling the lift 16 jobs wide (lower-expect, then two objects of the PS5 build);
+  each file compiled alone.
 - A null read in the game's code at `sdk+0x776a60` from `main+0x70f154` ended a run at the title (17/11/2026,
   stream-vis), the place of the 16/11 fault below: intermittent, cause not known. Again 17/11 at frame 405 in a split
   run (fix-split2), the same stack.
