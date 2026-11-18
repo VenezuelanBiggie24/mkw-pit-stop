@@ -41,9 +41,10 @@ def _align(n: int, a: int = 16) -> int:
 
 
 def write_nup(src: Path, out: Path, title_id: int = MKW_TITLE_ID, version: int = 0,
-              on_progress: Callable[[int, int], None] | None = None) -> int:  # fmt: skip
-    """Package every regular file under src as the romfs/ of one base package in out; the number of files.
-    on_progress(bytes_done, bytes_total) while the data is copied."""
+              on_progress: Callable[[int, int], None] | None = None,
+              keep: Callable[[str], bool] | None = None) -> int:  # fmt: skip
+    """Package every regular file under src (keep(name): only those) as the romfs/ of one base package in out; the
+    number of files. on_progress(bytes_done, bytes_total) while the data is copied."""
     # The tree, depth first, each directory's children contiguous in the child list (dirs, then files, by name).
     dirs: list[list] = []      # [name, first_child, child_count]
     files: list[list] = []     # [name, size, offset, sha256, path]
@@ -74,7 +75,7 @@ def write_nup(src: Path, out: Path, title_id: int = MKW_TITLE_ID, version: int =
         d, folder = pending.pop(0)
         entries = sorted(os.scandir(folder), key=lambda e: e.name)
         subs = [e for e in entries if e.is_dir(follow_symlinks=False)]
-        regs = [e for e in entries if e.is_file(follow_symlinks=False)]
+        regs = [e for e in entries if e.is_file(follow_symlinks=False) and (keep is None or keep(e.name))]
         dirs[d][1], dirs[d][2] = len(children), len(subs) + len(regs)
         for e in subs:
             i = new_dir(e.name)

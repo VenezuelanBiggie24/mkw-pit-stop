@@ -243,8 +243,10 @@ static int ensure_parent_dirs(const char *root, const char *rel) {
         struct stat st;
         if (lstat(buf, &st) == 0) {
             if (!S_ISDIR(st.st_mode)) return 0;   // reject symlinks or regular files in directory position
-        } else if (mkdir(buf, 0755) != 0 && errno != EEXIST) {
+        } else if (mkdir(buf, 0777) != 0 && errno != EEXIST) {
             return 0;
+        } else {
+            chmod(buf, 0777);
         }
         *p = '/';
     }
@@ -642,6 +644,10 @@ static int handle_put(int fd, uint8_t *io_buf) {
         send_err(fd, msg);
         return 0;
     }
+    // As an FTP upload leaves them. With 0644 (no execute bit) the title stopped starting after a send, with
+    // PRX_SCE_MODULE_LOAD_ERROR: its sce_module/libc.prx was byte for byte the placeholder's, only the mode and owner
+    // differed (18/11/2026).
+    fchmod(out_fd, 0777);
     if (resume_at) {
         pthread_mutex_lock(&g_lock);
         g_status.bytes_done += resume_at;
@@ -934,10 +940,13 @@ int ps5_game_files_ready(const char *root_dir, const char *expected_game_id, cha
     char p[768];
     struct stat st;
     if (!ps5_game_dir(root_dir, why, why_cap)) return 0;
-    snprintf(p, sizeof p, "%s/spirv", root_dir);
-    if (stat(p, &st) != 0 || !S_ISDIR(st.st_mode)) {
-        if (why && why_cap) snprintf(why, why_cap, "missing spirv/");
-        return 0;
+    snprintf(p, sizeof p, "%s/spirv.nup", root_dir);   // the shaders as one package (gfx_shader.c), else the folder
+    if (stat(p, &st) != 0 || !S_ISREG(st.st_mode)) {
+        snprintf(p, sizeof p, "%s/spirv", root_dir);
+        if (stat(p, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            if (why && why_cap) snprintf(why, why_cap, "missing spirv.nup or spirv/");
+            return 0;
+        }
     }
     if (expected_game_id && *expected_game_id) {
         snprintf(p, sizeof p, "%s/pitstop-game.id", root_dir);

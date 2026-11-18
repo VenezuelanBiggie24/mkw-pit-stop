@@ -395,6 +395,12 @@ A redistributable PS5 package cannot ship the full `eboot.bin` (which statically
   broken send of it goes on from the receiver's `.part` (`PIT1P` flag 2, the part's `.want` naming size and SHA-256;
   only to a receiver with `"resume"`), and `PIT1X` then removes the loose `romfs/` beside it (`"remove"`). The
   manifest is hash-indexed: a lookup that walked the table cost some 2x10^10 string compares over one loose send.
+- **The shaders as one file**: `spirv.nup` holds the `.spv`, `.cs.spv` and `.res.json` the title reads
+  (`gfx_shader.c` `prepared_read`; the translator's `.done` and `.result` stay on the PC), 23,000 files in place of
+  46,000 that went at ~50 a second.
+- **A send that breaks leaves a title that starts**: large files go first and `sce_module/`, `sce_sys/` and
+  `eboot.bin` last, so the placeholder's own files stay until everything else has arrived. Received files and folders
+  are `0777`, as an FTP upload leaves them.
 - **The copy already on the console**: `pitstop-game-dirs.txt` in the title folder names more folders that hold the
   game (each with its `updates/<version>/`); `ps5_game_dir` searches them after its own and picks the one whose
   `exefs/main` matches the build. The builder writes it for `--console-game` and sends no game files.

@@ -18,6 +18,7 @@
 #include "gfx.h"
 #include "host.h"
 #include "platform/platform.h"
+#include "sdk/fs/pack.h"
 
 #define BUCKETS 4096
 #define PATH_CAP 1024                                  // bytes of a UTF-8 path
@@ -124,8 +125,12 @@ static int spirv_complete(const uint32_t *w, uint64_t n) {
 
 // ---- MKW: SPIR-V prepared before the game runs (tools/shaders/translate.py)
 // <game dir>/spirv/<key>.spv and .res.json, key = nvn2_program_key(control, code): every program the game ships was
-// translated offline, so play never translates. MKW_SPIRV names another directory.
+// translated offline, so play never translates. MKW_SPIRV names another directory. <that directory>.nup, when there,
+// holds the same files as one package (the PS5 builder's spirv.nup: one file to send, not some 23,000).
 static char prepared_dir[PATH_CAP];
+static Pack *prepared_pack;
+static const PackEntry *prepared_entries;
+static size_t prepared_count;
 _Static_assert(CFG_GAME_DIR_MAX + 256 <= PATH_CAP, "game directory must leave room for derived shader paths");
 
 static void prepared_init(void *param) {
@@ -136,7 +141,33 @@ static void prepared_init(void *param) {
     } else {
         snprintf(prepared_dir, sizeof prepared_dir, "%s/spirv", cfg_game_dir());
     }
-    rt_log("gfx_shader: prepared SPIR-V from %s", prepared_dir);
+    char pk[PATH_CAP + 8];
+    snprintf(pk, sizeof pk, "%s.nup", prepared_dir);
+    if (pack_is(pk) && (prepared_pack = pack_open(pk)))
+        prepared_count = pack_entries(prepared_pack, PACK_ROMFS, &prepared_entries);
+    rt_log("gfx_shader: prepared SPIR-V from %s%s", prepared_dir, prepared_pack ? ".nup" : "");
+}
+
+static int entry_named(const void *name, const void *e) { return strcmp(name, ((const PackEntry *)e)->name); }
+
+// A prepared file, from the package or the directory; malloc'd with a NUL after its bytes, as plat_file_read's.
+static uint8_t *prepared_read(const char *name, uint64_t *size) {
+    *size = 0;
+    if (!prepared_pack) {
+        char p[PATH_CAP + 80];
+        snprintf(p, sizeof p, "%s/%s", prepared_dir, name);
+        return read_file(p, size);
+    }
+    const PackEntry *e = bsearch(name, prepared_entries, prepared_count, sizeof *prepared_entries, entry_named);
+    uint8_t *d = e ? pack_read_whole(prepared_pack, e) : NULL;
+    uint8_t *t = d ? realloc(d, e->size + 1) : NULL;
+    if (!t) {
+        free(d);
+        return NULL;
+    }
+    t[e->size] = 0;
+    *size = e->size;
+    return t;
 }
 
 static void prepared_paths(void) {
@@ -145,17 +176,17 @@ static void prepared_paths(void) {
 }
 
 static GfxShader *prepared_load(const uint8_t key[32], const uint8_t *control) {
-    char hex[65], p[PATH_CAP + 80];
+    char hex[65], p[96];
     key_hex(key, hex);
     uint64_t spv_size = 0, res_size = 0;
-    snprintf(p, sizeof p, "%s/%s.res.json", prepared_dir, hex);
-    uint8_t *res = read_file(p, &res_size);
+    snprintf(p, sizeof p, "%s.res.json", hex);
+    uint8_t *res = prepared_read(p, &res_size);
     if (!res || !reflection_valid((const char *)res, res_size)) {
         free(res);
         return NULL;
     }
-    snprintf(p, sizeof p, "%s/%s.spv", prepared_dir, hex);
-    uint8_t *spv = read_file(p, &spv_size);
+    snprintf(p, sizeof p, "%s.spv", hex);
+    uint8_t *spv = prepared_read(p, &spv_size);
     uint32_t magic = 0;
     if (spv && spv_size >= 20) memcpy(&magic, spv, 4);
     if (!spv || spv_size % 4 || magic != 0x07230203 || !spirv_complete((const uint32_t *)spv, spv_size / 4)) {
@@ -736,11 +767,11 @@ const GfxShader *gfx_shader_cs_variant(const GfxShader *s) {
     GfxShader *m = (GfxShader *)s;
     plat_mutex_lock(&lock);
     if (!m->cs_variant) {
-        char hex[65], p[PATH_CAP + 80];
+        char hex[65], p[96];
         key_hex(s->key, hex);
-        snprintf(p, sizeof p, "%s/%s.cs.spv", prepared_dir, hex);
+        snprintf(p, sizeof p, "%s.cs.spv", hex);
         uint64_t n = 0;
-        uint8_t *spv = read_file(p, &n);
+        uint8_t *spv = prepared_read(p, &n);
         uint32_t magic = 0;
         if (spv && n >= 20) memcpy(&magic, spv, 4);
         char *res = malloc(s->reflection_size + 1);
