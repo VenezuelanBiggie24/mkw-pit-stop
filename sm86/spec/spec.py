@@ -57,7 +57,8 @@ PINS = {  # tool: (package path under REDIST, sha256), from NVIDIA's redistrib_1
                   "9fdc70b4271ed9aad4d64cd7076a7d96ec36512d074b9995fe638de669197391"),
     },
 }  # fmt: skip
-TRIES = 8  # rejected captures: 0 of 8 on Linux without ASLR, 3 of 8 on Windows (09/11/2026)
+TRIES = 8  # rejected captures: 0 of 8 on Linux without ASLR, 3 of 8 on Windows (09/11/2026), 0 of 10 there with
+# fixed_base (18/11/2026)
 PTX = """.version 8.7
 .target sm_86
 .address_size 64
@@ -150,6 +151,21 @@ def strings(data: bytes) -> str:
     "<dst src size>" mark: only those blank lines go. Elsewhere they are part of the text."""
     text = "\n".join(m.decode("ascii") for m in re.findall(rb"[\t\x20-\x7e]+", data)) + "\n"
     return re.sub(r"(<0x[0-9a-f]+ 0x[0-9a-f]+ \d+>\n)(?:[ \t]*\n)+(?=ARCHITECTURE|OPERATION SETS)", r"\1", text)
+
+
+def fixed_base(exe: Path) -> Path:
+    """A copy of nvdisasm.exe without DYNAMIC_BASE and HIGH_ENTROPY_VA (its PE header's DllCharacteristics): Windows then
+    loads it and its heap at fixed addresses, as setarch -R does on Linux (no_aslr). With ASLR the captures were
+    rejected 7 of 10 times on a player's PC and a PS5 build failed all 8 tries; the copy: 0 of 10 (18/11/2026)."""
+    import struct
+
+    fixed = exe.with_name(exe.stem + "-fixed" + exe.suffix)
+    data = bytearray(exe.read_bytes())
+    at = struct.unpack_from("<I", data, 0x3C)[0] + 24 + 70  # PE signature, COFF header, then the optional header's field
+    struct.pack_into("<H", data, at, struct.unpack_from("<H", data, at)[0] & ~0x0060)
+    if not fixed.is_file() or fixed.read_bytes() != data:
+        fixed.write_bytes(data)
+    return fixed
 
 
 def no_aslr() -> None:
@@ -277,13 +293,15 @@ def capture(nvdisasm: Path, lib: Path, work: Path, out: Path) -> str:
 def build(out: Path, cache: Path, cc: list[str], crt: Path | None) -> None:
     cache.mkdir(parents=True, exist_ok=True)
     nvdisasm, ptxas = tool("nvdisasm", cache), tool("ptxas", cache)
+    if WINDOWS:
+        nvdisasm = fixed_base(nvdisasm)
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         (work / "k.ptx").write_text(PTX)
         subprocess.run([str(ptxas), "-arch=sm_86", str(work / "k.ptx"), "-o", str(work / "sm_86.cubin")], check=True)
         lib = intercept_lib(cc, work, crt)
-        # A garbled capture is still possible (see no_aslr; Windows keeps ASLR) and the parser has caught every one: a
-        # few tries, ~3 s each.
+        # A garbled capture is still possible (see no_aslr and fixed_base) and the parser has caught every one: a few
+        # tries, ~3 s each.
         for attempt in range(1, TRIES + 1):
             err = capture(nvdisasm, lib, work, out)
             if not err:
