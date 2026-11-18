@@ -1,4 +1,4 @@
-// The wire format of local wireless play carried over UDP (docs/multiplayer.md): one datagram is one message, an 8-byte
+// The wire format of local wireless play carried over UDP (docs/ps5/multiplayer.md): one datagram is one message, an 8-byte
 // header then a body of a fixed type with fixed limits. Pure: no sockets, no runtime; the session engine
 // (net_session.c), the lobby client and the lobby server (server/lobby) share it, and tests/test_net.py fuzzes it.
 //

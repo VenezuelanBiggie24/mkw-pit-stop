@@ -1,4 +1,4 @@
-// Consume the pinned MIT PS5_VulkanTemplate pad API (91179df); see docs/research.md.
+// Consume the pinned MIT PS5_VulkanTemplate pad API (91179df); see docs/project/research.md.
 #include "ps5_input.h"
 #include "platform.h"
 

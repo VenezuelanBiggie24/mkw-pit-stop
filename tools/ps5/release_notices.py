@@ -100,7 +100,7 @@ def parts() -> list[dict]:
              licence="Apache-2.0 WITH LLVM-exception",
              copyright=["Copyright (c) 2003-2026 University of Illinois at Urbana-Champaign and the LLVM project contributors"],
              artifacts=["eboot.bin", "ps5-bundle/lib/libc++*.a, libunwind.a, libclang_rt.builtins-x86_64.a"],
-             texts=[("file", HERE / "licenses/llvm-LICENSE.TXT", None, "LICENSE.TXT")],
+             texts=[("file", HERE / "LICENSE-llvm.TXT", None, "LICENSE.TXT")],
              source=dict(kind="fixed", revision="LLVM 21 as shipped in the PS5 payload SDK v0.42",
                          remote="https://github.com/llvm/llvm-project"), archive=False),
         dict(id="opus", name="Opus 1.5.2 (libopus.a)", licence="BSD-3-Clause", copyright=["Copyright the Opus authors "

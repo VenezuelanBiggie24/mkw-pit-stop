@@ -1,4 +1,4 @@
-// mkw-lobby: the lobby and relay of Mario Kart World local wireless play over the internet (docs/multiplayer.md).
+// mkw-lobby: the lobby and relay of Mario Kart World local wireless play over the internet (docs/ps5/multiplayer.md).
 //
 // Why: two players behind home routers cannot find each other, and some cannot reach each other at all (symmetric NAT,
 // CGNAT). The lobby lists public sessions (the game's own room search shows them as rooms), finds private ones by the

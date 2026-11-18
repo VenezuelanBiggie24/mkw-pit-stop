@@ -338,9 +338,9 @@ static void rows_graphics(void) {
         opt_choice_list("MKW_FPS", UI_MENU_FPS, vals, names, 5, UI_MENU_FPS_DESC);
     }
     {   // frames made between the game's (gfx/vk/device/vk_framegen.c), live
-        static const char *const vals[] = {"off", "auto", "2", "3", "4"};
-        const char *names[5] = {menu_text(UI_MENU_PERF_OFF), menu_text(UI_MENU_FPS_AUTO), "2x", "3x", "4x"};
-        opt_choice_list("MKW_FRAMEGEN", UI_MENU_FRAMEGEN, vals, names, 5, UI_MENU_FRAMEGEN_DESC);
+        static const char *const vals[] = {"off", "auto", "2", "3", "4", "120"};
+        const char *names[6] = {menu_text(UI_MENU_PERF_OFF), menu_text(UI_MENU_FPS_AUTO), "2x", "3x", "4x", "120 fps"};
+        opt_choice_list("MKW_FRAMEGEN", UI_MENU_FRAMEGEN, vals, names, 6, UI_MENU_FRAMEGEN_DESC);
         if (vk_fg_uneven()) opt_text(UI_MENU_FRAMEGEN_UNEVEN, true);   // a fixed factor that judders on this screen
     }
     opt_toggle("MKW_VRR", UI_MENU_VRR, UI_MENU_VRR_DESC);   // gfx/vk/device/vk_framegen.c fits, live
@@ -392,6 +392,25 @@ static const char *button_icons_note(void) {
     return note;
 }
 
+#ifndef MKW_PS5_NATIVE
+// Each player's controller and its battery (input/input_power.c), over the settings (discussion #516).
+static void pad_rows(void) {
+    if (!input_gamepads_running()) return;   // the start screen shows them on its main page (launcher.cpp pad_row)
+    opt_group(UI_MENU_PADS);
+    int shown = 0;
+    for (int p = 0; p < INPUT_MAX_PLAYERS; p++) {
+        InputPower w;
+        if (input_pad_power(p, &w) == INPUT_POWER_NONE) continue;
+        char id[16], label[128], value[64];
+        snprintf(id, sizeof id, "##pad%d", p + 1);
+        snprintf(label, sizeof label, menu_text(UI_MENU_PAD_PLAYER), p + 1, w.name);
+        opt_info(id, label, input_power_text(&w, value, sizeof value), UI_MENU_PAD_BATTERY_DESC);
+        shown++;
+    }
+    if (!shown) opt_text(UI_MENU_PADS_NONE);
+}
+#endif
+
 static void rows_controls(void) {
     static const UiTextId layout[] = {UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO, UI_MENU_PAD_LAYOUT_XBOX};
     opt_choice("MKW_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 3, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());
@@ -406,6 +425,7 @@ static void rows_controls(void) {
 #ifndef MKW_PS5_NATIVE
     opt_toggle("MKW_RUMBLE_TRIGGERS", UI_MENU_RUMBLE_TRIGGERS, UI_MENU_RUMBLE_TRIGGERS_DESC);
     opt_toggle("MKW_SWITCH2", UI_MENU_SWITCH2, UI_MENU_SWITCH2_DESC);   // input/switch2.c, at the next start
+    opt_toggle("MKW_DSU", UI_MENU_DSU, UI_MENU_DSU_DESC);   // input/dsu.c, live
 #endif
     opt_slider("MKW_STICK_DEADZONE", UI_MENU_STICK_DEADZONE, 0, 40, UI_MENU_STICK_DEADZONE_DESC, 1, "%.0f %%");   // input.c
 #ifndef MKW_PS5_NATIVE
@@ -419,6 +439,9 @@ static void rows_controls(void) {
 
 static void tab_controls(float scale) {
     opt_begin("##controls", scale);
+#ifndef MKW_PS5_NATIVE
+    pad_rows();   // the PS5's pads are not read through SDL: no battery to show
+#endif
     rows_controls();
     binds_rows(scale);
     opt_end();
@@ -441,6 +464,8 @@ static void rows_general(void) {
     opt_toggle("MKW_LAN", UI_MENU_LAN, UI_MENU_LAN_DESC);   // sdk/ov/ov_socket.c, the lan set of recomp/patches-mkw.txt
 #ifndef MKW_PS5_NATIVE
     opt_toggle("MKW_UPDATE_CHECK", UI_MENU_UPDATE_CHECK, UI_MENU_UPDATE_CHECK_DESC);   // ui/launcher/launcher_update.cpp
+    static const UiTextId start[] = {UI_MENU_AUTO, UI_MENU_START_ALWAYS, UI_MENU_START_SKIP};
+    opt_choice("MKW_START_SCREEN", UI_MENU_START_SCREEN, start, 3, UI_MENU_START_SCREEN_DESC);   // launcher.cpp console_start
 #endif
     opt_toggle("MKW_DISCORD", UI_MENU_DISCORD, UI_MENU_DISCORD_DESC);   // core/presence/presence.c
 }

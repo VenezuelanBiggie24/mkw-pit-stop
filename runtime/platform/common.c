@@ -197,6 +197,13 @@ __attribute__((weak)) int plat_fault_emulate_load(uint64_t fault_addr, int (*rd)
     return (void)fault_addr, (void)rd, 0;
 }
 __attribute__((weak)) int plat_fault_step(void (*fn)(uint64_t), uint64_t arg) { return (void)fn, (void)arg, 0; }
+// Background threads apart from the frame's fast cores (linux.c; win32.c's does nothing): the PS5 has no hybrid CPU,
+// so every thread already runs on the same cores (vk_backend.c keeps MKW_FAST_CORES off there).
+__attribute__((weak)) void plat_thread_background(void) {}
+// The same for the fast-core mask: every processor alike ("& all" in the callers keeps the process's own), and the C
+// heap trim after the prewarm's SPIR-V release (gfx_shader.c): the PS5's libc has no malloc_trim, so its pages stay.
+__attribute__((weak)) uint64_t plat_cpu_fast(void) { return ~0ull; }
+__attribute__((weak)) void plat_heap_trim(void) {}
 __attribute__((weak)) int plat_sample_stacks(void (*emit)(const char *, uint32_t, void *const *, int, void *), void *ctx) {
     (void)emit, (void)ctx;
     return 0;

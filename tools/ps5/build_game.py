@@ -36,7 +36,7 @@ TITLE_ID = "PPSA99193"
 TITLE_NAME = "Mario Kart World: Pit Stop"
 ICON = ROOT / "docs/images/icon0.png"
 # param.json flexibleMemorySize, MiB. Flexible and direct memory share the app's budget on the PS5: 1024 left 11,712
-# MiB of direct memory, which long sessions ran out of (docs/roadmap.md section 4), while flexible memory peaked at
+# MiB of direct memory, which long sessions ran out of (docs/project/roadmap.md section 4), while flexible memory peaked at
 # ~460-490 MiB in use ("flex free 562 MiB" in run pack1, 16/11/2026; task 38's report). 640 keeps ~150 MiB of that
 # spare and should give the direct memory ~384 MiB more; the census line's "dmem free N of M MiB" shows M.
 FLEXIBLE_MIB = 640

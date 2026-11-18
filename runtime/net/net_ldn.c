@@ -1,4 +1,4 @@
-// nn::ldn (local wireless play) for MKW, carried over UDP instead of the console's radio (docs/multiplayer.md).
+// nn::ldn (local wireless play) for MKW, carried over UDP instead of the console's radio (docs/ps5/multiplayer.md).
 //
 // MKW's network layer (main+0x22477b4, mode 2) needs only nn::ldn and nn::socket for local wireless: it never asks
 // nn::nifm, so nifm stays a console without a network (sdk/ov/ov_net.c) and the game never tries Nintendo's online
@@ -227,7 +227,7 @@ static void net_main(void *arg) {
             net_session_stats(s, &st);
             memcpy(g_ui.rtt_ms, st.rtt_ms, sizeof g_ui.rtt_ms);
             g_ui.dropped = st.dropped;
-            // every 10 s in a session: what one session costs (docs/multiplayer.md, "Running a lobby")
+            // every 10 s in a session: what one session costs (docs/ps5/multiplayer.md, "Running a lobby")
             static uint64_t stats_at, tx0, rx0, txd0, rxd0;
             int live = hosting || net_session_state(s) == NET_JOINED;
             if (!live) stats_at = 0;

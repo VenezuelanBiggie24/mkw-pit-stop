@@ -18,7 +18,7 @@ enum {
     SYNC_EVERY_MS = 1000, HANDSHAKE_MS = 10000, PEERS = 16, PENDING_MAX = 8,
     // per address, before a key: messages a second (burst twice), wrong proofs before a 60 s block
     CLEAR_RATE = 20, PROOF_TRIES = 5, BLOCK_MS = 60000, ADDRS = 64,
-    // per station, game datagrams: 1 MiB/s and 1000 datagrams/s (bursts twice); PIA sends far less (docs/multiplayer.md)
+    // per station, game datagrams: 1 MiB/s and 1000 datagrams/s (bursts twice); PIA sends far less (docs/ps5/multiplayer.md)
     DATA_BYTES = 1 << 20, DATA_DGRAMS = 1000,
 };
 

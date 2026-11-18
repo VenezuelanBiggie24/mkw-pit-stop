@@ -72,7 +72,7 @@ PS5_SOURCES = [
     "tools/ps5/build_radv.py",
     "tools/ps5/release_ps5.py",
     "tools/ps5/release_notices.py",
-    "tools/ps5/licenses",
+    "tools/ps5/LICENSE-llvm.TXT",
 ]
 SOURCES = list(dict.fromkeys(dist.SOURCES + PS5_SOURCES))
 
@@ -485,7 +485,7 @@ def main() -> int:
 
     notes_path = OUT / f"notes-ps5-{args.version}.md"
     subprocess.run([sys.executable, str(ROOT / "tools/build/notes.py"), "--version", args.changelog_section,
-                    "--template", str(ROOT / "docs/release-template-ps5.md"), "--out", str(notes_path)], check=True)
+                    "--template", str(ROOT / "docs/ps5/release-template-ps5.md"), "--out", str(notes_path)], check=True)
     artifacts.append(notes_path)
 
     icon_dst = OUT / "icon0.png"

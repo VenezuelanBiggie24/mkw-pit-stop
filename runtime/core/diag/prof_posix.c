@@ -4,7 +4,7 @@
 //   prof: frame 600: 41.2 CPU s sampled over 600 frames (0.0 ms dropped), every 1000 us per thread
 //   prof:   vk replay (replay): 16.30 CPU ms/frame, 25% outside the executable
 //   prof:     #1   9.1%   1.50 ms/f  host prepare_draw_ex
-//   prof:     #2   4.0%   0.65 ms/f  main+0x19e5860 (sym+0x40)   <- lifted, named in the guest (tools/analisis/q.py)
+//   prof:     #2   4.0%   0.65 ms/f  main+0x19e5860 (sym+0x40)   <- lifted, named in the guest (tools/analisis/bin/q.py)
 //   prof:     #3   3.0%   0.50 ms/f  outside: libc.so.6 __memmove_avx_unaligned_erms
 // Each sample weighs the thread's CPU time since its previous one (sigsample.c), so the figures are CPU time, and one
 // under MKW_PROFILE_MIN_US is dropped as a wait: the CPU of a thread busy less than a tenth of the time is not
