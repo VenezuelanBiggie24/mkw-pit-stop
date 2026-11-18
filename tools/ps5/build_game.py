@@ -8,6 +8,9 @@ ExeFS with `--generated DIR --exefs DIR` to build the loader-stage title.
 build with `tools/build/build.py --pgo-gen`, same generated tree): objects in `game-objects/lift-pgo`, so the
 build without it keeps its own, and the clang warnings about functions whose profile is missing or out of date
 are summed up at the end (a generator change since the profile shows there).
+`--gen-opt O2` compiles the generated C at -O2 instead of -O1 (objects in `lift-O2` / `lift-pgo-O2`): plain -O2 lost
+to -O1 (more instructions and memory operands in the hottest functions, docs/roadmap.md), but with a profile clang
+optimizes only the hot code and keeps the cold paths small, so -O2 is meant to be measured together with --pgo-use.
 """
 
 import argparse
@@ -116,7 +119,7 @@ def ninja_path(path: Path) -> str:
 
 def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[str, str],
                     jobs: int, generated: Path | None, exefs: Path | None,
-                    pgo_use: Path | None = None) -> tuple[list[Path], bool]:
+                    pgo_use: Path | None = None, gen_opt: str = "O1") -> tuple[list[Path], bool]:
     out = WORK / ("game-objects" if generated else "inventory-objects")
     out.mkdir(parents=True, exist_ok=True)
     write_changed(out / "guest_layout.h", ("#pragma once\n" + placement_defines(PROFILE)).encode())
@@ -128,7 +131,7 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
              f'-DRT_GAME_ID="{ident}"',
              "-fno-jump-tables", "-DVK_NO_PROTOTYPES", "-include", str(volk / "volk.h"),
              *(f"-I{p}" for p in [out, *include_dirs, *includes, template / "external", ROOT / "scratchpad/vma"])]
-    genflags = [*common, "-O1", "-Wno-return-type", "-Wno-unused-label", "-fvisibility=hidden",
+    genflags = [*common, f"-{gen_opt}", "-Wno-return-type", "-Wno-unused-label", "-fvisibility=hidden",
                 f"-I{RUNTIME / 'cpu'}"]
     # PGO changes layout, inlining and branch weights only, never what a guest instruction computes.
     # -Wprofile-instr-missing: a function the profile does not know, i.e. not compiled in the instrumented build.
@@ -176,7 +179,7 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
         ninja += ["rule tables", f"  command = {invocation} -MMD -MF $out.d -c $in -o $out",
                   "  depfile = $out.d", "  deps = gcc", "  description = compile game tables"]
         files.append((modules, Path("modules.c"), "tables"))
-        lift = "lift-pgo" if pgo_use is not None else "lift"
+        lift = "lift" + ("-pgo" if pgo_use is not None else "") + ("" if gen_opt == "O1" else f"-{gen_opt}")
         for name, _, _ in read_checked(generated, PROFILE):
             files += [(source, Path(lift) / name / source.name, "lift")
                       for source in sorted((generated / name).glob("*.c"))]
@@ -284,6 +287,8 @@ def main() -> int:
     parser.add_argument("--inventory", action="store_true", help="compile and report unresolved imports without packaging")
     parser.add_argument("--generated", type=Path, help="completed ps5-high144 lift")
     parser.add_argument("--exefs", type=Path, help="local extracted ExeFS for the built-in module hashes")
+    parser.add_argument("--gen-opt", choices=("O1", "O2"), default="O1",
+                        help="optimization level of the generated C (default O1; O2 is meant for --pgo-use)")
     parser.add_argument("--pgo-use", type=Path, metavar="FILE",
                         help="profile for the generated C (.profdata from tools/build/build.py --pgo-gen runs)")
     args = parser.parse_args()
@@ -322,7 +327,8 @@ def main() -> int:
         env.setdefault("PS5_CLANG", clang22)
     sdk = Path(subprocess.check_output(["bash", str(title / "ps5/tools/setup-sdk.sh")], env=env, text=True).strip())
     with output_lock(generated) if generated else nullcontext():
-        objects, complete = compile_objects(sdk, template, includes, env, args.jobs, generated, exefs, pgo_use)
+        objects, complete = compile_objects(sdk, template, includes, env, args.jobs, generated, exefs, pgo_use,
+                                            args.gen_opt)
     out = WORK / ("game-objects" if generated else "inventory-objects")
     aggregate = import_inventory(sdk, objects, env, out, reachable=False)
     loader = import_inventory(sdk, objects, env, out, reachable=True)

@@ -350,28 +350,59 @@ probe commands, so it needs linked game module metadata to reach those probes.
 
 ## Profile-guided build
 
-The PS5 SDK has no compiler-rt profile runtime, but `prospero-clang` is the same clang 21.1.8 as the Linux host's, so
-the profile is taken on Linux and used by the PS5 build. The Linux build compiles the PS5's own generated tree (same
-generator, `ps5-high144`, same patches and chunk file names, by which the profile names `static` helpers), so the two
-builds see the same functions:
+**Measured: no real gain** (19/11/2026, [roadmap](roadmap.md)), so releases do not use it. This is how to repeat it.
+
+The PS5 SDK has no compiler-rt profile runtime, so the profile is taken on a PC and used by the PS5 build. The PC build
+compiles the PS5's own generated tree (same generator, `ps5-high144`, same patches and chunk file names, by which the
+profile names `static` helpers), so the two builds see the same functions. Keep the generated tree at the same absolute
+path in both builds. The instrumentation is clang's front end (`-fprofile-instr-generate`): its function hashes come
+from the C's syntax tree, so the target, `-march` and `-fPIC` do not change them, but **the clang version does** (23
+against the PS5's 21: 22 % of the lifted functions differ). The generated C must be compiled by clang 21 on the PC too.
+
+On Windows, with the real GPU (what the 19/11 test used, from WSL). llvm-mingw's clang is newer, so `--pgo-cc` compiles
+the generated C with the host's clang 21 and `--pgo-rt` links a profile runtime of that version: `libprofile21.a`, built
+from LLVM 21.1.8's `compiler-rt/lib/profile` for `x86_64-w64-mingw32` with `-DCOMPILER_RT_HAS_ATOMICS=1`.
 
 ```sh
-uv run tools/build/build.py --guest-layout ps5-high144 --gen build/ps5-game/generated --pgo-gen build/pgo/raw
-MKW_GPU=null MKW_PGO_AT=1500,4500 MKW_INPUT_SCRIPT=race-drive.txt build/layout-ps5-high144/mkw-pgo-gen --seconds 280
-llvm-profdata merge -o build/pgo/mkw.profdata build/pgo/raw/*.profraw
-uv run tools/ps5/build_game.py ... --pgo-use build/pgo/mkw.profdata
+uv run tools/build/build.py --target windows --guest-layout ps5-high144 --gen "$PWD/build/ps5-gen" \
+  --exefs "$GAME/exefs" --romfs "$GAME/romfs" --pgo-gen /mnt/c/mkw-pgo/raw \
+  --pgo-cc "clang --target=x86_64-w64-mingw32 --sysroot=$LLVM_MINGW/x86_64-w64-mingw32" --pgo-rt libprofile21.a
 ```
 
-The instrumentation is clang's front end (`-fprofile-instr-generate`): its function hashes come from the C's syntax
-tree, so the other target, `-march` and `-fPIC` of the PS5 build do not change them. `MKW_GPU=null` runs the game's
-CPU side without the software GPU's stalls; the counts are of the game code, which does not depend on the GPU.
-`race-drive.txt` is an input script of your own (`tools/run/press-race.txt`'s menu presses, then the race driven):
-not `MKW_QUICK_RACE` or `MKW_SEQ_WATCH`, which turn on the function-entry hook and would mark it hot in every
-function (`pgo.c` warns). Only a clean end (`plat_exit(0)`) writes the `-exit` stretch; a crash writes nothing.
-`MKW_PGO_AT` cuts the profile into stretches (`runtime/core/diag/pgo.c`), so the race can be weighted above the menus
-(`llvm-profdata merge --weighted-input=W,FILE`). A profile goes stale when the generator or `runtime/cpu`'s headers
-change: `build_game.py --pgo-use` prints how many functions clang found out of date or without data, and those are
-compiled without the profile. Retake the profile then.
+Run `mkw-pgo-gen.exe` with this in `mkw.ini`:
+
+```ini
+[diagnostics]
+INPUT_SCRIPT = race-drive.txt
+SEQ_WATCH = 1
+SEQ_UNTIL = -WaitIntroMovie,IsSequenceFlag
+SEQ_EXIT = 210
+SEED = 1
+SKIP_MOVIES = 1
+```
+
+Then, with clang 21's tools:
+
+```sh
+llvm-profdata-21 merge -o build/pgo/mkw.profdata /mnt/c/mkw-pgo/raw/*-exit.profraw
+uv run tools/ps5/build_game.py ... --generated "$PWD/build/ps5-gen" --gen-opt O2 --pgo-use build/pgo/mkw.profdata
+```
+
+On Linux the host's clang is already 21, so `build.py --guest-layout ps5-high144 --gen ... --pgo-gen build/pgo/raw` is
+enough, and `MKW_GPU=null` runs the game's CPU side without the software GPU's stalls.
+
+`race-drive.txt` is an input script of your own: `tools/run/press-race.txt`'s menu presses, then `ReadyRace+N` lines
+that drive the race. Those lines need `SEQ_WATCH`, which turns on the function-entry hook (`cpu.h` `FN_ENTER`). The hook
+must stay out of the profile: its branch would count as taken in every function and be laid out hot in a build where it
+is always off. So `pgo.c` drops everything counted while the hook is on, when `SEQ_UNTIL` turns it off at the race
+start, and the log says so. A run that ends with the hook on writes no usable profile: its only file is `*-hook.profraw`,
+which the merge above leaves out. `MKW_QUICK_RACE` and `MKW_BENCH` keep the hook on, so they cannot take a profile.
+
+Only a clean end (`plat_exit(0)`) writes the `-exit` stretch; a crash writes nothing. `MKW_PGO_AT` cuts the profile into
+stretches (`runtime/core/diag/pgo.c`), which `llvm-profdata merge --weighted-input=W,FILE` can weight. A profile goes
+stale when the generator or `runtime/cpu`'s headers change: `build_game.py --pgo-use` prints how many functions clang
+found out of date or without data, and those are compiled without the profile. Retake the profile then. `--gen-opt O2`
+compiles the generated C at `-O2`; `-O1` stays the default.
 
 ## Pit Stop placeholder and PC builder
 
