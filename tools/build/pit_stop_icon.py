@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Draws the "MKW: Pit Stop" icon set: our own drawing (a go-kart seen from the front, a wrench and a chequered flag, no
 art of the game), lettered in Lato Black Italic (SIL OFL) converted to outlines so the SVGs need no font. Writes the SVGs
-to docs/images and docs/images/icon0.png, the 512-pixel PNG that tools/ps5/build_game.py puts in the PS5 title's
-sce_sys (the console's home screen icon). The PNG is committed so the PS5 build needs neither cairosvg nor the font;
+to docs/images, docs/images/icon0.png, the 512-pixel PNG that tools/ps5/build_game.py puts in the PS5 title's
+sce_sys (the console's home screen icon), and icon-mark.png (256 px, the emblem), from which with icon0.png
+tools/build/icon.py makes the PC program's icons. The PNGs are committed so no build needs cairosvg or the font;
 run this again after changing the drawing. With --png DIR it also renders the other sizes (1024/256 px icon, 256/64/32 px
 mark without lettering, the 1280x640 banner for GitHub's social preview) into DIR.
 
@@ -203,6 +204,9 @@ def main() -> None:
         (images / f"{name}.svg").write_text(svg)
     cairosvg.svg2png(bytestring=files["icon"].encode(), write_to=str(images / "icon0.png"), output_width=512,
                      output_height=512)
+    # the emblem's 256 px PNG: tools/build/icon.py makes the program's small icons (48 px and under) from it
+    cairosvg.svg2png(bytestring=files["icon-mark"].encode(), write_to=str(images / "icon-mark.png"), output_width=256,
+                     output_height=256)
     if args.png:
         args.png.mkdir(parents=True, exist_ok=True)
         for name, size in (("icon", 1024), ("icon", 512), ("icon", 256), ("icon-mark", 256), ("icon-mark", 64),

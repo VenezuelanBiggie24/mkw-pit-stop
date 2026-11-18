@@ -215,8 +215,11 @@ def pgo_report(text: str) -> None:
         found = [(int(a), int(b)) for a, b in re.findall(pattern, text)]
         sums[kind] = (len(found), sum(b for _, b in found), sum(a for a, _ in found))
     other = sorted({m for m in re.findall(r"warning: (.*profile.*)", text) if "of " not in m})[:10]
+    if not any(files for files, _, _ in sums.values()):
+        print("PGO: clang reported no profile counts (no generated file was compiled this time, or every one matched)")
     for kind, (files, bad, total) in sums.items():
-        print(f"PGO: {kind}: {bad} of {total} functions in {files} files")
+        if files:
+            print(f"PGO: {kind}: {bad} of {total} functions in {files} files")
     for line in other:
         print(f"PGO: {line}")
 

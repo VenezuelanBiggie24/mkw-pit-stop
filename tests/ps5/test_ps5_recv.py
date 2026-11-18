@@ -257,3 +257,35 @@ def test_ps5_recv_builder_status(tmp_path: Path) -> None:
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+@pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
+def test_ps5_send_reports_phases(tmp_path: Path) -> None:
+    """send_directory says what it is doing before the bytes flow (checksums, the PS5's answer), then the transfer."""
+    sys.path.insert(0, str(ROOT / "tools/ps5"))
+    import send_ps5
+
+    exe = _compile_helper(tmp_path)
+    title, stage = tmp_path / "PPSA99193", tmp_path / "stage"
+    title.mkdir()
+    for rel, data in {"eboot.bin": b"e" * 10, "exefs/main": b"m" * 20, "romfs/a.bin": b"r" * 30}.items():
+        (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+        (stage / rel).write_bytes(data)
+    port_file = tmp_path / "port.txt"
+    proc = subprocess.Popen([str(exe), "serve", str(title), str(port_file)], env=dict(os.environ, MKW_PS5_RECV_PORT="0"))
+    try:
+        for _ in range(200):
+            if port_file.is_file() and port_file.read_text().strip():
+                break
+            time.sleep(0.01)
+        phases, progress = [], []
+        send_ps5.send_directory(f"127.0.0.1:{port_file.read_text().strip()}", stage,
+                                on_phase=lambda p, d, t: phases.append((p, d, t)),
+                                on_progress=lambda bd, bt, fd, ft: progress.append((bd, bt, fd, ft)))
+        assert proc.wait(timeout=5) == 0
+        assert ("hash", 3, 3) in phases and ("check", 3, 3) in phases and ("send", 0, 60) in phases
+        assert [p[0] for p in phases].index("send") == len(phases) - 1
+        assert progress[-1] == (60, 60, 3, 3)
+    finally:
+        if proc.poll() is None:
+            proc.kill()

@@ -177,7 +177,9 @@ void rt_log_flush(void) __attribute__((weak));   // core/boot/main.c: the log li
 
 void plat_exit(int code) {
     if (rt_log_flush) rt_log_flush();
-    if (pgo_exit) pgo_exit();
+    // Clean ends only: a crash (main.c's handler, 71) or rt_fatal (1) would write from a signal handler, where the
+    // profile runtime's stdio is unsafe, and leave a partial profile that a merge of *.profraw takes in unnoticed.
+    if (pgo_exit && code == 0) pgo_exit();
     fflush(stdout);
     fflush(stderr);
     _exit(code);

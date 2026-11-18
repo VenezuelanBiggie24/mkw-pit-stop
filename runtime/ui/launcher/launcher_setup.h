@@ -16,6 +16,7 @@ typedef struct {
     char code[16];              // why, when it failed: prepare.py's error code (its header), or "stopped", "cancelled",
                                 // "no_setup" (the tools missing) and "" for a message of SDL's
     char error[512];            // the detail: a folder, a build id, a tool's English message...
+    char note[200];             // the running step's own line (prepare_ps5.py's 'note': which phase, speed, time left)
     unsigned generation;        // incremented at each start, including a setup completed between launcher frames
 } SetupState;
 
@@ -26,6 +27,7 @@ int setup_tool(const char *exe_dir, const char *rel, char *python, char *script,
 // source NULL: the last setup's copy (after an update: only what changed runs again). link_romfs: the player's pick
 // from the files page's cards (0 copy, 1 link), or < 0 for neither and prepare.py's own record of both.
 void setup_start(const char *exe_dir, const char *game_dir, const char *source, int link_romfs);
-void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip);
+// usb set: the title goes to usb/homebrew/PPSA99193 (prepare_ps5.py --usb), else to ps5_ip's receiver (--send).
+void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip, const char *usb);
 void setup_cancel(void);
 SetupState setup_state(void);                   // a copy, any time

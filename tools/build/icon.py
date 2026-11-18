@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Draws the icon of mkw.exe by code (our own: a checkered flag on a rounded square, no art of the game) and writes it as
-an .ico with PNG images of 256, 48, 32 and 16 pixels. tools/build/build.py --target windows calls it before the
-resource (runtime/platform/mkw.rc names "mkw.ico"); the file is made in build/, never committed. With an .svg name it
-writes the same drawing as vector shapes instead (the repo's logo, docs/images/logo.svg: text, so it can be versioned); with a
-.png name, one 256-pixel image (the Linux AppImage's icon, tools/build/release.py); with a .c name, the C source of
+"""The program's icons: mkw.exe's .ico (256, 48, 32 and 16 px), the window's (a .c name) and the AppImage's (.png),
+from the "MKW: Pit Stop" drawing the PS5 title uses (tools/build/pit_stop_icon.py): docs/images/icon0.png (512 px,
+with its lettering) for 256 and 128 px, docs/images/icon-mark.png (256 px, the emblem alone) for 48 px and under,
+where the lettering does not read. Both PNGs are committed, so no SVG renderer or font is needed here; they are
+scaled down by area (premultiplied alpha), in plain Python. tools/build/build.py --target windows calls it before the
+resource (runtime/platform/mkw.rc names "mkw.ico"); the output is made in build/, never committed. A .c name writes
 app_icon_set(SDL_Window *), which gives the window a 128-pixel copy (build.py, every target): Wayland compositors with
-xdg_toplevel_icon (KWin) show it in the taskbar instead of a generic icon when no desktop file matches the app id.
+xdg_toplevel_icon (KWin) show it in the taskbar. With an .svg name it still writes upstream's chequered-flag logo as
+vector shapes (docs/images/logo.svg; the start screen draws that logo itself, launcher_logo.cpp). tools/prepare/steam.py
+draws Steam's library images with render() (the flag) and png().
 
 Usage: uv run tools/build/icon.py OUT.ico | OUT.svg | OUT.png | OUT.c
 """
@@ -59,12 +62,95 @@ def render(size: int, ss: int = 4) -> bytes:
     return bytes(rows)
 
 
+ROOT = Path(__file__).resolve().parents[2]
+ICON = ROOT / "docs/images/icon0.png"       # 512 px, lettered
+MARK = ROOT / "docs/images/icon-mark.png"   # 256 px, the emblem alone
+SOURCES = (ICON, MARK)                      # build.py rebuilds the icons when these change
+
+
+def read_png(path: Path) -> tuple[int, int, list[float]]:
+    """Width, height and premultiplied RGBA floats of an 8-bit RGBA, non-interlaced PNG (what cairosvg writes)."""
+    data = path.read_bytes()
+    pos, idat = 8, b""
+    w = h = 0
+    while pos < len(data):
+        n, kind = struct.unpack(">I4s", data[pos : pos + 8])
+        body = data[pos + 8 : pos + 8 + n]
+        if kind == b"IHDR":
+            w, h, depth, ctype, _, _, interlace = struct.unpack(">IIBBBBB", body)
+            if (depth, ctype, interlace) != (8, 6, 0):
+                raise SystemExit(f"{path}: not an 8-bit RGBA PNG without interlacing")
+        elif kind == b"IDAT":
+            idat += body
+        pos += 12 + n
+    raw, stride, prev, out = zlib.decompress(idat), w * 4, bytearray(w * 4), []
+    for y in range(h):
+        f, line = raw[y * (stride + 1)], bytearray(raw[y * (stride + 1) + 1 : (y + 1) * (stride + 1)])
+        for i in range(stride):
+            a = line[i - 4] if i >= 4 else 0
+            b, c = prev[i], prev[i - 4] if i >= 4 else 0
+            if f == 1:
+                line[i] = (line[i] + a) & 255
+            elif f == 2:
+                line[i] = (line[i] + b) & 255
+            elif f == 3:
+                line[i] = (line[i] + (a + b) // 2) & 255
+            elif f == 4:
+                pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+        for i in range(0, stride, 4):
+            al = line[i + 3] / 255
+            out += [line[i] * al, line[i + 1] * al, line[i + 2] * al, al]
+        prev = line
+    return w, h, out
+
+
+def scale(src: tuple[int, int, list[float]], n: int) -> bytes:
+    """n x n RGBA bytes, each pixel the area-weighted mean of the source pixels it covers."""
+    w, h, px = src
+
+    def spans(size: int) -> list[list[tuple[int, float]]]:
+        k, res = size / n, []
+        for o in range(n):
+            a, b, cell = o * k, (o + 1) * k, []
+            for i in range(int(a), min(size, math.ceil(b))):
+                cover = min(b, i + 1) - max(a, i)
+                if cover > 0:
+                    cell.append((i, cover / k))
+            res.append(cell)
+        return res
+
+    xs, ys, out = spans(w), spans(h), bytearray()
+    for cy in ys:
+        for cx in xs:
+            acc = [0.0, 0.0, 0.0, 0.0]
+            for y, wy in cy:
+                row = y * w
+                for x, wx in cx:
+                    q, wt = (row + x) * 4, wx * wy
+                    acc[0] += px[q] * wt
+                    acc[1] += px[q + 1] * wt
+                    acc[2] += px[q + 2] * wt
+                    acc[3] += px[q + 3] * wt
+            a = acc[3]
+            out += bytes([round(min(255, acc[0] / a)), round(min(255, acc[1] / a)), round(min(255, acc[2] / a)),
+                          round(a * 255)] if a > 0 else [0, 0, 0, 0])  # fmt: skip
+    return bytes(out)
+
+
+def pixels(size: int) -> bytes:
+    """The icon at size px: the lettered one from 128 px up, the emblem below (the lettering does not read there)."""
+    return scale(read_png(ICON if size >= 128 else MARK), size)
+
+
 def png(size: int) -> bytes:
     def chunk(kind: bytes, data: bytes) -> bytes:
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
 
+    px, stride = pixels(size), size * 4
+    rows = b"".join(b"\0" + px[y * stride : (y + 1) * stride] for y in range(size))   # filter none
     head = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)   # 8-bit RGBA
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head) + chunk(b"IDAT", zlib.compress(render(size), 9)) + chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head) + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b"")
 
 
 def wave(x: float) -> float:
@@ -110,12 +196,11 @@ def main() -> None:
         return
     if sys.argv[1].endswith(".c"):
         n = 128
-        rows = render(n)
-        px = b"".join(rows[y * (n * 4 + 1) + 1 : (y + 1) * (n * 4 + 1)] for y in range(n))   # without the filter bytes
+        px = pixels(n)
         body = ",".join(str(b) for b in px)
         Path(sys.argv[1]).parent.mkdir(parents=True, exist_ok=True)
         Path(sys.argv[1]).write_text(
-            "// Drawn by tools/build/icon.py: the window's icon, RGBA rows. Generated, never committed.\n"
+            "// From docs/images/icon0.png by tools/build/icon.py: the window's icon, RGBA rows. Generated, never committed.\n"
             "#include <SDL3/SDL.h>\n"
             f"static const unsigned char px[{len(px)}] = {{{body}}};\n"
             "void app_icon_set(SDL_Window *w) {\n"

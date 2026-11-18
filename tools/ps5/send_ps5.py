@@ -166,13 +166,18 @@ def send_directory(
     cache_path: Path | None = None,
     on_progress: Callable[[int, int, int, int], None] | None = None,
     timeout: float = 30.0,
+    on_phase: Callable[[str, int, int], None] | None = None,
 ) -> tuple[int, int, int]:
     """Send staged package files to the Pit Stop placeholder TCP receiver.
 
+    on_phase(phase, done, total) reports the steps before the bytes flow, which took minutes in silence on a first
+    send (18/11/2026): "hash" (files checksummed here, each 23 GB first time, cached after), "check" (files the PS5
+    was asked about), then "send" once with the bytes to go (on_progress follows the transfer).
     Returns (files_sent, files_skipped, bytes_sent).
     """
     host, port = parse_host_port(host_spec)
-    entries = collect_stage_files(stage_dir, cache_path=cache_path)
+    entries = collect_stage_files(stage_dir, cache_path=cache_path,
+                                  on_hash=(lambda d, t: on_phase("hash", d, t)) if on_phase else None)
     total_files = len(entries)
 
     with socket.create_connection((host, port), timeout=timeout) as sock:
@@ -205,6 +210,8 @@ def send_directory(
                     skipped += 1
                 else:
                     need.append(item)
+            if on_phase:
+                on_phase("check", min(start + STAT_BATCH, total_files), total_files)
 
         send_files = len(need)
         send_bytes = sum(item[2] for item in need)
@@ -217,6 +224,8 @@ def send_directory(
 
         sock.sendall(b"PIT1B" + struct.pack("<QQ", send_files, send_bytes))
         _expect_ack(sock)
+        if on_phase:
+            on_phase("send", 0, send_bytes)
 
         bytes_sent = 0
         for idx, (rel, path, sz, digest) in enumerate(need, 1):

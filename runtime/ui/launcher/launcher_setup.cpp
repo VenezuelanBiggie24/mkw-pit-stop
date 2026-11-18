@@ -21,7 +21,7 @@ static const char *const kPs5Steps[SETUP_PS5_STEPS] = {"check", "nup", "exefs", 
                                                        "link", "shaders", "deploy"};
 
 static SDL_Mutex *g_lock;
-static SetupState g_state = {0, SETUP_MODE_DESKTOP, -1, SETUP_STEPS, {}, 0, 0, 0, {}, {}};
+static SetupState g_state = {0, SETUP_MODE_DESKTOP, -1, SETUP_STEPS, {}, 0, 0, 0, {}, {}, {}};
 static SDL_Process *g_proc;
 static char g_log_path[1200];
 
@@ -99,8 +99,10 @@ static void on_line(FILE *logf, char *line) {
             if (!strcmp(arg, names[i])) {
                 if (g_state.step >= 0 && g_state.step != i && !g_state.done[g_state.step]) g_state.done[g_state.step] = 1;
                 if (line[1] == 'k') g_state.done[i] = 2;
-                else g_state.step = i, g_state.progress = g_state.total = 0;
+                else g_state.step = i, g_state.progress = g_state.total = 0, g_state.note[0] = 0;
             }
+    } else if (!strcmp(line, "note") && arg) {
+        snprintf(g_state.note, sizeof g_state.note, "%s", arg);
     } else if (!strcmp(line, "progress") && arg) {
         sscanf(arg, "%ld %ld", &g_state.progress, &g_state.total);
     } else if (!strcmp(line, "done")) {
@@ -164,7 +166,7 @@ void setup_start(const char *exe_dir, const char *game_dir, const char *source, 
     char python[1200], script[1200];
     SDL_LockMutex(g_lock);
     unsigned generation = g_state.generation + 1;
-    g_state = SetupState{1, SETUP_MODE_DESKTOP, -1, SETUP_STEPS, {}, 0, 0, 0, {}, {}, generation};
+    g_state = SetupState{1, SETUP_MODE_DESKTOP, -1, SETUP_STEPS, {}, 0, 0, 0, {}, {}, {}, generation};
     SDL_UnlockMutex(g_lock);
     if (!find_tool(exe_dir, "prepare/prepare.py", python, script, sizeof python)) {
         set_finished(-1, "no_setup", "");
@@ -189,13 +191,13 @@ void setup_start(const char *exe_dir, const char *game_dir, const char *source, 
     SDL_DetachThread(SDL_CreateThread(reader, "setup", nullptr));
 }
 
-void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip) {
+void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip, const char *usb) {
     if (!g_lock) g_lock = SDL_CreateMutex();
     if (setup_state().running) return;
     char python[1200], script[1200], bundle[1200], work_dir[1200], shader_cache[1200];
     SDL_LockMutex(g_lock);
     unsigned generation = g_state.generation + 1;
-    g_state = SetupState{1, SETUP_MODE_PS5, -1, SETUP_PS5_STEPS, {}, 0, 0, 0, {}, {}, generation};
+    g_state = SetupState{1, SETUP_MODE_PS5, -1, SETUP_PS5_STEPS, {}, 0, 0, 0, {}, {}, {}, generation};
     SDL_UnlockMutex(g_lock);
     if (!find_ps5_tools(exe_dir, python, script, bundle, sizeof python)) {
         set_finished(-1, "no_setup", "the PS5 bundle tools are missing (setup/ps5-bundle/)");
@@ -226,13 +228,16 @@ void setup_ps5_start(const char *exe_dir, const char *source, const char *ps5_ip
         args[n++] = "--shader-cache";
         args[n++] = shader_cache;
     }
-    if (ps5_ip && ps5_ip[0]) {
+    if (usb && usb[0]) {
+        args[n++] = "--usb";
+        args[n++] = usb;
+    } else if (ps5_ip && ps5_ip[0]) {
         args[n++] = "--send";
         args[n++] = ps5_ip;
     }
     args[n++] = nullptr;
-    rt_log("setup-ps5: %s %s --source %s --bundle %s --send %s", python, script, source, bundle,
-           (ps5_ip && ps5_ip[0]) ? ps5_ip : "(none)");
+    rt_log("setup-ps5: %s %s --source %s --bundle %s %s %s", python, script, source, bundle,
+           usb && usb[0] ? "--usb" : "--send", usb && usb[0] ? usb : (ps5_ip && ps5_ip[0]) ? ps5_ip : "(none)");
     g_proc = SDL_CreateProcess(args, true);
     if (!g_proc) {
         set_finished(-1, "", SDL_GetError());
