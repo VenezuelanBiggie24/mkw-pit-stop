@@ -226,6 +226,13 @@ void gfx_shader_reflect(GfxShader *s) {
     json_str(js, js + strlen(js), "stage", stage, sizeof stage);
     s->stage = !strcmp(stage, "cs") ? GFX_STAGE_CS : !strcmp(stage, "ps") ? GFX_STAGE_FS : GFX_STAGE_VS;
     s->mesh_kind = !strcmp(stage, "task") ? GFX_MESH_TASK : !strcmp(stage, "mesh") ? GFX_MESH_MESH : GFX_MESH_NONE;
+    char t[32];
+    unsigned c[5];
+    json_str(js, js + strlen(js), "cs_table", t, sizeof t);   // translate.py: the control's counts, for a load by key
+    if (s->stage == GFX_STAGE_CS && !s->cs_known && sscanf(t, "%u,%u,%u,%u,%u", &c[0], &c[1], &c[2], &c[3], &c[4]) == 5) {
+        for (int i = 0; i < 5; i++) s->cs_table[i] = (uint8_t)c[i];
+        s->cs_known = 1;
+    }
     for (int k = 0; k < GFX_RES_KINDS; k++) {
         int count = json_objects(js, kinds[k], NULL, s, k);
         s->res[k] = calloc(count ? count : 1, sizeof *s->res[k]);

@@ -110,6 +110,11 @@ def translate_one(
     except (KeyError, ValueError, IndexError) as e:  # a translator bug in one program must not stop the census
         return f"error: {type(e).__name__} {e}", ""
     refl.update(int_hints.hints(src, stage, refl))  # integer inputs and outputs for the setup's prewarm
+    if stage == "cs":
+        # The NVN2 c0 table's counts (runtime gfx_shader_refl.c cs_res), which the runtime otherwise reads from the
+        # control section the game passes: the prewarm loads programs by key alone, and without them a compute
+        # pipeline read its buffers from the wrong slots (0cb78db5 looped 65 536 times, 412 ms a frame, 18/11/2026).
+        refl["cs_table"] = ",".join(str(ctl[o]) for o in (0xB1, 0xB2, 0xB3, 0xB6, 0xA9))
     cs_src = refl.pop("cs_glsl", None)
     gl, spv, res = Path(out, f"{key}.glsl"), Path(out, f"{key}.spv"), Path(out, f"{key}.result")
     if cs_src is not None:   # task/mesh as compute, for devices without mesh shaders

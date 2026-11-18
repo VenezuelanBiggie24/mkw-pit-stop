@@ -182,6 +182,13 @@ static GfxShader *prepared_load(const uint8_t key[32], const uint8_t *control) {
         }
     }
     gfx_shader_reflect(s);
+    if (s->stage == GFX_STAGE_CS && !s->cs_known) {
+        // loaded by key (a prewarm) from a translation older than its "cs_table": its resources would sit in the
+        // wrong slots, and the cache would keep it so for the game's dispatch. Left out: the game loads it with its
+        // control.
+        shader_free(s);
+        return NULL;
+    }
     s->spirv_state = SPIRV_PREPARED;
     return gfx_shader_insert(s);
 }
