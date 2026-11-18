@@ -33,9 +33,14 @@ STEPS = ("check", "exefs", "romfs", "generate", "compile", "shaders", "warm", "c
 LINK_TIMEOUT = 30 * 60  # far past a slow link: only a hung linker (issue #2: "stuck" after the last object)
 WARM_SECONDS = 60  # the driver cache is saved every 20 s and the pipeline keys every 2 (vk_pipeline.c, vk_pipe_keys.c)
 
+EMIT_HOOKS: list = []   # each gets an event's words (prepare_ps5.py: send_ps5.StatusNotifier, the PS5's screen)
+
+
 def emit(*words: object) -> None:
     print(*words, flush=True)
     print(*words, file=sys.stderr)
+    for hook in EMIT_HOOKS:
+        hook(" ".join(str(w) for w in words).split())
 
 def known_names() -> str:
     return ", ".join(v.name for v in reversed(PS5_VERSIONS))

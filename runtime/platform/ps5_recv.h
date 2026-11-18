@@ -27,6 +27,11 @@ typedef struct {
     uint64_t bytes_total;
     char current_file[256];
     char error[256];
+    // The PC builder's own step while it builds, before it sends (PIT1T, tools/ps5/send_ps5.py StatusNotifier):
+    // pc_index of pc_count (0: no word from it yet), its name or, pc_failed, why it failed; pc_progress of pc_total.
+    uint8_t pc_index, pc_count, pc_failed;
+    uint32_t pc_progress, pc_total;
+    char pc_label[201];
 } Ps5RecvStatus;
 
 // Validate a relative path from the builder: must stay strictly inside the title folder.

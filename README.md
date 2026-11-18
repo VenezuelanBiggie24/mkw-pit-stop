@@ -66,7 +66,8 @@ Early, and moving fast. On 17/11/2026 on a base PS5:
    ```bat
    prepare_ps5.bat --source "D:\Dumps\MKW" --send 192.168.1.50
    ```
-4. **Start the game.** The PS5 shows **Transfer complete!** when every file has arrived and been checked: press
+4. **Start the game.** While the PC builds, the PS5 screen shows its step and progress; it shows **Transfer
+   complete!** when every file has arrived and been checked: press
    **Cross**, then launch **Mario Kart World: Pit Stop** again.
 
 If the PS5 stays on **Waiting for connection**, check the address and that both are on the same network; a failed

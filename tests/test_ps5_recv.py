@@ -67,6 +67,22 @@ int main(int argc, char **argv) {
         ps5_recv_stop();
         return st.state == PS5_RECV_DONE ? 0 : 3;
     }
+    if (argc >= 4 && !strcmp(argv[1], "status")) {   // the PC builder's step reports (PIT1T) until its failure
+        if (!ps5_recv_start(argv[2], 0, "0.1.0-test", "deadbeef01234567", 0)) return 2;
+        Ps5RecvStatus st;
+        ps5_recv_status(&st);
+        FILE *f = fopen(argv[3], "w");
+        fprintf(f, "%u\\n", (unsigned)st.port);
+        fclose(f);
+        for (int i = 0; i < 1000 && !st.pc_failed; i++) {
+            usleep(10000);
+            ps5_recv_status(&st);
+        }
+        printf("%u %u %u %u %u %d|%s\\n", st.pc_index, st.pc_count, st.pc_failed, st.pc_progress, st.pc_total, st.state,
+               st.pc_label);
+        ps5_recv_stop();
+        return st.pc_failed ? 0 : 3;
+    }
     return 9;
 }
 """,
@@ -201,6 +217,43 @@ def test_ps5_recv_paths_checksum_and_incremental(tmp_path: Path) -> None:
             assert _recv_exact(s, 1) == b"K"
         assert proc2.wait(timeout=5) == 0
         assert (title / "eboot.bin").read_bytes() == b"fake-eboot-v2"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+@pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
+def test_ps5_recv_builder_status(tmp_path: Path) -> None:
+    """The PC builder's steps reach the placeholder (send_ps5.StatusNotifier -> PIT1T), its failure last, and the
+    receiver announces it takes them."""
+    sys.path.insert(0, str(ROOT / "tools/ps5"))
+    import send_ps5
+
+    exe = _compile_helper(tmp_path)
+    title = tmp_path / "PPSA99193"
+    title.mkdir()
+    port_file = tmp_path / "port.txt"
+    proc = subprocess.Popen([str(exe), "status", str(title), str(port_file)], stdout=subprocess.PIPE, text=True,
+                            env=dict(os.environ, MKW_PS5_RECV_PORT="0"))
+    try:
+        for _ in range(200):
+            if port_file.is_file() and port_file.read_text().strip():
+                break
+            time.sleep(0.01)
+        port = int(port_file.read_text().strip())
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(b"PIT1I")
+            info = json.loads(_recv_exact(s, struct.unpack("<I", _recv_exact(s, 4))[0]).decode("utf-8"))
+            assert info["status"] == 1
+        notifier = send_ps5.StatusNotifier(f"127.0.0.1:{port}")
+        for line in ("step check", "step shaders", "progress 5 10", "error failed spec.py failed: unparsed\nline"):
+            notifier.event(line.split())
+        notifier.flush()
+        out, _ = proc.communicate(timeout=15)
+        assert proc.returncode == 0, out
+        nums, label = out.strip().split("|", 1)
+        assert nums.split() == ["8", "9", "1", "5", "10", "1"]   # shaders of 9, failed, 5/10, still waiting
+        assert label == "spec.py failed: unparsed line"
     finally:
         if proc.poll() is None:
             proc.kill()

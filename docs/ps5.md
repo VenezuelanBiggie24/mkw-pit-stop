@@ -384,7 +384,9 @@ A redistributable PS5 package cannot ship the full `eboot.bin` (which statically
   launches, rejects any path leaving the title root (`..`, leading `/`, `\`, symlinks), streams into `.pitstop.part`
   with SHA-256 verification before atomic rename, skips matching files via `.pitstop-manifest.tsv` so runtime updates
   resend only changed files (`eboot.bin`, `mkw.sym`, `pitstop-game.id`), closes the listening socket on `CMD_DONE`, and
-  refreshes `/user/app/PPSA99193/sce_sys` when writable.
+  refreshes `/user/app/PPSA99193/sce_sys` when writable. While the PC builds, `PIT1T` reports its step, progress
+  or failure for the screen only (`send_ps5.py` `StatusNotifier`, at most once a second, 2 s timeout); it goes only
+  to a receiver whose `PIT1I` reply has `"status"`, since an older one answers an unknown command with an error.
 - **SDK-free PC builder**: `tools/ps5/release_ps5.py` packages `ps5-bundle/` (`loader-inventory.o`, prebuilt `app_crt.o`,
   `libSceAgc*.so`, RADV/deps/SDK archives & stubs, linker scripts, and Linux/Windows `ps5-native-tool[.exe]`). The
   desktop launcher (`runtime/ui/launcher/`) and `tools/ps5/prepare_ps5.py` drive the build with pinned `zig` (`zig cc`,

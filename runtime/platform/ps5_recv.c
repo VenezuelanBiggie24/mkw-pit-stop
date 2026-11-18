@@ -335,12 +335,44 @@ static int handle_info(int fd) {
     char json[512];
     int n = snprintf(json, sizeof json,
                      "{\"title_id\":\"PPSA99193\",\"port_version\":\"%s\",\"rt_game_id\":\"%s\","
-                     "\"has_game_code\":%d,\"game_files_ready\":%d,\"free_bytes\":%llu}",
+                     "\"has_game_code\":%d,\"game_files_ready\":%d,\"free_bytes\":%llu,\"status\":1}",
                      g_port_ver, g_game_id, g_has_game_code ? 1 : 0, ready ? 1 : 0, (unsigned long long)free_bytes);
     if (n < 0 || n >= (int)sizeof json) return 0;
     uint8_t hdr[4];
     put_u32le(hdr, (uint32_t)n);
     return write_exact(fd, hdr, 4) && write_exact(fd, json, (size_t)n);
+}
+
+// PIT1T: the PC builder's step for the screen (send_ps5.py StatusNotifier): u8 index, u8 count, u8 failed, u32
+// progress, u32 total, u16 length and the step's name or the failure (UTF-8, at most 200 bytes). Only shown: the
+// transfer's state is not touched. The builder sends it only to a receiver whose PIT1I reply has "status".
+static int handle_status(int fd) {
+    uint8_t b[13];
+    if (!read_exact(fd, b, sizeof b)) return 0;
+    uint16_t n = get_u16le(b + 11);
+    if (n > 200) {
+        send_err(fd, "status text too long");
+        return 0;
+    }
+    char label[201];
+    if (n && !read_exact(fd, label, n)) return 0;
+    label[n] = 0;
+    for (uint16_t i = 0; i < n; i++)
+        if ((unsigned char)label[i] < 0x20) label[i] = ' ';   // one line on the screen
+    pthread_mutex_lock(&g_lock);
+    g_status.pc_index = b[0];
+    g_status.pc_count = b[1];
+    g_status.pc_failed = b[2] != 0;
+    g_status.pc_progress = get_u32le(b + 3);
+    g_status.pc_total = get_u32le(b + 7);
+    memcpy(g_status.pc_label, label, (size_t)n + 1);
+    if (g_status.state == PS5_RECV_ERROR) {   // a new build after a failed transfer: its error is old news
+        g_status.state = PS5_RECV_WAITING;
+        g_status.error[0] = 0;
+    }
+    pthread_mutex_unlock(&g_lock);
+    uint8_t ok = 'K';
+    return write_exact(fd, &ok, 1);
 }
 
 static int handle_stat_batch(int fd) {
@@ -545,6 +577,8 @@ static void handle_client(int fd, uint8_t *io_buf) {
         uint8_t op = hdr[4];
         if (op == 'I') {
             if (!handle_info(fd)) break;
+        } else if (op == 'T') {
+            if (!handle_status(fd)) break;
         } else if (op == 'S') {
             if (!handle_stat_batch(fd)) break;
         } else if (op == 'B') {

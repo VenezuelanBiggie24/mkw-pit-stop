@@ -18,6 +18,8 @@ import os
 import socket
 import struct
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -244,6 +246,98 @@ def send_directory(
         if on_progress:
             on_progress(send_bytes, send_bytes, send_files, send_files)
         return send_files, skipped, send_bytes
+
+
+# The PC builder's steps as the placeholder shows them (the launcher's names: launcher_setup.cpp kPs5Steps).
+STATUS_STEPS = {
+    "check": "Check the copy", "nup": "Unpack .nup", "exefs": "Copy exefs", "romfs": "RomFS",
+    "generate": "Generate the game code", "compile": "Compile the game code", "link": "Link and sign eboot.bin",
+    "shaders": "Translate the shaders", "deploy": "Send to PS5",
+}  # fmt: skip
+STATUS_ORDER = list(STATUS_STEPS)
+
+
+class StatusNotifier:
+    """The build's step and progress on the PS5's Game files missing screen (PIT1T), while the PC works.
+
+    Why: the build takes 15-20 minutes before anything is sent, and the TV only said "Waiting for connection" all that
+    time. Each update is one short connection from a thread of its own, at most once a second (a new step or a failure
+    at once), with a 2 s timeout: a PS5 that is off, busy or older never slows the build. An older placeholder does not
+    announce "status" in its PIT1I reply and gets nothing (it would answer an unknown command with an error screen)."""
+
+    def __init__(self, host_spec: str) -> None:
+        self.host, self.port = parse_host_port(host_spec)
+        self.state = {"index": 0, "label": "", "progress": 0, "total": 0, "failed": "", "step": ""}
+        self.cond = threading.Condition()
+        self.dirty = self.urgent = False
+        self.supported: bool | None = None   # None: not asked yet
+        self.retry_at = 0.0
+        threading.Thread(target=self._loop, name="pitstop-status", daemon=True).start()
+
+    def event(self, words: list[str]) -> None:
+        """One emit() line of prepare_ps5.py: step / skip / progress / error / done."""
+        if not words:
+            return
+        kind, rest = words[0], words[1:]
+        with self.cond:
+            st = self.state
+            if kind == "step" and rest and rest[0] in STATUS_STEPS:
+                st.update(step=rest[0], index=STATUS_ORDER.index(rest[0]) + 1, label=STATUS_STEPS[rest[0]],
+                          progress=0, total=0, failed="")  # fmt: skip
+                self.urgent = True
+            elif kind == "progress" and len(rest) >= 2 and st["step"] != "deploy":   # the transfer shows its own
+                try:
+                    st["progress"], st["total"] = int(rest[0]), int(rest[1])
+                except ValueError:
+                    return
+            elif kind == "error":
+                st["failed"] = " ".join(rest[1:])[:200] or "the build failed"
+                self.urgent = True
+            else:
+                return
+            self.dirty = True
+            self.cond.notify()
+
+    def flush(self, timeout: float = 3.0) -> None:
+        """Wait until the last update went out (or could not): the failure before the builder exits."""
+        end = time.monotonic() + timeout
+        with self.cond:
+            while self.dirty and self.supported is not False and time.monotonic() < end:
+                self.cond.wait(0.1)
+
+    def _loop(self) -> None:
+        last = 0.0
+        while True:
+            with self.cond:
+                while not self.dirty:
+                    self.cond.wait()
+                wait = 0.0 if self.urgent else max(0.0, last + 1.0 - time.monotonic())
+            if wait:
+                time.sleep(wait)
+            with self.cond:
+                st, self.dirty, self.urgent = dict(self.state), False, False
+            if time.monotonic() >= self.retry_at:
+                try:
+                    self._send(st)
+                except (OSError, TransferError, ValueError):
+                    self.retry_at = time.monotonic() + 10.0   # unreachable: try again in a while
+            last = time.monotonic()
+            with self.cond:
+                self.cond.notify_all()
+
+    def _send(self, st: dict) -> None:
+        with socket.create_connection((self.host, self.port), timeout=2.0) as sock:
+            if self.supported is None:
+                sock.sendall(b"PIT1I")
+                (n,) = struct.unpack("<I", _recv_exact(sock, 4))
+                self.supported = bool(json.loads(_recv_exact(sock, n).decode("utf-8")).get("status"))
+            if not self.supported:
+                return
+            label = (st["failed"] or st["label"]).encode("utf-8")[:200]
+            sock.sendall(b"PIT1T" + struct.pack("<BBBII", st["index"], len(STATUS_ORDER), 1 if st["failed"] else 0,
+                                                 min(st["progress"], 0xFFFFFFFF), min(st["total"], 0xFFFFFFFF))
+                         + struct.pack("<H", len(label)) + label)  # fmt: skip
+            _expect_ack(sock)
 
 
 def main() -> int:

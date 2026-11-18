@@ -47,8 +47,8 @@ import build  # noqa: E402
 from layout import output_lock, read_checked  # noqa: E402
 from machine import Failed, default_cc, default_glslc, mem_gb, own_children, shader_jobs, tool_env  # noqa: E402
 from nup_reader import NupError, NupReader, is_nup  # noqa: E402
-from ps5_prepare_common import check, copy_tree, emit, remove_stale, run, sm86_spec  # noqa: E402
-from send_ps5 import TransferError, send_directory  # noqa: E402
+from ps5_prepare_common import EMIT_HOOKS, check, copy_tree, emit, remove_stale, run, sm86_spec  # noqa: E402
+from send_ps5 import StatusNotifier, TransferError, send_directory  # noqa: E402
 
 TITLE_ID = "PPSA99193"
 PROFILE = "ps5-high144"
@@ -666,6 +666,9 @@ def main() -> int:
 
     state = load_state(work)
     done_map: dict[str, str] = state.setdefault("done", {})
+    status = StatusNotifier(args.send) if args.send else None   # the build's progress on the PS5's screen
+    if status:
+        EMIT_HOOKS.append(status.event)
 
     try:
         emit("step", "check")
@@ -826,6 +829,9 @@ def main() -> int:
     except OSError as e:
         emit("error", "io", f"{e} (see {log_path.name})")
         return 1
+    finally:
+        if status:
+            status.flush()   # a failure reaches the PS5 before the builder exits
 
 
 if __name__ == "__main__":

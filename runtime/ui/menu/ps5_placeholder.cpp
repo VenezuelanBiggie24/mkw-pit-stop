@@ -119,6 +119,20 @@ static void draw_placeholder(float width, float height, void *raw_ctx) {
                     ImGui::TextColored(ImVec4(0.45f, 0.85f, 1.0f, 1.0f), "Receiving from PC builder...");
                     ImGui::ProgressBar(frac, ImVec2(-1.0f, 28.0f * scale), overlay);
                     if (st.current_file[0]) ImGui::TextDisabled("Current: %s", st.current_file);
+                } else if (st.pc_count && st.pc_failed) {   // the PC builder's failure (PIT1T), what to do about it
+                    ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "The build on the PC failed");
+                    ImGui::PushTextWrapPos(0);
+                    ImGui::TextUnformatted(st.pc_label);
+                    ImGui::PopTextWrapPos();
+                    ImGui::TextDisabled("Leave this screen open, fix it on the PC and press Try again there.");
+                } else if (st.pc_count) {   // the PC builder at work: its step and, when it counts, how far
+                    ImGui::TextColored(ImVec4(0.45f, 0.85f, 1.0f, 1.0f), "Building on the PC: step %u of %u, %s",
+                                       (unsigned)st.pc_index, (unsigned)st.pc_count, st.pc_label);
+                    float frac = st.pc_total ? (float)((double)st.pc_progress / (double)st.pc_total) : 0.0f;
+                    char overlay[64] = "";
+                    if (st.pc_total) snprintf(overlay, sizeof overlay, "%u / %u", st.pc_progress, st.pc_total);
+                    ImGui::ProgressBar(frac > 1.0f ? 1.0f : frac, ImVec2(-1.0f, 28.0f * scale), overlay);
+                    ImGui::TextDisabled("Leave this screen open: the files come here when the build is done.");
                 } else {
                     ImGui::TextColored(ImVec4(0.75f, 0.80f, 0.88f, 1.0f),
                                        ctx->recv_started ? "Waiting for connection from PC Pit Stop builder..."
