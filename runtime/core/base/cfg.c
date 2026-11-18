@@ -285,6 +285,11 @@ static const struct { const char *key, *value; } PS5[] = {
     {"REPLAY_PAR_HEAD", "0"},
     {"REPLAY_PAR_CHECK_BY_CHUNK", "1"},
     {"REPLAY_PAR_JOIN", "1"},
+    // The walk in full before the chunks go out, as before 16/11/2026: handing them out during the walk gave single
+    // game frames with the lit scene black, 5-55 a race against 0-1 without (black-flash runs pipeC-on / pipeC-off,
+    // 18/11/2026; vk_tex_alias.c), for ~2 fps (27.8 against 29.9). Until that is fixed where it breaks; ab or 1 in
+    // mkw.ini brings it back.
+    {"REPLAY_PAR_PIPE", "0"},
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 
