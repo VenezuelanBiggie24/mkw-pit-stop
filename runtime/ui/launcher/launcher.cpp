@@ -98,6 +98,8 @@ static struct {
     char ps5_ip[64];                // the PS5's address from its Game files missing screen, kept in ps5-ip.txt
     char ps5_usb[1024];             // or the USB drive the title is written to (ps5-usb.txt: the drive, then net|usb)
     int ps5_use_usb;                // 1: Build for PS5 writes to ps5_usb instead of sending over the network
+    int ps5_on_console;             // 1: the copy is already on the PS5, in ps5_console_dir (ps5-console.txt)
+    char ps5_console_dir[512];
     char shortcut_note[1200];       // what the shortcut button did
     // the last setup's record (read_setup_info): the game version, the port version, the copy and how its RomFS is kept
     char game_version[32], setup_port[48], setup_source[1024], setup_mode[8];
@@ -828,6 +830,29 @@ static void save_ps5_usb(void) {
     }
 }
 
+// The copy already on the PS5 (ps5-console.txt: its folder there, then on|off).
+static void load_ps5_console(void) {
+    char p[1100], mode[16] = "";
+    snprintf(p, sizeof p, "%s/ps5-console.txt", L.exe_dir);
+    FILE *f = fopen(p, "r");
+    if (!f) return;
+    if (fgets(L.ps5_console_dir, (int)sizeof L.ps5_console_dir, f))
+        L.ps5_console_dir[strcspn(L.ps5_console_dir, "\r\n")] = 0;
+    if (fgets(mode, (int)sizeof mode, f)) L.ps5_on_console = !strncmp(mode, "on", 2);
+    fclose(f);
+}
+
+static void save_ps5_console(void) {
+    char p[1100];
+    snprintf(p, sizeof p, "%s/ps5-console.txt", L.exe_dir);
+    if (FILE *f = fopen(p, "w")) {
+        fprintf(f, "%s\n%s\n", L.ps5_console_dir, L.ps5_on_console ? "on" : "off");
+        fclose(f);
+    }
+}
+
+static const char *ps5_console_arg(void) { return L.ps5_on_console && L.ps5_console_dir[0] ? L.ps5_console_dir : nullptr; }
+
 static void save_ps5_ip(void) {
     if (!L.ps5_ip[0]) return;
     char p[1100];
@@ -1024,16 +1049,32 @@ static void ps5_step(float act_h) {
             SDL_ShowOpenFolderDialog(picked, (void *)L.ps5_usb, L.win, L.ps5_usb[0] ? L.ps5_usb : nullptr, false);
         }
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + fminf(ImGui::GetContentRegionAvail().x, 760 * L.scale));
-        ImGui::TextColored(col4(LOOK_HEADING), "The title goes to homebrew\\PPSA99193 on the drive (exFAT or FAT32, "
+        ImGui::TextColored(col4(LOOK_HEADING), "The title goes to homebrew\\PPSA99193 on the drive (exFAT, "
                                                "about 25 GB free). Plug it into the PS5 and ShadowMountPlus finds it.");
         ImGui::PopTextWrapPos();
         ready = L.ps5_usb[0] != 0;
+    }
+    // The copy already on the PS5 (put there once by FTP or a drive): only the game code and shaders go, and the
+    // title looks for the game there (pitstop-game-dirs.txt, ps5_recv.c ps5_game_dir). The PC still needs the copy:
+    // the game code is made from its exefs and the shaders from its RomFS.
+    bool on = L.ps5_on_console != 0;
+    if (ImGui::Checkbox("My game files are already on the PS5##ps5on", &on)) L.ps5_on_console = on;
+    if (L.ps5_on_console) {
+        ImGui::SetNextItemWidth(fminf(ImGui::GetContentRegionAvail().x, 420 * L.scale));
+        ImGui::InputTextWithHint("##ps5_console_dir", "/data/mkw", L.ps5_console_dir, sizeof L.ps5_console_dir);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + fminf(ImGui::GetContentRegionAvail().x, 760 * L.scale));
+        ImGui::TextColored(col4(LOOK_HEADING), "The folder on the PS5 with exefs and romfs (or romfs.nup) in it, or in "
+                                               "its updates\\<version> (a console dump). Only the game code and "
+                                               "shaders are sent.");
+        ImGui::PopTextWrapPos();
+        ready = ready && L.ps5_console_dir[0] == '/';
     }
     ImGui::BeginDisabled(!L.source[0] || !ready);
     if (accent_button(menu_text(UI_LAUNCH_PS5_BUILD), ImVec2(0, act_h))) {
         save_ps5_ip();
         save_ps5_usb();
-        setup_ps5_start(L.exe_dir, L.source, L.ps5_ip, L.ps5_use_usb ? L.ps5_usb : nullptr);
+        save_ps5_console();
+        setup_ps5_start(L.exe_dir, L.source, L.ps5_ip, L.ps5_use_usb ? L.ps5_usb : nullptr, ps5_console_arg());
     }
     ImGui::EndDisabled();
     step_end();
@@ -1132,7 +1173,7 @@ static void setup_failed_card(const SetupState &st) {
     ImGui::TextColored(col4(LOOK_BAD), "%s", msg);
     if (accent_button(menu_text(UI_LAUNCH_RETRY))) {
         if (st.mode == SETUP_MODE_PS5)   // its steps done are kept too
-            setup_ps5_start(L.exe_dir, L.source, L.ps5_ip, L.ps5_use_usb ? L.ps5_usb : nullptr);
+            setup_ps5_start(L.exe_dir, L.source, L.ps5_ip, L.ps5_use_usb ? L.ps5_usb : nullptr, ps5_console_arg());
         else setup_start(L.exe_dir, cfg_game_dir(), L.source[0] ? L.source : nullptr, L.link_romfs);
     }
     ImGui::SameLine();
@@ -1776,6 +1817,7 @@ extern "C" int launcher_run(void) {
     L.ps5_tools = setup_ps5_available(L.exe_dir);
     load_ps5_ip();
     load_ps5_usb();
+    load_ps5_console();
     if (!rt_game_present() && !L.shot_at) L.page = PAGE_FILES;
     pads_refresh();
     char state[PLAT_PATH_MAX * 3];

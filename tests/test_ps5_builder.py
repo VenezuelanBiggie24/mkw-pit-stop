@@ -121,3 +121,24 @@ def test_copy_to_usb_updates_in_place(tmp_path: Path, capsys) -> None:
     files = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
     assert files == ["eboot.bin", "exefs/main", "mkw.ini", "profile/save.bin", "spirv/a.spv"]
     assert (dest / "eboot.bin").read_text() == "e2"
+
+
+def test_nup_writer_round_trip(tmp_path: Path) -> None:
+    """romfs.nup (nup_writer.py) reads back file for file through nup_reader.py, which checks every SHA-256, with
+    the RomFS as the last package's romfs/ and an empty exefs/ (the C reader walks both)."""
+    import nup_reader
+    import nup_writer
+
+    src = tmp_path / "romfs"
+    files = {"System/Resource/big.bin": os.urandom(1_000_003), "Font/a.txt": b"hi\n", "zero.bin": b"",
+             "System/odd.bin": os.urandom(17)}  # fmt: skip
+    for rel, data in files.items():
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_bytes(data)
+    out = tmp_path / "romfs.nup"
+    assert nup_writer.write_nup(src, out) == len(files)
+    with nup_reader.NupReader(out) as r:
+        assert r.exefs == {} and sorted(r.romfs) == sorted(files)
+        for rel, data in files.items():
+            assert r.read_entry(r.romfs[rel]) == data
+            assert r.romfs[rel].codec == nup_reader.CODEC_RAW   # read in place on the PS5, never decoded

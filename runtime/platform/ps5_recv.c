@@ -61,13 +61,46 @@ typedef struct {
 static ManifestEntry *g_man;
 static size_t g_man_n;
 static size_t g_man_cap;
+// A hash index over the paths (open addressing, entry index + 1, 0 free): the RomFS is ~206,000 files, and a lookup
+// that walked the whole table made each received file, each "have you got it" and the manifest's load cost up to
+// 206,000 string compares, some 2x10^10 over one send (18/11/2026).
+static size_t *g_idx;
+static size_t g_idx_cap;   // a power of two, at least twice the entries
 
 static void manifest_free(void) {
     for (size_t i = 0; i < g_man_n; i++) free(g_man[i].path);
     free(g_man);
+    free(g_idx);
     g_man = NULL;
+    g_idx = NULL;
     g_man_n = 0;
     g_man_cap = 0;
+    g_idx_cap = 0;
+}
+
+static uint64_t path_hash(const char *s) {
+    uint64_t h = 1469598103934665603ull;   // FNV-1a
+    while (*s) h = (h ^ (uint8_t)*s++) * 1099511628211ull;
+    return h;
+}
+
+// The slot of rel: its entry's, or the free one where it would go.
+static size_t idx_slot(const char *rel) {
+    size_t mask = g_idx_cap - 1, i = (size_t)path_hash(rel) & mask;
+    while (g_idx[i] && strcmp(g_man[g_idx[i] - 1].path, rel)) i = (i + 1) & mask;
+    return i;
+}
+
+static int idx_rebuild(size_t want) {
+    size_t cap = 1024;
+    while (cap < want * 2) cap *= 2;
+    size_t *n = calloc(cap, sizeof *n);
+    if (!n) return 0;
+    free(g_idx);
+    g_idx = n;
+    g_idx_cap = cap;
+    for (size_t e = 0; e < g_man_n; e++) g_idx[idx_slot(g_man[e].path)] = e + 1;
+    return 1;
 }
 
 static uint64_t stat_mtime_ns(const struct stat *st) {
@@ -95,13 +128,14 @@ static int hex_decode32(const char *hex, uint8_t out[32]) {
 }
 
 static void manifest_set(const char *rel, uint64_t size, uint64_t mtime_ns, const uint8_t sha[32]) {
-    for (size_t i = 0; i < g_man_n; i++) {
-        if (!strcmp(g_man[i].path, rel)) {
-            g_man[i].size = size;
-            g_man[i].mtime_ns = mtime_ns;
-            memcpy(g_man[i].sha256, sha, 32);
-            return;
-        }
+    if ((g_man_n + 1) * 2 > g_idx_cap && !idx_rebuild(g_man_n + 1)) return;
+    size_t slot = idx_slot(rel);
+    if (g_idx[slot]) {
+        ManifestEntry *m = &g_man[g_idx[slot] - 1];
+        m->size = size;
+        m->mtime_ns = mtime_ns;
+        memcpy(m->sha256, sha, 32);
+        return;
     }
     if (g_man_n == g_man_cap) {
         size_t ncap = g_man_cap ? g_man_cap * 2 : 1024;
@@ -114,13 +148,25 @@ static void manifest_set(const char *rel, uint64_t size, uint64_t mtime_ns, cons
     if (!copy) return;
     g_man[g_man_n++] = (ManifestEntry){copy, size, mtime_ns, {0}};
     memcpy(g_man[g_man_n - 1].sha256, sha, 32);
+    g_idx[slot] = g_man_n;
 }
 
 static const ManifestEntry *manifest_find(const char *rel) {
+    if (!g_idx_cap) return NULL;
+    size_t slot = idx_slot(rel);
+    return g_idx[slot] ? &g_man[g_idx[slot] - 1] : NULL;
+}
+
+// Drops rel and everything under it (a removed folder) from the table.
+static void manifest_remove_tree(const char *rel) {
+    size_t len = strlen(rel), out = 0;
     for (size_t i = 0; i < g_man_n; i++) {
-        if (!strcmp(g_man[i].path, rel)) return &g_man[i];
+        const char *p = g_man[i].path;
+        if (!strncmp(p, rel, len) && (p[len] == 0 || p[len] == '/')) free(g_man[i].path);
+        else g_man[out++] = g_man[i];
     }
-    return NULL;
+    g_man_n = out;
+    idx_rebuild(g_man_n);
 }
 
 static void manifest_load(const char *root) {
@@ -335,7 +381,7 @@ static int handle_info(int fd) {
     char json[512];
     int n = snprintf(json, sizeof json,
                      "{\"title_id\":\"PPSA99193\",\"port_version\":\"%s\",\"rt_game_id\":\"%s\","
-                     "\"has_game_code\":%d,\"game_files_ready\":%d,\"free_bytes\":%llu,\"status\":1}",
+                     "\"has_game_code\":%d,\"game_files_ready\":%d,\"free_bytes\":%llu,\"status\":1,\"resume\":1,\"remove\":1}",
                      g_port_ver, g_game_id, g_has_game_code ? 1 : 0, ready ? 1 : 0, (unsigned long long)free_bytes);
     if (n < 0 || n >= (int)sizeof json) return 0;
     uint8_t hdr[4];
@@ -371,6 +417,55 @@ static int handle_status(int fd) {
         g_status.error[0] = 0;
     }
     pthread_mutex_unlock(&g_lock);
+    uint8_t ok = 'K';
+    return write_exact(fd, &ok, 1);
+}
+
+// A file, or a folder with everything in it, never following a symbolic link (lstat; a link itself is removed).
+static int remove_tree(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) return errno == ENOENT;
+    if (!S_ISDIR(st.st_mode)) return unlink(path) == 0;
+    DIR *d = opendir(path);
+    if (!d) return 0;
+    int ok = 1;
+    struct dirent *e;
+    char child[1400];
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (snprintf(child, sizeof child, "%s/%s", path, e->d_name) >= (int)sizeof child) { ok = 0; continue; }
+        ok = remove_tree(child) && ok;
+    }
+    closedir(d);
+    return rmdir(path) == 0 && ok;
+}
+
+// PIT1X: remove a path in the title folder (u16 length, the path): the loose romfs/ once romfs.nup has arrived in
+// its place (23 GB the console would otherwise keep twice). Only inside the title folder (ps5_recv_validate_path),
+// only for a sender whose PIT1I saw "remove".
+static int handle_remove(int fd) {
+    uint8_t lb[2];
+    if (!read_exact(fd, lb, 2)) return 0;
+    uint16_t plen = get_u16le(lb);
+    if (plen == 0 || plen >= 512) {
+        send_err(fd, "invalid path length");
+        return 0;
+    }
+    char rel[512], full[1280];
+    if (!read_exact(fd, rel, plen)) return 0;
+    rel[plen] = 0;
+    if (!ps5_recv_validate_path(rel) || !strcmp(rel, MANIFEST_NAME)) {
+        send_err(fd, "rejected path outside title folder");
+        return 0;
+    }
+    snprintf(full, sizeof full, "%s/%s", g_root, rel);
+    if (!remove_tree(full)) {
+        char msg[200];
+        snprintf(msg, sizeof msg, "remove %s failed: %s", rel, strerror(errno));
+        send_err(fd, msg);
+        return 0;
+    }
+    manifest_remove_tree(rel);
     uint8_t ok = 'K';
     return write_exact(fd, &ok, 1);
 }
@@ -488,17 +583,69 @@ static int handle_put(int fd, uint8_t *io_buf) {
         send_err(fd, "refusing to write through symlink");
         return 0;
     }
-    int out_fd = open(part_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0644);
+    // flags & 2 (a sender whose PIT1I saw "resume"): a large file whose transfer broke goes on where its .part ends.
+    // The .part's .want names the file it belongs to (size and SHA-256); its bytes are hashed again here, and the
+    // offset to go on from is answered before the data. romfs.nup is 23 GB in one file: a dropped connection would
+    // otherwise start it over.
+    Sha256 sha;
+    sha256_init(&sha);
+    char want_path[1340];
+    snprintf(want_path, sizeof want_path, "%s.want", part_path);
+    uint64_t resume_at = 0;
+    int resumable = (flags & 2) != 0;
+    if (resumable) {
+        char want_line[100] = "", expect[100];
+        char hex[65];
+        for (int i = 0; i < 32; i++) snprintf(hex + 2 * i, 3, "%02x", want_sha[i]);
+        snprintf(expect, sizeof expect, "%llu %s", (unsigned long long)fsize, hex);
+        FILE *wf = fopen(want_path, "r");
+        if (wf) {
+            if (!fgets(want_line, sizeof want_line, wf)) want_line[0] = 0;
+            fclose(wf);
+            want_line[strcspn(want_line, "\r\n")] = 0;
+        }
+        struct stat ps;
+        if (!strcmp(want_line, expect) && lstat(part_path, &ps) == 0 && S_ISREG(ps.st_mode) &&
+            (uint64_t)ps.st_size <= fsize) {
+            int in_fd = open(part_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+            uint64_t have = 0;
+            while (in_fd >= 0 && have < (uint64_t)ps.st_size) {
+                size_t want = (uint64_t)ps.st_size - have > IO_BUF_SIZE ? IO_BUF_SIZE : (size_t)((uint64_t)ps.st_size - have);
+                ssize_t k = read(in_fd, io_buf, want);
+                if (k <= 0) break;
+                sha256_update(&sha, io_buf, (size_t)k);
+                have += (uint64_t)k;
+            }
+            if (in_fd >= 0) close(in_fd);
+            if (have == (uint64_t)ps.st_size) resume_at = have;
+            else sha256_init(&sha);
+        }
+        if (!resume_at) {
+            FILE *nf = fopen(want_path, "w");
+            if (nf) fprintf(nf, "%s\n", expect), fclose(nf);
+        }
+        uint8_t off_le[8];
+        for (int i = 0; i < 8; i++) off_le[i] = (uint8_t)(resume_at >> (8 * i));
+        if (!write_exact(fd, off_le, 8)) return 0;
+    }
+    int out_fd = open(part_path, O_WRONLY | O_CREAT | (resume_at ? 0 : O_TRUNC) | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (out_fd >= 0 && resume_at && lseek(out_fd, (off_t)resume_at, SEEK_SET) != (off_t)resume_at) {
+        close(out_fd);
+        out_fd = -1;
+    }
     if (out_fd < 0) {
         char msg[200];
         snprintf(msg, sizeof msg, "open %s failed: %s", rel, strerror(errno));
         send_err(fd, msg);
         return 0;
     }
+    if (resume_at) {
+        pthread_mutex_lock(&g_lock);
+        g_status.bytes_done += resume_at;
+        pthread_mutex_unlock(&g_lock);
+    }
 
-    Sha256 sha;
-    sha256_init(&sha);
-    uint64_t rem = fsize;
+    uint64_t rem = fsize - resume_at;
     int io_err = 0;
     while (rem > 0) {
         size_t chunk = rem > IO_BUF_SIZE ? IO_BUF_SIZE : (size_t)rem;
@@ -526,7 +673,12 @@ static int handle_put(int fd, uint8_t *io_buf) {
     if (!io_err && !strcmp(rel, "eboot.bin") && fsync(out_fd) != 0) io_err = 2;
     if (close(out_fd) != 0 && !io_err) io_err = 2;
     if (io_err) {
+        if (io_err == 1 && resumable) {   // the connection broke: keep the part for the next try
+            set_error("connection lost during file transfer (the next send goes on from here)");
+            return 0;
+        }
         unlink(part_path);
+        unlink(want_path);
         if (io_err == 2) send_err(fd, "write failed (disk full or permission denied)");
         else set_error("connection lost during file transfer");
         return 0;
@@ -535,9 +687,11 @@ static int handle_put(int fd, uint8_t *io_buf) {
     sha256_final(&sha, got_sha);
     if (memcmp(got_sha, want_sha, 32) != 0) {
         unlink(part_path);
+        unlink(want_path);
         send_err(fd, "SHA-256 mismatch");
         return 0;
     }
+    unlink(want_path);
     if (rename(part_path, final_path) != 0) {
         char msg[200];
         snprintf(msg, sizeof msg, "replace %s failed: %s", rel, strerror(errno));
@@ -577,6 +731,8 @@ static void handle_client(int fd, uint8_t *io_buf) {
         uint8_t op = hdr[4];
         if (op == 'I') {
             if (!handle_info(fd)) break;
+        } else if (op == 'X') {
+            if (!handle_remove(fd)) break;
         } else if (op == 'T') {
             if (!handle_status(fd)) break;
         } else if (op == 'S') {
@@ -671,13 +827,22 @@ static char g_main_sha[65];
 
 void ps5_game_set_main_sha256(const char *hex) { snprintf(g_main_sha, sizeof g_main_sha, "%s", hex ? hex : ""); }
 
+// The RomFS of a game folder: romfs.nup, the whole RomFS as one package the runtime reads in place (the PC builder
+// writes it: one file to send instead of ~206,000), else the loose romfs/ folder. 0 when neither is there.
+int ps5_game_romfs(const char *dir, char *out, size_t cap) {
+    struct stat st;
+    snprintf(out, cap, "%s/romfs.nup", dir);
+    if (stat(out, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) return 1;
+    snprintf(out, cap, "%s/romfs", dir);
+    return stat(out, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 static int has_game(const char *dir) {
     char p[768];
     struct stat st;
     snprintf(p, sizeof p, "%s/exefs/main", dir);
     if (stat(p, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) return 0;
-    snprintf(p, sizeof p, "%s/romfs", dir);
-    return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+    return ps5_game_romfs(dir, p, sizeof p);
 }
 
 static int main_matches(const char *dir) {
@@ -694,6 +859,35 @@ static int by_version_desc(const void *a, const void *b) {
     return x < y ? 1 : x > y ? -1 : 0;
 }
 
+// The game folders under base: its updates/<title version>/ (newest first: 917504, 1.8.0, before an older update),
+// then base itself, appended to cands (at most cap).
+static int add_game_tree(const char *base, char **cands, int n, int cap) {
+    char *vers[33];
+    int nv = 0;
+    char up[640];
+    snprintf(up, sizeof up, "%s/updates", base);
+    DIR *d = opendir(up);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d)) && nv < 32) {
+            if (e->d_name[0] == '.') continue;
+            char c[768];
+            snprintf(c, sizeof c, "%s/%s", up, e->d_name);
+            if (has_game(c)) vers[nv++] = strdup(e->d_name);
+        }
+        closedir(d);
+    }
+    qsort(vers, (size_t)nv, sizeof *vers, by_version_desc);
+    for (int i = 0; i < nv; i++) {
+        char c[768];
+        snprintf(c, sizeof c, "%s/%s", up, vers[i]);
+        free(vers[i]);
+        if (n < cap) cands[n++] = strdup(c);
+    }
+    if (n < cap && has_game(base)) cands[n++] = strdup(base);
+    return n;
+}
+
 const char *ps5_game_dir(const char *root_dir, char *why, size_t why_cap) {
     // once per boot: the placeholder check, the receiver's status and the paths ask the same (each hash of a
     // candidate's main, ~55 MB, would cost a read of it again)
@@ -701,29 +895,22 @@ const char *ps5_game_dir(const char *root_dir, char *why, size_t why_cap) {
     static int done;
     if (why && why_cap) why[0] = 0;
     if (done && !strcmp(done_for, root_dir)) return found[0] ? found : NULL;
-    char *cands[33];
-    int n = 0;
-    char up[640];
-    snprintf(up, sizeof up, "%s/updates", root_dir);
-    DIR *d = opendir(up);
-    if (d) {
-        struct dirent *e;
-        while ((e = readdir(d)) && n < 32) {
-            if (e->d_name[0] == '.') continue;
-            char c[768];
-            snprintf(c, sizeof c, "%s/%s", up, e->d_name);
-            if (has_game(c)) cands[n++] = strdup(e->d_name);
+    enum { CAP = 64 };
+    char *cands[CAP];
+    int n = add_game_tree(root_dir, cands, 0, CAP);
+    // pitstop-game-dirs.txt: more folders that hold the game, one path a line (the PC builder writes it when the
+    // player's copy is already on the console, so the 23 GB need not be sent again); the title's own folder first
+    char list[640];
+    snprintf(list, sizeof list, "%s/pitstop-game-dirs.txt", root_dir);
+    FILE *lf = fopen(list, "r");
+    if (lf) {
+        char line[600];
+        while (fgets(line, sizeof line, lf)) {
+            line[strcspn(line, "\r\n")] = 0;
+            if (line[0] == '/' ) n = add_game_tree(line, cands, n, CAP);
         }
-        closedir(d);
+        fclose(lf);
     }
-    qsort(cands, (size_t)n, sizeof *cands, by_version_desc);   // updates/917504 (1.8.0) before an older update
-    for (int i = 0; i < n; i++) {
-        char c[768];
-        snprintf(c, sizeof c, "%s/%s", up, cands[i]);
-        free(cands[i]);
-        cands[i] = strdup(c);
-    }
-    if (has_game(root_dir)) cands[n++] = strdup(root_dir);
     found[0] = 0;
     for (int i = 0; i < n; i++) {
         // one candidate: the loader's hash check says if it is the wrong version; several: the one this build matches
@@ -731,7 +918,8 @@ const char *ps5_game_dir(const char *root_dir, char *why, size_t why_cap) {
         free(cands[i]);
     }
     if (!found[0] && why && why_cap)
-        snprintf(why, why_cap, n ? "no exefs/main of the game version this build was made for" : "missing exefs/main or romfs/");
+        snprintf(why, why_cap, n ? "no exefs/main of the game version this build was made for"
+                                 : "missing exefs/main, or romfs/ or romfs.nup");
     snprintf(done_for, sizeof done_for, "%s", root_dir);
     done = 1;
     return found[0] ? found : NULL;

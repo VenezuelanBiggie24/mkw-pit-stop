@@ -28,6 +28,7 @@ CHUNK_SIZE = 256 * 1024
 STAT_BATCH = 4096
 ACK_EVERY_FILES = 128
 ACK_SIZE_THRESHOLD = 256 * 1024
+RESUME_MIN = 64 * 1024 * 1024   # files this large go on where a broken send left them (receivers with "resume")
 CACHE_NAME = ".pitstop-client-sha256.tsv"
 
 
@@ -188,6 +189,8 @@ def send_directory(
         info = json.loads(_recv_exact(sock, info_len).decode("utf-8"))
         if info.get("title_id") != "PPSA99193":
             raise TransferError(f"unexpected console title {info.get('title_id')!r}")
+        can_resume = bool(info.get("resume"))
+        can_remove = bool(info.get("remove"))
 
         need: list[tuple[str, Path, int, bytes]] = []
         skipped = 0
@@ -231,11 +234,23 @@ def send_directory(
         for idx, (rel, path, sz, digest) in enumerate(need, 1):
             is_last = idx == send_files
             ack = 1 if (is_last or rel == "eboot.bin" or sz >= ACK_SIZE_THRESHOLD or idx % ACK_EVERY_FILES == 0) else 0
+            resume = can_resume and sz >= RESUME_MIN
             rel_b = rel.encode("utf-8")
-            hdr = b"PIT1P" + struct.pack("<BH", ack, len(rel_b)) + rel_b + struct.pack("<Q", sz) + digest
+            hdr = b"PIT1P" + struct.pack("<BH", ack | (2 if resume else 0), len(rel_b)) + rel_b + struct.pack("<Q", sz) + digest
             sock.sendall(hdr)
+            start = 0
+            if resume:   # the receiver answers where its .part of this very file ends (0: from the start)
+                first = _recv_exact(sock, 1)
+                if first == b"E":
+                    (mlen,) = struct.unpack("<H", _recv_exact(sock, 2))
+                    raise TransferError(_recv_exact(sock, mlen).decode("utf-8", errors="replace"))
+                (start,) = struct.unpack("<Q", first + _recv_exact(sock, 7))
+                if start > sz:
+                    raise TransferError(f"receiver resumes {rel} past its end")
+                bytes_sent += start
             with path.open("rb") as f:
-                rem = sz
+                f.seek(start)
+                rem = sz - start
                 while rem > 0:
                     chunk = f.read(min(CHUNK_SIZE, rem))
                     if not chunk:
@@ -250,6 +265,13 @@ def send_directory(
             if ack:
                 _expect_ack(sock)
 
+        # romfs.nup replaces a loose romfs/ an earlier send left beside it (23 GB the console would keep twice)
+        if can_remove:
+            for rel, *_ in entries:
+                if rel == "romfs.nup" or rel.endswith("/romfs.nup"):
+                    loose = (rel[: -len("romfs.nup")] + "romfs").encode("utf-8")
+                    sock.sendall(b"PIT1X" + struct.pack("<H", len(loose)) + loose)
+                    _expect_ack(sock)
         sock.sendall(b"PIT1D")
         _expect_ack(sock)
         if on_progress:

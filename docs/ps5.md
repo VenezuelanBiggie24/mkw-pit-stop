@@ -390,6 +390,14 @@ A redistributable PS5 package cannot ship the full `eboot.bin` (which statically
   refreshes `/user/app/PPSA99193/sce_sys` when writable. While the PC builds, `PIT1T` reports its step, progress
   or failure for the screen only (`send_ps5.py` `StatusNotifier`, at most once a second, 2 s timeout); it goes only
   to a receiver whose `PIT1I` reply has `"status"`, since an older one answers an unknown command with an error.
+- **The RomFS as one file**: the builder writes `romfs.nup` (`tools/ps5/nup_writer.py`, raw NUP v1) in place of
+  the ~206,000 loose files, and the title reads it in place (`ps5_game_romfs`: `romfs.nup` before `romfs/`). A
+  broken send of it goes on from the receiver's `.part` (`PIT1P` flag 2, the part's `.want` naming size and SHA-256;
+  only to a receiver with `"resume"`), and `PIT1X` then removes the loose `romfs/` beside it (`"remove"`). The
+  manifest is hash-indexed: a lookup that walked the table cost some 2x10^10 string compares over one loose send.
+- **The copy already on the console**: `pitstop-game-dirs.txt` in the title folder names more folders that hold the
+  game (each with its `updates/<version>/`); `ps5_game_dir` searches them after its own and picks the one whose
+  `exefs/main` matches the build. The builder writes it for `--console-game` and sends no game files.
 - **SDK-free PC builder**: `tools/ps5/release_ps5.py` packages `ps5-bundle/` (`loader-inventory.o`, prebuilt `app_crt.o`,
   `libSceAgc*.so`, RADV/deps/SDK archives & stubs, linker scripts, and Linux/Windows `ps5-native-tool[.exe]`). The
   desktop launcher (`runtime/ui/launcher/`) and `tools/ps5/prepare_ps5.py` drive the build with pinned `zig` (`zig cc`,
