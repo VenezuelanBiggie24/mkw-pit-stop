@@ -240,6 +240,7 @@ void plat_mem_back_release(uint64_t addr, size_t n) { (void)addr; (void)n; }
 int plat_mem_watch_info(uint64_t addr) { (void)addr; return 0; }
 void plat_mem_gpu_import(uint64_t addr, size_t n, int on) { (void)addr; (void)n; (void)on; }
 uint64_t plat_mem_dmem_avail(void) { return UINT64_MAX; }
+uint64_t plat_mem_dmem_free_total(void) { return UINT64_MAX; }
 uint64_t plat_mem_write_watch_faults(int reset) { (void)reset; return 0; }
 uint64_t plat_mem_write_watch_repeats(int reset) { (void)reset; return 0; }
 

@@ -207,6 +207,14 @@ void ps5_mem_log_census(const char *tag) { log_backed_totals(tag ? tag : "census
 
 void plat_mem_census_log(const char *tag) { ps5_mem_log_census(tag); }
 
+uint64_t plat_mem_dmem_free_total(void) {
+    int64_t dmem_total = sceKernelGetDirectMemorySize();
+    if (dmem_total <= 0) return UINT64_MAX;
+    int areas, cut;
+    uint64_t total = dmem_free_scan(dmem_total, &areas, &cut);
+    return cut && !areas ? UINT64_MAX : total;   // (no area and cut: another thread's scan was running)
+}
+
 uint64_t plat_mem_dmem_avail(void) {
     int64_t phys = 0;
     size_t avail = 0;

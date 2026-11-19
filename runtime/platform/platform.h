@@ -308,6 +308,9 @@ int plat_mem_watch_info(uint64_t addr);
 void plat_mem_gpu_import(uint64_t addr, size_t n, int on);
 void plat_mem_census_log(const char *tag);                 // PS5: logs memory & page-table census; no-op elsewhere
 uint64_t plat_mem_dmem_avail(void);                        // PS5: free direct memory in bytes; UINT64_MAX elsewhere
+// PS5: all free direct memory, summed over its free areas (plat_mem_dmem_avail is the largest one only); a lower bound
+// when the scan was cut short. UINT64_MAX elsewhere, or when another scan is running.
+uint64_t plat_mem_dmem_free_total(void);
 void plat_mem_backed_summary(char *out, size_t cap);     // PS5: guest backed memory and free dmem, one line; "" elsewhere
 size_t plat_mem_early_page_size(void);                     // protection granularity for early-read watch (4 KiB or 16 KiB)
 // Granularity of the write watch (plat_mem_written): a write anywhere in such a page reports all of its 4 KiB pages as

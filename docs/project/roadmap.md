@@ -121,6 +121,13 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   at most every 250 ms (18-38 passes per 60 frames before): in-race A/B ~5x fewer passes, -0.43 ms mean (-0.92 / +0.07
   by race). The log now adds up every free area of direct memory: 1.0-1.1 GiB against 0.6-0.73 GiB in the largest one,
   still near the hard level's 1 GiB, so the governor's levels stay on the largest area.
+- **Done, memory gain only: the governor on all free memory** (20/11/2026, PS5 1.8.0). `MKW_GOV_TOTAL` (default 1)
+  sets the levels on every free area added up, keeping a 128 MiB floor on the largest one, and its hard trim evicts
+  the textures unseen longest first (`MKW_GOV_EVICT_IDLE`, 600 frames) in batches of 16 under a try-lock, not the
+  whole table in hash order under `tex_lock` (6-16 ms). In-race A/B (two races, inverted): hard passes 267-288 ->
+  46-62 and textures evicted 5.8-6.4 -> 1.6 GiB per race; frame -0.20 / +0.14 ms, median -0.05 / 0.00, within
+  noise. All free memory still dips to 924-1,174 MiB, under the 1 GiB hard level. Re-uploads stay at ~60 per 60
+  frames either way: the game rewrites those textures, so eviction is not their source.
 - **Done, no frame gain: the zero scan skips what it already read.** Each hard pass read every frozen unit for zero
   pages (~1.5 GB, 9.3 ms a pass on the governor's thread, freeing almost nothing). `MKW_ZERO_SCAN_CACHE` (default 1)
   skips a unit found not all zero earlier in the same freeze (`mem_frozen` now returns the freeze's number). A/B on

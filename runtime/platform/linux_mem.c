@@ -609,6 +609,7 @@ int plat_mem_watch_info(uint64_t addr) {
 void plat_mem_gpu_import(uint64_t addr, size_t n, int on) { (void)addr; (void)n; (void)on; }
 
 uint64_t plat_mem_dmem_avail(void) { return UINT64_MAX; }
+uint64_t plat_mem_dmem_free_total(void) { return UINT64_MAX; }
 
 uint64_t plat_mem_write_watch_faults(int reset) {
     return linux_prot_watch_on() ? prot_watch_faults(reset) : 0;

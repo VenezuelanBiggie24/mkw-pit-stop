@@ -329,6 +329,11 @@ void *vk_staging_try(VkDeviceSize size, VkBuffer *buf, VmaAllocation *alloc) { r
 #define DMEM_HARD_BYTES (1024ull << 20)
 #define GOV_REL_SOFT    (64ull << 20)
 #define GOV_TRIM_HARD   (512ull << 20)
+// MKW_GOV_TOTAL (default 1, "ab" to compare): the levels read all free direct memory (plat_mem_dmem_free_total), not
+// only its largest free area, with DMEM_FLOOR_BYTES as a floor for that area so a large allocation still finds room;
+// and the hard level's texture trim is the gentler vk_texture_trim_gov. On the largest area alone the governor sat at
+// 602 MiB in a race while 1,262-1,503 MiB were free (tls-new4, 19/11/2026): hard every pass, 10 GiB of textures evicted.
+#define DMEM_FLOOR_BYTES (128ull << 20)
 
 uint64_t vk_upload_stg_bytes(void) {
     VkCtx *c = vk_ctx();
@@ -388,7 +393,16 @@ void vk_mem_governor(int force) {
             rt_log("vk: shadow trim test: %.1f MiB dropped (%.1f MiB in %u trims)", f / 1048576.0, trimmed / 1048576.0, n_trims);
     }
     uint64_t avail = plat_mem_dmem_avail();
-    if (avail >= DMEM_SOFT_BYTES) {
+    static int gov_total = -1;
+    if (gov_total < 0) gov_total = rt_knob("GOV_TOTAL", "1");
+    int by_total = RT_KNOB_ON(gov_total);
+    uint64_t total = avail;
+    if (by_total && avail < DMEM_SOFT_BYTES) {
+        uint64_t t = plat_mem_dmem_free_total();
+        if (t != UINT64_MAX && t > avail) total = t;
+    }
+    int hard = by_total ? total < DMEM_HARD_BYTES || avail < DMEM_FLOOR_BYTES : avail < DMEM_HARD_BYTES;
+    if (!hard && total >= DMEM_SOFT_BYTES) {
         vk_mem_shadow_shed(0);
         return;
     }
@@ -397,13 +411,13 @@ void vk_mem_governor(int force) {
     const char *level;
     uint64_t t0 = plat_now_ns(), zero_ns = 0;
     int ab_side = rt_ab();
-    if (avail < DMEM_HARD_BYTES) {
+    if (hard) {
         level = "hard";
         vk_mem_shadow_shed(1);
         rel_freed = vk_texture_trim_released(0);
         hr_freed = vk_headroom_shed();
         if (!force) pk_freed = pack_step(plat_mem_dmem_avail());
-        trim_freed = vk_texture_trim(GOV_TRIM_HARD);
+        trim_freed = by_total ? vk_texture_trim_gov(GOV_TRIM_HARD) : vk_texture_trim(GOV_TRIM_HARD);
         sp_freed = vk_sparse_trim(GOV_TRIM_HARD);
         sh_freed = shadow_trim(GOV_TRIM_HARD);
         h0_freed = vk_usnap_trim(8ull << 20) + (uint64_t)vk_exec_cb_trim_spare(2) * (4ull << 20);
@@ -426,8 +440,8 @@ void vk_mem_governor(int force) {
     uint64_t after = plat_mem_dmem_avail();
     if (rel_freed || hr_freed || trim_freed || sp_freed || sh_freed || h0_freed || zero_freed || pk_freed ||
         (__atomic_add_fetch(&idle_logs, 1, __ATOMIC_RELAXED) % 60) == 1)
-        rt_log("vk: memory governor (%s): dmem=%llu->%llu MiB, freed rel=%.1f headroom=%.1f pack=%.1f trim=%.1f sparse=%.1f shadow=%.1f heap0=%.1f zero=%.1f (scanned=%.1f) MiB; %.2f ms (zero scan %.2f) ab=%c",
-               level, (unsigned long long)(avail >> 20), (unsigned long long)(after >> 20),
+        rt_log("vk: memory governor (%s): dmem=%llu->%llu MiB (all free %llu), freed rel=%.1f headroom=%.1f pack=%.1f trim=%.1f sparse=%.1f shadow=%.1f heap0=%.1f zero=%.1f (scanned=%.1f) MiB; %.2f ms (zero scan %.2f) ab=%c",
+               level, (unsigned long long)(avail >> 20), (unsigned long long)(after >> 20), (unsigned long long)(total >> 20),
                rel_freed / 1048576.0, hr_freed / 1048576.0, pk_freed / 1048576.0, trim_freed / 1048576.0,
                sp_freed / 1048576.0, sh_freed / 1048576.0, h0_freed / 1048576.0,
                zero_freed / 1048576.0, zero_scanned / 1048576.0, (plat_now_ns() - t0) / 1e6, zero_ns / 1e6,

@@ -98,6 +98,62 @@ uint64_t vk_texture_trim(uint64_t bytes) {
     return freed;
 }
 
+// The memory governor's trim (vk_mem_governor, hard level, MKW_GOV_TOTAL): mirrored textures idle for
+// MKW_GOV_EVICT_IDLE submissions (default 600, a few seconds; the out-of-memory paths keep EVICT_IDLE), oldest use
+// first, GOV_EVICT_BATCH at a time with tex_lock released between batches. vk_texture_trim walks the table in hash
+// order with the lock held throughout: in a race (tls-new4, 19/11/2026) 42 such passes evicted 10,184 MiB of textures
+// seen half a second before, held tex_lock 6-16 ms each, and the replay uploaded them again moments later.
+#define GOV_EVICT_IDLE 600
+#define GOV_EVICT_BATCH 16
+typedef struct { TexKey key; uint32_t seen; } EvictCand;
+
+static int cand_by_seen(const void *a, const void *b) {
+    uint32_t x = ((const EvictCand *)a)->seen, y = ((const EvictCand *)b)->seen;
+    return (int32_t)(x - y) < 0 ? -1 : (int32_t)(x - y) > 0;
+}
+
+static int gov_evictable(const Tex *e, uint32_t idle) {
+    return e && e->alloc && e->pub.mirrored && !e->pub.gpu_owned && !e->gpu_dirty && !e->released && !e->pin &&
+           (uint32_t)(submit_epoch - e->seen) > idle;
+}
+
+uint64_t vk_texture_trim_gov(uint64_t bytes) {
+    VkCtx *c = vk_ctx();
+    if (!c || !bytes) return 0;
+    static int32_t idle_v = -1;
+    if (idle_v < 0) {
+        const char *s = cfg_get("MKW_GOV_EVICT_IDLE");
+        idle_v = s && *s && atoi(s) > 0 ? atoi(s) : GOV_EVICT_IDLE;
+    }
+    uint32_t idle = (uint32_t)idle_v;
+    if (!plat_rmutex_trylock(&tex_lock)) return 0;
+    uint32_t cap = by_key.n + 1, n = 0;
+    EvictCand *cand = malloc(sizeof *cand * cap);
+    if (cand)
+        for (uint32_t i = 0; i < by_key.cap && n < cap; i++) {
+            Tex *e = by_key.vals ? by_key.vals[i] : NULL;
+            if (gov_evictable(e, idle)) cand[n].key = e->key, cand[n].seen = e->seen, n++;
+        }
+    unlock();
+    if (!cand) return 0;
+    qsort(cand, n, sizeof *cand, cand_by_seen);
+    uint64_t freed = 0;
+    for (uint32_t k = 0; k < n && freed < bytes;) {
+        if (!plat_rmutex_trylock(&tex_lock)) break;   // the replay holds it: the next pass carries on
+        for (uint32_t b = 0; b < GOV_EVICT_BATCH && k < n && freed < bytes; b++, k++) {
+            Tex *e = nvn_hm_get(&by_key, &cand[k].key);   // looked up again: it may have gone or been used since
+            if (!gov_evictable(e, idle)) continue;
+            VmaAllocationInfo vi = {0};
+            vmaGetAllocationInfo(c->vma, e->alloc, &vi);
+            freed += vi.size, n_evicted++, evicted_bytes += vi.size;
+            destroy_idle(e);
+        }
+        unlock();
+    }
+    free(cand);
+    return freed;
+}
+
 uint64_t vk_texture_trim_released(uint64_t keep_bytes) {
     VkCtx *c = vk_ctx();
     if (!c || !plat_rmutex_trylock(&tex_lock)) return 0;
