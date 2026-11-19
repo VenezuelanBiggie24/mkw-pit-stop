@@ -446,6 +446,7 @@ static int upload(Tex *e) {
     if (agpu) {
         uint64_t a0 = perf_begin();
         vk_astc_tag(e->pub.addr, 1);
+        if (e->f.astc_bc7 == 2) vk_astc_bc1_alpha_note(e->pub.addr, stg, total, e->f.astc_bw, e->f.astc_bh, "upload");
         checked = vk_astc_record(cb, sb, total, ar, (int)n, e->f.astc_bw, e->f.astc_bh, e->f.astc_srgb, e->pub.image,
                                  e->pub.aspect, e->f.astc_bc7, rbuf);
         perf_end(PERF_ASTC, a0);
@@ -834,6 +835,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
             vk_upload_lock();
             barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
             vk_astc_tag((uintptr_t)src->mem, 2);
+            if (bc7 == 2) vk_astc_bc1_alpha_note(dsti->addr, stg, per * layers, f.astc_bw, f.astc_bh, "copy");
             ok = vk_astc_record(cb, sb, per * layers, ar, (int)layers, f.astc_bw, f.astc_bh, f.astc_srgb, dst, aspect,
                                 bc7, VK_NULL_HANDLE);
             barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
@@ -850,6 +852,7 @@ int vk_texture_astc_copy(const tex_t *src, uint32_t level, uint32_t layer, uint3
         if (ok) {
             barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
             vk_astc_tag((uintptr_t)src->mem, 2);
+            if (bc7 == 2) vk_astc_bc1_alpha_note(dsti->addr, stg, per * layers, f.astc_bw, f.astc_bh, "copy");
             ok = vk_astc_record(cb, sb, per * layers, ar, (int)layers, f.astc_bw, f.astc_bh, f.astc_srgb, dst, aspect,
                                 bc7, rbuf);
             barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);

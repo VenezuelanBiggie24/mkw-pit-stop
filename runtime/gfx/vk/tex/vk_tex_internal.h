@@ -174,6 +174,8 @@ void sweep_released(void);
 
 // vk_tex_upload.c: uploads and the freshness checks
 void make_fresh(Tex *e);
+// MKW_ASTC_BC1_ALPHA: ASTC bytes going into a BC1 image checked for alpha below 1 (vk_tex_image.c)
+void vk_astc_bc1_alpha_note(uint64_t addr, const uint8_t *src, size_t size, uint32_t bw, uint32_t bh, const char *path);
 void make_fresh_snap(Tex *e);
 void expand_rgb(int format, const uint8_t *src, uint8_t *dst, size_t n);
 void shrink_rgb(int format, const uint8_t *src, uint8_t *dst, size_t n);

@@ -365,6 +365,57 @@ static int astc_alpha_one(const uint8_t *p, uint64_t size, int bw, int bh) {
     return alpha_range(p, 0, size, bw, bh, &any, NULL) && any;
 }
 
+// MKW_ASTC_BC1_ALPHA (diagnosis; default 0, N logs that many textures): ASTC bytes about to be decoded into a BC1
+// image (BC1 RGB, no alpha) checked for blocks that decode below alpha 1, whose alpha the image then loses. An image
+// becomes BC1 when every block decoded to alpha 1 at its creation, and blocks of zeros (not loaded yet) pass that
+// test: a texture made before its data came in, or its storage reused for other data, could get alpha later. Counted
+// per upload and per distinct texture; the bytes are the staging the decoder reads, so this sees what the GPU decodes.
+void vk_astc_bc1_alpha_note(uint64_t addr, const uint8_t *src, size_t size, uint32_t bw, uint32_t bh, const char *path) {
+    static int lines = -1;
+    static volatile int64_t ups, ups_alpha, blocks, blocks_alpha;
+    static volatile int32_t ntex;
+    static uint64_t seen[2048];   // textures with alpha blocks (open addressing; full: counted, not remembered)
+    static PlatMutex lock = PLAT_MUTEX_INIT;
+    if (lines < 0) lines = cfg_get("MKW_ASTC_BC1_ALPHA") ? atoi(cfg_get("MKW_ASTC_BC1_ALPHA")) : 0;
+    if (lines <= 0 || !src || bw < 4 || bh < 4) return;
+    uint64_t nb = 0, na = 0;
+    for (size_t at = 0; at + 16 <= size; at += 16) {
+        uint64_t lo, hi;
+        memcpy(&lo, src + at, 8), memcpy(&hi, src + at + 8, 8);
+        if (!lo && !hi) continue;   // padding, or not loaded: decodes as the error colour, opaque
+        nb++;
+        if ((lo & 0x1ff) == 0x1fc) {   // void extent: alpha in the top u16
+            na += (hi >> 48) != 0xffff;
+            continue;
+        }
+        if (!(lo & 0x7ff)) continue;   // reserved: the error colour
+        unsigned parts = (unsigned)((lo >> 11) & 3) + 1, cem = 16;
+        if (parts == 1) cem = (unsigned)((lo >> 13) & 15);
+        else if (((lo >> 23) & 3) == 0) cem = (unsigned)((lo >> 25) & 15);
+        if (cem < 16 && !(ASTC_ALPHA_CEM >> cem & 1)) continue;
+        na += !astc_block_alpha_one(src + at, bw, bh);
+    }
+    __atomic_add_fetch(&ups, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&blocks, (int64_t)nb, __ATOMIC_RELAXED);
+    if (!na) return;
+    int64_t u = __atomic_add_fetch(&ups_alpha, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&blocks_alpha, (int64_t)na, __ATOMIC_RELAXED);
+    int fresh = 0;
+    plat_mutex_lock(&lock);
+    uint32_t i = (uint32_t)((addr * 0x9e3779b97f4a7c15ull) >> 53), probes = 0;
+    while (seen[i] && seen[i] != addr && ++probes < 2048) i = (i + 1) & 2047;
+    if (probes < 2048 && !seen[i]) seen[i] = addr, fresh = 1;
+    plat_mutex_unlock(&lock);
+    int32_t t = fresh ? plat_inc32(&ntex) : __atomic_load_n(&ntex, __ATOMIC_RELAXED);
+    if (fresh && t <= lines)
+        rt_log("vk: ASTC BC1 alpha: texture %#llx (%s, ASTC %ux%u): %llu of %llu blocks decode below alpha 1 into a BC1 "
+               "image, which drops it (f%llu)", (unsigned long long)addr, path, bw, bh, (unsigned long long)na,
+               (unsigned long long)nb, (unsigned long long)vk_exec_presented);
+    if (fresh || u % 256 == 0)
+        rt_log("vk: ASTC BC1 alpha: %d textures, %lld of %lld uploads into BC1 images with alpha (%lld of %lld blocks)", t,
+               (long long)u, (long long)ups, (long long)blocks_alpha, (long long)blocks);
+}
+
 // Texture memory made before play (MKW_VK_TEX_POOL_MIN=<blocks>, default half the VRAM up to 8, 0 off; by default on
 // discrete GPUs only, a value set makes it on any): a pool of fixed 256 MiB blocks, that many of them allocated at
 // start on a thread of their own, takes the textures of its memory type.

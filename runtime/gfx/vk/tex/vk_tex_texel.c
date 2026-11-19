@@ -139,6 +139,7 @@ static int bc_unaligned(Tex *e, const Region *g, const NVNcopyRegion *r, const u
     if (ok) {
         barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
         vk_astc_tag(e->pub.addr, 3);
+        if (e->f.astc_bc7 == 2) vk_astc_bc1_alpha_note(e->pub.addr, stg, per * (size_t)g->nz, bw, bh, "texels");
         ok = vk_astc_record(cb, sb, per * (size_t)g->nz, ar, g->nz, bw, bh, e->f.astc_srgb, e->pub.image, aspect,
                             e->f.astc_bc7, VK_NULL_HANDLE);
         barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
@@ -240,6 +241,8 @@ static int texels_pinned(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_
                                        .lw = e->pub.width >> g->level, .lh = e->pub.height >> g->level};
             uint64_t a0 = perf_begin();
             vk_astc_tag(e->pub.addr, 3);
+            if (e->f.astc_bc7 == 2)
+                vk_astc_bc1_alpha_note(e->pub.addr, stg, slice * (size_t)g->nz, e->f.astc_bw, e->f.astc_bh, "write");
             done = vk_astc_record(cb, sb, slice * (size_t)g->nz, ar, g->nz, e->f.astc_bw, e->f.astc_bh, e->f.astc_srgb,
                                   e->pub.image, aspect, e->f.astc_bc7, VK_NULL_HANDLE);
             perf_end(PERF_ASTC, a0);
