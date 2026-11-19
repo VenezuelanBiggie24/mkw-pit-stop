@@ -582,6 +582,14 @@ void shadow_log(uint64_t frame) {
 
 // Evicts cold shadow buffers back to lazy = 1 under memory pressure when neither GPU nor CPU writeback depends on them.
 // Any pool resolved again transparently recreates its shadow/import via lazy_back from guest RAM.
+typedef struct { VkBuffer buf; VmaAllocation alloc; } TrimDead;
+
+static void trim_free(void *arg) {   // completion thread: every submission that could bind the buffer is done
+    TrimDead *d = arg;
+    vmaDestroyBuffer(vk_ctx()->vma, d->buf, d->alloc);
+    free(d);
+}
+
 uint64_t shadow_trim(uint64_t bytes) {
     static int trim_mode = -1;
     if (trim_mode < 0) {
@@ -644,7 +652,16 @@ uint64_t shadow_trim(uint64_t bytes) {
     plat_mutex_unlock(&shadow_lock);
     plat_mutex_unlock(&pool_lock);
 
-    for (int i = 0; i < ndead; i++) vmaDestroyBuffer(c->vma, dead[i].buf, dead[i].alloc);
+    // Freed once the newest reserved submission is done, not now: vk_mem_resolve's cached path takes a pool's buffer
+    // without pool_lock, so a recording thread that read the cache just before the pool_gen bump above may bind this
+    // buffer in a submission it is recording now, whose fence is at most the one reserved here (a use after free).
+    uint64_t after = ndead ? vk_sync_fence_reserved() : 0;
+    for (int i = 0; i < ndead; i++) {
+        TrimDead *d = malloc(sizeof *d);
+        if (!d) rt_fatal("vk: out of memory (shadow trim)");
+        d->buf = dead[i].buf, d->alloc = dead[i].alloc;
+        vk_completion_add(after, trim_free, d);
+    }
     return freed;
 }
 
