@@ -123,6 +123,12 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   on 1.8.0, so the fault handler now emulates `cmp` with a memory operand (`MKW_EARLY_SIBLING_CMP`, default 1). A/B
   inside two Grand Prix races at FPS=60: -0.38 and -0.12 ms (inverted), -0.25 ms by means and -0.46 by medians. The wait
   time was mostly not on the frame's critical path. Of the reads still not emulated, 54 % were at `EMU_MAX`.
+- **Done: more sibling reads emulated** (19/11/2026). `test` with a memory operand (`MKW_EARLY_SIBLING_TEST`, default 1:
+  one `testb` site held 59 % of the wait time left) and `EMU_MAX` 128 instead of 32 (`MKW_EARLY_SIBLING_MAX`). Four
+  Grand Prix races at FPS=60 with `test` on: limit 32 23.21 and 24.87 ms, limit 128 22.90 and 22.40 ms; no read was left
+  undecoded. An A/B of `test` at limit 128: -0.51 ms by means, -0.83 by medians, but -1.13 and +0.11 in its two races.
+  Races differ: some run 56-79 emulated reads a frame against 12-16 (`main+0x1043f0` on one record), and one such race
+  took 25.62 ms even at 128. Those reads cost two protection changes each; a snapshot of the page would remove that.
 - **Measured and set aside: profile-guided optimization** (19/11/2026). 1.8.0 on the PS5, Grand Prix at FPS=60, frame
   generation off, 210 s of race per run, in the order A B A B: `-O1` 23.87 and 24.85 ms, `-O2` with PGO 24.12 and
   23.97 ms. One run of each build had a single 4-6 s stall; without it `-O1` is 23.87 and 24.14 ms, PGO 23.64 and

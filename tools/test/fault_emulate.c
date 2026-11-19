@@ -1,5 +1,6 @@
 // Checks plat_fault_emulate_load (runtime/platform/fault_guard.c) against the CPU. Why: a wrong flag from an emulated
 // CMP sends the game down the wrong branch with nothing in the log, and the PS5 run that uses it takes minutes.
+// (AF after TEST is undefined on the CPU, so it is not compared there.)
 // Each case is a random instruction with a memory operand, run twice from the same registers and flags: once on the
 // CPU with its page readable, once with the page inaccessible, so the fault handler emulates it. Registers, rflags and
 // the rip after it must match. Forms the emulator must decline fall back to the CPU, and are counted.
@@ -19,7 +20,7 @@ enum { PAGE_SZ = 4096, NREG = 16, RSP = 4 };
 typedef struct { uint64_t r[NREG], flags; } Regs;
 
 static uint8_t *code, *data, shadow[PAGE_SZ];
-static int code_len, allow_cmp, emulating, emulated, declined, bad_rip;
+static int code_len, allow, emulating, emulated, declined, bad_rip;
 
 // Loads every register but rsp from r and the flags, calls code, stores them back.
 __attribute__((naked)) static void run(Regs *r, void *fn) {
@@ -61,7 +62,7 @@ static void on_segv(int sig, siginfo_t *si, void *uc) {
         _exit(2);
     }
     plat_fault_uc = uc;
-    int ok = plat_fault_emulate_load(a, allow_cmp, rd_shadow);
+    int ok = plat_fault_emulate_load(a, allow, rd_shadow);
     plat_fault_uc = NULL;
     if (ok) {
         emulated++;
@@ -124,7 +125,7 @@ static Insn encode(int o66, int w, int op0f, int op, int digit, int imm_size, in
     return in;
 }
 
-// sized: operand size from REX.W and 66. must_w: REX.W always. kind 0 emulated always, 1 only with cmp, 2 never.
+// sized: operand size from REX.W and 66. must_w: REX.W always. kind: 0 emulated always, else the PLAT_EMU_ bit it needs, -1 never.
 typedef struct { const char *name; int op0f, op, digit, imm, sized, must_w, kind; } Form;
 static const Form forms[] = {
     {"cmp [m],r8", 0, 0x38, -1, 0, 0, 0, 1},     {"cmp [m],r", 0, 0x39, -1, 0, 1, 0, 1},
@@ -135,8 +136,10 @@ static const Form forms[] = {
     {"movzx r,[m8]", 1, 0xb6, -1, 0, 0, 0, 0},   {"movzx r,[m16]", 1, 0xb7, -1, 0, 0, 0, 0},
     {"movsx r,[m8]", 1, 0xbe, -1, 0, 0, 0, 0},   {"movsx r,[m16]", 1, 0xbf, -1, 0, 0, 0, 0},
     {"movsxd r,[m32]", 0, 0x63, -1, 0, 0, 1, 0},
-    {"or [m],imm8", 0, 0x83, 1, 1, 1, 0, 2},     {"sub [m8],imm8", 0, 0x80, 5, 1, 0, 0, 2},
-    {"add [m],r", 0, 0x01, -1, 0, 1, 0, 2},      {"test [m],r", 0, 0x85, -1, 0, 1, 0, 2},
+    {"test [m],r8", 0, 0x84, -1, 0, 0, 0, 2},    {"test [m],r", 0, 0x85, -1, 0, 1, 0, 2},
+    {"test [m8],imm8", 0, 0xf6, 0, 1, 0, 0, 2},  {"test [m],imm", 0, 0xf7, 0, 4, 1, 0, 2},
+    {"or [m],imm8", 0, 0x83, 1, 1, 1, 0, -1},    {"sub [m8],imm8", 0, 0x80, 5, 1, 0, 0, -1},
+    {"add [m],r", 0, 0x01, -1, 0, 1, 0, -1},     {"not [m8]", 0, 0xf6, 2, 0, 0, 0, -1},
 };
 
 static int fails;
@@ -167,7 +170,8 @@ static void one(const Form *f) {
     emulating = 0;
     mprotect(data, PAGE_SZ, PROT_READ | PROT_WRITE);
 
-    cpu.flags &= ~0x10000ull, emu.flags &= ~0x10000ull;   // (RF is the CPU's own)
+    uint64_t ignore = 0x10000ull | (f->kind == PLAT_EMU_TEST ? 0x10 : 0);   // (RF is the CPU's own; AF, above)
+    cpu.flags &= ~ignore, emu.flags &= ~ignore;
     if (memcmp(&cpu, &emu, sizeof cpu) || memcmp(after, data, PAGE_SZ)) {
         if (fails++ < 10) {
             printf("MISMATCH %s:", f->name);
@@ -185,15 +189,15 @@ int main(void) {
     struct sigaction sa = {0};
     sa.sa_sigaction = on_segv, sa.sa_flags = SA_SIGINFO;
     sigaction(SIGSEGV, &sa, NULL), sigaction(SIGBUS, &sa, NULL);
-    enum { RUNS = 4000 };
-    for (allow_cmp = 1; allow_cmp >= 0; allow_cmp--)
+    enum { RUNS = 2000 };
+    for (allow = 3; allow >= 0; allow--)
         for (size_t i = 0; i < sizeof forms / sizeof *forms; i++) {
             const Form *f = &forms[i];
             emulated = declined = 0;
             for (int n = 0; n < RUNS; n++) one(f);
-            int want = f->kind == 0 || (f->kind == 1 && allow_cmp);
-            if (want ? !emulated : emulated) fails++, printf("WRONG COVERAGE %s cmp=%d: emulated %d\n", f->name, allow_cmp, emulated);
-            printf("%-16s cmp=%d emulated %5d, left to the CPU %5d\n", f->name, allow_cmp, emulated, declined);
+            int want = f->kind == 0 || (f->kind > 0 && (allow & f->kind));
+            if (want ? !emulated : emulated) fails++, printf("WRONG COVERAGE %s allow=%d: emulated %d\n", f->name, allow, emulated);
+            printf("%-16s allow=%d emulated %5d, left to the CPU %5d\n", f->name, allow, emulated, declined);
         }
     if (bad_rip) fails++, printf("rip wrong after %d emulations\n", bad_rip);
     printf("fault_emulate: %s (%d failures)\n", fails ? "FAILED" : "passed", fails);

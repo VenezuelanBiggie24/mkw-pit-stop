@@ -600,11 +600,15 @@ static int sibling_step(uint64_t a, uint64_t p, uint64_t np, size_t ep) {   // f
 // watch stays. The single step died on the PS5 at its first use (step-ab6): no trap flag there. At most EMU_MAX reads
 // a native page for one writer fence: past that it waits as before (a loop over the page would cost more than the
 // wait). Only bytes of 4 KiB pages not watched are read; anything else waits as before (sib_emu_no counts it, and the
-// three sib_no_* say why). MKW_EARLY_SIBLING_CMP (default 1, "ab" to compare) also emulates CMP with a memory operand.
-#define EMU_MAX 32
-static int sib_emu = -1, sib_cmp;
+// three sib_no_* say why). MKW_EARLY_SIBLING_CMP (default 1, "ab" to compare) also emulates CMP with a memory operand,
+// MKW_EARLY_SIBLING_TEST (the same) TEST. MKW_EARLY_SIBLING_MAX replaces EMU_MAX; MKW_EARLY_SIBLING_MAX_B replaces it in the B blocks of MKW_AB, to compare two
+// limits in one race. 128, not the first 32: two races each on 1.8.0 with TEST on (19/11/2026), 22.90 and 22.40 ms
+// against 23.21 and 24.87; a wait costs ~15 ms, an emulated read ~90 us.
+#define EMU_MAX 128
+static int sib_emu = -1, sib_cmp, sib_test, emu_max = EMU_MAX, emu_max_b;
 static uint64_t sib_emus, sib_emu_no;   // since the last log line
-static uint64_t sib_no_max, sib_no_insn, sib_no_bytes;   // not emulated: EMU_MAX, the instruction, the bytes
+static uint64_t sib_no_max, sib_no_insn, sib_no_bytes;   // not emulated: the limit, the instruction, the bytes
+static uint64_t sib_no_max_b;   // of sib_no_max, in the B blocks of MKW_AB
 static int emu_refused;   // sibling_read said no to this read
 static struct { uint64_t np, key; int n; } emu_seen[16];
 static uint64_t emu_np;   // the native page sibling_read may open (frz_lock)
@@ -633,6 +637,10 @@ static void sibling_emu_init(void) {
     sib_emu = rt_knob("EARLY_SIBLING_EMU", "1");
     if (!sib_emu) return;
     sib_cmp = rt_knob("EARLY_SIBLING_CMP", "1");
+    sib_test = rt_knob("EARLY_SIBLING_TEST", "1");
+    const char *max = cfg_get("MKW_EARLY_SIBLING_MAX"), *max_b = cfg_get("MKW_EARLY_SIBLING_MAX_B");
+    if (max && *max) emu_max = atoi(max);
+    if (max_b && *max_b) emu_max_b = atoi(max_b);
     int ok = plat_code_init();
     rt_log("mem: sibling-page reads emulated%s (MKW_EARLY_SIBLING_EMU): the code-read check %s", sib_emu == 2 ? " in the B blocks" : "",
            ok ? "passed" : "failed, so they wait as before");
@@ -645,9 +653,11 @@ static int sibling_emu(uint64_t a, uint64_t p, uint64_t np, size_t ep) {   // fr
     if (sib_emu <= 0 || !RT_KNOB_ON(sib_emu) || !sibling_pending(a, p, np, ep, &prot, &key)) return 0;
     int k = (int)((np / ep) % 16);
     if (emu_seen[k].np != np || emu_seen[k].key != key) emu_seen[k].np = np, emu_seen[k].key = key, emu_seen[k].n = 0;
-    if (emu_seen[k].n >= EMU_MAX) return sib_no_max++, sib_emu_no++, 0;
+    int in_b = rt_ab();
+    if (emu_seen[k].n >= (in_b && emu_max_b > 0 ? emu_max_b : emu_max)) return sib_no_max++, sib_no_max_b += in_b, sib_emu_no++, 0;
     emu_np = np, emu_prot = prot, emu_refused = 0;
-    if (!plat_fault_emulate_load(a, RT_KNOB_ON(sib_cmp), sibling_read)) {
+    int extra = (RT_KNOB_ON(sib_cmp) ? PLAT_EMU_CMP : 0) | (RT_KNOB_ON(sib_test) ? PLAT_EMU_TEST : 0);
+    if (!plat_fault_emulate_load(a, extra, sibling_read)) {
         if (emu_refused) sib_no_bytes++;
         else sib_no_insn++;
         return sib_emu_no++, 0;
@@ -731,16 +741,16 @@ void mem_early_log(uint64_t frame) {   // every frame
     rt_log("mem: early reads at frame %llu (%lld pages watched now)%s; waits %lld, %.1f ms in all, %lld given up (fence "
            "not handed to the queue in %llu ms); touches by host code on game threads %lld (no wait); released by an "
            "invalidate of other bytes %lld; sibling-page watches given up without a wait %llu; sibling reads let through "
-           "(MKW_EARLY_SIBLING_STEP) %llu, emulated (MKW_EARLY_SIBLING_EMU) %llu, not emulated %llu (at the limit %llu, instruction not "
-           "handled %llu, bytes on a watched page %llu); %s",
+           "(MKW_EARLY_SIBLING_STEP) %llu, emulated (MKW_EARLY_SIBLING_EMU) %llu, not emulated %llu (at the limit %llu, %llu of them in B "
+           "blocks, instruction not handled %llu, bytes on a watched page %llu); %s",
            (unsigned long long)frame, (long long)mem_early_pages, k ? b : ": none", (long long)waits,
            (double)wait_ns / 1e6, (long long)not_issued, (unsigned long long)(ISSUE_WAIT_NS / 1000000),
            (long long)not_game, (long long)range_skips, (unsigned long long)siblings_released,
            (unsigned long long)sib_steps, (unsigned long long)sib_emus, (unsigned long long)sib_emu_no,
-           (unsigned long long)sib_no_max, (unsigned long long)sib_no_insn, (unsigned long long)sib_no_bytes, ev);
+           (unsigned long long)sib_no_max, (unsigned long long)sib_no_max_b, (unsigned long long)sib_no_insn, (unsigned long long)sib_no_bytes, ev);
     waits = wait_ns = range_skips = not_game = not_issued = 0;
     siblings_released = 0, sib_steps = 0, sib_emus = 0, sib_emu_no = 0;
-    sib_no_max = sib_no_insn = sib_no_bytes = 0;
+    sib_no_max = sib_no_max_b = sib_no_insn = sib_no_bytes = 0;
     char wr[1024];
     int wo = 0;
     plat_mutex_lock(&wread_lock);

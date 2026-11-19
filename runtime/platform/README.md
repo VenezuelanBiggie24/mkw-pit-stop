@@ -22,7 +22,7 @@
 | `ps5_mutex.c` | PS5 loader reader and writer locks over pthreads |
 | `ps5_threads.c`, `ps5_fiber.c`, `fiber_x86.h` | PS5 host threads, CPU timing, and System V fibers |
 | `ps5_sys.c` | PS5 POSIX file writes, system/load stubs, and zstd tracer no-ops |
-| `fault_guard.c` | Linux and PS5: `plat_mem_copy_guarded`, a copy that returns 0 when it faults instead of running the fault hooks, for copies made with a platform lock held (the PS5's `plat_mem_read`, which hung run 25 against the early-read watch) It also emulates one faulting load or memory-operand `cmp` for the sibling-page read path (checked against the CPU by `tools/test/fault_emulate.c`) |
+| `fault_guard.c` | Linux and PS5: `plat_mem_copy_guarded`, a copy that returns 0 when it faults instead of running the fault hooks, for copies made with a platform lock held (the PS5's `plat_mem_read`, which hung run 25 against the early-read watch) It also emulates one faulting load or memory-operand `cmp` or `test` for the sibling-page read path (checked against the CPU by `tools/test/fault_emulate.c`) |
 | `sigsample.c` | Linux and PS5: the runtime's threads in a registry; each one's CPU time read on the thread itself through SIGPROF (the PS5's `pthread_getcpuclockid` answers with the caller's clock), and the sampler thread of the profiler (`core/diag/prof_posix.c`) |
 | `common.c`, `fp_x86.h` | Common parts, x86 floating point control |
 | `prot_watch.c`, `prot_watch.h` | Page-protection write watch shared by PS5 (16 KiB native pages) and Linux (`MKW_PROT_WATCH=1`, 4 KiB pages) |
