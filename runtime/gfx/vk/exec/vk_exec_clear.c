@@ -128,16 +128,37 @@ void clear_color(VkExec *ex, const p_clear_color *c) {
 int dc_mode = -1;
 static uint64_t dc_mid;   // clears of one layer in the middle of a sequence (logged)
 
-static uint32_t *dc_seq(VkImage img) {
+// The entry of img in front (most recent first), made from the last one when it has none.
+static __typeof__(DC.seq.e[0]) *dc_front(VkImage img) {
     int i = 0;
-    while (i < 3 && DC.seq[i].img != img) i++;
-    if (DC.seq[i].img != img) DC.seq[i].img = img, DC.seq[i].done = 0;   // the last entry is the one recycled
-    if (i) {   // most recent first
-        __typeof__(DC.seq[0]) e = DC.seq[i];
-        memmove(&DC.seq[1], &DC.seq[0], (size_t)i * sizeof e);
-        DC.seq[0] = e;
+    while (i < 3 && DC.seq.e[i].img != img) i++;
+    if (DC.seq.e[i].img != img) DC.seq.e[i].img = img, DC.seq.e[i].done = 0;   // the last entry is the one recycled
+    if (i) {
+        __typeof__(DC.seq.e[0]) e = DC.seq.e[i];
+        memmove(&DC.seq.e[1], &DC.seq.e[0], (size_t)i * sizeof e);
+        DC.seq.e[0] = e;
     }
-    return &DC.seq[0].done;
+    return &DC.seq.e[0];
+}
+
+static uint32_t *dc_seq(VkImage img) {
+    __typeof__(DC.seq.e[0]) *e = dc_front(img);
+    e->touched = 1;
+    return &e->done;
+}
+
+void vk_exec_dc_seq_get(VkExecDcSeq *out) { *out = DC.seq; }
+
+void vk_exec_dc_seq_seed(const VkExecDcSeq *s) {
+    DC.seq = *s;
+    for (int i = 0; i < 4; i++) DC.seq.e[i].touched = 0;
+}
+
+// In a submission's chunks only the chunk that binds an image first makes its sequence (a later one clears it layer by
+// layer, dc_seen), so the chunks' touched entries never overlap; the oldest goes in first, the newest ends in front.
+void vk_exec_dc_seq_merge(const VkExecDcSeq *s) {
+    for (int i = 3; i >= 0; i--)
+        if (s->e[i].touched && s->e[i].img) dc_front(s->e[i].img)->done = s->e[i].done;
 }
 
 void vk_exec_dc_read(VkImage img) {

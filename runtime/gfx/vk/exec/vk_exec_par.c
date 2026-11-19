@@ -67,6 +67,7 @@ typedef struct {
     VkCompletionList done; // its completion callbacks, added in chunk order once every chunk is recorded
     VkExecFrame counters;  // its MKW_TRACE=gfx frame counters, summed into vk_exec_frame_all at the join
     VkUsnapLog ulog;       // the uniform snapshot regions it bound from the copy and those it dropped
+    VkExecDcSeq dcseq;     // its layered depth clear sequences at its end (merged in chunk order at the join)
 } Chunk;
 
 typedef struct { VkCommandBuffer cb; uint64_t fence; } CbSlot;
@@ -106,6 +107,12 @@ static struct {
     uint32_t wdlayers;        // its layers
     VkImage dc_img;           // a layered depth image whose clears have begun and not reached every layer: no cut
     uint32_t dc_left;
+    // The replay thread's layered depth clear sequences when the chunks were handed out (after the head): every chunk
+    // starts from them. A chunk thread's own were whatever its last chunk left, maybe frames old: a layer that clear had
+    // marked done read as the start of a new sequence, and the clear of every layer wiped the layers drawn in earlier
+    // submissions (the kart's shadow; the serial replay's sequence, 08/11/2026, kept per thread).
+    VkExecDcSeq dcseq0;
+    uint64_t n_dc_stale;      // chunks whose thread held another sequence for an image it cleared (the old code's state)
     // the job
     const uint64_t *handles;
     int n;
@@ -226,6 +233,7 @@ static void send_ready(int wait);
 // The job: its chunks become takeable as they are handed out (P.avail), by the threads woken here.
 static void job_start(void) {
     P.t_job = kern_now_ns();
+    vk_exec_dc_seq_get(&P.dcseq0);   // (on the replay thread, the head recorded: no chunk has run yet)
     for (int k = 0; k < MAX_CHUNKS; k++) __atomic_store_n(&P.ready[k], 0, __ATOMIC_RELEASE);
     plat_mutex_lock(&P.lock);
     uint32_t gen = ++P.gen;
@@ -527,6 +535,22 @@ static VkCommandBuffer chunk_cb(int t, uint64_t fence) {
     return s->cb;
 }
 
+// The done layers of img in s (0: none).
+static uint32_t dc_done(const VkExecDcSeq *s, VkImage img) {
+    for (int i = 0; i < 4; i++)
+        if (s->e[i].img == img) return s->e[i].done;
+    return 0;
+}
+
+// 1 when a sequence the chunk made (touched in now) started from other layers in old, the chunk thread's own state,
+// than in the replay order's (P.dcseq0): where the chunks before the fix could clear the wrong layers.
+static int dc_stale(const VkExecDcSeq *old, const VkExecDcSeq *now) {
+    for (int i = 0; i < 4; i++)
+        if (now->e[i].touched && now->e[i].img && dc_done(old, now->e[i].img) != dc_done(&P.dcseq0, now->e[i].img))
+            return 1;
+    return 0;
+}
+
 static void chunk_record(int k, int t, int again) {
     Chunk *c = &P.ch[k];
     VkExec *ex = c->ex;
@@ -541,6 +565,9 @@ static void chunk_record(int k, int t, int again) {
     vk_usnap_log(&c->ulog);
     vk_exec_xfer_again(again);
     vk_exec_chunk_begin(ex, P.dimg, c->dimg0);
+    VkExecDcSeq old;
+    vk_exec_dc_seq_get(&old);   // what the thread's last chunk left: counted where it differs (n_dc_stale)
+    vk_exec_dc_seq_seed(&P.dcseq0);   // a second recording starts from them again too
     vk_exec_op_pos_set(c->op0);
     vk_exec_draw_upd_seed(ex, P.upd, c->upd0);
     // (a chunk handed out before the walk ended has the next one: the walk goes on adding to nch, ncond and dimg)
@@ -555,6 +582,8 @@ static void chunk_record(int k, int t, int again) {
         if (h->op != OP_QUEUE) vk_exec_op(ex, h);   // the walk made the switch (plan): it ends this chunk
     }
     vk_exec_chunk_end(ex);
+    vk_exec_dc_seq_get(&c->dcseq);
+    if (!again && dc_stale(&old, &c->dcseq)) __atomic_add_fetch(&P.n_dc_stale, 1, __ATOMIC_RELAXED);
     // Ended here, on the thread whose pool it comes from: the replay thread that submits it must not touch it, as this
     // thread may then be recording its next chunk from the same pool (vk_sync_split_with).
     vkEndCommandBuffer(c->cb);
@@ -814,6 +843,10 @@ int vk_exec_par(VkExec *ex, const uint64_t *handles, int n, int diag) {
     // submit against 2-4 serial (pp60a, 16/11/2026).
     if (!P.pipe_now || !P.threads || RT_KNOB_ON(P.join)) take_chunks(0, P.gen);
     send_ready(1);
+    // every chunk recorded (a second recording too): the sequences go on from the chunks', in their order, on this
+    // thread, whose own the chunks it took have overwritten
+    vk_exec_dc_seq_seed(&P.dcseq0);
+    for (int k = 0; k < P.nch; k++) vk_exec_dc_seq_merge(&P.ch[k].dcseq);
     uint64_t t2 = kern_now_ns();
     // The rest of the submission continues from the state after its last op, in the command buffer of the last send.
     VkExec keep = *ex;
@@ -861,6 +894,10 @@ void vk_exec_par_log(void) {
                P.n_par ? (double)P.ch0_pub_ns / 1e6 / (double)P.n_par : 0, P.n_par ? (double)P.ch0_rdy_ns / 1e6 / (double)P.n_par : 0,
                (unsigned long long)P.n_head, P.n_head ? (double)P.head_ndraws / (double)P.n_head : 0,
                P.n_head ? (double)P.head_ns / 1e6 / (double)P.n_head : 0);
+    uint64_t stale = __atomic_exchange_n(&P.n_dc_stale, 0, __ATOMIC_RELAXED);
+    if (P.mode && nf && stale)
+        rt_log("perf: replay in chunks: %llu chunks began a layered depth clear sequence that their thread held "
+               "otherwise (now taken from the replay order)", (unsigned long long)stale);
     if (P.n_pre) {
         double f = (double)nf;
         uint64_t rest = P.pre_ns - (P.pre_texlock_ns + P.pre_snap_ns + P.pre_up_ns < P.pre_ns

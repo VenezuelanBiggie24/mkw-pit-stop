@@ -26,7 +26,9 @@ typedef struct {   // MKW_DEPTH_CLEAR_ALL (dc_layered); per recording thread (MK
     // Per image, the layers whose clear came (made or skipped) since its last clear of every layer. Unlike pending it
     // outlives submissions, copies and queue switches: a clear of a layer not in it while others are continues the
     // sequence, and clearing every layer there would wipe the layers already drawn (the kart's shadow, 08/11/2026).
-    struct { VkImage img; uint32_t done; } seq[4];
+    // A sequence spans submissions (one layer each), so with MKW_REPLAY_PAR it must follow them in order, not stay on
+    // whichever thread recorded a chunk: a chunk starts from the replay thread's copy, merged back at the join.
+    VkExecDcSeq seq;
     // A MKW_REPLAY_PAR chunk: the depth images earlier chunks bound (nseen -1: any). Which of their layers an earlier
     // chunk cleared ahead or drew into is not known here, and clearing every layer would wipe what it drew (car shadows
     // flickered, 07/11/2026): those clear layer by layer. An image no earlier chunk bound is as in the serial replay.

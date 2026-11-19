@@ -319,6 +319,13 @@ int vk_exec_xfer_state(VkExec *ex, uint32_t op, const void *payload);
 void vk_exec_dc_read(VkImage img);           // a sampling of img (MKW_DEPTH_CLEAR_ALL's read count)
 // since the last call; by_layer: clears a chunk made layer by layer since an earlier chunk bound the image
 void vk_exec_dc_stats(uint64_t *reads, uint64_t *skipped, uint64_t *ahead, uint64_t *by_layer);
+// The layered depth clears' sequences (dc_seq) of the calling thread, most recent first; touched: looked up since the
+// last seed. MKW_REPLAY_PAR (vk_exec_par.c): get copies them out; seed makes a copy this thread's, touched cleared (a
+// chunk starts from the replay thread's at the job's start); merge puts the touched ones of a chunk's copy in front.
+typedef struct { struct { VkImage img; uint32_t done; int touched; } e[4]; } VkExecDcSeq;
+void vk_exec_dc_seq_get(VkExecDcSeq *out);
+void vk_exec_dc_seq_seed(const VkExecDcSeq *s);
+void vk_exec_dc_seq_merge(const VkExecDcSeq *s);
 void vk_exec_present_note(uint64_t frame);   // MKW_TRACE=perf: a present (the per-frame submission census)
 int vk_exec_draw_timing(char *buf, int size, double us_per_tick);   // MKW_TRACE=perf: prepare_draw by stage, then reset
 // The aspect a sampled view of img reads (vk_exec_view.c get_view): stencil for a view in STENCIL depth-stencil mode.
