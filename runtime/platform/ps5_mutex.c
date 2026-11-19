@@ -4,7 +4,12 @@
 // CLOCK_MONOTONIC via plat_now_ns() (TSC-backed by default). pthread_cond_reltimedwait_np is not used (its PS5
 // signature is unverified and hung at frame 1 in run 22).
 // MKW_LOCK_PROF=1 records lock contention and contended hold times for plat_lock_report (as linux_sync.c).
-// MKW_PS5_FAST_LOCK=1 uses a user-space atomic rwlock with pthread_cond_wait on contention (0: pthread_rwlock_t).
+// MKW_PS5_FAST_LOCK=1 (main.c, plat_lock_fast_mode) makes the locks created after it user-space atomic reader/writer
+// locks that sleep on a pthread condition variable when contended (0: pthread_rwlock_t). Rules of the fast lock: word
+// holds the writer bit, the reader count and LK_S, "a thread may be asleep"; a thread going to sleep sets LK_S and looks
+// again at what fetch_or returned, so an unlock between its check and the bit cannot be missed (every unlock that
+// empties the lock and finds LK_S wakes the sleepers). Writers in the slow path are counted in writers_waiting, and new
+// readers hold back for them, so a stream of readers cannot starve a writer; LK_S itself never stops anyone.
 #include "platform.h"
 
 #include <errno.h>
@@ -15,16 +20,11 @@
 #include <string.h>
 #include <time.h>
 
-static int fast_lock_on = -1;
+static int fast_lock_on, locks_made;
 
-static int use_fast_lock(void) {
-    int v = __atomic_load_n(&fast_lock_on, __ATOMIC_RELAXED);
-    if (v < 0) {
-        const char *e = getenv("MKW_PS5_FAST_LOCK");
-        v = (e && *e && *e != '0') ? 1 : 0;
-        __atomic_store_n(&fast_lock_on, v, __ATOMIC_RELAXED);
-    }
-    return v;
+int plat_lock_fast_mode(int on) {
+    __atomic_store_n(&fast_lock_on, on ? 1 : 0, __ATOMIC_RELEASE);
+    return __atomic_load_n(&locks_made, __ATOMIC_ACQUIRE);
 }
 
 // ---- MKW_LOCK_PROF (ported from linux_sync.c)
@@ -106,7 +106,8 @@ typedef struct {
     int fast;
     pthread_rwlock_t rw;
     volatile uint32_t word;
-    volatile uint32_t waiters;
+    volatile uint32_t waiters;           // threads between taking m to sleep and leaving (m)
+    volatile uint32_t writers_waiting;   // of them, writers (changed under m, read without it)
     pthread_mutex_t m;
     pthread_cond_t cv;
 } Ps5Lock;
@@ -117,14 +118,16 @@ static Ps5Lock *get_lock(PlatMutex *mutex) {
 
     Ps5Lock *created = calloc(1, sizeof *created);
     if (!created) abort();
-    created->fast = use_fast_lock();
+    created->fast = __atomic_load_n(&fast_lock_on, __ATOMIC_ACQUIRE);
     if (created->fast) {
         if (pthread_mutex_init(&created->m, NULL) || pthread_cond_init(&created->cv, NULL)) abort();
     } else {
         if (pthread_rwlock_init(&created->rw, NULL)) abort();
     }
-    if (__atomic_compare_exchange_n(&mutex->p, &lock, created, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    if (__atomic_compare_exchange_n(&mutex->p, &lock, created, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        __atomic_add_fetch(&locks_made, 1, __ATOMIC_ACQ_REL);
         return created;
+    }
     if (created->fast) {
         pthread_cond_destroy(&created->cv);
         pthread_mutex_destroy(&created->m);
@@ -138,6 +141,28 @@ static Ps5Lock *get_lock(PlatMutex *mutex) {
 void plat_mutex_init(PlatMutex *mutex) {
     mutex->p = NULL;
     (void)get_lock(mutex);
+}
+
+// After an unlock that found LK_S: everyone asleep looks again. The bit goes when no one is left (under m, where it is set).
+static void fast_wake(Ps5Lock *l) {
+    pthread_mutex_lock(&l->m);
+    if (__atomic_load_n(&l->waiters, __ATOMIC_RELAXED) == 0) __atomic_fetch_and(&l->word, ~LK_S, __ATOMIC_ACQ_REL);
+    pthread_cond_broadcast(&l->cv);
+    pthread_mutex_unlock(&l->m);
+}
+
+// m held: sleeps until the lock has none of the blocking bits (and, for a reader, no writer is waiting).
+static void fast_sleep(Ps5Lock *l, uint32_t blocking, int reader) {
+    for (;;) {
+        uint32_t s = __atomic_load_n(&l->word, __ATOMIC_ACQUIRE);
+        int writers = reader && __atomic_load_n(&l->writers_waiting, __ATOMIC_RELAXED);
+        if (!(s & blocking) && !writers) return;
+        if (!(s & LK_S)) {
+            s = __atomic_fetch_or(&l->word, LK_S, __ATOMIC_ACQ_REL);
+            if (!(s & blocking) && !writers) return;   // released before the bit went in: no one would wake this thread
+        }
+        pthread_cond_wait(&l->cv, &l->m);
+    }
 }
 
 static void lock_at(PlatMutex *mutex, uintptr_t ra) {
@@ -158,10 +183,9 @@ static void lock_at(PlatMutex *mutex, uintptr_t ra) {
             if (spin < LK_SPINS) { plat_pause(); continue; }
             pthread_mutex_lock(&l->m);
             __atomic_fetch_add(&l->waiters, 1, __ATOMIC_ACQ_REL);
-            while ((s = __atomic_load_n(&l->word, __ATOMIC_RELAXED)) & (LK_W | LK_R)) {
-                if (!(s & LK_S)) __atomic_fetch_or(&l->word, LK_S, __ATOMIC_ACQ_REL);
-                pthread_cond_wait(&l->cv, &l->m);
-            }
+            __atomic_fetch_add(&l->writers_waiting, 1, __ATOMIC_RELAXED);
+            fast_sleep(l, LK_W | LK_R, 0);
+            __atomic_fetch_sub(&l->writers_waiting, 1, __ATOMIC_RELAXED);
             __atomic_fetch_sub(&l->waiters, 1, __ATOMIC_ACQ_REL);
             pthread_mutex_unlock(&l->m);
         }
@@ -196,13 +220,7 @@ void plat_mutex_unlock(PlatMutex *mutex) {
     if (l->fast) {
         uint32_t s = __atomic_fetch_and(&l->word, ~LK_W, __ATOMIC_RELEASE);
         if (lp_on > 0) lh_pop(mutex, (s & LK_S) != 0);
-        if (s & LK_S) {
-            pthread_mutex_lock(&l->m);
-            if (__atomic_load_n(&l->waiters, __ATOMIC_RELAXED) == 0)
-                __atomic_fetch_and(&l->word, ~LK_S, __ATOMIC_RELAXED);
-            pthread_cond_broadcast(&l->cv);
-            pthread_mutex_unlock(&l->m);
-        }
+        if (s & LK_S) fast_wake(l);
         return;
     }
     if (lp_on > 0) lh_pop(mutex, 0);
@@ -216,7 +234,7 @@ void plat_mutex_lock_shared(PlatMutex *mutex) {
         uint64_t t0 = 0;
         for (int spin = 0;; spin++) {
             uint32_t s = __atomic_load_n(&l->word, __ATOMIC_RELAXED);
-            if (!(s & (LK_W | LK_S))) {
+            if (!(s & LK_W) && !__atomic_load_n(&l->writers_waiting, __ATOMIC_RELAXED)) {
                 if (__atomic_compare_exchange_n(&l->word, &s, s + 1, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
                     if (t0) lp_add(lp, mutex, t0, ra);
                     return;
@@ -227,10 +245,7 @@ void plat_mutex_lock_shared(PlatMutex *mutex) {
             if (spin < LK_SPINS) { plat_pause(); continue; }
             pthread_mutex_lock(&l->m);
             __atomic_fetch_add(&l->waiters, 1, __ATOMIC_ACQ_REL);
-            while ((s = __atomic_load_n(&l->word, __ATOMIC_RELAXED)) & LK_W) {
-                if (!(s & LK_S)) __atomic_fetch_or(&l->word, LK_S, __ATOMIC_ACQ_REL);
-                pthread_cond_wait(&l->cv, &l->m);
-            }
+            fast_sleep(l, LK_W, 1);
             __atomic_fetch_sub(&l->waiters, 1, __ATOMIC_ACQ_REL);
             pthread_mutex_unlock(&l->m);
         }
@@ -246,7 +261,7 @@ int plat_mutex_trylock_shared(PlatMutex *mutex) {
     Ps5Lock *l = get_lock(mutex);
     if (l->fast) {
         uint32_t s = __atomic_load_n(&l->word, __ATOMIC_RELAXED);
-        while (!(s & (LK_W | LK_S)))
+        while (!(s & LK_W) && !__atomic_load_n(&l->writers_waiting, __ATOMIC_RELAXED))
             if (__atomic_compare_exchange_n(&l->word, &s, s + 1, 1, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return 1;
         return 0;
     }
@@ -257,13 +272,7 @@ void plat_mutex_unlock_shared(PlatMutex *mutex) {
     Ps5Lock *l = get_lock(mutex);
     if (l->fast) {
         uint32_t s = __atomic_sub_fetch(&l->word, 1, __ATOMIC_RELEASE);
-        if ((s & LK_S) && !(s & LK_R)) {
-            pthread_mutex_lock(&l->m);
-            if (__atomic_load_n(&l->waiters, __ATOMIC_RELAXED) == 0)
-                __atomic_fetch_and(&l->word, ~LK_S, __ATOMIC_RELAXED);
-            pthread_cond_broadcast(&l->cv);
-            pthread_mutex_unlock(&l->m);
-        }
+        if ((s & LK_S) && !(s & LK_R)) fast_wake(l);
         return;
     }
     if (pthread_rwlock_unlock(&l->rw)) abort();

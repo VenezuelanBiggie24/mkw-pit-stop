@@ -133,6 +133,12 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   race with 141 emulated reads a frame 24.93 -> 21.99 ms, the race with 21 a frame 22.33 -> 22.14 ms. A check race
   (`MKW_EARLY_SIBLING_SNAP_CHECK=1`) compared 868,731 reads with memory: none differed. With the default on, a confirming
   race took 23.18 ms (worst frame 85.3 ms, no hang).
+- **Measured and set aside: longer write-watch backoff for hot pages** (19/11/2026). Pages hot again right after an arm
+  stayed writable 4 and 12 times longer: repeat faults 8.6 -> 3.2 a frame, all faults 64 -> 58, frame +0.01 ms by means
+  and -0.24 by medians over two A/B races. About 87 % of the faults are on pages that did not fault the cycle before.
+- **Measured and set aside: the fast PS5 lock** (`MKW_PS5_FAST_LOCK`, default 0, 19/11/2026). Six alternating Grand Prix
+  races at FPS=60: off 22.69, 22.40 and 21.31 ms (22.13), on 21.88, 22.05 and 22.48 ms (22.14); texture-lock waits about
+  20 % lower, no hang. Its lost wakeup and a reader spin were fixed first, and it now reads `mkw.ini`.
 - **Measured and set aside: profile-guided optimization** (19/11/2026). 1.8.0 on the PS5, Grand Prix at FPS=60, frame
   generation off, 210 s of race per run, in the order A B A B: `-O1` 23.87 and 24.85 ms, `-O2` with PGO 24.12 and
   23.97 ms. One run of each build had a single 4-6 s stall; without it `-O1` is 23.87 and 24.14 ms, PGO 23.64 and

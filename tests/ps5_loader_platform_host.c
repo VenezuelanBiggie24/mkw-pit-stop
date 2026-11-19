@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -531,6 +532,48 @@ static void *test_contended_lock(void *arg) {
     return NULL;
 }
 
+// MKW_PS5_FAST_LOCK under load: writers and readers on a few locks. A lost wakeup hangs here (the test's timeout); a
+// broken exclusion shows in the counters, which only the holders of the lock may touch.
+enum { FL_LOCKS = 3, FL_THREADS = 8, FL_ROUNDS = 60000 };
+static PlatMutex fl_lock[FL_LOCKS];
+static uint64_t fl_a[FL_LOCKS], fl_b[FL_LOCKS], fl_writes;
+static void *fast_lock_worker(void *arg) {
+    uint64_t r = (uintptr_t)arg * 2654435761u + 1;
+    for (int i = 0; i < FL_ROUNDS; i++) {
+        r ^= r << 13, r ^= r >> 7, r ^= r << 17;
+        int k = (int)(r % FL_LOCKS);
+        if (r >> 60 < 5) {
+            plat_mutex_lock(&fl_lock[k]);
+            fl_a[k]++;
+            if (!(r >> 20 & 15)) sched_yield();
+            fl_b[k]++;
+            __atomic_fetch_add(&fl_writes, 1, __ATOMIC_RELAXED);
+            plat_mutex_unlock(&fl_lock[k]);
+        } else if (r >> 56 & 1 || !plat_mutex_trylock_shared(&fl_lock[k])) {
+            plat_mutex_lock_shared(&fl_lock[k]);
+            assert(fl_a[k] == fl_b[k]);
+            if (!(r >> 20 & 31)) sched_yield();
+            assert(fl_a[k] == fl_b[k]);
+            plat_mutex_unlock_shared(&fl_lock[k]);
+        } else {
+            assert(fl_a[k] == fl_b[k]);
+            plat_mutex_unlock_shared(&fl_lock[k]);
+        }
+    }
+    return NULL;
+}
+static void test_fast_lock(void) {
+    plat_lock_fast_mode(1);
+    pthread_t t[FL_THREADS];
+    for (uintptr_t i = 0; i < FL_THREADS; i++) assert(!pthread_create(&t[i], NULL, fast_lock_worker, (void *)(i + 1)));
+    for (int i = 0; i < FL_THREADS; i++) assert(!pthread_join(t[i], NULL));
+    uint64_t sum = 0;
+    for (int k = 0; k < FL_LOCKS; k++) assert(fl_a[k] == fl_b[k]), sum += fl_a[k];
+    assert(sum == fl_writes && sum);
+    plat_lock_fast_mode(0);
+    puts("fast lock: eight threads, three locks: no hang, exclusion held");
+}
+
 static void test_io_and_mutex(void) {
     uint64_t size;
     uint8_t *bytes = plat_file_read("binary", &size);
@@ -651,6 +694,7 @@ static void test_fault_emulate(void) {
 int main(void) {
     test_memory();
     test_io_and_mutex();
+    test_fast_lock();
     test_fault_step();
     test_fault_emulate();
 }

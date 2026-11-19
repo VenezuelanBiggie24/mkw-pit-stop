@@ -553,6 +553,10 @@ void mem_init(void) {
     // mkw.ini is read here, once the address space is claimed and before the first setting: the pool size below
     // depends on MKW_APP_POOL.
     cfg_init();
+#ifdef __PROSPERO__
+    if (rt_knob("PS5_FAST_LOCK", "0") == 1)   // (a lock keeps its kind for life, so "ab" cannot work)
+        rt_log("platform: fast locks on (MKW_PS5_FAST_LOCK); the %d locks made before this keep the old kind", plat_lock_fast_mode(1));
+#endif
     const char *pool = cfg_get("MKW_APP_POOL");
     uint64_t aslr = low < alias ? low : alias;
     L = (RtGuestLayout){

@@ -50,6 +50,7 @@ int plat_thread_priority_mode(int on);
 int plat_tsc_clock_mode(int on);
 void plat_cond_probe(void);
 void plat_lock_prof_mode(int on);
+int plat_lock_fast_mode(int on);   // PS5: locks created from now on are the fast kind; returns how many exist already
 int plat_pw_batch_mode(int on);
 int plat_pw_hot_mode(int on);   // write watch: hot pages stay writable (MKW_PW_HOT); -1 without a write watch
 uint64_t plat_mem_write_watch_hot_skips(int reset);   // arms skipped for hot pages since the last reset

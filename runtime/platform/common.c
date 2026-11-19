@@ -128,6 +128,7 @@ __attribute__((weak)) int plat_thread_priority_mode(int on) { (void)on; return -
 __attribute__((weak)) int plat_tsc_clock_mode(int on) { (void)on; return -1; }
 __attribute__((weak)) void plat_cond_probe(void) {}
 __attribute__((weak)) void plat_lock_prof_mode(int on) { (void)on; }
+__attribute__((weak)) int plat_lock_fast_mode(int on) { return (void)on, 0; }
 __attribute__((weak)) int plat_pw_batch_mode(int on) { (void)on; return -1; }
 __attribute__((weak)) int plat_pw_hot_mode(int on) { (void)on; return -1; }
 __attribute__((weak)) uint64_t plat_mem_write_watch_hot_skips(int reset) { (void)reset; return 0; }
