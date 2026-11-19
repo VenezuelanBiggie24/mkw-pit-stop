@@ -128,6 +128,15 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   46-62 and textures evicted 5.8-6.4 -> 1.6 GiB per race; frame -0.20 / +0.14 ms, median -0.05 / 0.00, within
   noise. All free memory still dips to 924-1,174 MiB, under the 1 GiB hard level. Re-uploads stay at ~60 per 60
   frames either way: the game rewrites those textures, so eviction is not their source.
+- **Done, no frame gain: textures made faster on the replay thread** (20/11/2026, PS5 1.8.0). Timing the texture
+  lock's holds showed the replay's slot precheck as its longest holder (~1.1 ms twice a frame, up to 36 ms); ~2% of
+  frames have a pass over 5 ms (median 7 ms), half of it making new textures (~100 per 60 frames as the course
+  streams) and half uploads and snapshot answers. Of making a texture, ~60% was the ASTC alpha check that picks BC1
+  (996 of 1,646 ms in a race), and every one made a probe image only an out-of-memory retry uses.
+  `MKW_TEX_MAKE_FAST` (default 1) spreads that check over the ASTC decode pool (same answers: 6,144 checks compared in
+  a race) and makes the probe only when out of memory. In-race A/B (two races): making textures 9.5-10.3 -> 6.1-6.9 ms
+  per 60 frames, the frame -0.21 / +0.21 ms (medians -0.01 / -0.02). Letting waiters into the precheck's hold
+  (tried, not kept) did not move the frame either: the texture lock's waiters are not on the critical path.
 - **Done, no frame gain: the zero scan skips what it already read.** Each hard pass read every frozen unit for zero
   pages (~1.5 GB, 9.3 ms a pass on the governor's thread, freeing almost nothing). `MKW_ZERO_SCAN_CACHE` (default 1)
   skips a unit found not all zero earlier in the same freeze (`mem_frozen` now returns the freeze's number). A/B on

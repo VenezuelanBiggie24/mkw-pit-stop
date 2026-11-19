@@ -305,13 +305,25 @@ static int astc_opaque(const uint8_t *p, uint64_t size) {
 // astc_opaque takes as alpha because of their colour endpoint mode may still hold alpha 1 everywhere (728 of 768 ASTC
 // images of the race stayed BC7 for their modes, bc1r; 552 of them decode to alpha 1, bca1). Decoding every texel took
 // 5.4 s of the load on the replay thread (bca2). Storage is block-linear, but every 16 bytes is still one block.
-static int astc_alpha_one(const uint8_t *p, uint64_t size, int bw, int bh) {
-    int any = 0;
-    for (uint64_t at = 0; at + 16 <= size; at += 16) {
+// MKW_TEX_MAKE_FAST (default 1; "ab" to measure): a large storage's check spread over the ASTC decode pool
+// (astc_mt_for), the caller taking part and waiting, so the answer and the moment the storage is read stay the same
+// (MKW_TEX_MAKE_CHECK in a race: 6,144 checks, none different from the serial one, 20/11/2026). In a race this check
+// was ~60% of making textures on the replay thread: 996 of 1,646 ms (7,168 ASTC images, pcmake, 20/11/2026), in bursts
+// behind the slow precheck passes. In-race A/B (two races): the check 5.6-5.8 -> 2.4-2.9 ms and making textures
+// 9.5-10.3 -> 6.1-6.9 ms per 60 frames; the frame within noise (-0.21 / +0.21 ms, medians -0.01 / -0.02).
+typedef struct { const uint8_t *p; int bw, bh; volatile int32_t any, fail; } AlphaJob;
+#define ALPHA_RANGE 1024   // blocks per range (16 KiB)
+static int make_fast = -1;
+
+// Blocks [at, end) of astc_alpha_one's test: 0 at the first block that may decode below alpha 1 (or once *fail is set
+// by another range); *any set by a block that is not padding.
+static int alpha_range(const uint8_t *p, uint64_t at, uint64_t end, int bw, int bh, int *any, volatile int32_t *fail) {
+    for (; at + 16 <= end; at += 16) {
+        if (fail && !((at >> 4) & 63) && __atomic_load_n(fail, __ATOMIC_RELAXED)) return 0;
         uint64_t lo, hi;
         memcpy(&lo, p + at, 8), memcpy(&hi, p + at + 8, 8);
         if (!lo && !hi) continue;   // layout padding; only zeros: not loaded yet, not opaque
-        any = 1;
+        *any = 1;
         // a single partition (or one class) without an alpha mode needs no decode (astc_opaque's test)
         if ((lo & 0x1ff) != 0x1fc && (lo & 0x7ff)) {
             unsigned parts = (unsigned)((lo >> 11) & 3) + 1, cem = 16;
@@ -321,7 +333,36 @@ static int astc_alpha_one(const uint8_t *p, uint64_t size, int bw, int bh) {
         }
         if (!astc_block_alpha_one(p + at, (uint32_t)bw, (uint32_t)bh)) return 0;
     }
-    return any;
+    return 1;
+}
+
+static void alpha_job(void *arg, uint32_t i0, uint32_t i1) {
+    AlphaJob *j = arg;
+    for (uint32_t i = i0; i < i1 && !__atomic_load_n(&j->fail, __ATOMIC_RELAXED); i++) {
+        int any = 0;
+        if (!alpha_range(j->p, (uint64_t)i * ALPHA_RANGE * 16, (uint64_t)(i + 1) * ALPHA_RANGE * 16, j->bw, j->bh, &any,
+                         &j->fail))
+            __atomic_store_n(&j->fail, 1, __ATOMIC_RELAXED);
+        if (any) __atomic_store_n(&j->any, 1, __ATOMIC_RELAXED);
+    }
+}
+
+static int astc_alpha_one(const uint8_t *p, uint64_t size, int bw, int bh) {
+    if (make_fast < 0) make_fast = rt_knob("TEX_MAKE_FAST", "1");
+    uint64_t blocks = size / 16;
+    if (RT_KNOB_ON(make_fast) && blocks >= 4 * ALPHA_RANGE) {
+        AlphaJob j = {.p = p, .bw = bw, .bh = bh};
+        uint32_t n = (uint32_t)((blocks + ALPHA_RANGE - 1) / ALPHA_RANGE);
+        if (size % (ALPHA_RANGE * 16)) {   // the last, partial range here
+            int any = 0;
+            if (!alpha_range(p, (uint64_t)(n - 1) * ALPHA_RANGE * 16, size, bw, bh, &any, NULL)) return 0;
+            if (any) j.any = 1;
+            n--;
+        }
+        if (!n || astc_mt_for(alpha_job, &j, n, 1)) return !j.fail && j.any;
+    }   // small, or the pool busy: alone, as before
+    int any = 0;
+    return alpha_range(p, 0, size, bw, bh, &any, NULL) && any;
 }
 
 // Texture memory made before play (MKW_VK_TEX_POOL_MIN=<blocks>, default half the VRAM up to 8, 0 off; by default on
@@ -613,7 +654,10 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         VkResult r = vma_image(c, &ci, &ai, &img, &e->alloc);
         uint64_t vram_used = 0, vram_budget = 0;
         int vram_exact = 0;
-        VkDeviceSize need = image_bytes(c, &ci);
+        // the probe image only when its size is used, out of memory (MKW_TEX_MAKE_FAST; before, every new texture made
+        // and destroyed one more image: 0.26 ms per 60 frames in a race)
+        if (make_fast < 0) make_fast = rt_knob("TEX_MAKE_FAST", "1");
+        VkDeviceSize need = r == VK_ERROR_OUT_OF_DEVICE_MEMORY || !RT_KNOB_ON(make_fast) ? image_bytes(c, &ci) : 0;
         // Skip relief/eviction retries when the image alone exceeds the device-local heap budget:
         // freeing existing textures cannot make a >budget non-sparse image fit (e.g. 11.35 GiB arrays).
         int can_fit = r != VK_ERROR_OUT_OF_DEVICE_MEMORY ||

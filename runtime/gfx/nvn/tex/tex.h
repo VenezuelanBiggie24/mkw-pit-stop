@@ -47,6 +47,8 @@ void astc_decode_ldr(const uint8_t *blocks, uint32_t width, uint32_t height, uin
 bool astc_decode_block(const uint8_t block[16], uint32_t bw, uint32_t bh, bool srgb, uint8_t *rgba_out);
 // 1 when every texel of the block decodes to alpha 255, from its endpoints alone (no texel is decoded).
 bool astc_block_alpha_one(const uint8_t block[16], uint32_t bw, uint32_t bh);
+// tex_astc_mt.c: fn over [0, n) in ranges on the ASTC decode pool and the caller; 0 when the pool is busy (run it alone)
+int astc_mt_for(void (*fn)(void *arg, uint32_t i0, uint32_t i1), void *arg, uint32_t n, uint32_t chunk);
 // tex_astc_mt.c: the same bytes as astc_decode_ldr, large images split by block rows over a worker pool; blocks.
 void astc_decode_ldr_mt(const uint8_t *blocks, uint32_t width, uint32_t height, uint32_t bw, uint32_t bh, bool srgb,
                         uint8_t *rgba_out);

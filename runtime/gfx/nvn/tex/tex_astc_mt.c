@@ -1,7 +1,7 @@
 // astc_decode_ldr_mt: astc_decode_ldr with the block rows of one image spread over a persistent worker pool. Each block
 // goes through astc_decode_block and lands where astc_decode_ldr puts it, so the output is the same bytes. The caller
 // takes part and returns when every row is done. One image at a time: a second caller while the pool is busy, or an
-// image under MT_MIN_BLOCKS, decodes on its own thread.
+// image under MT_MIN_BLOCKS, decodes on its own thread. astc_mt_for spreads any job split in ranges over the same pool.
 #include <string.h>
 
 #include "host.h"
@@ -25,6 +25,8 @@ static struct {
     uint32_t width, height, bw, bh, bx, by, chunk;
     bool srgb;
     volatile int32_t next;                      // first block row not yet claimed
+    void (*fn)(void *arg, uint32_t i0, uint32_t i1);   // the job: decode_rows, or astc_mt_for's
+    void *arg;
 } P = {PLAT_ONCE_INIT, .lock = PLAT_MUTEX_INIT, .work = PLAT_COND_INIT, .done = PLAT_COND_INIT};
 
 // Block rows [j0, j1) of the current image, as astc_decode_ldr's loop does them.
@@ -45,12 +47,17 @@ static void decode_rows(uint32_t j0, uint32_t j1) {
     }
 }
 
+static void decode_job(void *arg, uint32_t j0, uint32_t j1) {
+    (void)arg;
+    decode_rows(j0, j1);
+}
+
 static void claim_rows(void) {
     for (;;) {
         int32_t j0 = plat_xadd32(&P.next, (int32_t)P.chunk);
         if ((uint32_t)j0 >= P.by) return;
         uint32_t j1 = (uint32_t)j0 + P.chunk;
-        decode_rows((uint32_t)j0, j1 < P.by ? j1 : P.by);
+        P.fn(P.arg, (uint32_t)j0, j1 < P.by ? j1 : P.by);
     }
 }
 
@@ -97,7 +104,7 @@ void astc_decode_ldr_mt(const uint8_t *blocks, uint32_t width, uint32_t height, 
     }
     plat_mutex_lock(&P.lock);
     P.blocks = blocks, P.out = rgba_out, P.width = width, P.height = height, P.bw = bw, P.bh = bh, P.bx = bx, P.by = by;
-    P.srgb = srgb;
+    P.srgb = srgb, P.fn = decode_job, P.arg = NULL;
     uint32_t parts = (uint32_t)(P.threads + 1) * 4;   // a few chunks per thread evens out uneven blocks
     P.chunk = by / parts ? by / parts : 1;
     P.next = 0;
@@ -110,4 +117,24 @@ void astc_decode_ldr_mt(const uint8_t *blocks, uint32_t width, uint32_t height, 
     while (P.active) plat_cond_wait(&P.done, &P.lock);
     plat_mutex_unlock(&P.lock);
     plat_mutex_unlock(&P.busy);
+}
+
+// fn(arg, i0, i1) over [0, n) in ranges of about chunk, on the pool and the caller; returns when every range is done.
+// 0 (nothing run) when the pool is busy with another caller or has no workers: the caller runs fn itself.
+int astc_mt_for(void (*fn)(void *arg, uint32_t i0, uint32_t i1), void *arg, uint32_t n, uint32_t chunk) {
+    plat_once(&P.once, pool_init, NULL);
+    if (!P.threads || !n || !plat_mutex_trylock(&P.busy)) return 0;
+    plat_mutex_lock(&P.lock);
+    P.fn = fn, P.arg = arg, P.by = n, P.chunk = chunk ? chunk : 1;
+    P.next = 0;
+    P.active = P.threads;
+    P.gen++;
+    plat_cond_broadcast(&P.work);
+    plat_mutex_unlock(&P.lock);
+    claim_rows();
+    plat_mutex_lock(&P.lock);
+    while (P.active) plat_cond_wait(&P.done, &P.lock);
+    plat_mutex_unlock(&P.lock);
+    plat_mutex_unlock(&P.busy);
+    return 1;
 }
