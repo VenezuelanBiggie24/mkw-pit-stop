@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -176,10 +177,18 @@ def query_info(host: str, port: int = DEFAULT_PORT, timeout: float = 10.0) -> di
         return json.loads(payload)
 
 
+TITLE_VIEW_FREE = 16 << 30   # what statvfs answers inside the title, for /app0 and /data alike
+
+
 def usable_free(info: dict) -> int | None:
-    """The console's free bytes, or None when its receiver cannot tell: before "free_real" it measured /app0, the
-    title's mounted view, which claimed 16.00 GiB on a console with 231 GiB free (a full disk still fails the write)."""
-    return int(info.get("free_bytes", 0)) if info.get("free_real") else None
+    """The console's free bytes, or None when its receiver cannot tell (a full disk still fails the write). Inside the
+    title statvfs answers exactly 16.00 GiB for /app0 and for /data, on a console with 231 GiB free: the placeholders
+    of 18-20/11/2026 sent that as "free_real", and a 23 GB romfs.nup was refused or had the PS5 delete folders to make
+    room (20/11/2026). Exactly that figure is no measurement."""
+    if not info.get("free_real"):
+        return None
+    free = int(info.get("free_bytes", 0))
+    return None if free == TITLE_VIEW_FREE else free
 
 
 def _no_space(need: int, free: int) -> str:
@@ -206,16 +215,20 @@ def send_directory(
                                   on_hash=(lambda d, t: on_phase("hash", d, t)) if on_phase else None)
     total_files = len(entries)
 
-    with socket.create_connection((host, port), timeout=timeout) as sock:
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    def connect() -> tuple[socket.socket, dict]:
+        s = socket.create_connection((host, port), timeout=timeout)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         try:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCK_BUF)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCK_BUF)
         except OSError:
             pass   # the default buffer still works
+        s.sendall(b"PIT1I")
+        (n,) = struct.unpack("<I", _recv_exact(s, 4))
+        return s, json.loads(_recv_exact(s, n).decode("utf-8"))
 
-        sock.sendall(b"PIT1I")
-        (info_len,) = struct.unpack("<I", _recv_exact(sock, 4))
-        info = json.loads(_recv_exact(sock, info_len).decode("utf-8"))
+    sock, info = connect()
+    with contextlib.ExitStack() as stack:
+        stack.callback(lambda: sock.close())
         if info.get("title_id") != "PPSA99193":
             raise TransferError(f"unexpected console title {info.get('title_id')!r}")
         can_resume = bool(info.get("resume"))
@@ -249,11 +262,21 @@ def send_directory(
         send_bytes = sum(item[2] for item in need)
         # a package replaces the loose folder an earlier send left beside it (romfs/: 23 GB kept twice otherwise)
         def remove_loose() -> None:
+            nonlocal sock
             for rel, *_ in entries:
                 if rel == "spirv.nup" or rel == "romfs.nup" or rel.endswith("/romfs.nup"):
                     loose = rel[: -len(".nup")].encode("utf-8")   # romfs/ or spirv/ beside its package
                     sock.sendall(b"PIT1X" + struct.pack("<H", len(loose)) + loose)
-                    _expect_ack(sock)
+                    try:
+                        _expect_ack(sock)
+                    except TransferError as e:
+                        # Only space is lost: the title reads the package. Files an FTP upload left there are not the
+                        # title's to delete ("Operation not permitted", 20/11/2026), and the receiver closes the
+                        # connection after an error, so the send goes on over a new one.
+                        print(f"send_ps5: the PS5 kept {loose.decode()}/ ({e}); delete it by FTP to free its space",
+                              file=sys.stderr)
+                        sock.close()
+                        sock, _ = connect()
 
         free_bytes = usable_free(info)
         resumable = sum(item[2] for item in need if can_resume and item[2] >= RESUME_MIN)
@@ -262,8 +285,8 @@ def send_directory(
             remove_loose()   # it may be what fills the console: gone first, then counted again
             removed = True
             sock.sendall(b"PIT1I")
-            (info_len,) = struct.unpack("<I", _recv_exact(sock, 4))
-            free_bytes = usable_free(json.loads(_recv_exact(sock, info_len).decode("utf-8")))
+            (n,) = struct.unpack("<I", _recv_exact(sock, 4))
+            free_bytes = usable_free(json.loads(_recv_exact(sock, n).decode("utf-8")))
         # a resumable file may be partly there already: it is checked once the receiver says how much (below)
         if free_bytes is not None and send_bytes - resumable > free_bytes:
             raise TransferError(_no_space(send_bytes - resumable, free_bytes))

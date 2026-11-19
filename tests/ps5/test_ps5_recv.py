@@ -378,6 +378,42 @@ def test_ps5_recv_nup_replaces_loose_romfs(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root deletes the read-only folder anyway")
+def test_ps5_send_survives_a_folder_it_cannot_remove(tmp_path: Path) -> None:
+    """A loose spirv/ the title may not delete (files an FTP upload left, 20/11/2026: "Operation not permitted") costs
+    only its space: the receiver answers the removal with an error and closes the connection, the sender says so,
+    connects again and finishes the send."""
+    sys.path.insert(0, str(ROOT / "tools/ps5"))
+    import send_ps5
+
+    exe = _compile_helper(tmp_path)
+    title, stage = tmp_path / "PPSA99193", tmp_path / "stage"
+    (title / "spirv").mkdir(parents=True)
+    (title / "spirv/old.spv").write_bytes(b"old")
+    (title / "spirv").chmod(0o555)   # its file cannot be unlinked
+    stage.mkdir()
+    (stage / "spirv.nup").write_bytes(b"NUP" * 100)
+    (stage / "eboot.bin").write_bytes(b"eboot")
+    port_file = tmp_path / "port.txt"
+    proc = subprocess.Popen([str(exe), "serve", str(title), str(port_file)], env=dict(os.environ, MKW_PS5_RECV_PORT="0"))
+    try:
+        for _ in range(200):
+            if port_file.is_file() and port_file.read_text().strip():
+                break
+            time.sleep(0.01)
+        port = int(port_file.read_text().strip())
+        sent, skipped, _ = send_ps5.send_directory(f"127.0.0.1:{port}", stage)
+        assert proc.wait(timeout=30) == 0   # the receiver got PIT1D over the second connection
+        assert sent == 2 and skipped == 0
+        assert (title / "spirv.nup").read_bytes() == b"NUP" * 100
+        assert (title / "spirv/old.spv").exists()
+    finally:
+        (title / "spirv").chmod(0o755)
+        if proc.poll() is None:
+            proc.kill()
+
+
+@pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
 def test_ps5_send_order_and_modes(tmp_path: Path) -> None:
     """Big files first, what the title starts from last, eboot.bin at the very end; the shaders go as spirv.nup, not
     the translator's folder; received files are executable, as an FTP upload leaves them (a 0644 libc.prx is the

@@ -162,7 +162,8 @@ def test_free_space_only_from_a_receiver_that_measures_it() -> None:
     import send_ps5
 
     assert send_ps5.usable_free({"free_bytes": 16 << 30}) is None   # an older placeholder: /app0's made-up size
-    assert send_ps5.usable_free({"free_bytes": 16 << 30, "free_real": 1}) == 16 << 30
+    assert send_ps5.usable_free({"free_bytes": 16 << 30, "free_real": 1}) is None   # the title's view, 18-20/11
+    assert send_ps5.usable_free({"free_bytes": 200 << 30, "free_real": 1}) == 200 << 30
 
 
 def test_nup_writer_keeps_only_what_is_asked(tmp_path: Path) -> None:

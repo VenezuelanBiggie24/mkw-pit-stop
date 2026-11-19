@@ -387,14 +387,15 @@ static int handle_info(int fd) {
     int ready = ps5_game_files_ready(g_root, g_game_id, why, sizeof why);
     uint64_t free_bytes = 0;
     struct statvfs vfs;
-    // /app0 is the title's mounted view and reports a size of its own: exactly 16.00 GiB free on a console with 231 GiB
-    // free on /data, where the title's files really go, and the builder refused a 22.5 GiB send (18/11/2026).
+    // Not a measurement, so not sent as one ("free_real":0): inside the title statvfs answers exactly 16.00 GiB free
+    // for /app0 and for /data alike, on a console with 231 GiB free, and the builder refused a 22.5 GiB send
+    // (18/11/2026) or deleted folders to make room (20/11/2026). A full disk still fails the write with its error.
     if (statvfs(strcmp(g_root, "/app0") ? g_root : "/data", &vfs) == 0)
         free_bytes = (uint64_t)vfs.f_bavail * (uint64_t)vfs.f_frsize;
     char json[512];
     int n = snprintf(json, sizeof json,
                      "{\"title_id\":\"PPSA99193\",\"port_version\":\"%s\",\"rt_game_id\":\"%s\","
-                     "\"has_game_code\":%d,\"game_files_ready\":%d,\"free_bytes\":%llu,\"free_real\":1,\"status\":1,\"resume\":1,\"remove\":1}",
+                     "\"has_game_code\":%d,\"game_files_ready\":%d,\"free_bytes\":%llu,\"free_real\":0,\"status\":1,\"resume\":1,\"remove\":1}",
                      g_port_ver, g_game_id, g_has_game_code ? 1 : 0, ready ? 1 : 0, (unsigned long long)free_bytes);
     if (n < 0 || n >= (int)sizeof json) return 0;
     uint8_t hdr[4];
