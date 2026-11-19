@@ -62,7 +62,26 @@ static int probe_any_mapping(Ps5MemBlock *block, Ps5MemCommitReport *report) {
     return report->any_unmap_status ? report->any_unmap_status : PS5_MEM_RELOCATED;
 }
 
-static int commit(Ps5MemBlock *block, Ps5MemCommitReport *report, bool probe_any) {
+// The unit's first contents (zeros, or a packed unit's bytes) are written through a private map of it, and only then is
+// it mapped at its guest address. Zeroing after the fixed map let another thread write the unit in between (it no
+// longer faults, so it never waits for the unit's lock) and lost that write: the title's MetaDataBase::setData crash
+// (19/11/2026), a SharedBuffer header the game had just written read back as 0. Two more calls per unit backed.
+static int fill_private(Ps5MemBlock *block, Ps5MemCommitReport *report, int (*fill)(void *ctx, void *unit), void *ctx) {
+    void *at = NULL;
+    int result = sceKernelMapDirectMemory(&at, PS5_MEM_UNIT, cpu_rw, 0, block->physical, PS5_MEM_UNIT);
+    if (report) report->private_status = result;
+    if (result) return result;
+    if (!at) return PS5_MEM_RELOCATED;
+    if (fill) result = fill(ctx, at);
+    else memset(at, 0, PS5_MEM_UNIT);   // the direct-memory allocator can return a previously used unit
+    int unmapped = sceKernelMunmap(at, PS5_MEM_UNIT);
+    if (report) report->private_unmap_status = unmapped;
+    if (unmapped) block->relocated = at;   // still mapped: ps5_mem_release unmaps it, the physical unit is kept
+    return result ? result : unmapped;
+}
+
+static int commit(Ps5MemBlock *block, Ps5MemCommitReport *report, bool probe_any, int (*fill)(void *ctx, void *unit),
+                  void *ctx) {
     if (report) *report = (Ps5MemCommitReport){0};
     if (!block->reserved || block->committed || block->allocated || block->relocated) return PS5_MEM_BAD_REQUEST;
     int result = sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), PS5_MEM_UNIT,
@@ -74,6 +93,12 @@ static int commit(Ps5MemBlock *block, Ps5MemCommitReport *report, bool probe_any
     if (probe_any) {
         result = probe_any_mapping(block, report);
         if (result) return result;
+    }
+
+    result = fill_private(block, report, fill, ctx);
+    if (result) {
+        int cleanup = block->relocated ? 0 : release_physical(block);
+        return cleanup ? cleanup : result;
     }
 
     // MAP_FIXED replaces the single reservation this block already owns. Use
@@ -92,18 +117,20 @@ static int commit(Ps5MemBlock *block, Ps5MemCommitReport *report, bool probe_any
         return cleanup ? cleanup : result;
     }
     block->committed = true;
-    // The direct-memory allocator can return a previously used unit.
-    memset(mapped, 0, PS5_MEM_UNIT);
     return 0;
 }
 
 int ps5_mem_commit(Ps5MemBlock *block, Ps5MemCommitReport *report) {
-    return commit(block, report, false);
+    return commit(block, report, false, NULL, NULL);
+}
+
+int ps5_mem_commit_fill(Ps5MemBlock *block, Ps5MemCommitReport *report, int (*fill)(void *ctx, void *unit), void *ctx) {
+    return commit(block, report, false, fill, ctx);
 }
 
 int ps5_mem_commit_probe(Ps5MemBlock *block, Ps5MemCommitReport *report) {
     if (!report) return PS5_MEM_BAD_REQUEST;
-    return commit(block, report, true);
+    return commit(block, report, true, NULL, NULL);
 }
 
 static _Thread_local Ps5ProtBatch *tl_batch;   // ps5_mem_batch_begin

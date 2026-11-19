@@ -28,9 +28,9 @@ int ps5_mixed_commit(Ps5MixedBlock *block, size_t offset);
 int ps5_mixed_commit_lazy(Ps5MixedBlock *block, size_t offset);
 int ps5_mixed_back(Ps5MixedBlock *block);
 int ps5_mixed_back_report(Ps5MixedBlock *block, Ps5MemCommitReport *report);
-// The same, with fill(ctx, unit) writing the unit's bytes after the zero-filled commit and before the guest pages'
-// native protections apply (a read-only page could not be written then). A nonzero fill releases the backing again
-// and is returned.
+// The same, with fill(ctx, unit) writing the unit's bytes through a private map before the unit is mapped at its guest
+// address (ps5_mem_commit_fill), so no thread sees it half written. A nonzero fill releases the backing again and is
+// returned.
 int ps5_mixed_back_fill(Ps5MixedBlock *block, Ps5MemCommitReport *report, int (*fill)(void *ctx, void *unit),
                         void *ctx);
 int ps5_mixed_protect(Ps5MixedBlock *block, size_t offset, Ps5GuestPage protection);

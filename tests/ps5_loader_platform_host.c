@@ -85,11 +85,27 @@ int sceKernelGetPageTableStats(int *cpu_total, int *cpu_free, int *gpu_total, in
     return 0;
 }
 
+// Physical memory is a shared file, so a unit mapped twice (ps5_memory.c's private fill map, then the fixed map) shows
+// the same bytes in both. A unit allocated again holds a stale pattern until it is filled.
+static const uint64_t STALE = 0xbabababababababaull;
+static int phys_fd = -1;
+static uint8_t *phys;
+
+static void phys_init(void) {
+    if (phys) return;
+    phys_fd = memfd_create("ps5-direct", 0);
+    assert(phys_fd >= 0 && !ftruncate(phys_fd, (off_t)(sizeof units * UNIT)));
+    phys = mmap(NULL, sizeof units * UNIT, PROT_READ | PROT_WRITE, MAP_SHARED, phys_fd, 0);
+    assert(phys != MAP_FAILED);
+}
+
 int32_t sceKernelAllocateDirectMemory(int64_t lo, int64_t hi, size_t bytes, size_t alignment, int type, int64_t *offset) {
     assert(!lo && hi == sceKernelGetDirectMemorySize() && bytes == UNIT && alignment == UNIT);
     assert(type == PS5_KERNEL_DIRECT_TYPE_CPU);
+    phys_init();
     for (size_t i = 0; i < sizeof units; ++i) {
         if (units[i]) continue;
+        memset(phys + i * UNIT, 0xba, UNIT);
         units[i] = true;
         ++allocations;
         *offset = (int64_t)(i * UNIT);
@@ -105,12 +121,26 @@ int32_t sceKernelReleaseDirectMemory(int64_t offset, size_t bytes) {
     return 0;
 }
 
+static volatile unsigned private_maps;   // bumped in the fault handler too
+
 int32_t sceKernelMapDirectMemory(void **address, size_t bytes, int protection, int flags, int64_t offset, size_t align) {
-    assert(bytes == UNIT && align == UNIT && flags == PS5_KERNEL_MAP_FIXED && units[offset / UNIT]);
+    assert(bytes == UNIT && align == UNIT && units[offset / UNIT]);
     assert(protection == (PROT_READ | PROT_WRITE));
+    if (!flags) {   // OS-chosen: the private map that writes the unit's first contents
+        assert(!*address);
+        void *p = mmap(NULL, bytes, protection, MAP_SHARED, phys_fd, offset);
+        assert(p != MAP_FAILED);
+        *address = p;
+        ++private_maps;
+        return 0;
+    }
+    assert(flags == PS5_KERNEL_MAP_FIXED);
     assert((uintptr_t)*address != unexpected && (!foreign || (uintptr_t)*address != sample));
-    assert(!mprotect(*address, bytes, protection));
-    memset(*address, 0xba, bytes);
+    // Nothing stale may be seen at the guest address, even for an instant: the unit is filled before this map.
+    const uint64_t *w = (const uint64_t *)(phys + offset);
+    for (size_t k = 0; k < UNIT / sizeof *w; ++k) assert(w[k] != STALE);
+    void *p = mmap(*address, bytes, protection, MAP_SHARED | MAP_FIXED, phys_fd, offset);
+    assert(p == *address);
     return 0;
 }
 
@@ -373,9 +403,11 @@ static void test_pack(uint64_t addr) {
     // The packed unit holds data, the released zero unit does not.
     assert(plat_mem_populated(addr, 4 * UNIT, runs, 4) == 2 && runs[0][0] == addr && runs[0][1] == addr + UNIT &&
            runs[1][0] == addr + 2 * UNIT && runs[1][1] == addr + 4 * UNIT);
-    // A read of the packed unit faults and unpacks it; the zero unit commits zero-filled.
+    // A read of the packed unit faults and unpacks it; the zero unit commits zero-filled. Both are written through a
+    // private map before the guest address shows them (the map model checks that nothing stale is left).
+    unsigned maps_before = private_maps;
     for (int u = 0; u < 3; u++) assert(!memcmp((void *)(uintptr_t)(addr + u * UNIT), want[u], UNIT));
-    assert(allocations == 4);
+    assert(allocations == 4 && private_maps == maps_before + 2);
     plat_mem_pack_summary(line, sizeof line);
     assert(strstr(line, "0 units") && strstr(line, "1 unpacked") && strstr(line, "read fault 1") &&
            strstr(line, "1 checked, 0 differed") && strstr(line, "0 failed") && strstr(line, "test 1"));

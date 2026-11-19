@@ -316,13 +316,17 @@ static bool back_unit_locked(Ps5MixedBlock *unit, RangeKind kind, int in_signal,
     Ps5MemCommitReport rep = {0};
     int rc = pk ? ps5_mixed_back_fill(unit, &rep, unpack_fill, pk) : ps5_mixed_back_report(unit, &rep);
     if (rc) {
-        if (pk && !rep.allocation_status && !rep.mapping_status)
+        if (pk && !rep.allocation_status && !rep.private_status && !rep.private_unmap_status && !rep.mapping_status)
             fprintf(stderr, "PS5 memory unpack %#llx failed: its packed bytes do not decompress (%u bytes)\n",
                     (unsigned long long)unit->backing.address, pk->csize);
         const char *call = rep.allocation_status ? "sceKernelAllocateDirectMemory"
+                           : rep.private_status ? "sceKernelMapDirectMemory (private)"
+                           : rep.private_unmap_status ? "sceKernelMunmap (private)"
                            : (rep.fixed_attempted && rep.mapping_status) ? "sceKernelMapDirectMemory"
                            : "ps5_mixed_back";
         int err = rep.allocation_status ? rep.allocation_status
+                  : rep.private_status ? rep.private_status
+                  : rep.private_unmap_status ? rep.private_unmap_status
                   : (rep.fixed_attempted && rep.mapping_status) ? rep.mapping_status : rc;
         log_backed_totals(call, unit->backing.address, err, in_signal);
         return false;
