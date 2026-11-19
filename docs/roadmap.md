@@ -59,6 +59,13 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   memory. Lower levels (soft 768 / hard 512 MiB, an A/B on 15/11/2026) let memory fall to 470-560 MiB: textures came
   out corrupted and the frame was slower (27.9 against 23.9 ms). The hard level holds memory where it is; the lever
   is using less (finalized pool storage kept backed since task 32, ~550-680 MiB; textures; shadows), not doing less.
+- **Done: pool storage no longer rebuilt over and over before the race, and the governor rate-limited** (19/11/2026,
+  PS5). A pool backed again on use (`lazy_back`) kept its old last-use submit, so the next shadow trim freed it at once:
+  ~1,600 rebuilds (~60 GiB) of the same 32 MiB pools before a race, with 1-6 s frames. `lazy_back` now marks the pool
+  used: ~330 MiB rebuilt, no frame over 1 s. `MKW_GOV_RATE_LIMIT` (default 1) runs the governor from the headroom thread
+  at most every 250 ms (18-38 passes per 60 frames before): in-race A/B ~5x fewer passes, -0.43 ms mean (-0.92 / +0.07
+  by race). The log now adds up every free area of direct memory: 1.0-1.1 GiB against 0.6-0.73 GiB in the largest one,
+  still near the hard level's 1 GiB, so the governor's levels stay on the largest area.
 - **Done, no frame gain: the zero scan skips what it already read.** Each hard pass read every frozen unit for zero
   pages (~1.5 GB, 9.3 ms a pass on the governor's thread, freeing almost nothing). `MKW_ZERO_SCAN_CACHE` (default 1)
   skips a unit found not all zero earlier in the same freeze (`mem_frozen` now returns the freeze's number). A/B on

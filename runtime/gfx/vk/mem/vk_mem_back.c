@@ -419,6 +419,10 @@ void lazy_back(PoolRec *r) {
     if (import_pool(vk_ctx(), &tmp, r->lo, r->size)) {
         tmp.lazy = 0;
         *r = tmp;
+        // Just used: without this the record kept its old submit number and looked cold to shadow_trim, which took the
+        // new buffer back before the resolve that asked for it had marked it. That draw got no memory, and one 32 MiB
+        // pool was rebuilt ~1,600 times before a race (60 GiB by the last log line, fp-base7-20261119).
+        r->touch_sub = __atomic_load_n(&vk_replay_submit, __ATOMIC_RELAXED);
         long n = ++n_lazy_backed;
         lazy_backed_bytes += (int64_t)r->size;
         if (n <= 4 || !(n & (n - 1)))

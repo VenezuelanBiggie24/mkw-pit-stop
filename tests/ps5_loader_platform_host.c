@@ -55,12 +55,15 @@ int32_t sceKernelReserveVirtualRange(void **address, size_t bytes, int flags, si
 int64_t sceKernelGetDirectMemorySize(void) { return sizeof units * UNIT; }
 
 int32_t sceKernelAvailableDirectMemorySize(int64_t lo, int64_t hi, size_t align, int64_t *phys, size_t *avail) {
-    (void)lo; (void)hi; (void)align;
-    size_t free_units = 0;
-    for (size_t i = 0; i < sizeof units; ++i)
-        if (!units[i]) ++free_units;
-    if (phys) *phys = 0;
-    if (avail) *avail = free_units * UNIT;
+    (void)align;   // as the console seems to: the largest free run of the range
+    size_t first = (size_t)lo / UNIT, last = (uint64_t)hi / UNIT < sizeof units ? (size_t)((uint64_t)hi / UNIT) : sizeof units;
+    size_t best = 0, best_at = 0, run = 0;
+    for (size_t i = first; i < last; ++i) {
+        run = units[i] ? 0 : run + 1;
+        if (run > best) best = run, best_at = i + 1 - run;
+    }
+    if (phys) *phys = (int64_t)(best_at * UNIT);
+    if (avail) *avail = best * UNIT;
     return 0;
 }
 
@@ -574,6 +577,20 @@ static void test_fast_lock(void) {
     puts("fast lock: eight threads, three locks: no hang, exclusion held");
 }
 
+// The log's total of free direct memory adds up every free area, not only the largest.
+static void test_dmem_scan(void) {
+    bool saved[sizeof units];
+    memcpy(saved, units, sizeof units);
+    memset(units, 1, sizeof units);
+    // Free: unit 1, units 3-4 and units 6-9 (the model's direct memory is 1 MiB, so the MiB total only rounds to 0).
+    units[1] = units[3] = units[4] = units[6] = units[7] = units[8] = units[9] = false;
+    char out[384];
+    plat_mem_backed_summary(out, sizeof out);
+    assert(strstr(out, "all free areas: 0 MiB in 3,"));
+    memcpy(units, saved, sizeof units);
+    puts("dmem scan: three free areas found");
+}
+
 static void test_io_and_mutex(void) {
     uint64_t size;
     uint8_t *bytes = plat_file_read("binary", &size);
@@ -695,6 +712,7 @@ int main(void) {
     test_memory();
     test_io_and_mutex();
     test_fast_lock();
+    test_dmem_scan();
     test_fault_step();
     test_fault_emulate();
 }
