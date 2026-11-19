@@ -377,6 +377,10 @@ static void slot_reap(void *arg) {
                 if (*pp == b) { *pp = b->next; break; }
             n_blocks--;
             dead_blk = b;
+            // A lane keeps the span it reserved past the block's last used slot: its next slot_get must not reach
+            // the block freed below.
+            for (int i = 0; i < LANES; i++)
+                if (lanes[i].b == b) lanes[i] = (Lane){0};
         }
     }
     sp_give();
@@ -954,6 +958,9 @@ uint64_t vk_sparse_destroy(VkImage img) {
         free(s->bound);
         free(s->dirty);
         free(s->dl);
+        // A new image allocated at this address must not take over this one's lanes.
+        for (int i = 0; i < LANES; i++)
+            if (lanes[i].s == s) lanes[i] = (Lane){0};
         sparse_va -= s->va_size;
         free(s);
         n_images--;
