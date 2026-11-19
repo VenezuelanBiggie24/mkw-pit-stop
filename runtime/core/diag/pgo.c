@@ -9,12 +9,14 @@
 // without its .profraw, %p expanded. After each write the runtime's file name is <stem>-exit.profraw again, so its own
 // atexit write (a run that ends by exit(), e.g. the window closed) holds the rest of the run instead of overwriting the
 // last stretch.
-// Drive the run with MKW_INPUT_SCRIPT, not MKW_QUICK_RACE or MKW_SEQ_WATCH: those turn on the function-entry hook
-// (cpu.h FN_ENTER, g_fnprof), whose branch would then be counted taken in every function and laid out hot in the
-// PGO build, where it is always off. pgo_frame warns when it sees the hook on.
+// The function-entry hook (cpu.h FN_ENTER, g_fnprof: MKW_SEQ_WATCH, MKW_QUICK_RACE, MKW_BENCH...) must not reach a
+// profile: its branch would count as taken in every function and be laid out hot in the PGO build, where it is always
+// off (the 17/11/2026 profile: 44,564 of 44,565 executed functions, so its "no gain" says nothing). What is counted
+// while the hook is on is dropped when it goes off (MKW_SEQ_UNTIL: the race start), and a run that ends with it on
+// writes nothing but <stem>-hook.profraw from the runtime's atexit, which a merge must leave out.
 // The profile runtime's symbols are weak: a build without instrumented code links them as null and this does nothing.
-// Only Linux has the runtime (the PS5 SDK ships no libclang_rt.profile): prof.h makes the calls no-ops elsewhere.
-#if defined(__linux__) && !defined(MKW_PS5_NATIVE)
+// Linux and Windows have the runtime (the PS5 SDK ships no libclang_rt.profile): prof.h makes the calls no-ops on the PS5.
+#if (defined(__linux__) || defined(_WIN32)) && !defined(MKW_PS5_NATIVE)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,8 +33,10 @@ const char *__llvm_profile_get_filename(void) __attribute__((weak));
 
 #define PGO_MAX_AT 16
 static uint64_t at[PGO_MAX_AT];
-static int at_n, at_next, inited, fnprof_seen, fnprof_warned;
+static int at_n, at_next, inited, hook_counted;
 static char stem[512];
+
+static void pgo_name(const char *part);
 
 static void pgo_init(void) {
     inited = 1;
@@ -57,10 +61,14 @@ static void pgo_init(void) {
         while (*p == ',' || *p == ' ') p++;
     }
     snprintf(stem, sizeof stem, "%s", s);   // last: pgo_exit tests stem[0]
-    char path[sizeof stem + 32];
-    snprintf(path, sizeof path, "%s-exit.profraw", stem);
-    __llvm_profile_set_filename(path);   // copied by the runtime; its atexit write goes here too
+    pgo_name("exit");   // the runtime's atexit write goes here too
     rt_log("pgo: instrumented game code, profile %s-*.profraw, %d frame(s) in MKW_PGO_AT", stem, at_n);
+}
+
+static void pgo_name(const char *part) {
+    char path[sizeof stem + 32];
+    snprintf(path, sizeof path, "%s-%s.profraw", stem, part);
+    __llvm_profile_set_filename(path);   // copied by the runtime
 }
 
 static void pgo_write(const char *part) {
@@ -69,20 +77,28 @@ static void pgo_write(const char *part) {
     __llvm_profile_set_filename(path);
     int r = __llvm_profile_write_file();
     rt_log("pgo: %s %s", r ? "could not write" : "wrote", path);
-    if (fnprof_seen && !fnprof_warned) {
-        fnprof_warned = 1;
-        rt_log("pgo: WARNING: the function-entry hook (MKW_QUICK_RACE, MKW_SEQ_WATCH...) was on: this profile marks "
-               "it hot in every function it ran; take the profile with MKW_INPUT_SCRIPT instead");
-    }
-    snprintf(path, sizeof path, "%s-exit.profraw", stem);
-    __llvm_profile_set_filename(path);   // the runtime's atexit write must not overwrite this stretch
+    pgo_name("exit");   // the runtime's atexit write must not overwrite this stretch
 }
 
 // perf_present, every present (the render thread)
 void pgo_frame(uint64_t frame) {
     if (!inited) pgo_init();
     if (!stem[0]) return;
-    fnprof_seen |= *rt_game()->fnprof;
+    if (*rt_game()->fnprof) {
+        if (!hook_counted) pgo_name("hook");
+        hook_counted = 1;
+        while (at_next < at_n && at[at_next] <= frame) {
+            rt_log("pgo: frame %llu of MKW_PGO_AT skipped: the function-entry hook is on", (unsigned long long)at[at_next]);
+            at_next++;
+        }
+        return;
+    }
+    if (hook_counted) {
+        hook_counted = 0;
+        __llvm_profile_reset_counters();
+        pgo_name("exit");
+        rt_log("pgo: function-entry hook off at frame %llu: the counters so far are dropped", (unsigned long long)frame);
+    }
     if (at_next >= at_n || frame < at[at_next]) return;
     char part[32];
     snprintf(part, sizeof part, "f%llu", (unsigned long long)frame);
@@ -92,9 +108,11 @@ void pgo_frame(uint64_t frame) {
     __llvm_profile_reset_counters();
 }
 
-// plat_exit(0) (platform/linux_sys.c), before _exit
+// plat_exit(0) (platform/linux_sys.c, win32_sys.c), before the process ends
 void pgo_exit(void) {
     if (!inited) pgo_init();
-    if (stem[0]) pgo_write("exit");
+    if (!stem[0]) return;
+    if (hook_counted || *rt_game()->fnprof) rt_log("pgo: the function-entry hook was still on at exit: no profile written");
+    else pgo_write("exit");
 }
 #endif

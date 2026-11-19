@@ -27,6 +27,8 @@ typedef struct {
     void *any_address;
     int any_status;
     int any_unmap_status;
+    int private_status;         // the private map that writes the unit's first contents (fill_private)
+    int private_unmap_status;
     bool fixed_attempted;
     void *fixed_address;
     int mapping_status;
@@ -35,6 +37,9 @@ typedef struct {
 int ps5_mem_reserve(Ps5MemBlock *block, uintptr_t address);
 // An optional report preserves raw SDK results even if cleanup also fails.
 int ps5_mem_commit(Ps5MemBlock *block, Ps5MemCommitReport *report);
+// The same with the unit's first contents written by fill(ctx, unit) instead of zeros, before any thread can see them.
+// A fill's nonzero result fails the commit and is returned.
+int ps5_mem_commit_fill(Ps5MemBlock *block, Ps5MemCommitReport *report, int (*fill)(void *ctx, void *unit), void *ctx);
 // First try an OS-chosen map of the same unit and discard it before mapping at
 // the owned reservation. A failed OS-chosen map does not suppress the fixed test.
 int ps5_mem_commit_probe(Ps5MemBlock *block, Ps5MemCommitReport *report);

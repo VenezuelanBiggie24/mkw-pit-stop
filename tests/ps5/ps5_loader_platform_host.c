@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,12 +55,15 @@ int32_t sceKernelReserveVirtualRange(void **address, size_t bytes, int flags, si
 int64_t sceKernelGetDirectMemorySize(void) { return sizeof units * UNIT; }
 
 int32_t sceKernelAvailableDirectMemorySize(int64_t lo, int64_t hi, size_t align, int64_t *phys, size_t *avail) {
-    (void)lo; (void)hi; (void)align;
-    size_t free_units = 0;
-    for (size_t i = 0; i < sizeof units; ++i)
-        if (!units[i]) ++free_units;
-    if (phys) *phys = 0;
-    if (avail) *avail = free_units * UNIT;
+    (void)align;   // as the console seems to: the largest free run of the range
+    size_t first = (size_t)lo / UNIT, last = (uint64_t)hi / UNIT < sizeof units ? (size_t)((uint64_t)hi / UNIT) : sizeof units;
+    size_t best = 0, best_at = 0, run = 0;
+    for (size_t i = first; i < last; ++i) {
+        run = units[i] ? 0 : run + 1;
+        if (run > best) best = run, best_at = i + 1 - run;
+    }
+    if (phys) *phys = (int64_t)(best_at * UNIT);
+    if (avail) *avail = best * UNIT;
     return 0;
 }
 
@@ -81,11 +85,27 @@ int sceKernelGetPageTableStats(int *cpu_total, int *cpu_free, int *gpu_total, in
     return 0;
 }
 
+// Physical memory is a shared file, so a unit mapped twice (ps5_memory.c's private fill map, then the fixed map) shows
+// the same bytes in both. A unit allocated again holds a stale pattern until it is filled.
+static const uint64_t STALE = 0xbabababababababaull;
+static int phys_fd = -1;
+static uint8_t *phys;
+
+static void phys_init(void) {
+    if (phys) return;
+    phys_fd = memfd_create("ps5-direct", 0);
+    assert(phys_fd >= 0 && !ftruncate(phys_fd, (off_t)(sizeof units * UNIT)));
+    phys = mmap(NULL, sizeof units * UNIT, PROT_READ | PROT_WRITE, MAP_SHARED, phys_fd, 0);
+    assert(phys != MAP_FAILED);
+}
+
 int32_t sceKernelAllocateDirectMemory(int64_t lo, int64_t hi, size_t bytes, size_t alignment, int type, int64_t *offset) {
     assert(!lo && hi == sceKernelGetDirectMemorySize() && bytes == UNIT && alignment == UNIT);
     assert(type == PS5_KERNEL_DIRECT_TYPE_CPU);
+    phys_init();
     for (size_t i = 0; i < sizeof units; ++i) {
         if (units[i]) continue;
+        memset(phys + i * UNIT, 0xba, UNIT);
         units[i] = true;
         ++allocations;
         *offset = (int64_t)(i * UNIT);
@@ -101,12 +121,26 @@ int32_t sceKernelReleaseDirectMemory(int64_t offset, size_t bytes) {
     return 0;
 }
 
+static volatile unsigned private_maps;   // bumped in the fault handler too
+
 int32_t sceKernelMapDirectMemory(void **address, size_t bytes, int protection, int flags, int64_t offset, size_t align) {
-    assert(bytes == UNIT && align == UNIT && flags == PS5_KERNEL_MAP_FIXED && units[offset / UNIT]);
+    assert(bytes == UNIT && align == UNIT && units[offset / UNIT]);
     assert(protection == (PROT_READ | PROT_WRITE));
+    if (!flags) {   // OS-chosen: the private map that writes the unit's first contents
+        assert(!*address);
+        void *p = mmap(NULL, bytes, protection, MAP_SHARED, phys_fd, offset);
+        assert(p != MAP_FAILED);
+        *address = p;
+        ++private_maps;
+        return 0;
+    }
+    assert(flags == PS5_KERNEL_MAP_FIXED);
     assert((uintptr_t)*address != unexpected && (!foreign || (uintptr_t)*address != sample));
-    assert(!mprotect(*address, bytes, protection));
-    memset(*address, 0xba, bytes);
+    // Nothing stale may be seen at the guest address, even for an instant: the unit is filled before this map.
+    const uint64_t *w = (const uint64_t *)(phys + offset);
+    for (size_t k = 0; k < UNIT / sizeof *w; ++k) assert(w[k] != STALE);
+    void *p = mmap(*address, bytes, protection, MAP_SHARED | MAP_FIXED, phys_fd, offset);
+    assert(p == *address);
     return 0;
 }
 
@@ -286,6 +320,16 @@ static void test_early_batch(uint64_t addr) {
     puts("early batch: second arm and second restore failed; native RW/NONE/RW, watch bits 0/1/1");
     assert(plat_mem_early_protect(addr, 3 * ep, 0, 0) == PLAT_EARLY_OK);
     plat_mem_gpu_import(addr + ep, 2 * ep, 0);
+    // A closed page opened for reading only, as memory_early.c's page copies do; closing it moves its counter once.
+    assert(plat_mem_early_protect(addr, ep, 1, 0) == PLAT_EARLY_OK);
+    assert(!plat_mem_early_open_read(addr + 1, ep) && !plat_mem_early_open_read(addr, 2 * ep));
+    assert(plat_mem_early_open_read(addr, ep));
+    check_early_page(addr, PROT_READ, 1);
+    uint32_t gen = plat_mem_early_gen(addr);
+    assert(plat_mem_early_protect(addr, ep, 1, 0) == PLAT_EARLY_OK);
+    assert(plat_mem_early_gen(addr) == gen + 1);
+    check_early_page(addr, PROT_NONE, 1);
+    assert(plat_mem_early_protect(addr, ep, 0, 0) == PLAT_EARLY_OK);
     assert(plat_mem_decommit(addr, 3 * ep));
 }
 
@@ -359,9 +403,11 @@ static void test_pack(uint64_t addr) {
     // The packed unit holds data, the released zero unit does not.
     assert(plat_mem_populated(addr, 4 * UNIT, runs, 4) == 2 && runs[0][0] == addr && runs[0][1] == addr + UNIT &&
            runs[1][0] == addr + 2 * UNIT && runs[1][1] == addr + 4 * UNIT);
-    // A read of the packed unit faults and unpacks it; the zero unit commits zero-filled.
+    // A read of the packed unit faults and unpacks it; the zero unit commits zero-filled. Both are written through a
+    // private map before the guest address shows them (the map model checks that nothing stale is left).
+    unsigned maps_before = private_maps;
     for (int u = 0; u < 3; u++) assert(!memcmp((void *)(uintptr_t)(addr + u * UNIT), want[u], UNIT));
-    assert(allocations == 4);
+    assert(allocations == 4 && private_maps == maps_before + 2);
     plat_mem_pack_summary(line, sizeof line);
     assert(strstr(line, "0 units") && strstr(line, "1 unpacked") && strstr(line, "read fault 1") &&
            strstr(line, "1 checked, 0 differed") && strstr(line, "0 failed") && strstr(line, "test 1"));
@@ -521,6 +567,62 @@ static void *test_contended_lock(void *arg) {
     return NULL;
 }
 
+// MKW_PS5_FAST_LOCK under load: writers and readers on a few locks. A lost wakeup hangs here (the test's timeout); a
+// broken exclusion shows in the counters, which only the holders of the lock may touch.
+enum { FL_LOCKS = 3, FL_THREADS = 8, FL_ROUNDS = 60000 };
+static PlatMutex fl_lock[FL_LOCKS];
+static uint64_t fl_a[FL_LOCKS], fl_b[FL_LOCKS], fl_writes;
+static void *fast_lock_worker(void *arg) {
+    uint64_t r = (uintptr_t)arg * 2654435761u + 1;
+    for (int i = 0; i < FL_ROUNDS; i++) {
+        r ^= r << 13, r ^= r >> 7, r ^= r << 17;
+        int k = (int)(r % FL_LOCKS);
+        if (r >> 60 < 5) {
+            plat_mutex_lock(&fl_lock[k]);
+            fl_a[k]++;
+            if (!(r >> 20 & 15)) sched_yield();
+            fl_b[k]++;
+            __atomic_fetch_add(&fl_writes, 1, __ATOMIC_RELAXED);
+            plat_mutex_unlock(&fl_lock[k]);
+        } else if (r >> 56 & 1 || !plat_mutex_trylock_shared(&fl_lock[k])) {
+            plat_mutex_lock_shared(&fl_lock[k]);
+            assert(fl_a[k] == fl_b[k]);
+            if (!(r >> 20 & 31)) sched_yield();
+            assert(fl_a[k] == fl_b[k]);
+            plat_mutex_unlock_shared(&fl_lock[k]);
+        } else {
+            assert(fl_a[k] == fl_b[k]);
+            plat_mutex_unlock_shared(&fl_lock[k]);
+        }
+    }
+    return NULL;
+}
+static void test_fast_lock(void) {
+    plat_lock_fast_mode(1);
+    pthread_t t[FL_THREADS];
+    for (uintptr_t i = 0; i < FL_THREADS; i++) assert(!pthread_create(&t[i], NULL, fast_lock_worker, (void *)(i + 1)));
+    for (int i = 0; i < FL_THREADS; i++) assert(!pthread_join(t[i], NULL));
+    uint64_t sum = 0;
+    for (int k = 0; k < FL_LOCKS; k++) assert(fl_a[k] == fl_b[k]), sum += fl_a[k];
+    assert(sum == fl_writes && sum);
+    plat_lock_fast_mode(0);
+    puts("fast lock: eight threads, three locks: no hang, exclusion held");
+}
+
+// The log's total of free direct memory adds up every free area, not only the largest.
+static void test_dmem_scan(void) {
+    bool saved[sizeof units];
+    memcpy(saved, units, sizeof units);
+    memset(units, 1, sizeof units);
+    // Free: unit 1, units 3-4 and units 6-9 (the model's direct memory is 1 MiB, so the MiB total only rounds to 0).
+    units[1] = units[3] = units[4] = units[6] = units[7] = units[8] = units[9] = false;
+    char out[384];
+    plat_mem_backed_summary(out, sizeof out);
+    assert(strstr(out, "all free areas: 0 MiB in 3,"));
+    memcpy(units, saved, sizeof units);
+    puts("dmem scan: three free areas found");
+}
+
 static void test_io_and_mutex(void) {
     uint64_t size;
     uint8_t *bytes = plat_file_read("binary", &size);
@@ -593,7 +695,7 @@ static int emu_read(uint64_t ea, size_t n, void *dst) {
 static int emu_hook(uint64_t addr) {
     if (addr - emu_page >= PS5_KERNEL_PAGE_SIZE) return 0;
     emu_faults++;
-    assert(plat_fault_emulate_load(addr, emu_read));
+    assert(plat_fault_emulate_load(addr, 0, emu_read));
     return 1;
 }
 
@@ -641,6 +743,8 @@ static void test_fault_emulate(void) {
 int main(void) {
     test_memory();
     test_io_and_mutex();
+    test_fast_lock();
+    test_dmem_scan();
     test_fault_step();
     test_fault_emulate();
 }

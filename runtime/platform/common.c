@@ -128,6 +128,7 @@ __attribute__((weak)) int plat_thread_priority_mode(int on) { (void)on; return -
 __attribute__((weak)) int plat_tsc_clock_mode(int on) { (void)on; return -1; }
 __attribute__((weak)) void plat_cond_probe(void) {}
 __attribute__((weak)) void plat_lock_prof_mode(int on) { (void)on; }
+__attribute__((weak)) int plat_lock_fast_mode(int on) { return (void)on, 0; }
 __attribute__((weak)) int plat_pw_batch_mode(int on) { (void)on; return -1; }
 __attribute__((weak)) int plat_pw_hot_mode(int on) { (void)on; return -1; }
 __attribute__((weak)) uint64_t plat_mem_write_watch_hot_skips(int reset) { (void)reset; return 0; }
@@ -165,6 +166,8 @@ __attribute__((weak)) PlatEarlyResult plat_mem_early_protect(uint64_t addr, size
     if (plat_mem_protect(addr, n, on ? PLAT_PROT_NONE : restore_prot)) return PLAT_EARLY_OK;
     return on ? PLAT_EARLY_FAILED : PLAT_EARLY_UNRESTORED;
 }
+__attribute__((weak)) int plat_mem_early_open_read(uint64_t addr, size_t n) { return (void)addr, (void)n, 0; }
+__attribute__((weak)) uint32_t plat_mem_early_gen(uint64_t addr) { return (void)addr, 0; }
 __attribute__((weak)) void plat_mem_early_hold_hook(void (*fn)(uint64_t addr, size_t n)) { (void)fn; }
 __attribute__((weak)) void plat_mem_early_resolve(uint64_t addr, size_t n) { (void)addr, (void)n; }
 __attribute__((weak)) void plat_mem_thaw_hook(void (*fn)(uint64_t addr, size_t n)) { (void)fn; }
@@ -193,8 +196,8 @@ __attribute__((weak)) void plat_fault_guarded(void) {}
 // fault_guard.c's decoder and single step, which it builds only on Linux and the PS5: Windows has neither (0, so
 // memory_early.c waits for a watched page's neighbour as before b907279, whose Windows link failed without these).
 __attribute__((weak)) int plat_code_init(void) { return 0; }
-__attribute__((weak)) int plat_fault_emulate_load(uint64_t fault_addr, int (*rd)(uint64_t, size_t, void *)) {
-    return (void)fault_addr, (void)rd, 0;
+__attribute__((weak)) int plat_fault_emulate_load(uint64_t fault_addr, int extra, int (*rd)(uint64_t, size_t, void *)) {
+    return (void)fault_addr, (void)extra, (void)rd, 0;
 }
 __attribute__((weak)) int plat_fault_step(void (*fn)(uint64_t), uint64_t arg) { return (void)fn, (void)arg, 0; }
 // Background threads apart from the frame's fast cores (linux.c; win32.c's does nothing): the PS5 has no hybrid CPU,

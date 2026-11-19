@@ -21,7 +21,7 @@
 //   queried for written pages; pages stamped after a pool's sgen are copied in by the CPU.
 // - GPU -> guest: the GPU's writes stay pending from record time to their fence (vk_mem_wback.c); the CPU copies skip
 //   them meanwhile, or merge them by bytes where the range has a base (vk_mem_merge.c).
-// MKW_SHADOW=1/0 forces the mode on or off; the default is on for Linux.
+// MKW_SHADOW=1/0 forces the mode on or off; the default is on for Linux, off on the PS5 (its device profile, cfg.c).
 int shadow_on;                                    // shadow mode: imported pools get shadow storage (vk_mem_class_log)
 PlatMutex shadow_lock = PLAT_MUTEX_INIT;          // after pool_lock; before gen_lock
 // Pools resolved since the last sync, under a lock of their own: the recording threads add to it while the early
@@ -582,6 +582,14 @@ void shadow_log(uint64_t frame) {
 
 // Evicts cold shadow buffers back to lazy = 1 under memory pressure when neither GPU nor CPU writeback depends on them.
 // Any pool resolved again transparently recreates its shadow/import via lazy_back from guest RAM.
+typedef struct { VkBuffer buf; VmaAllocation alloc; } TrimDead;
+
+static void trim_free(void *arg) {   // completion thread: every submission that could bind the buffer is done
+    TrimDead *d = arg;
+    vmaDestroyBuffer(vk_ctx()->vma, d->buf, d->alloc);
+    free(d);
+}
+
 uint64_t shadow_trim(uint64_t bytes) {
     static int trim_mode = -1;
     if (trim_mode < 0) {
@@ -644,7 +652,16 @@ uint64_t shadow_trim(uint64_t bytes) {
     plat_mutex_unlock(&shadow_lock);
     plat_mutex_unlock(&pool_lock);
 
-    for (int i = 0; i < ndead; i++) vmaDestroyBuffer(c->vma, dead[i].buf, dead[i].alloc);
+    // Freed once the newest reserved submission is done, not now: vk_mem_resolve's cached path takes a pool's buffer
+    // without pool_lock, so a recording thread that read the cache just before the pool_gen bump above may bind this
+    // buffer in a submission it is recording now, whose fence is at most the one reserved here (a use after free).
+    uint64_t after = ndead ? vk_sync_fence_reserved() : 0;
+    for (int i = 0; i < ndead; i++) {
+        TrimDead *d = malloc(sizeof *d);
+        if (!d) rt_fatal("vk: out of memory (shadow trim)");
+        d->buf = dead[i].buf, d->alloc = dead[i].alloc;
+        vk_completion_add(after, trim_free, d);
+    }
     return freed;
 }
 

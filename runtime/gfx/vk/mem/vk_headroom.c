@@ -14,6 +14,10 @@
 // its VRAM mirror (vk_memory.c), so while use plus two blocks passes 85% of the budget the anchor goes and nothing new
 // is allocated.
 // MKW_VRAM_HEADROOM=0 turns it off.
+// MKW_GOV_RATE_LIMIT ("ab" to compare): the memory governor runs at most every GOV_MIN_MS here. Every new VkDeviceMemory
+// wakes this thread, and each pass may hold the pool lock exclusively while the replay resolves: 18-38 passes per 60
+// race frames (19/11/2026). An allocation that fails still calls the governor at once (vk_mem_relieve). Default on:
+// an in-race A/B on the PS5 (19/11/2026, two races) cut the passes ~5x, frame -0.43 ms mean (-0.92 / +0.07 by race).
 
 #include "cfg.h"
 #include "host.h"
@@ -21,6 +25,7 @@
 #include "platform/platform.h"
 
 #define HR_PERIOD_MS 500
+#define GOV_MIN_MS 250
 #define HR_SMALL_HEAP (1ull << 30)   // VMA_SMALL_HEAP_MAX_SIZE: smaller heaps use blocks of a heap eighth
 
 static struct {
@@ -106,6 +111,8 @@ static void headroom_main(void *arg) {
     __atomic_store_n(&H.tid, plat_thread_id(), __ATOMIC_RELEASE);
     plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
     uint64_t watch = 0;   // memory types seen so far
+    uint64_t gov_last = 0;
+    int gov_limit = rt_knob("GOV_RATE_LIMIT", "1");
     for (;;) {
         if (watch) plat_event_wait_ns(&H.ev, (uint64_t)HR_PERIOD_MS * 1000000u);
         else plat_event_wait(&H.ev);
@@ -119,6 +126,9 @@ static void headroom_main(void *arg) {
             for (uint32_t t = 0; t < 64; t++) drop_anchor(c, t);
         plat_mutex_unlock(&H.lock);
         if (stop) return;
+        uint64_t now = plat_now_ns();
+        if (RT_KNOB_ON(gov_limit) && gov_last && now - gov_last < GOV_MIN_MS * 1000000ull) continue;
+        gov_last = now;
         vk_mem_governor(0);
     }
 }

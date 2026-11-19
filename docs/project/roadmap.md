@@ -51,7 +51,8 @@ totk-pc-recomp, MIT; −10.6 % recorder instructions on Steam Deck; no measurabl
   17:33 on 19-22 ms, with no change to the code; that was the GPU clock (the item above), and comparing a `taskset`
   run of one period with an unpinned run of the other first gave a 2x effect that was not there. Compare inside one
   run (`MKW_AB`).
-- **The game thread**: the generated C at `-O1`, with profile-guided optimization next (12-15 % in totk-pc-recomp).
+- **The game thread**: the generated C at `-O1`. Profile-guided optimization, 12-15 % in totk-pc-recomp, gave no
+  measurable gain here (section 1, 19/11/2026).
 
 \* Our numbers (not the ones said to come from totk-pc-recomp) were measured on 07-09/11/2026 on our test machine:
 Radeon 660M APU (Ryzen 5 7535HS), Linux, 720p internal resolution.
@@ -74,7 +75,7 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   were no loop). More locals, or locals chosen by loop use, cost more than they saved on random functions;
   `--reg-loop-weight 8` helps `main+0x154e14`'s list walk (`x11` no longer stored and reloaded per node) and is
   for a second build to measure. -O2 gave more instructions and memory operands than -O1 on the race's 24 hottest
-  functions, so the generated code stays at -O1; PGO is next. Measured on the console (15/11/2026): no hang, every
+  functions, so the generated code stays at -O1. Measured on the console (15/11/2026): no hang, every
   hot function within noise, the game threads' total 74.7 -> 74.0 ms a frame. Next on this line: `frinta` lifted to a
   libm `round()` call (1.3 ms a frame, from `sinf`), and the `--reg-loop-weight 8` build.
 - **Tried and dropped: a gentler memory governor.** A race sits at ~836 MiB of direct memory, so the governor runs its
@@ -82,6 +83,33 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   memory. Lower levels (soft 768 / hard 512 MiB, an A/B on 15/11/2026) let memory fall to 470-560 MiB: textures came
   out corrupted and the frame was slower (27.9 against 23.9 ms). The hard level holds memory where it is; the lever
   is using less (finalized pool storage kept backed since task 32, ~550-680 MiB; textures; shadows), not doing less.
+- **Measured: the race frame's critical path** (19/11/2026, PS5 1.8.0 at 60 fps, `MKW_TRACE=sched`,
+  `MKW_PROFILE_FN_MAINWAIT`). Main runs ~4.6 ms of a 22-23 ms frame; it waits ~6.5 ms in nvnSyncWait for the last
+  presented frame's fence and ~9.5 ms on an address the job chain signals. The fence wait is a real data dependency:
+  `MKW_PS5_OVERLAP` (the fence done once recorded) made the game's reads of GPU-written storage buffers wait instead
+  (~270 early-read waits per 600 frames against 3), faulted the shadow copies on the watched pages (~105,000 against
+  ~1,500), and the frame went to 41-44 ms. During the job wait ~3.7 other game threads run (all six cores a third of
+  the time): the chain works rather than waits. The profile names WaitForAddress, CriticalSection Enter/Leave and
+  GetTlsValue in it, but it charges the code after a call to the function last entered: Enter's share is the locked
+  code, GetTlsValue (four loads) its callers'. The runtime's own cost, from `MKW_SVC_STATS`: yields 677 a frame at
+  5.9 us (4.0 ms, all threads; spin loops, cheaper ones only spin more, 15/11), SignalToAddress 387 at 4.3 us
+  (1.7 ms), and a wait's handoff to running again 12-25 us, ~10 of it the OS wake (`MKW_ADDR_SPIN` A/B: -0.09 and
+  +0.15 ms, none).
+- **Done: no shadow copies on the PS5** (19/11/2026). Races of one build ran in one of two states, ~22 ms or
+  18.8-19.7 ms: the fast ones were those where the governor's first hard pass had shed shadows
+  (`vk_mem_shadow_shed`) before the race's pools were made, so they were imported (fence write-backs ~5 MiB per log
+  window against ~285). Shadows answer the cost of importing on Linux (amdgpu userptrs), which the console's unified
+  memory does not have, and their copies and write-backs sat in main's wait for the last frame's fence. The PS5
+  device profile sets `MKW_SHADOW=0`: races 17.6-17.8 ms (three, against 22.0-22.4), GPU 7.6 -> 6.2 ms, free direct
+  memory median 375 -> 642 MiB (largest area down to 68 MiB at times, all areas >= 1.06 GiB); screenshots and the
+  user's menu check clean.
+- **Done: pool storage no longer rebuilt over and over before the race, and the governor rate-limited** (19/11/2026,
+  PS5). A pool backed again on use (`lazy_back`) kept its old last-use submit, so the next shadow trim freed it at once:
+  ~1,600 rebuilds (~60 GiB) of the same 32 MiB pools before a race, with 1-6 s frames. `lazy_back` now marks the pool
+  used: ~330 MiB rebuilt, no frame over 1 s. `MKW_GOV_RATE_LIMIT` (default 1) runs the governor from the headroom thread
+  at most every 250 ms (18-38 passes per 60 frames before): in-race A/B ~5x fewer passes, -0.43 ms mean (-0.92 / +0.07
+  by race). The log now adds up every free area of direct memory: 1.0-1.1 GiB against 0.6-0.73 GiB in the largest one,
+  still near the hard level's 1 GiB, so the governor's levels stay on the largest area.
 - **Done, no frame gain: the zero scan skips what it already read.** Each hard pass read every frozen unit for zero
   pages (~1.5 GB, 9.3 ms a pass on the governor's thread, freeing almost nothing). `MKW_ZERO_SCAN_CACHE` (default 1)
   skips a unit found not all zero earlier in the same freeze (`mem_frozen` now returns the freeze's number). A/B on
@@ -93,7 +121,7 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   (+0.6 ms busy), they overlap other work. Slow wakes (`MKW_SVC_STATS`): ~11 a frame take 200 us or more, 98 % of it
   waiting for the virtual core, held by an equal-priority worker of the other job pool (two pools of six, one per
   core, priority 44, as main on core 0); main loses ~0.3 ms a frame to them. What is left is the game's own work as
-  translated: profile-guided optimization of the generated C next (task 35).
+  translated.
 - **Found, to measure: `main+0x154e14` is a wait, not a walk** (task 36, 16/11/2026). Its 6.3-7 ms a frame
   (`MKW_PROFILE_FN`) are an early-read wait for the GPU at its start: a read at 0x25a052c0e8 of a 16 KiB native page
   whose other 4 KiB page 0x25a052f000 the GPU writes (a sibling wait). In the sibling A/B run 58 of the 60 logged waits
@@ -142,11 +170,38 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   (0), `MKW_REPLAY_PAR_MORE` (6 recorders: 35.0 against 34.3 ms, the cores are taken). `MKW_REPLAY_PAR_MORE`/`SMALL`
   drew whole-scene vertical streaks in their B blocks; MORE alone renders clean, so SMALL or the switching is the bug.
   Both were removed in the merge of 0.1.13.
-- **Measured and set aside: profile-guided optimization** (17/11/2026). A fresh profile of the merged lift (Linux,
-  `MKW_GPU=null`, race weighted 3x) built into the PS5 eboot: single player at FPS=60 43.8 against 43.9 fps (22.84
-  against 22.76 ms, 210 s of race each), 2-player split at 30 fps 34.03 against 34.30-34.50 ms. The frame waits on
-  the game's job chain, not on the speed of its code. clang crashed now and then compiling the lift 16 jobs wide
-  (lower-expect, then two objects of the PS5 build); each file compiled alone.
+- **Done, small gain: sibling reads by `cmp`** (19/11/2026). Two `cmp` sites held 64 % of the early-read wait time left
+  on 1.8.0, so the fault handler now emulates `cmp` with a memory operand (`MKW_EARLY_SIBLING_CMP`, default 1). A/B
+  inside two Grand Prix races at FPS=60: -0.38 and -0.12 ms (inverted), -0.25 ms by means and -0.46 by medians. The wait
+  time was mostly not on the frame's critical path. Of the reads still not emulated, 54 % were at `EMU_MAX`.
+- **Done: more sibling reads emulated** (19/11/2026). `test` with a memory operand (`MKW_EARLY_SIBLING_TEST`, default 1:
+  one `testb` site held 59 % of the wait time left) and `EMU_MAX` 128 instead of 32 (`MKW_EARLY_SIBLING_MAX`). Four
+  Grand Prix races at FPS=60 with `test` on: limit 32 23.21 and 24.87 ms, limit 128 22.90 and 22.40 ms; no read was left
+  undecoded. An A/B of `test` at limit 128: -0.51 ms by means, -0.83 by medians, but -1.13 and +0.11 in its two races.
+  Races differ: some run 56-79 emulated reads a frame against 12-16 (`main+0x1043f0` on one record), and one such race
+  took 25.62 ms even at 128. Those reads cost two protection changes each.
+- **Done: sibling reads from a copy of the page** (`MKW_EARLY_SIBLING_SNAP`, default 1, 19/11/2026). A/B at FPS=60: the
+  race with 141 emulated reads a frame 24.93 -> 21.99 ms, the race with 21 a frame 22.33 -> 22.14 ms. A check race
+  (`MKW_EARLY_SIBLING_SNAP_CHECK=1`) compared 868,731 reads with memory: none differed. With the default on, a confirming
+  race took 23.18 ms (worst frame 85.3 ms, no hang).
+- **Measured and set aside: longer write-watch backoff for hot pages** (19/11/2026). Pages hot again right after an arm
+  stayed writable 4 and 12 times longer: repeat faults 8.6 -> 3.2 a frame, all faults 64 -> 58, frame +0.01 ms by means
+  and -0.24 by medians over two A/B races. About 87 % of the faults are on pages that did not fault the cycle before.
+- **Measured and set aside: the fast PS5 lock** (`MKW_PS5_FAST_LOCK`, default 0, 19/11/2026). Six alternating Grand Prix
+  races at FPS=60: off 22.69, 22.40 and 21.31 ms (22.13), on 21.88, 22.05 and 22.48 ms (22.14); texture-lock waits about
+  20 % lower, no hang. Its lost wakeup and a reader spin were fixed first, and it now reads `mkw.ini`.
+- **Measured and set aside: profile-guided optimization** (19/11/2026). 1.8.0 on the PS5, Grand Prix at FPS=60, frame
+  generation off, 210 s of race per run, in the order A B A B: `-O1` 23.87 and 24.85 ms, `-O2` with PGO 24.12 and
+  23.97 ms. One run of each build had a single 4-6 s stall; without it `-O1` is 23.87 and 24.14 ms, PGO 23.64 and
+  23.97 ms, so about 0.2 ms against 0.27 ms between two runs of the same build. The profile: one race on Windows with
+  the real GPU, 210 s at about half speed, 13,217 functions run, the function-entry hook in none, and no function
+  mismatched or missing in the PS5 build. It does not cover the menus, other courses or split screen. No gain fits the
+  frame waiting on the game's job chain rather than on the speed of its code, which this test does not prove. The 4-6 s
+  stalls were not looked into.
+  **The 17/11/2026 test (22.84 against 22.76 ms) says nothing:** `MKW_SEQ_WATCH` kept the hook on during that profile,
+  marking its branch hot in 44,564 of 44,565 functions run. Commit 38a9398 says that profile avoided the hook; it did
+  not. clang crashed now and then compiling the lift 16 jobs wide (lower-expect, then two objects of the PS5 build);
+  each file compiled alone.
 - A null read in the game's code at `sdk+0x776a60` from `main+0x70f154` ended a run at the title (17/11/2026,
   stream-vis), the place of the 16/11 fault below: intermittent, cause not known. Again 17/11 at frame 405 in a split
   run (fix-split2), the same stack.

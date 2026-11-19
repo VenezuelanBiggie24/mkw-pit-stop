@@ -813,6 +813,13 @@ static int fence_wait_impl(uint64_t value, uint64_t timeout_ns, uint64_t *replay
 uint64_t vk_sync_fence_done(void) { return __atomic_load_n(&done, __ATOMIC_ACQUIRE); }
 
 uint64_t vk_sync_fence_queued(void) { return __atomic_load_n(&queued, __ATOMIC_ACQUIRE); }
+// The newest value handed out (vk_sync_reserve) or submitted: no submission recorded so far, or being recorded now,
+// signals a later one. Read without st_lock: a value only grows, and a stale one is still at least the fence of any
+// submission whose recording began before the call.
+uint64_t vk_sync_fence_reserved(void) {
+    uint64_t r = __atomic_load_n(&reserved, __ATOMIC_ACQUIRE), i = __atomic_load_n(&issued, __ATOMIC_ACQUIRE);
+    return r > i ? r : i;
+}
 
 uint64_t vk_sync_issued(void) { return __atomic_load_n(&issued, __ATOMIC_ACQUIRE); }
 

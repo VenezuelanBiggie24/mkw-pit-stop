@@ -101,7 +101,7 @@ def check_no_game_ps5(root: Path, allow_placeholder_eboot: bool = False) -> list
                 continue
         rel_parts = p.relative_to(root).parts
         if rel_parts[:2] != ("tools", "romfs") and rel_parts[:4] != ("setup", "src", "tools", "romfs") and any(
-            part in ("exefs", "romfs", "spirv", "generated", "lift", "lift-pgo") for part in rel_parts
+            part in ("exefs", "romfs", "spirv", "generated", "lift", "lift-pgo", "lift-O2", "lift-pgo-O2") for part in rel_parts
         ):
             errors.append(f"{rel}: forbidden game/generated directory in release")
             continue

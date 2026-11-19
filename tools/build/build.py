@@ -17,7 +17,10 @@ Objects go to build/obj-win. The window, input, keyboard and menu are SDL3 on bo
 platform/linux.c.
 
 --pgo-gen DIR instruments the generated C for profile-guided optimization (clang -fprofile-instr-generate): the run
-writes DIR/mkw-<pid>-*.profraw (runtime/core/diag/pgo.c, MKW_PGO_AT) for tools/ps5/build_game.py --pgo-use.
+writes DIR/mkw-<pid>-*.profraw (runtime/core/diag/pgo.c, MKW_PGO_AT) for tools/ps5/build_game.py --pgo-use. Linux and
+Windows (--target windows: a real GPU). clang's function hashes change between versions (23 against the PS5's 21: 22 % of
+the lifted functions), so a Windows profile for the PS5 compiles the generated C with --pgo-cc (the PS5's clang version,
+targeting Windows) and links --pgo-rt (that version's profile runtime); docs/ps5/ps5.md has the commands.
 
 Usage: uv run tools/build/build.py [--target linux|windows] [--guest-layout PROFILE] [--gen DIR] [--exefs DIR] [--romfs DIR]
        [--jobs N] [--frame-pointers] [--pgo-gen DIR] [--dry-run]
@@ -235,7 +238,7 @@ RT_EXPORTS = ("rt_dispatch", "rt_sj_owner", "rt_svc", "rt_udf", "rt_ticks", "rt_
 def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: Path | None,
                runtime_only: bool = False, ld_extra: list[str] | None = None, profile: str = DEFAULT,
                exe: Path | None = None, gen_extra: list[str] | None = None,
-               sys_flags: list[str] | None = None) -> str:  # fmt: skip
+               sys_flags: list[str] | None = None, gen_cc: str | None = None) -> str:  # fmt: skip
     """dist: the player's build into that folder, the runtime (mkw, mkw.exe) and the game code apart (mkwgame.so,
     mkwgame.dll); else build/mkw with the game code linked in. runtime_only (with dist): the runtime alone, what a
     release ships and the CI builds, without the game's generated C."""
@@ -261,7 +264,7 @@ def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: 
         f"tabflags = {' '.join(GEN_FLAGS + pic + (sys_flags or []))} {gid} {inc} -I{gen}",
         f"ldflags = {' '.join(link_flags)}",
         (
-            f"rule cc\n  command = {cc} $genflags -MD -MF $out.d -c $in -o $out\n  depfile = $out.d\n  deps = gcc"
+            f"rule cc\n  command = {gen_cc or cc} $genflags -MD -MF $out.d -c $in -o $out\n  depfile = $out.d\n  deps = gcc"
             "\n  description = cc $in"
         ),
         (
@@ -404,6 +407,8 @@ def main() -> int:
         help="instrument the generated C (-fprofile-instr-generate): the run writes DIR/mkw-<pid>-*.profraw; objects "
         "in obj-pgo-gen, the executable mkw-pgo-gen",
     )  # fmt: skip
+    ap.add_argument("--pgo-cc", metavar="CMD", help="with --pgo-gen: compiler command for the generated C")
+    ap.add_argument("--pgo-rt", type=Path, metavar="LIB", help="with --pgo-gen: that compiler's profile runtime")
     args = ap.parse_args()
     # Absolute, not resolved (game/ is a link): ninja puts $in in each command and ccache hashes the input's path, so a
     # relative --gen next to the absolute default rebuilt all 623 objects for real on every switch (16/11/2026).
@@ -422,8 +427,10 @@ def main() -> int:
     set_arch(args.arch)
     if args.sysroot and target is WINDOWS:
         ap.error("--sysroot is for Linux")
-    if args.pgo_gen and (args.dist or args.target == "windows"):
-        ap.error("--pgo-gen is for the Linux build with the game linked in (the profile runtime is Linux's)")
+    if (args.pgo_cc or args.pgo_rt) and not args.pgo_gen:
+        ap.error("--pgo-cc and --pgo-rt go with --pgo-gen")
+    if args.pgo_gen and args.dist:
+        ap.error("--pgo-gen is for a build with the game linked in")
     build_root = ROOT / "build"
     if args.guest_layout != DEFAULT:
         build_root /= f"layout-{args.guest_layout}"
@@ -442,7 +449,7 @@ def build(args: argparse.Namespace, build_root: Path) -> int:
     sys_ld = [*sys_flags, f"-L{args.sysroot.resolve()}/usr/local/lib"] if args.sysroot else []
     cross = ARCH != HOST_ARCH and target is LINUX  # another CPU's build: its own dist and object folders
     dist = ROOT / "build/dist" / (args.target + (f"-{ARCH}" if cross else "")) if args.dist else None
-    exe = build_root / (target.exe.name + ("-pgo-gen" if args.pgo_gen else ""))
+    exe = build_root / (f"{target.exe.stem}-pgo-gen{target.exe.suffix}" if args.pgo_gen else target.exe.name)
     args.out = args.out or build_root / ("obj" + ("-dist" if dist else "") + ("-win" if target is WINDOWS else "")
                                          + (f"-{ARCH}" if cross else "") + ("-pgo-gen" if args.pgo_gen else ""))
     if HOST_WINDOWS and not shutil.which("ninja") and (MSYS2_UCRT64_BIN / "ninja.exe").is_file():
@@ -455,8 +462,13 @@ def build(args: argparse.Namespace, build_root: Path) -> int:
     if args.pgo_gen:
         args.pgo_gen = args.pgo_gen.resolve()
         args.pgo_gen.mkdir(parents=True, exist_ok=True)
-        gen_pgo = [f"-fprofile-instr-generate={args.pgo_gen / 'mkw-%p.profraw'}"]
+        raw_dir = str(args.pgo_gen)
+        if target is WINDOWS and shutil.which("wslpath"):  # WSL: the path is baked in and read by the program on Windows
+            raw_dir = subprocess.check_output(["wslpath", "-m", raw_dir], text=True).strip()
+        gen_pgo = [f"-fprofile-instr-generate={raw_dir}/mkw-%p.profraw"]
         ld_pgo = ["-fprofile-instr-generate"]   # links clang's profile runtime (libclang_rt.profile)
+        if args.pgo_rt:   # the runtime must speak the raw format of the compiler that instrumented the code
+            ld_pgo = [str(args.pgo_rt.resolve()), "-Wl,-u,__llvm_profile_runtime"]
     modules = None
     if not args.runtime_only:
         modules = module_glue(args.gen, args.exefs, dist is not None, args.guest_layout)
@@ -487,7 +499,7 @@ def build(args: argparse.Namespace, build_root: Path) -> int:
         # the lifted code and its library take the sysroot only for another CPU: an x86-64 release's stay as they were
         ninja_file(
             target, args.gen, args.out, fp + sys_flags, dist, args.runtime_only, sys_ld + ld_pgo, args.guest_layout,
-            exe, gen_pgo, sys_flags if cross else None,
+            exe, gen_pgo, sys_flags if cross else None, args.pgo_cc,
         )
     )
     (args.out / "build.ninja").write_text(windows_host_ninja(ninja) if HOST_WINDOWS else ninja)

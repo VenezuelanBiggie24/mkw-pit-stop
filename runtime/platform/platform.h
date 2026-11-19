@@ -50,6 +50,7 @@ int plat_thread_priority_mode(int on);
 int plat_tsc_clock_mode(int on);
 void plat_cond_probe(void);
 void plat_lock_prof_mode(int on);
+int plat_lock_fast_mode(int on);   // PS5: locks created from now on are the fast kind; returns how many exist already
 int plat_pw_batch_mode(int on);
 int plat_pw_hot_mode(int on);   // write watch: hot pages stay writable (MKW_PW_HOT); -1 without a write watch
 uint64_t plat_mem_write_watch_hot_skips(int reset);   // arms skipped for hot pages since the last reset
@@ -80,11 +81,13 @@ int plat_fault_step(void (*fn)(uint64_t arg), uint64_t arg);
 void plat_fault_step_arm(uint64_t *rflags);
 int plat_fault_step_trap(uint64_t *rflags);
 int plat_fault_step_init(void);
-// Emulates the faulting instruction when it is a plain load into a general register (fault_guard.c, x86-64 Linux and
-// PS5): rd reads its n bytes at ea (1 done); the register is written and the instruction skipped. Called from the
-// fault hook, which then returns 1. 0: not such a load (or rd refused): nothing changed. plat_fault_uc: the context
-// of the fault being handled on this thread (the platform's fault handler sets it around the hook).
-int plat_fault_emulate_load(uint64_t fault_addr, int (*rd)(uint64_t ea, size_t n, void *dst));
+// Emulates the faulting instruction when it is a plain load into a general register or, as extra allows, a CMP or TEST
+// with a memory operand (fault_guard.c, x86-64 Linux and PS5): rd reads its n bytes at ea (1 done); the register or flags are
+// written and the instruction skipped. Called from the fault hook, which then returns 1. 0: no such instruction (or rd
+// refused): nothing changed. plat_fault_uc: the context of the fault being handled on this thread (the platform's fault
+// handler sets it around the hook).
+enum { PLAT_EMU_CMP = 1, PLAT_EMU_TEST = 2 };
+int plat_fault_emulate_load(uint64_t fault_addr, int extra, int (*rd)(uint64_t ea, size_t n, void *dst));
 extern _Thread_local void *plat_fault_uc;
 // The instruction bytes plat_fault_emulate_load decodes: from memory, or (the PS5, whose text is execute-only) from
 // the executable's file. plat_code_file_init: read them from this ELF or fake SELF, loaded at base (ET_DYN). plat_code_init:
@@ -316,6 +319,11 @@ typedef enum {
     PLAT_EARLY_UNRESTORED,   // a restore failed; callers must stop without retrying or clearing trap state
 } PlatEarlyResult;
 PlatEarlyResult plat_mem_early_protect(uint64_t addr, size_t n, int on, int restore_prot);
+// A closed native page made readable but not writable, for a copy: a writer still faults, and waits for the caller's
+// lock. The caller closes it again with plat_mem_early_protect(on 1). 0: not possible here. plat_mem_early_gen: changes
+// whenever plat_mem_early_protect touches this native page (or another that shares its counter).
+int plat_mem_early_open_read(uint64_t addr, size_t n);
+uint32_t plat_mem_early_gen(uint64_t addr);
 void plat_mem_early_hold_hook(void (*fn)(uint64_t addr, size_t n));
 void plat_mem_frozen_hook(int (*fn)(uint64_t addr));
 // Frees frozen units that are all zero, up to target_bytes (0 no limit). cache: skip units found not all zero earlier

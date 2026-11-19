@@ -147,6 +147,38 @@ static void log_backed_totals(const char *call, uint64_t address, int err, int i
 // nocache, 16/11/2026, free memory 1104 -> 105 MiB over three races with the VMA heap flat).
 static void pk_backed_note(char *out, size_t cap);   // MKW_PACK, below
 
+// sceKernelAvailableDirectMemorySize answers with one free area of the range, apparently the largest (840 MiB unchanged
+// for 2,877 governor passes that were freeing memory, with ~2 GiB unaccounted for, fp-base7-20261119). This adds up the
+// areas by asking again on each side of every one found, the widest range first; at most DMEM_SCAN_CALLS calls, so the
+// total is a lower bound when *cut is set. For the log only (a few lines a run): nothing decides on it yet.
+#define DMEM_SCAN_CALLS 1024
+static uint64_t dmem_free_scan(int64_t dmem_total, int *areas, int *cut) {
+    static struct { int64_t lo, hi; } todo[DMEM_SCAN_CALLS + 2];
+    static int busy;
+    int n = 1, calls = 0;
+    uint64_t total = 0;
+    *areas = 0, *cut = 1;
+    if (__atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE)) return 0;
+    todo[0].lo = 0, todo[0].hi = dmem_total;
+    *cut = 0;
+    while (n) {
+        if (calls++ == DMEM_SCAN_CALLS) { *cut = 1; break; }
+        int w = 0;
+        for (int i = 1; i < n; i++)
+            if (todo[i].hi - todo[i].lo > todo[w].hi - todo[w].lo) w = i;
+        int64_t lo = todo[w].lo, hi = todo[w].hi, phys = 0;
+        todo[w] = todo[--n];
+        size_t size = 0;
+        if (sceKernelAvailableDirectMemorySize(lo, hi, PS5_MEM_UNIT, &phys, &size) != 0 || !size) continue;
+        if (phys < lo || (uint64_t)phys + size > (uint64_t)hi) continue;   // (not an answer about this range)
+        total += size, ++*areas;
+        if (phys - lo >= (int64_t)PS5_MEM_UNIT) todo[n].lo = lo, todo[n++].hi = phys;
+        if (hi - phys - (int64_t)size >= (int64_t)PS5_MEM_UNIT) todo[n].lo = phys + (int64_t)size, todo[n++].hi = hi;
+    }
+    __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
+    return total;
+}
+
 void plat_mem_backed_summary(char *out, size_t cap) {
     int64_t phys = 0;
     size_t avail = 0;
@@ -161,6 +193,13 @@ void plat_mem_backed_summary(char *out, size_t cap) {
              u[RANGE_HEAP] + u[RANGE_ALIAS] + u[RANGE_OTHER], u[RANGE_HEAP], u[RANGE_ALIAS], u[RANGE_OTHER], c[0], c[1],
              c[2], c[3], rc == 0 ? avail >> 20 : 0, dmem_total > 0 ? (long long)(dmem_total >> 20) : 0ll);
     size_t at = strlen(out);
+    if (dmem_total > 0 && at < cap) {
+        int areas, cut;
+        uint64_t t0 = plat_now_ns(), total = dmem_free_scan(dmem_total, &areas, &cut);
+        snprintf(out + at, cap - at, " (all free areas: %s%llu MiB in %d, scan %llu us)", cut ? "at least " : "",
+                 (unsigned long long)(total >> 20), areas, (unsigned long long)((plat_now_ns() - t0) / 1000));
+        at = strlen(out);
+    }
     if (at < cap) pk_backed_note(out + at, cap - at);
 }
 
@@ -277,13 +316,17 @@ static bool back_unit_locked(Ps5MixedBlock *unit, RangeKind kind, int in_signal,
     Ps5MemCommitReport rep = {0};
     int rc = pk ? ps5_mixed_back_fill(unit, &rep, unpack_fill, pk) : ps5_mixed_back_report(unit, &rep);
     if (rc) {
-        if (pk && !rep.allocation_status && !rep.mapping_status)
+        if (pk && !rep.allocation_status && !rep.private_status && !rep.private_unmap_status && !rep.mapping_status)
             fprintf(stderr, "PS5 memory unpack %#llx failed: its packed bytes do not decompress (%u bytes)\n",
                     (unsigned long long)unit->backing.address, pk->csize);
         const char *call = rep.allocation_status ? "sceKernelAllocateDirectMemory"
+                           : rep.private_status ? "sceKernelMapDirectMemory (private)"
+                           : rep.private_unmap_status ? "sceKernelMunmap (private)"
                            : (rep.fixed_attempted && rep.mapping_status) ? "sceKernelMapDirectMemory"
                            : "ps5_mixed_back";
         int err = rep.allocation_status ? rep.allocation_status
+                  : rep.private_status ? rep.private_status
+                  : rep.private_unmap_status ? rep.private_unmap_status
                   : (rep.fixed_attempted && rep.mapping_status) ? rep.mapping_status : rc;
         log_backed_totals(call, unit->backing.address, err, in_signal);
         return false;
@@ -939,11 +982,40 @@ static PlatEarlyResult early_protect(uint64_t addr, size_t n, int on, int restor
     return PLAT_EARLY_OK;
 }
 
+// Counted per native page, hashed: memory_early.c's page snapshots are good only while their page was not opened.
+#define EARLY_GEN_N 64
+static uint32_t early_gen[EARLY_GEN_N];
+
+uint32_t plat_mem_early_gen(uint64_t addr) {
+    return __atomic_load_n(&early_gen[(addr / PS5_MEM_PAGE) % EARLY_GEN_N], __ATOMIC_ACQUIRE);
+}
+
 __attribute__((noinline)) PlatEarlyResult plat_mem_early_protect(uint64_t addr, size_t n, int on, int restore_prot) {
     uint64_t t0 = plat_now_ns();
     PlatEarlyResult r = early_protect(addr, n, on, restore_prot);
+    uint64_t first = addr / PS5_MEM_PAGE, count = n ? (addr + n - 1) / PS5_MEM_PAGE - first + 1 : 0;
+    if (count > EARLY_GEN_N) first = 0, count = EARLY_GEN_N;
+    for (uint64_t i = 0; i < count; i++)
+        __atomic_add_fetch(&early_gen[(first + i) % EARLY_GEN_N], 1, __ATOMIC_RELEASE);
     pstat_add((uintptr_t)__builtin_return_address(0), plat_now_ns() - t0);
     return r;
+}
+
+__attribute__((noinline)) int plat_mem_early_open_read(uint64_t addr, size_t n) {
+    if (n != PS5_MEM_PAGE || addr & (PS5_MEM_PAGE - 1)) return 0;
+    uint64_t t0 = plat_now_ns();
+    Ps5MixedBlock *u = find_unit_lockfree(find_range_lockfree(addr), addr);
+    if (!u) return 0;
+    unit_lock(u);
+    int ok = u->backing.reserved && u->live_pages && u->backing.committed;
+    if (ok) {
+        int prot = PS5_KERNEL_PROT_CPU_READ;
+        if (prot_watch_has_gpu(addr, PS5_MEM_PAGE)) prot |= PS5_KERNEL_PROT_GPU_READ | PS5_KERNEL_PROT_GPU_WRITE;
+        ok = sceKernelMprotect((void *)(uintptr_t)addr, n, prot) == 0;
+    }
+    unit_unlock(u);
+    pstat_add((uintptr_t)__builtin_return_address(0), plat_now_ns() - t0);
+    return ok;
 }
 
 int plat_mem_back_hold_as(uint64_t addr, size_t n, int cause) {

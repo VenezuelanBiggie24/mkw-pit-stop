@@ -641,6 +641,7 @@ uint64_t vk_sync_reserve(void);            // asynchronous replay: the value the
 int vk_sync_fence_wait(uint64_t value, uint64_t timeout_ns);   // 1 when done; 0 on timeout or a value never submitted
 uint64_t vk_sync_fence_done(void);         // highest done value
 uint64_t vk_sync_fence_queued(void);       // newest value with a part on the GPU queue
+uint64_t vk_sync_fence_reserved(void);     // newest value handed out or submitted (>= any recording's fence)
 uint64_t vk_mem_wb_need_take(uint64_t fence);   // MKW_WB_ORDER: the earlier value whose write-back the part waits for
 // vk_timeline.c (MKW_TRACE_TL=1, a measurement): each frame's submissions on one clock, a line every 600 frames.
 int vk_tl_on(void);

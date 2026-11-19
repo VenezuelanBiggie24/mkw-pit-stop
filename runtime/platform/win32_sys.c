@@ -24,8 +24,12 @@
 
 void rt_log_flush(void) __attribute__((weak));   // core/boot/main.c: the log lines still queued for the log thread
 
+void pgo_exit(void) __attribute__((weak));   // core/diag/pgo.c: an instrumented build's counters, which ExitProcess skips
+
 void plat_exit(int code) {
     if (rt_log_flush) rt_log_flush();
+    // Clean ends only, as on Linux: a partial profile from a crash would go into the merge unnoticed.
+    if (pgo_exit && code == 0) pgo_exit();
     fflush(stdout);
     fflush(stderr);
     ExitProcess((UINT)code);

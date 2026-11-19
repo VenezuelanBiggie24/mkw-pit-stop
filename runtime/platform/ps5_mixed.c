@@ -85,12 +85,8 @@ int ps5_mixed_back_fill(Ps5MixedBlock *block, Ps5MemCommitReport *report, int (*
     if (!block->backing.reserved || !block->live_pages || block->backing.committed ||
         block->backing.allocated || block->backing.relocated)
         return PS5_MEM_BAD_REQUEST;
-    int result = ps5_mem_commit(&block->backing, report);
+    int result = ps5_mem_commit_fill(&block->backing, report, fill, ctx);
     if (result) return result;
-    if (fill && (result = fill(ctx, (void *)block->backing.address)) != 0) {
-        int cleanup = ps5_mem_decommit(&block->backing);
-        return cleanup ? cleanup : result;
-    }
     for (size_t g = 0; g < PS5_MEM_UNIT / PS5_MEM_PAGE; ++g) {
         size_t first = g * GUEST_PER_NATIVE;
         bool any_rw = false, any_read = false;

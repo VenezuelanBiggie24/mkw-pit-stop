@@ -3,6 +3,7 @@
 | File | What it is |
 |---|---|
 | `cpu.h` | `Cpu` (registers, NZCV, TPIDR, exclusives, FPCR/FPSR, vectors), memory accesses and the `rt_*` services the generated C uses |
+| `fn_enter.h` | `FN_ENTER`, the function-entry hook of the lifted code; on the PS5 out of line, so a function pays only a compare and a branch for it (`tools/test/fn_enter.c`) |
 | `simd.h`, `simd_fp.h` | AArch64 NEON and floating point in portable C |
 | `dispatch.c`, `dispatch.h` | `rt_dispatch`: indirect calls through an address table |
 | `sjlj.c` | Guest `setjmp`/`longjmp`: a setjmp caller's body runs under a host setjmp point, and a dispatch into the middle of a live one (the guest longjmp's `BR x30`) jumps back to it |

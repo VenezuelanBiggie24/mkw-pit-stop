@@ -56,15 +56,15 @@ static const char *const known[] = {
     "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_TEX_POOL_MIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "VRAM_LOG", "VRAM_MARGIN", "VS_OUTS",
     // the PS5 port's (ps5-port-60fps)
     "ADDR_SPIN", "ADDR_SPIN_US", "ASTC_BC_ARRAYS", "ASTC_BC_CHECK", "ASTC_ERRORS", "ASTC_ERRORS_LAG", "COMPUTE_WRITTEN", "CORE_HANDOFF",
-    "EARLY_BATCH", "EARLY_SIBLING_EMU", "EARLY_SIBLING_STEP", "EARLY_SIBLING_WAIT", "EARLY_WAIT_AWAY", "GPU_ONLY_RELEASE", "HEADLESS", "HEAP_SHRINK_RELEASE",
+    "EARLY_BATCH", "EARLY_SIBLING_CMP", "EARLY_SIBLING_EMU", "EARLY_SIBLING_MAX", "EARLY_SIBLING_MAX_B", "EARLY_SIBLING_SNAP", "EARLY_SIBLING_SNAP_CHECK", "EARLY_SIBLING_TEST", "EARLY_SIBLING_STEP", "EARLY_SIBLING_WAIT", "EARLY_WAIT_AWAY", "GPU_ONLY_RELEASE", "HEADLESS", "HEAP_SHRINK_RELEASE",
     "HOST_MEMSET", "HOST_ROUND",
     "LIST_WATCH", "PACK", "PACK_COLD_S", "PACK_STORE_MIB", "PACK_VERIFY", "POOL_RELEASE", "PROFILE_FN", "PROFILE_FROM",
-    "PROFILE_ONLY", "PROFILE_US", "PS5_FAST_LOCK", "PS5_OVERLAP", "PS5_PW_BATCH", "PS5_TSC_CLOCK", "PW_HOT",
+    "PROFILE_FN_MAINWAIT", "PROFILE_ONLY", "PROFILE_US", "PS5_FAST_LOCK", "PS5_OVERLAP", "PS5_PW_BATCH", "PS5_TSC_CLOCK", "PW_HOT",
     "QORDER_LOG", "QORDER_LOG_AT", "QORDER_PARTS", "QORDER_PRE", "QUEUE_HOLD_MS", "QUEUE_WAITS",
     "REPLAY_PAR", "REPLAY_PAR_CHECK_BY_CHUNK", "REPLAY_PAR_FIRST", "REPLAY_PAR_HEAD", "REPLAY_PAR_JOIN", "REPLAY_PAR_PIPE",
     "REPLAY_PAR_PRECHECK", "REPLAY_PAR_THREADS",
     "SEQ_UNTIL",
-    "SEQ_WATCH", "SHADOW_TRIM", "SNAP_BG", "SPARSE_EVICT", "SVC_STATS", "TEX_EVICT_IDLE", "TEX_READBACK", "TEX_UP_DUMP",
+    "SEQ_WATCH", "GOV_RATE_LIMIT", "SHADOW", "SHADOW_TRIM", "SNAP_BG", "SPARSE_EVICT", "SVC_STATS", "TEX_EVICT_IDLE", "TEX_READBACK", "TEX_UP_DUMP",
     "TEX_UP_DUMP_DIR", "TEX_UP_LOG", "TEX_UP_LOG_AT", "TEX_ZERO_LOG", "YIELD_NOLOCK", "ZERO_SCAN_CACHE",
     // the bench driver, multiplayer and extra pads (PS5 port)
     "BENCH", "BENCH_MAX", "KEYBOARD_PLAYER", "LOBBY", "LOCAL_WIRELESS", "NET_HOST", "NET_IFACE", "NET_JOIN", "NET_NAME",
@@ -355,6 +355,12 @@ static const struct { const char *key, *value; } PS5[] = {
     // 18/11/2026; vk_tex_alias.c), for ~2 fps (27.8 against 29.9). Until that is fixed where it breaks; ab or 1 in
     // mkw.ini brings it back.
     {"REPLAY_PAR_PIPE", "0"},
+    // CPU-visible pools imported, no shadow copies (vk_mem_shadow.c): shadows answer the cost of importing on Linux
+    // (amdgpu userptrs), which the console's unified memory does not have, and their copies and fence write-backs sat in
+    // the main thread's wait for the last frame's fence. Races 22.0-22.4 ms with them, 17.6-17.8 without (noshadow1/2,
+    // 19/11/2026; GPU 7.6 -> 6.2 ms, free direct memory median 375 -> 642 MiB); races that happened to start after the
+    // governor had shed shadows (vk_mem_shadow_shed) were the fast ones at 18.8-19.7. Menus checked by the user.
+    {"SHADOW", "0"},
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 
