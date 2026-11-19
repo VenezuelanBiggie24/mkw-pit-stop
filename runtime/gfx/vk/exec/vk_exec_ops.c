@@ -456,6 +456,12 @@ static void bind_handles(uint64_t *dst, int cap, const p_bind_handles *b) {
 
 static void op_draw_mesh_cs(VkExec *ex, const p_draw_mesh *d) {
     if (d->count <= 0) return;
+    // Conditional rendering drops the whole draw, its task and mesh programs too (prepare_draw_ex only stops the last
+    // step, after the compute passes would have run).
+    if (ex->render_disabled) {
+        vk_exec_frame.skip[VK_SKIP_OFF]++;
+        return;
+    }
     int present;
     const GfxShader *msh = NULL, *first = mesh_stages(ex, &msh, &present);
     if (!first) return;

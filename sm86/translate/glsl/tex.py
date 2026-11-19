@@ -14,16 +14,19 @@ class TexOps:
         if i.sym("query") != "TEX_HEADER_DIMENSION":
             raise Unsupported(f"TXQ {i.sym('query')}")
         key = (i.v("bank5"), i.v("tsPtrIdx"))
-        self.textures.setdefault(key, "sampler2D")
-        t = f"t{key[0]}_{key[1]}"
-        # the sampler's type is final only after the whole program (a later TEX may make it an array): the size comes
-        # from txqsz_<bank>_<idx>, written with the declarations, as an ivec3 padded with 1
+        if key not in self.textures:
+            self.textures[key] = "sampler2D"
+            self.txq_guess.add(key)
+        # the sampler's type is final only after the whole program (a later TEX or TLD may make it an array or
+        # multisampled): size and levels come from txqsz_/txqlv_<bank>_<idx>, written with the declarations
         self.txq_tex.add(key)
         size = f"txqsz_{key[0]}_{key[1]}(int({self.src_u(i, 'a')}))"
-        comps = [f"uint(sz[{k}])" for k in range(3)] + [f"uint(textureQueryLevels({t}))"]
+        comps = [f"uint(sz[{k}])" for k in range(3)] + [f"uint(txqlv_{key[0]}_{key[1]}())"]
         rd, rd2 = i.v("Rd"), i.v("Rd2")
         dests = [rd, rd + 1 if rd != RZ else RZ, rd2, rd2 + 1 if rd2 != RZ else RZ]
         outs, comp, mask = [], 0, i.v("wmsk", 0xF)
+        if mask & 8:
+            self.txq_levels.add(key)
         for c in range(4):
             if mask >> c & 1:
                 d = dests[comp]
@@ -38,6 +41,14 @@ class TexOps:
     # format from the descriptor). Coordinates are integers from Ra, the array layer after the coordinates.
     IMG: ClassVar[dict[str, tuple[str, int]]] = {"1D": ("1D", 1), "2D": ("2D", 2), "3D": ("3D", 3),
                                                  "1D_ARRAY": ("1DArray", 2), "2D_ARRAY": ("2DArray", 3)}  # fmt: skip
+
+    def texel_sampler(self, key: tuple[int, int], sampler: str) -> None:
+        """The type TLD or TMML gives a texture: it replaces TXQ's guess, and yields to a type already known."""
+        if key in self.txq_guess:
+            self.txq_guess.discard(key)
+            self.textures[key] = sampler
+        else:
+            self.textures.setdefault(key, sampler)
 
     def image(self, i: Insn) -> tuple[str, str, int]:
         dim = i.sym("dim")
@@ -164,6 +175,7 @@ class TexOps:
         vec = coords[0] if len(coords) == 1 else f"vec{len(coords)}({', '.join(coords)})"
         sampler = f"sampler{name}{'Shadow' if dc else ''}"
         self.textures[key] = sampler
+        self.txq_guess.discard(key)
         if dc and lod == "LL":
             self.uses_shadow_lod = True  # textureLod on array and cube shadow samplers
         if ptp:
@@ -254,7 +266,7 @@ class TexOps:
         )
         vec = ints[0] if len(ints) == 1 else f"ivec{len(ints)}({', '.join(ints)})"
         key = (i.v("bank5"), i.v("tsPtrIdx"))
-        self.textures.setdefault(key, f"sampler{name}")
+        self.texel_sampler(key, f"sampler{name}")
         lv = f"int({reg(regs['ms' if ms else 'lod'])})" if ms or lod == "LL" else "0"
         call = f"texelFetch(t{key[0]}_{key[1]}, {vec}, {lv})"
         outs = self.tex_outs(i)
@@ -273,7 +285,7 @@ class TexOps:
         self.regs.update(r for r in range(a, a + idx + ncoord) if r != RZ)
         vec = coords[0] if ncoord == 1 else f"vec{ncoord}({', '.join(coords)})"
         key = (i.v("bank5"), i.v("tsPtrIdx"))
-        self.textures.setdefault(key, f"sampler{name}")
+        self.texel_sampler(key, f"sampler{name}")
         t = f"t{key[0]}_{key[1]}"
         rd, rd2 = i.v("Rd"), i.v("Rd2")
         dests = [rd, rd + 1 if rd != RZ else RZ, rd2, rd2 + 1 if rd2 != RZ else RZ]

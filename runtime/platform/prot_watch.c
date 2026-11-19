@@ -402,7 +402,15 @@ uint64_t prot_watch_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t
             uint64_t sub_hi = (p + pw_page_size) < hi ? (p + pw_page_size) : hi;
             uint64_t sub_cnt = (sub_hi - sub_lo) / PW_GUEST_PAGE;
             int partial = 0;
-            if (v & PW_WRITTEN) {
+            int sub_partial = (sub_lo > p) || (sub_hi < p + pw_page_size);
+            // Writable and not armed: writes to it fault on nothing, here or until the protection below lands (a
+            // batch holds it until its run ends), so what it holds is reported as written. The caller reads the
+            // page after this call returns, when the page is protected.
+            int unseen = reset && !sub_partial &&
+                         !(v & (PW_WRITTEN | PW_ARMED | PW_HOLD_MASK | PW_PROTECTING | PW_EARLY | PW_FAULT_MASK)) &&
+                         pw_state_fn(p) == PLAT_PROT_RW;
+            int reported = (v & PW_WRITTEN) || unseen;
+            if (reported) {
                 if (got + sub_cnt > max && got > 0) {
                     stopped_early = 1;
                     break;
@@ -417,7 +425,6 @@ uint64_t prot_watch_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t
                        !__atomic_compare_exchange_n(&c[idx], &cur, cur & ~PW_REP_MASK, 1, __ATOMIC_ACQ_REL,
                                                     __ATOMIC_ACQUIRE)) {}
             }
-            int sub_partial = (sub_lo > p) || (sub_hi < p + pw_page_size);
             int armed_cas = 0;
             uint32_t gpu_bits = 0;
             if (reset && !partial && !sub_partial) {
@@ -442,6 +449,12 @@ uint64_t prot_watch_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t
                                     cur = __atomic_load_n(&c[idx], __ATOMIC_ACQUIRE);
                                 if (cur & (PW_HOLD_MASK | PW_PROTECTING)) {
                                     if (cur & PW_HOLD_MASK) saw_held = 1;
+                                    break;
+                                }
+                                // Written since the load above and not in pages[]: arming would erase it. It stays
+                                // written for the next query.
+                                if (!reported && (cur & PW_WRITTEN)) {
+                                    saw_held = 1;
                                     break;
                                 }
                                 gpu_bits = cur & PW_GPU_MASK;

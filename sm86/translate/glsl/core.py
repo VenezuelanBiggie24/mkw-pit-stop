@@ -57,6 +57,8 @@ class Builder(AluOps, MemOps, TexOps, ThreadOps):
         self.uses_subgroup = self.uses_shfl = self.uses_shared = self.uses_prmt = self.uses_arith = False
         self.uses_nminmax = False
         self.txq_tex: set[tuple[int, int]] = set()  # textures TXQ reads the size of (txqsz_* functions)
+        self.txq_levels: set[tuple[int, int]] = set()  # textures TXQ reads the level count of (txqlv_* functions)
+        self.txq_guess: set[tuple[int, int]] = set()  # textures typed only by TXQ's sampler2D so far: TLD/TMML decide
         self.uses_shadow_lod = False
         self.uses_demote = False
         self.lmem_bytes = 0  # local memory (LDL/STL): the furthest constant extent, 0 = none

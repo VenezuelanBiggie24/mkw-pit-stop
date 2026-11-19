@@ -136,11 +136,16 @@ def declarations(b, stage: str, shape: tuple[int, int, int, int] | None) -> list
                                "handle": idx, "array": 1, "separate": False, "flags": 4})  # fmt: skip
         nb += 1
     for bank, idx in sorted(b.txq_tex):
+        kind = b.textures[(bank, idx)].replace("Shadow", "")
         n = {"sampler1D": 1, "sampler2D": 2, "sampler3D": 3, "samplerCube": 2, "sampler2DArray": 3,
-             "samplerCubeArray": 3, "sampler1DArray": 2}.get(b.textures[(bank, idx)].replace("Shadow", ""), 2)  # fmt: skip
-        sz = f"textureSize(t{bank}_{idx}, l)"
+             "samplerCubeArray": 3, "sampler1DArray": 2, "sampler2DMS": 2, "sampler2DMSArray": 3}.get(kind, 2)  # fmt: skip
+        ms = "MS" in kind  # multisampled: no levels, so textureSize takes no lod and textureQueryLevels does not apply
+        sz = f"textureSize(t{bank}_{idx})" if ms else f"textureSize(t{bank}_{idx}, l)"
         v = sz if n == 3 else f"ivec3({sz}, 1)" if n == 2 else f"ivec3({sz}, 1, 1)"
         head.append(f"ivec3 txqsz_{bank}_{idx}(int l) {{ return {v}; }}")
+        if (bank, idx) in b.txq_levels:
+            lv = "1" if ms else f"textureQueryLevels(t{bank}_{idx})"
+            head.append(f"int txqlv_{bank}_{idx}() {{ return {lv}; }}")
     # Specialization constants of the fixed-address constant words (Builder.const); "spec" lists each k's [bank, byte].
     for (bank, byte), k in b.spec.items():
         head.append(f"layout(constant_id = {2 * k}) const bool SCU{k} = false;")
@@ -232,8 +237,11 @@ CS_BUFFERS = [
     "#define mmap mp.map",
 ]
 
+# The payload starts at zero, as MESH_ZERO's outputs do: shared memory keeps the previous workgroup's bytes on AMD, and
+# every word goes to the task record whether the program wrote it or not.
 TASK_MAIN_CS = f"""void main() {{
     if (gl_LocalInvocationIndex == 0u) task_count = 0u;
+    for (uint k = gl_LocalInvocationIndex; k < {TASK_REC - 1}u; k += 32u) tp[k] = 0u;
     barrier();
     sm_main();
     barrier();
