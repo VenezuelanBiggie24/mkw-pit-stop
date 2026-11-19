@@ -80,11 +80,12 @@ int plat_fault_step(void (*fn)(uint64_t arg), uint64_t arg);
 void plat_fault_step_arm(uint64_t *rflags);
 int plat_fault_step_trap(uint64_t *rflags);
 int plat_fault_step_init(void);
-// Emulates the faulting instruction when it is a plain load into a general register (fault_guard.c, x86-64 Linux and
-// PS5): rd reads its n bytes at ea (1 done); the register is written and the instruction skipped. Called from the
-// fault hook, which then returns 1. 0: not such a load (or rd refused): nothing changed. plat_fault_uc: the context
-// of the fault being handled on this thread (the platform's fault handler sets it around the hook).
-int plat_fault_emulate_load(uint64_t fault_addr, int (*rd)(uint64_t ea, size_t n, void *dst));
+// Emulates the faulting instruction when it is a plain load into a general register or, with cmp, a CMP with a memory
+// operand (fault_guard.c, x86-64 Linux and PS5): rd reads its n bytes at ea (1 done); the register or the flags are
+// written and the instruction skipped. Called from the fault hook, which then returns 1. 0: no such instruction (or rd
+// refused): nothing changed. plat_fault_uc: the context of the fault being handled on this thread (the platform's fault
+// handler sets it around the hook).
+int plat_fault_emulate_load(uint64_t fault_addr, int cmp, int (*rd)(uint64_t ea, size_t n, void *dst));
 extern _Thread_local void *plat_fault_uc;
 // The instruction bytes plat_fault_emulate_load decodes: from memory, or (the PS5, whose text is execute-only) from
 // the executable's file. plat_code_file_init: read them from this ELF or fake SELF, loaded at base (ET_DYN). plat_code_init:

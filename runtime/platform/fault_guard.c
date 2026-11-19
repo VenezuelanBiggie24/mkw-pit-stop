@@ -87,12 +87,14 @@ int plat_fault_step_init(void) {
     return step_works;
 }
 
-// One load emulated (plat_fault_emulate_load, platform.h): the faulting instruction decoded at the context's rip,
-// its bytes read by rd, its destination register written in the context and rip moved past it. Only the forms the
-// game's sibling-page readers use (the PS5 race's six early-read sites, 17/11/2026: mov r64/r32 from [base+disp8/32],
-// movzx r32 from a byte or word) and their near relatives: MOV r/m (8B, and 8A without the high-byte registers),
-// MOVZX/MOVSX (0F B6/B7/BE/BF), MOVSXD (REX.W 63); any ModRM/SIB addressing, rip-relative too; prefixes 66 and REX
-// only. Anything else (VEX, other opcodes, segment or lock prefixes) returns 0 and the caller does what it did before.
+// One read emulated (plat_fault_emulate_load, platform.h): the faulting instruction decoded at the context's rip, its
+// bytes read by rd, its result written in the context and rip moved past it. Only the forms the game's sibling-page
+// readers use (the PS5 race's six early-read sites, 17/11/2026: mov r64/r32 from [base+disp8/32], movzx r32 from a byte
+// or word) and their near relatives: MOV r/m (8B, and 8A without the high-byte registers), MOVZX/MOVSX (0F B6/B7/BE/BF),
+// MOVSXD (REX.W 63). With cmp, also CMP with a memory operand (38/39/3A/3B, 80/81/83 /7), which only sets the flags:
+// 64 % of the wait time left on 1.8.0 was two such sites (texpar-abi-20261119, 39 51 10 and 4c 3b 4f 08). Any ModRM/SIB
+// addressing, rip-relative too; prefixes 66 and REX only. Anything else (VEX, other opcodes, segment or lock prefixes)
+// returns 0 and the caller does what it did before. tools/test/fault_emulate.c checks it against the CPU.
 _Thread_local void *plat_fault_uc;
 
 static uint64_t *ctx_gpr(void *uc, int r) {
@@ -123,6 +125,31 @@ static uint64_t *ctx_gpr(void *uc, int r) {
                                 REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15, REG_RIP};
     return (uint64_t *)&u->uc_mcontext.gregs[map[r]];
 #endif
+}
+
+static uint64_t *ctx_rflags(void *uc) {
+    ucontext_t *u = uc;
+#ifdef __PROSPERO__
+    return (uint64_t *)&u->uc_mcontext.mc_rflags;
+#else
+    return (uint64_t *)&u->uc_mcontext.gregs[REG_EFL];
+#endif
+}
+
+// The six flags of CMP a, b (a - b) at this operand size; the other bits of rflags stay.
+static void cmp_flags(uint64_t *rflags, uint64_t a, uint64_t b, int size) {
+    int top = size * 8 - 1;
+    uint64_t mask = ~0ull >> (63 - top);
+    a &= mask, b &= mask;
+    uint64_t r = (a - b) & mask, f = *rflags & ~0x8d5ull;
+    uint64_t nibble = (r ^ r >> 4) & 15;                   // the low byte's parity, without a library call
+    if (a < b) f |= 1;                                     // CF
+    if (!(0x6996 >> nibble & 1)) f |= 1 << 2;              // PF: an even number of ones in the low byte
+    if ((a ^ b ^ r) & 0x10) f |= 1 << 4;                   // AF
+    if (!r) f |= 1 << 6;                                   // ZF
+    if (r >> top & 1) f |= 1 << 7;                         // SF
+    if (((a ^ b) & (a ^ r)) >> top & 1) f |= 1 << 11;      // OF
+    *rflags = f;
 }
 
 // The instruction bytes the decoder reads. The PS5 maps the eboot's text execute-only: a read of the code at rip
@@ -221,7 +248,7 @@ int plat_code_init(void) {
 
 static _Thread_local struct { uint64_t rip; uint8_t n, b[15]; } code_cache[16];   // per thread: no lock in the handler
 
-int plat_fault_emulate_load(uint64_t fault_addr, int (*rd)(uint64_t ea, size_t n, void *dst)) {
+int plat_fault_emulate_load(uint64_t fault_addr, int cmp, int (*rd)(uint64_t ea, size_t n, void *dst)) {
     void *uc = plat_fault_uc;
     if (!uc) return 0;
     uint64_t *rip = ctx_gpr(uc, 16);
@@ -240,8 +267,12 @@ int plat_fault_emulate_load(uint64_t fault_addr, int (*rd)(uint64_t ea, size_t n
         else if ((ib[i] & 0xf0) == 0x40) { rex = ib[i++]; break; }
         else break;
     }
-    int w = rex & 8, size, sx = 0, op = NEXT();
-    if (op == 0x8b) size = w ? 8 : o16 ? 2 : 4;
+    int w = rex & 8, size, sx = 0, op = NEXT(), full = w ? 8 : o16 ? 2 : 4, imm_size = 0, is_cmp = 0;
+    if (cmp && (op == 0x38 || op == 0x3a || op == 0x80)) size = 1, is_cmp = 1, imm_size = op == 0x80;
+    else if (cmp && (op == 0x39 || op == 0x3b)) size = full, is_cmp = 1;
+    else if (cmp && op == 0x81) size = full, is_cmp = 1, imm_size = full == 2 ? 2 : 4;
+    else if (cmp && op == 0x83) size = full, is_cmp = 1, imm_size = 1;
+    else if (op == 0x8b) size = w ? 8 : o16 ? 2 : 4;
     else if (op == 0x8a) size = 1;
     else if (op == 0x63 && w) size = 4, sx = 1;
     else if (op == 0x0f) {
@@ -253,7 +284,8 @@ int plat_fault_emulate_load(uint64_t fault_addr, int (*rd)(uint64_t ea, size_t n
     if (modrm < 0) return 0;
     int mod = modrm >> 6, reg = (modrm >> 3 & 7) | (rex & 4) << 1, rm = modrm & 7;
     if (mod == 3) return 0;
-    if (op == 0x8a && !rex && reg >= 4) return 0;   // (ah, ch, dh, bh)
+    if ((op == 0x8a || op == 0x38 || op == 0x3a) && !rex && reg >= 4) return 0;   // (ah, ch, dh, bh)
+    if (imm_size && (modrm >> 3 & 7) != 7) return 0;   // (80/81/83: only /7 is CMP; the others write the memory)
     uint64_t ea = 0;
     int riprel = 0, nodisp32base = 0;
     if (rm == 4) {
@@ -277,11 +309,25 @@ int plat_fault_emulate_load(uint64_t fault_addr, int (*rd)(uint64_t ea, size_t n
         ea += (uint64_t)(int64_t)(int32_t)rd_u(ib + i, 4);
         i += 4;
     }
+    int64_t imm = 0;
+    if (imm_size) {   // sign-extended to the operand size
+        if (i + imm_size > len) return 0;
+        uint64_t u = rd_u(ib + i, imm_size);
+        imm = imm_size == 1 ? (int8_t)u : imm_size == 2 ? (int16_t)u : (int32_t)u;
+        i += imm_size;
+    }
 #undef NEXT
-    if (riprel) ea += *rip + (uint64_t)i;   // (no immediate in these forms: the next instruction)
+    if (riprel) ea += *rip + (uint64_t)i;   // (relative to the next instruction, after any immediate)
     if (ea > fault_addr || fault_addr - ea >= (uint64_t)size) return 0;   // (not the access that faulted)
     uint64_t v = 0;
     if (!rd(ea, (size_t)size, &v)) return 0;
+    if (is_cmp) {
+        uint64_t other = imm_size ? (uint64_t)imm : *ctx_gpr(uc, reg);
+        if (op == 0x3a || op == 0x3b) cmp_flags(ctx_rflags(uc), other, v, size);   // CMP reg, [mem]
+        else cmp_flags(ctx_rflags(uc), v, other, size);                            // CMP [mem], reg or immediate
+        *rip += (uint64_t)i;
+        return 1;
+    }
     if (sx) v = size == 1 ? (uint64_t)(int64_t)(int8_t)v : size == 2 ? (uint64_t)(int64_t)(int16_t)v : (uint64_t)(int64_t)(int32_t)v;
     uint64_t *d = ctx_gpr(uc, reg);
     int dsize = op == 0x8a ? 1 : op == 0x8b ? size : w ? 8 : o16 ? 2 : 4;   // (movzx/movsx/movsxd: the operand size)
@@ -297,8 +343,8 @@ _Thread_local void *plat_fault_uc;
 int plat_code_file_init(const char *path, uint64_t base) { return (void)path, (void)base, 0; }
 int plat_code_check(void) { return 0; }
 int plat_code_init(void) { return 0; }
-int plat_fault_emulate_load(uint64_t fault_addr, int (*rd)(uint64_t ea, size_t n, void *dst)) {
-    return (void)fault_addr, (void)rd, 0;
+int plat_fault_emulate_load(uint64_t fault_addr, int cmp, int (*rd)(uint64_t ea, size_t n, void *dst)) {
+    return (void)fault_addr, (void)cmp, (void)rd, 0;
 }
 int plat_fault_step(void (*fn)(uint64_t arg), uint64_t arg) { return (void)fn, (void)arg, 0; }
 void plat_fault_step_arm(uint64_t *rflags) { (void)rflags; }

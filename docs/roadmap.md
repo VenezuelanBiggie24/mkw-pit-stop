@@ -119,6 +119,10 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   (0), `MKW_REPLAY_PAR_MORE` (6 recorders: 35.0 against 34.3 ms, the cores are taken). `MKW_REPLAY_PAR_MORE`/`SMALL`
   drew whole-scene vertical streaks in their B blocks; MORE alone renders clean, so SMALL or the switching is the bug.
   Both were removed in the merge of 0.1.13.
+- **Done, small gain: sibling reads by `cmp`** (19/11/2026). Two `cmp` sites held 64 % of the early-read wait time left
+  on 1.8.0, so the fault handler now emulates `cmp` with a memory operand (`MKW_EARLY_SIBLING_CMP`, default 1). A/B
+  inside two Grand Prix races at FPS=60: -0.38 and -0.12 ms (inverted), -0.25 ms by means and -0.46 by medians. The wait
+  time was mostly not on the frame's critical path. Of the reads still not emulated, 54 % were at `EMU_MAX`.
 - **Measured and set aside: profile-guided optimization** (19/11/2026). 1.8.0 on the PS5, Grand Prix at FPS=60, frame
   generation off, 210 s of race per run, in the order A B A B: `-O1` 23.87 and 24.85 ms, `-O2` with PGO 24.12 and
   23.97 ms. One run of each build had a single 4-6 s stall; without it `-O1` is 23.87 and 24.14 ms, PGO 23.64 and

@@ -599,19 +599,24 @@ static int sibling_step(uint64_t a, uint64_t p, uint64_t np, size_t ep) {   // f
 // protects, ~44 us each on the PS5, against waits of 15-20 ms), writes the register and skips the instruction; the
 // watch stays. The single step died on the PS5 at its first use (step-ab6): no trap flag there. At most EMU_MAX reads
 // a native page for one writer fence: past that it waits as before (a loop over the page would cost more than the
-// wait). Only bytes of 4 KiB pages not watched are read; anything else waits as before (sib_emu_no counts it).
+// wait). Only bytes of 4 KiB pages not watched are read; anything else waits as before (sib_emu_no counts it, and the
+// three sib_no_* say why). MKW_EARLY_SIBLING_CMP (default 1, "ab" to compare) also emulates CMP with a memory operand.
 #define EMU_MAX 32
-static int sib_emu = -1;
+static int sib_emu = -1, sib_cmp;
 static uint64_t sib_emus, sib_emu_no;   // since the last log line
+static uint64_t sib_no_max, sib_no_insn, sib_no_bytes;   // not emulated: EMU_MAX, the instruction, the bytes
+static int emu_refused;   // sibling_read said no to this read
 static struct { uint64_t np, key; int n; } emu_seen[16];
 static uint64_t emu_np;   // the native page sibling_read may open (frz_lock)
 static int emu_prot;
 
 static int sibling_read(uint64_t ea, size_t n, void *dst) {   // frz_lock held (inside mem_early_release_locked)
     size_t ep = plat_mem_early_page_size();
+    emu_refused = 1;
     if (ea < emu_np || ea + n > emu_np + ep) return 0;
     for (uint64_t q = ea & ~(PAGE - 1); q < ea + n; q += PAGE)
         if (trapped[q / PAGE] == 2) return 0;
+    emu_refused = 0;
     if (plat_mem_early_protect(emu_np, ep, 0, emu_prot) != PLAT_EARLY_OK)
         rt_fatal("memory: early-read watch: page %#llx kept no access", (unsigned long long)emu_np);
     memcpy(dst, (const void *)(uintptr_t)ea, n);
@@ -627,6 +632,7 @@ static void sibling_emu_init(void) {
     if (plat_mem_early_page_size() == PAGE) return (void)(sib_emu = 0);   // (no siblings)
     sib_emu = rt_knob("EARLY_SIBLING_EMU", "1");
     if (!sib_emu) return;
+    sib_cmp = rt_knob("EARLY_SIBLING_CMP", "1");
     int ok = plat_code_init();
     rt_log("mem: sibling-page reads emulated%s (MKW_EARLY_SIBLING_EMU): the code-read check %s", sib_emu == 2 ? " in the B blocks" : "",
            ok ? "passed" : "failed, so they wait as before");
@@ -639,9 +645,13 @@ static int sibling_emu(uint64_t a, uint64_t p, uint64_t np, size_t ep) {   // fr
     if (sib_emu <= 0 || !RT_KNOB_ON(sib_emu) || !sibling_pending(a, p, np, ep, &prot, &key)) return 0;
     int k = (int)((np / ep) % 16);
     if (emu_seen[k].np != np || emu_seen[k].key != key) emu_seen[k].np = np, emu_seen[k].key = key, emu_seen[k].n = 0;
-    if (emu_seen[k].n >= EMU_MAX) return sib_emu_no++, 0;
-    emu_np = np, emu_prot = prot;
-    if (!plat_fault_emulate_load(a, sibling_read)) return sib_emu_no++, 0;
+    if (emu_seen[k].n >= EMU_MAX) return sib_no_max++, sib_emu_no++, 0;
+    emu_np = np, emu_prot = prot, emu_refused = 0;
+    if (!plat_fault_emulate_load(a, RT_KNOB_ON(sib_cmp), sibling_read)) {
+        if (emu_refused) sib_no_bytes++;
+        else sib_no_insn++;
+        return sib_emu_no++, 0;
+    }
     emu_seen[k].n++, sib_emus++;
     return 1;
 }
@@ -721,13 +731,16 @@ void mem_early_log(uint64_t frame) {   // every frame
     rt_log("mem: early reads at frame %llu (%lld pages watched now)%s; waits %lld, %.1f ms in all, %lld given up (fence "
            "not handed to the queue in %llu ms); touches by host code on game threads %lld (no wait); released by an "
            "invalidate of other bytes %lld; sibling-page watches given up without a wait %llu; sibling reads let through "
-           "(MKW_EARLY_SIBLING_STEP) %llu, emulated (MKW_EARLY_SIBLING_EMU) %llu, not emulated %llu; %s",
+           "(MKW_EARLY_SIBLING_STEP) %llu, emulated (MKW_EARLY_SIBLING_EMU) %llu, not emulated %llu (at the limit %llu, instruction not "
+           "handled %llu, bytes on a watched page %llu); %s",
            (unsigned long long)frame, (long long)mem_early_pages, k ? b : ": none", (long long)waits,
            (double)wait_ns / 1e6, (long long)not_issued, (unsigned long long)(ISSUE_WAIT_NS / 1000000),
            (long long)not_game, (long long)range_skips, (unsigned long long)siblings_released,
-           (unsigned long long)sib_steps, (unsigned long long)sib_emus, (unsigned long long)sib_emu_no, ev);
+           (unsigned long long)sib_steps, (unsigned long long)sib_emus, (unsigned long long)sib_emu_no,
+           (unsigned long long)sib_no_max, (unsigned long long)sib_no_insn, (unsigned long long)sib_no_bytes, ev);
     waits = wait_ns = range_skips = not_game = not_issued = 0;
     siblings_released = 0, sib_steps = 0, sib_emus = 0, sib_emu_no = 0;
+    sib_no_max = sib_no_insn = sib_no_bytes = 0;
     char wr[1024];
     int wo = 0;
     plat_mutex_lock(&wread_lock);

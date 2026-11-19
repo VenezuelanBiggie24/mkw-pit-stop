@@ -593,7 +593,7 @@ static int emu_read(uint64_t ea, size_t n, void *dst) {
 static int emu_hook(uint64_t addr) {
     if (addr - emu_page >= PS5_KERNEL_PAGE_SIZE) return 0;
     emu_faults++;
-    assert(plat_fault_emulate_load(addr, emu_read));
+    assert(plat_fault_emulate_load(addr, 0, emu_read));
     return 1;
 }
 
