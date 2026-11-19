@@ -50,8 +50,6 @@ void warn_once(int key, const char *fmt, ...) {
 // which every thread of the process would carry: B, DS, RS, UPD, SM, PM and BRA name this thread's, each through a
 // pointer set there.
 
-_Thread_local DrawB *dtl_b;
-_Thread_local int pd_on;
 
 void vk_exec_draw_new_cb(void) {
     vk_exec_draw_thread();
@@ -77,7 +75,7 @@ void vk_exec_draw_forget(void) {
 #define SHADER_SETS 2048
 #define SHADER_WAYS 4
 typedef struct { uint64_t serial; int stage; int used; GfxShaderAnswers a; const GfxShader *s; } ShaderEnt;
-static _Thread_local ShaderEnt (*shader_tab)[SHADER_WAYS];   // per recording thread (vk_exec_draw_thread)
+#define shader_tab (*(ShaderEnt (**)[SHADER_WAYS])&vk_rt.shader_tab)   // per recording thread (vk_exec_draw_thread)
 
 static int find_stage_scan(const prog_t *p, int nvn_stage, const uint8_t **ctl, const uint8_t **code, uint32_t *len) {
     for (uint32_t i = 0; i < p->nstage && i < 6; i++) {   // prog_t keeps 6 shaders
@@ -99,7 +97,7 @@ static int find_stage_scan(const prog_t *p, int nvn_stage, const uint8_t **ctl, 
 // several times a draw. Direct-mapped; a collision only scans again.
 #define STAGEM_N 512
 typedef struct { uint64_t serial; int8_t idx[8]; uint32_t len[8]; } StageM;   // NVN stages 0-7 (6 task, 7 mesh)
-static _Thread_local StageM *stagem;   // STAGEM_N per recording thread (vk_exec_draw_thread)
+#define stagem (*(StageM **)&vk_rt.stagem)   // STAGEM_N per recording thread (vk_exec_draw_thread)
 
 int find_stage(const prog_t *p, int nvn_stage, const uint8_t **ctl, const uint8_t **code, uint32_t *len) {
     if (!p->serial || (unsigned)nvn_stage >= 8) return find_stage_scan(p, nvn_stage, ctl, code, len);
@@ -298,7 +296,7 @@ static uint32_t attached_as(const VkExec *ex, const SubRange *r) {
 // pass or an earlier one. Direct-mapped.
 #define FM_N 8192
 typedef struct { uint64_t h, tok; uint32_t gen; SubRange r; } FeedMemo;
-static _Thread_local FeedMemo *FM;   // FM_N per recording thread (vk_exec_draw_thread): its hits are read without a lock
+#define FM (*(FeedMemo **)&vk_rt.fm)   // FM_N per recording thread (vk_exec_draw_thread): its hits are read without a lock
 
 // One lookup per texture lock: held over a draw's whole scan, the game's vk_texture_register waited for it (wlp2c,
 // Windows: 54 ms per s of race, the scan holding it 71).
@@ -477,7 +475,7 @@ typedef struct {
     VkPipeState pipe;
 } MemoKey;
 typedef struct { int on, valid, has_fs; MemoKey k; const GfxShader *vs, *fs; } DrawSM;
-static _Thread_local DrawSM *dtl_sm;
+#define dtl_sm (*(DrawSM **)&vk_rt.sm)
 #define SM (*dtl_sm)
 
 static void memo_key(const VkExec *ex, MemoKey *k) {
@@ -498,7 +496,7 @@ static int shader_memo_on(void) {
 }
 
 typedef struct { int on, valid; VkPipeState s; const VkPipeInfo *info; } DrawPM;
-static _Thread_local DrawPM *dtl_pm;
+#define dtl_pm (*(DrawPM **)&vk_rt.pm)
 #define PM (*dtl_pm)
 
 static int pipe_memo_on(void) {
@@ -682,8 +680,8 @@ struct DrawTls {
     DrawB b;
     DrawSM sm;
     DrawPM pm;
-    ShaderEnt shader_tab[SHADER_SETS][SHADER_WAYS];
-    StageM stagem[STAGEM_N];
+    ShaderEnt shader_tab_[SHADER_SETS][SHADER_WAYS];
+    StageM stagem_[STAGEM_N];
     FeedMemo fm[FM_N];
 };
 
@@ -694,6 +692,6 @@ void vk_exec_draw_thread(void) {
     if (!t) rt_fatal("vk: out of memory (replay thread state)");
     t->sm.on = t->pm.on = -1;
     dtl_b = &t->b, dtl_sm = &t->sm, dtl_pm = &t->pm;
-    shader_tab = t->shader_tab, stagem = t->stagem, FM = t->fm;
+    shader_tab = t->shader_tab_, stagem = t->stagem_, FM = t->fm;
     vk_exec_bind_thread();
 }

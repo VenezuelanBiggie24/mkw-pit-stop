@@ -166,7 +166,36 @@ enum { VK_SKIP_OFF, VK_SKIP_SCISSOR, VK_SKIP_PROGRAM, VK_SKIP_NO_VS, VK_SKIP_SHA
 extern VkExecFrame vk_exec_frame_all;
 // The counters this thread adds to: vk_exec_frame_all, or a chunk's own on MKW_REPLAY_PAR's threads (summed into it
 // when the chunks join, vk_exec_frame_add).
-extern _Thread_local VkExecFrame *vk_exec_frame_cur;
+// The recording threads' per-thread state, in one _Thread_local block (vk_exec.c). On the PS5 every _Thread_local
+// access is a call (the target's emulated TLS, __emutls_get_address) and the compiler makes one per variable in a
+// function: a draw paid ~15 of them (prepare_draw_ex, bind_resources) and every op ~6 (vk_exec_op), ~100,000 a frame
+// over the recording threads. With one block a function pays one. The old names are macros over its fields; a type
+// that is one file's own is kept as void * and named through that file's macro.
+// MKW_BIND_STATS counters (vk_exec_bind.c bind_stats).
+typedef struct {
+    int on;
+    uint64_t draws, bind[2], desc[2], push, push_skip, set_new, set_reuse, same_prog, same_all, bind_skip, ubo_skip;
+    uint64_t miss[8];   // graphics builds not skipped, by the first input of bind_sig that differed (bind_stats)
+} DrawBS;
+typedef struct VkRecTls {
+    VkExecFrame *frame_cur;              // vk_exec_frame_cur
+    VkExec *x_cur, *x_here_ex;           // vk_exec.c
+    uint64_t x_pos, bind_gen;
+    int op_hit, split_ending, pd_on, ubo_kind;
+    uint32_t c0_dim[3], c0_binst;
+    const GfxShader *c0_cs;
+    void *b, *upd, *sm, *pm, *shader_tab, *stagem, *fm;   // vk_exec_draw.c's blocks (vk_exec_draw_thread)
+    void *ds, *rs, *bra, *td, *tb;                         // vk_exec_bind.c's (vk_exec_bind_thread)
+    void *ru_cap;                                          // vk_exec_reuse.c
+    const void *rs_last, *rs_last_l;
+    struct CbRes *cb_cur;                // vk_exec_cb.c: the command buffer's resources, and the fence they belong to
+    uint64_t cb_cur_fence;
+    uint64_t td_stat[7];                 // vk_exec_bind.c (MKW_TRACE=perf texture memo counters)
+    int br_on;
+    DrawBS bs;
+} VkRecTls;
+extern _Thread_local VkRecTls vk_rt;
+#define vk_exec_frame_cur (vk_rt.frame_cur)
 #define vk_exec_frame (*vk_exec_frame_cur)
 void vk_exec_frame_add(const VkExecFrame *f);
 void vk_exec_frame_written(const tex_t *t);                    // vk_texture_gpu_written: t rendered or copied into

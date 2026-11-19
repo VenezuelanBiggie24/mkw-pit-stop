@@ -28,10 +28,9 @@
 // again (the descriptors stay bound across pipeline binds of that layout).
 #define DS_SIG_BYTES (MAX_DESC * sizeof(VkDescSlot))
 typedef struct { uint32_t n[2], pn[2]; uint8_t sig[2][DS_SIG_BYTES], psig[2][DS_SIG_BYTES]; } DrawDS;
-static _Thread_local DrawDS *dtl_ds;
+#define dtl_ds (*(DrawDS **)&vk_rt.ds)
 #define DS (*dtl_ds)
 
-_Thread_local DrawBS BS = {-1};
 
 // The inputs of the last graphics bind_resources (bind_sig) and what its build counted for the traffic census, which a
 // skipped build counts again. RS_BYTES bounds the bound-slot bytes a pipeline reads (RsList): per binding at most one
@@ -54,7 +53,7 @@ typedef struct {
     uint32_t ckn;                        // check mode: the last build's packed descriptors (bytes in ck)
     uint8_t ck[DS_SIG_BYTES];
 } DrawRS;
-static _Thread_local DrawRS *dtl_rs;
+#define dtl_rs (*(DrawRS **)&vk_rt.rs)
 #define RS (*dtl_rs)
 
 // The bound-slot bytes of VkExec a pipeline's descriptors read, as ranges merged where they touch, built once per
@@ -68,12 +67,9 @@ typedef struct { int st; const GfxShaderRes *res; } RsPtr;
 typedef struct { uint32_t n, bytes; uint8_t sup, c0, ok, np; RsPtr p[RS_PTRS]; RsRange r[]; } RsList;
 static nvn_hmap rs_lists;                // VkPipeInfo pointer -> RsList, until shutdown; rs_lock
 static PlatMutex rs_lock = PLAT_MUTEX_INIT;
-static _Thread_local const VkPipeInfo *rs_last;        // the last lookup
-static _Thread_local const RsList *rs_last_l;
+#define rs_last (*(const VkPipeInfo **)&vk_rt.rs_last)        // the last lookup
+#define rs_last_l (*(const RsList **)&vk_rt.rs_last_l)
 
-_Thread_local uint32_t c0_dim[3], c0_binst;
-_Thread_local const GfxShader *c0_cs;
-_Thread_local uint64_t bind_gen = 1;
 
 // ---- descriptors
 
@@ -219,7 +215,7 @@ void limits_init(void) {
     __atomic_store_n(&LIM.ubo_max, l->maxUniformBufferRange, __ATOMIC_RELEASE);
 }
 
-static _Thread_local int ubo_kind;   // MKW_REUSE: what gave ubo_info's last answer (RUK_*)
+#define ubo_kind (vk_rt.ubo_kind)   // MKW_REUSE: what gave ubo_info's last answer (RUK_*)
 
 static VkDescriptorBufferInfo ubo_info(VkExec *ex, int st, int slot) {
     ubo_kind = RUK_STABLE;
@@ -335,9 +331,8 @@ typedef struct {
     VkImage image;
     VkDescriptorImageInfo out;
 } TexMemo;
-static _Thread_local TexMemo *TD;   // TD_N per recording thread (vk_exec_draw_thread)
+#define TD (*(TexMemo **)&vk_rt.td)   // TD_N per recording thread (vk_exec_draw_thread)
 
-_Thread_local uint64_t td_stat[7];
 
 static void tex_lock_once(int *locked) {
     if (*locked) return;
@@ -415,7 +410,7 @@ typedef struct {
     VkImage image[TB_MAX];
     VkDescSlot out[TB_MAX];
 } TexBindMemo;
-static _Thread_local TexBindMemo *TB;
+#define TB (*(TexBindMemo **)&vk_rt.tb)
 
 // What support_fill reads: viewport size, point size and the alpha test's reference (0 with the test off, so a
 // reference the game sets for no test makes no new buffer).
@@ -690,11 +685,11 @@ static void write_set(const VkPipeInfo *info, uint32_t s, VkDescriptorSet set, c
 // MKW_TRACE=draw: bind_resources by stage (TSC ticks), printed with prepare_draw's stages.
 static _Thread_local uint64_t br_t;
 _Thread_local uint64_t br_tsc[BR_N];
-static _Thread_local int br_on;
+#define br_on (vk_rt.br_on)
 #define BR_MARK(i) do { if (br_on) { uint64_t t_ = plat_cycles(); br_tsc[i] += t_ - br_t; br_t = t_; } } while (0)
 
 typedef struct { VkWriteDescriptorSet w[MAX_BINDINGS]; VkDescSlot d[MAX_DESC]; VkBufferView bv[MAX_DESC]; } DrawBRA;
-static _Thread_local DrawBRA *dtl_bra;
+#define dtl_bra (*(DrawBRA **)&vk_rt.bra)
 #define BRA (*dtl_bra)
 
 typedef struct { const VkPipeInfo *info; uint32_t s; const VkDescSlot *d; VkWriteDescriptorSet *w; uint32_t i0, i1; } DcWrite;

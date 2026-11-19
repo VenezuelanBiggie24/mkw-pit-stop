@@ -69,7 +69,6 @@ void vk_c0_fill(uint8_t bank[VK_C0_BYTES], int stage, const p_bind_buf ssbo[16],
 // into the buffer's GPU copy; guest memory gets them only from the write-back when the submission ends. The terrain
 // rewrites its pointer block this way before every draw, all at one address, so ubo_ptr reads the latest update that
 // covers the pointer, else memory. Payloads stay in the recorded command buffer for the whole replay.
-_Thread_local DrawUPD *dtl_upd;
 
 void vk_exec_draw_upd_seed(const VkExec *ex, const void *const *upd, int n) {
     UPD.fence = ex->fence, UPD.n = 0;

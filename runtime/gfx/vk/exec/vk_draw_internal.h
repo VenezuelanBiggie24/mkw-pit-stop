@@ -68,24 +68,18 @@ typedef struct {
     int ds_pushed[2];                    // set number holds the push of DS.psig under ds_layout
     int res_valid;                       // the graphics sets bound hold what the inputs in RS give (bind_resources)
 } DrawB;
-extern _Thread_local DrawB *dtl_b DRAW_SHARED;   // vk_exec_draw.c
+#define dtl_b (*(DrawB **)&vk_rt.b)   // vk_exec_draw.c (vk_exec.h VkRecTls)
 #define B (*dtl_b)
 
 // The draw or dispatch being bound (vk_exec_bind.c), set by the ops: its dispatch size and base instance, its compute
 // shader, and a generation every bind op that writes ex->prog, ubo, ssbo, tex or img bumps.
-extern _Thread_local uint32_t c0_dim[3] DRAW_SHARED, c0_binst DRAW_SHARED;
-extern _Thread_local const GfxShader *c0_cs DRAW_SHARED;
-extern _Thread_local uint64_t bind_gen DRAW_SHARED;
-extern _Thread_local int pd_on DRAW_SHARED;            // MKW_TRACE=draw timing (prepare_draw_ex sets it per draw)
+#define c0_dim (vk_rt.c0_dim)
+#define c0_binst (vk_rt.c0_binst)
+#define c0_cs (vk_rt.c0_cs)
+#define bind_gen (vk_rt.bind_gen)
+#define pd_on (vk_rt.pd_on)            // MKW_TRACE=draw timing (prepare_draw_ex sets it per draw)
 
-// MKW_BIND_STATS counters (vk_exec_bind.c bind_stats).
-// MKW_BIND_STATS counters (bind_stats).
-typedef struct {
-    int on;
-    uint64_t draws, bind[2], desc[2], push, push_skip, set_new, set_reuse, same_prog, same_all, bind_skip, ubo_skip;
-    uint64_t miss[8];   // graphics builds not skipped, by the first input of bind_sig that differed (bind_stats)
-} DrawBS;
-extern _Thread_local DrawBS BS DRAW_SHARED;
+#define BS (vk_rt.bs)   // MKW_BIND_STATS counters (DrawBS, vk_exec.h)
 
 static inline int bind_stats_on(void) {
     if (BS.on < 0) {
@@ -99,7 +93,7 @@ static inline int bind_stats_on(void) {
 enum { PD_HEAD, PD_SHADER, PD_FEEDBACK, PD_PIPE, PD_STATE, PD_RES, PD_VB, PD_N };
 enum { BR_SIG, BR_C0, BR_UBO, BR_SSBO, BR_TEX, BR_CHECK, BR_SETS, BR_N };   // BR_C0: c0, compiler constants, support
 extern _Thread_local uint64_t pd_tsc[PD_N] DRAW_SHARED, pd_n DRAW_SHARED, br_tsc[BR_N] DRAW_SHARED;
-extern _Thread_local uint64_t td_stat[7] DRAW_SHARED;   // MKW_TRACE=perf: memo hits, of them first in the submission, misses, not memoised; miss TSC, hit TSC, texture lock TSC
+#define td_stat (vk_rt.td_stat)   // MKW_TRACE=perf: memo hits, of them first in the submission, misses, not memoised; miss TSC, hit TSC, texture lock TSC
 
 // The inline uniform updates of the submission being replayed, newest last (a ring of UPD_N). op_update_ub writes them
 // into the buffer's GPU copy; guest memory gets them only from the write-back when the submission ends. The terrain
@@ -111,7 +105,7 @@ typedef struct {
     uint32_t n;                          // updates noted in it
     struct { uint64_t lo, hi; const uint8_t *data; } u[UPD_N];
 } DrawUPD;
-extern _Thread_local DrawUPD *dtl_upd DRAW_SHARED;   // vk_exec_ubuf.c
+#define dtl_upd (*(DrawUPD **)&vk_rt.upd)   // vk_exec_ubuf.c
 #define UPD (*dtl_upd)
 
 static inline void upd_note(const VkExec *ex, const p_update_ub *u) {
@@ -183,11 +177,12 @@ static inline int c0_ssbo_base(int stage) {
 // ---- entry points of the parts
 // vk_exec_cb.c: the command buffer's resources (made on its first use) and the pipeline bound per bind point
 typedef struct CbRes CbRes;
-extern _Thread_local CbRes *cur DRAW_SHARED;
-extern _Thread_local uint64_t cur_fence DRAW_SHARED;
 CbRes *cb_res_new(VkExec *ex);
 
-static inline CbRes *cb_res(VkExec *ex) { return cur && cur_fence == ex->fence ? cur : cb_res_new(ex); }
+static inline CbRes *cb_res(VkExec *ex) {
+    CbRes *r = vk_rt.cb_cur;
+    return r && vk_rt.cb_cur_fence == ex->fence ? r : cb_res_new(ex);
+}
 
 static inline void bind_pipeline(VkExec *ex, VkPipelineBindPoint bp, VkPipeline p) {
     int k = bp == VK_PIPELINE_BIND_POINT_COMPUTE;

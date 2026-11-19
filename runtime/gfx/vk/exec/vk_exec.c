@@ -46,9 +46,9 @@ static VkExec X;
 static int x_ready;
 // The replay state this thread records with: X inside vk_exec_record, a chunk's copy on MKW_REPLAY_PAR's threads
 // (vk_exec_inline_begin, vk_exec_recording_fence); NULL elsewhere.
-static _Thread_local VkExec *x_cur;
-static _Thread_local VkExec *x_here_ex;   // X while this thread is in vk_exec_record
-static _Thread_local uint64_t x_pos;      // ops handed to vk_exec_op in this submission (a chunk starts at its first)
+#define x_cur (vk_rt.x_cur)
+#define x_here_ex (vk_rt.x_here_ex)   // X while this thread is in vk_exec_record
+#define x_pos (vk_rt.x_pos)           // ops handed to vk_exec_op in this submission (a chunk starts at its first)
 
 uint64_t vk_exec_op_pos(void) { return x_pos; }
 void vk_exec_op_pos_set(uint64_t pos) { x_pos = pos; }
@@ -56,7 +56,7 @@ void vk_exec_op_pos_set(uint64_t pos) { x_pos = pos; }
 // ---- MKW_TRACE=gfx frame counters
 
 VkExecFrame vk_exec_frame_all;
-_Thread_local VkExecFrame *vk_exec_frame_cur = &vk_exec_frame_all;
+_Thread_local VkRecTls vk_rt = {.frame_cur = &vk_exec_frame_all, .bind_gen = 1, .bs = {.on = -1}};   // vk_exec.h
 
 void vk_exec_frame_add(const VkExecFrame *f) {
     uint64_t *d = (uint64_t *)&vk_exec_frame_all;
@@ -253,7 +253,7 @@ void vk_exec_pass_begin(VkExec *ex) {
 
 // Set while a pass ends only to resume (maybe_split's new command buffer, an inline command such as MKW_DUMP_DRAWS's
 // snapshots or MKW_TEX_ALIAS's copies): the targets are half drawn, MKW_RTSTATS leaves them for the real end of the pass.
-static _Thread_local int split_ending;
+#define split_ending (vk_rt.split_ending)
 
 void vk_exec_pass_end(VkExec *ex) {
     if (!ex->in_pass) return;
@@ -429,7 +429,7 @@ static int op_timing = -1;
 enum { OPX_BEGIN = OP_COUNT_, OPX_SPLIT, OPX_END, OPX_HIT, OPX_CAP, OPX_N };   // the submission's start and end, the
                                                                               // splits, draws MKW_REUSE served, captured
 static uint64_t op_tsc[OPX_N], op_cnt[OPX_N], op_t0, op_ns0;
-static _Thread_local int op_hit;   // the op being walked was a draw MKW_REUSE served (OPX_HIT) or captured (OPX_CAP)
+#define op_hit (vk_rt.op_hit)   // the op being walked was a draw MKW_REUSE served (OPX_HIT) or captured (OPX_CAP)
 static const char *opx_name(int i) {
     return i == OPX_BEGIN ? "(start: mirrors, usnap)" : i == OPX_SPLIT ? "(splits)" : i == OPX_END ? "(end of the walk)"
            : i == OPX_HIT ? "(draws reused)" : i == OPX_CAP ? "(draws captured)" : nvn_op_name((uint32_t)i);

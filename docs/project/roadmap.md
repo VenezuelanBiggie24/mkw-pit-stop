@@ -95,6 +95,11 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   5.9 us (4.0 ms, all threads; spin loops, cheaper ones only spin more, 15/11), SignalToAddress 387 at 4.3 us
   (1.7 ms), and a wait's handoff to running again 12-25 us, ~10 of it the OS wake (`MKW_ADDR_SPIN` A/B: -0.09 and
   +0.15 ms, none).
+- **Done: the recording threads' thread-locals in one block** (19/11/2026). The PS5 target's TLS is emulated: every
+  `_Thread_local` access is a call to `__emutls_get_address`, one per variable per function, ~15 per draw and ~6 per
+  replayed op. Native TLS does not link (the title's layout has no TLS segment). `VkRecTls vk_rt` (vk_exec.h) holds
+  them, so a function makes one. Four alternating races: 17.53 / 17.57 ms before, 17.36 / 17.33 after; 1 % low
+  35.5-35.8 -> 39.2-39.5 fps. Left as they were: trace-only counters, the fault handler's and the kernel's (`tcur`).
 - **Done: no shadow copies on the PS5** (19/11/2026). Races of one build ran in one of two states, ~22 ms or
   18.8-19.7 ms: the fast ones were those where the governor's first hard pass had shed shadows
   (`vk_mem_shadow_shed`) before the race's pools were made, so they were imported (fence write-backs ~5 MiB per log

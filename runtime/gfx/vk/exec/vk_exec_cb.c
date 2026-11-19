@@ -42,8 +42,6 @@ struct CbRes {
     int32_t *wslot;    // open-addressing index of written (-1 empty), 2 * cwritten slots: note_written's lookup
 };
 
-_Thread_local CbRes *cur;
-_Thread_local uint64_t cur_fence;
 
 // Descriptor pools and full-size transient chunks go back to these lists when their command buffer completes, instead
 // of being destroyed and created again for the next one: each creation is a driver memory allocation (on Windows an
@@ -86,9 +84,9 @@ static void cb_done(void *arg) {   // completion thread
 }
 
 CbRes *cb_res_new(VkExec *ex) {
-    cur = calloc(1, sizeof *cur);
+    CbRes *cur = calloc(1, sizeof *cur);
     if (!cur) rt_fatal("vk: out of memory");
-    cur_fence = ex->fence;
+    vk_rt.cb_cur = cur, vk_rt.cb_cur_fence = ex->fence;   // cb_res's memo (vk_exec.h VkRecTls)
     memset(&B, 0, sizeof B);
     vk_completion_add(ex->fence, cb_done, cur);
     return cur;

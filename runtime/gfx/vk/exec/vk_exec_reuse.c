@@ -32,6 +32,7 @@
 #include "vk_draw_internal.h"
 #include "vk_rec_reuse.h"
 #include "vk_reuse.h"
+#undef c0_binst   // a field name here; the recording thread's value is vk_rt.c0_binst (vk_exec.h)
 
 #define RU_GENS 12          // submissions an entry stays without a hit (a race frame sends ~4)
 #define RU_TAB (1u << 15)
@@ -40,7 +41,6 @@
 #define RU_SETN 96          // descriptors of a set
 
 int ru_on = -1;
-_Thread_local RuCap *ru_cap;
 
 typedef struct { uint64_t addr, size, off; VkBuffer buf; } RuMem;
 // A texture slot as the draw found it: its token, and what it resolved to (entry and view) for when the game registers
@@ -428,7 +428,7 @@ static void store(const VkExec *ex, RuCap *c) {
     RuEnt *e = arena_alloc(size);
     if (!e) return;
     *e = (RuEnt){.key = c->key, .gen = cur_gen, .size = (uint32_t)size, .fb_after = ex->fb_dirty & ~c->fb_before, .fbl_read = c->fbl_read, .sgen = vk_sampler_gen(),
-                 .c0_binst = c0_binst, .set_bytes = (uint32_t)sb, .nmem = (uint16_t)c->nmem, .ntex = (uint16_t)c->ntex, .ndep = (uint16_t)ndep,
+                 .c0_binst = vk_rt.c0_binst, .set_bytes = (uint32_t)sb, .nmem = (uint16_t)c->nmem, .ntex = (uint16_t)c->ntex, .ndep = (uint16_t)ndep,
                  .nset = (uint16_t)c->nset, .nwords = (uint16_t)c->win.nwords, .nreloc = (uint16_t)c->win.nreloc,
                  .npk = (uint16_t)c->win.npk, .npair = (uint16_t)c->win.npair, .vmask = vk_exec_streams(ex, c->info), .ntd = (uint16_t)c->ntd};
     memcpy(e->td, c->td, sizeof c->td[0] * c->ntd);
