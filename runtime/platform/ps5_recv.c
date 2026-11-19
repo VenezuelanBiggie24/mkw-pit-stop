@@ -26,6 +26,14 @@
 #define MAGIC_STR "PIT1"
 #define MAX_BATCH 16384u
 #define IO_BUF_SIZE (256u * 1024u)
+// File data is received into PIPE_SLOTS buffers of PIPE_SLOT_SIZE while a writer thread hashes and writes the ones
+// already full: received, hashed and written one after another, the socket sat idle for every write() to the console's
+// disk and the sender stalled on a full window. 4 x 1 MiB keeps a write's worth of data in flight.
+#define PIPE_SLOTS 4u
+#define PIPE_SLOT_SIZE (1024u * 1024u)
+// The kernel's receive buffer, set on the listening socket so the accepted one negotiates a window scale large enough
+// for it: the default left the sender waiting on acknowledgements between bursts.
+#define SOCK_BUF_SIZE (4 * 1024 * 1024)
 #define HASH_CHECK_LIMIT (256ull << 20)
 
 #ifdef __PROSPERO__
@@ -548,7 +556,110 @@ static int handle_begin(int fd) {
     return write_exact(fd, &ok, 1);
 }
 
-static int handle_put(int fd, uint8_t *io_buf) {
+// ---- file data pipeline: the connection's thread receives, the writer thread hashes and writes (see PIPE_SLOTS)
+typedef struct {
+    pthread_mutex_t m;
+    pthread_cond_t c;
+    pthread_t thread;
+    uint8_t *buf[PIPE_SLOTS];
+    size_t len[PIPE_SLOTS];
+    unsigned head, tail;   // filled up to head, written up to tail (both count up; slot = n % PIPE_SLOTS)
+    int out_fd;
+    Sha256 *sha;
+    int err;               // a write failed: the rest of the file is not written
+    int quit;
+} Pipe;
+
+static void *pipe_writer(void *arg) {
+    Pipe *p = arg;
+    pthread_mutex_lock(&p->m);
+    for (;;) {
+        while (p->tail == p->head && !p->quit) pthread_cond_wait(&p->c, &p->m);
+        if (p->tail == p->head) break;   // quit with nothing left
+        unsigned slot = p->tail % PIPE_SLOTS;
+        int fd = p->out_fd, failed = p->err;
+        Sha256 *sha = p->sha;
+        pthread_mutex_unlock(&p->m);
+        const uint8_t *b = p->buf[slot];
+        size_t n = p->len[slot], off = 0;
+        sha256_update(sha, b, n);
+        while (!failed && off < n) {
+            ssize_t w = write(fd, b + off, n - off);
+            if (w < 0 && errno == EINTR) continue;
+            if (w <= 0) failed = 1;
+            else off += (size_t)w;
+        }
+        pthread_mutex_lock(&p->m);
+        if (failed) p->err = 1;
+        p->tail++;
+        pthread_cond_broadcast(&p->c);
+    }
+    pthread_mutex_unlock(&p->m);
+    return NULL;
+}
+
+static int pipe_open(Pipe *p) {
+    memset(p, 0, sizeof *p);
+    for (unsigned i = 0; i < PIPE_SLOTS; i++) {
+        p->buf[i] = malloc(PIPE_SLOT_SIZE);
+        if (!p->buf[i]) {
+            while (i--) free(p->buf[i]);
+            return 0;
+        }
+    }
+    pthread_mutex_init(&p->m, NULL);
+    pthread_cond_init(&p->c, NULL);
+    if (pthread_create(&p->thread, NULL, pipe_writer, p) != 0) {
+        for (unsigned i = 0; i < PIPE_SLOTS; i++) free(p->buf[i]);
+        return 0;
+    }
+    return 1;
+}
+
+static void pipe_close(Pipe *p) {
+    pthread_mutex_lock(&p->m);
+    p->quit = 1;
+    pthread_cond_broadcast(&p->c);
+    pthread_mutex_unlock(&p->m);
+    pthread_join(p->thread, NULL);
+    for (unsigned i = 0; i < PIPE_SLOTS; i++) free(p->buf[i]);
+}
+
+// A free slot to receive into (waits for the writer while all are full).
+static uint8_t *pipe_slot(Pipe *p) {
+    pthread_mutex_lock(&p->m);
+    while (p->head - p->tail >= PIPE_SLOTS) pthread_cond_wait(&p->c, &p->m);
+    uint8_t *b = p->buf[p->head % PIPE_SLOTS];
+    pthread_mutex_unlock(&p->m);
+    return b;
+}
+
+static void pipe_push(Pipe *p, size_t n) {
+    pthread_mutex_lock(&p->m);
+    p->len[p->head % PIPE_SLOTS] = n;
+    p->head++;
+    pthread_cond_broadcast(&p->c);
+    pthread_mutex_unlock(&p->m);
+}
+
+// Waits until every pushed slot is written; returns the write error flag.
+static int pipe_drain(Pipe *p) {
+    pthread_mutex_lock(&p->m);
+    while (p->tail != p->head) pthread_cond_wait(&p->c, &p->m);
+    int err = p->err;
+    pthread_mutex_unlock(&p->m);
+    return err;
+}
+
+static int pipe_failed(Pipe *p) {
+    pthread_mutex_lock(&p->m);
+    int err = p->err;
+    pthread_mutex_unlock(&p->m);
+    return err;
+}
+
+static int handle_put(int fd, Pipe *pipe) {
+    uint8_t *io_buf = pipe->buf[0];   // the writer is idle between files: slot 0 serves the resume check
     uint8_t hdr[3];
     if (!read_exact(fd, hdr, 3)) return 0;
     uint8_t flags = hdr[0];
@@ -656,29 +767,31 @@ static int handle_put(int fd, uint8_t *io_buf) {
 
     uint64_t rem = fsize - resume_at;
     int io_err = 0;
+    pthread_mutex_lock(&pipe->m);
+    pipe->out_fd = out_fd;
+    pipe->sha = &sha;
+    pipe->err = 0;
+    pthread_mutex_unlock(&pipe->m);
     while (rem > 0) {
-        size_t chunk = rem > IO_BUF_SIZE ? IO_BUF_SIZE : (size_t)rem;
-        if (!read_exact(fd, io_buf, chunk)) {
+        if (pipe_failed(pipe)) {
+            io_err = 2;
+            break;
+        }
+        size_t chunk = rem > PIPE_SLOT_SIZE ? PIPE_SLOT_SIZE : (size_t)rem;
+        uint8_t *b = pipe_slot(pipe);
+        if (!read_exact(fd, b, chunk)) {
             io_err = 1;
             break;
         }
-        sha256_update(&sha, io_buf, chunk);
-        size_t off = 0;
-        while (off < chunk) {
-            ssize_t w = write(out_fd, io_buf + off, chunk - off);
-            if (w < 0 && errno == EINTR) continue;
-            if (w <= 0) {
-                io_err = 2;
-                break;
-            }
-            off += (size_t)w;
-        }
-        if (io_err) break;
+        pipe_push(pipe, chunk);
         rem -= chunk;
         pthread_mutex_lock(&g_lock);
         g_status.bytes_done += chunk;
         pthread_mutex_unlock(&g_lock);
     }
+    // the writer finishes what was received before the file is closed (and, on a broken connection, the .part keeps
+    // every byte that came: the resume hashes it again)
+    if (pipe_drain(pipe) && io_err != 1) io_err = 2;
     if (!io_err && !strcmp(rel, "eboot.bin") && fsync(out_fd) != 0) io_err = 2;
     if (close(out_fd) != 0 && !io_err) io_err = 2;
     if (io_err) {
@@ -722,7 +835,7 @@ static int handle_put(int fd, uint8_t *io_buf) {
     return 1;
 }
 
-static void handle_client(int fd, uint8_t *io_buf) {
+static void handle_client(int fd, Pipe *pipe) {
     struct timeval tv = {.tv_sec = 30, .tv_usec = 0};
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
@@ -749,7 +862,7 @@ static void handle_client(int fd, uint8_t *io_buf) {
         } else if (op == 'B') {
             if (!handle_begin(fd)) break;
         } else if (op == 'P') {
-            if (!handle_put(fd, io_buf)) break;
+            if (!handle_put(fd, pipe)) break;
         } else if (op == 'D') {
             manifest_save(g_root);
             refresh_shadowmount_sce_sys(g_root);
@@ -784,8 +897,8 @@ static void handle_client(int fd, uint8_t *io_buf) {
 
 static void *recv_main(void *unused) {
     (void)unused;
-    uint8_t *io_buf = malloc(IO_BUF_SIZE);
-    if (!io_buf) return NULL;
+    Pipe pipe;
+    if (!pipe_open(&pipe)) return NULL;
     manifest_load(g_root);
     while (!g_stop) {
         int lfd = __atomic_load_n(&g_listen_fd, __ATOMIC_ACQUIRE);
@@ -797,10 +910,10 @@ static void *recv_main(void *unused) {
             if (errno == EINTR && !g_stop) continue;
             break;
         }
-        handle_client(cfd, io_buf);
+        handle_client(cfd, &pipe);
         close(cfd);
     }
-    free(io_buf);
+    pipe_close(&pipe);
     manifest_free();
     return NULL;
 }
@@ -987,6 +1100,8 @@ int ps5_recv_start(const char *root_dir, uint16_t port, const char *port_version
     if (fd < 0) return 0;
     int reuse = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof reuse);
+    int rcvbuf = SOCK_BUF_SIZE;   // a refusal only leaves the default
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof rcvbuf);
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof addr);
     addr.sin_family = AF_INET;
