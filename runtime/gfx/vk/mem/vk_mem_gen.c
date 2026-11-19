@@ -222,19 +222,28 @@ uint64_t snap_regions(uint64_t r0, uint64_t r1, uint32_t epoch) {
     return calls;
 }
 
+uint64_t vk_snap_q_ns, vk_snap_lock_ns;   // MKW_TRACE=perf: queries made by checks, and waits for gen_lock (precheck)
+
 int vk_mem_changed_snap(uint64_t addr, uint64_t size, uint32_t since, uint32_t epoch, uint32_t *now) {
     if (!size) { *now = since; return 0; }
     uint64_t lo = addr & ~0xfffull, hi = (addr + size + 0xfff) & ~0xfffull;
     uint64_t r0 = lo >> SNAP_SHIFT, r1 = (hi - 1) >> SNAP_SHIFT;
     if (!epoch || r1 >= SNAP_REGIONS) return vk_mem_changed(addr, size, since, now);
-    int excl = 0;
+    int excl = 0, perf = (rt_trace & RT_TRACE_PERF) != 0;
+    uint64_t t0 = perf ? kern_now_ns() : 0;
     gen_lock_s();
+    if (perf) __atomic_add_fetch(&vk_snap_lock_ns, kern_now_ns() - t0, __ATOMIC_RELAXED);
     for (uint64_t r = r0; r <= r1; r++)
         if (snap_at[r] != epoch) { excl = 1; break; }
     if (excl) {
         plat_mutex_unlock_shared(&gen_lock);
+        uint64_t t1 = perf ? kern_now_ns() : 0;
         gen_lock_x();
+        uint64_t t2 = perf ? kern_now_ns() : 0;
         n_snap_calls += snap_regions(r0, r1, epoch);
+        if (perf)
+            __atomic_add_fetch(&vk_snap_lock_ns, t2 - t1, __ATOMIC_RELAXED),
+                __atomic_add_fetch(&vk_snap_q_ns, kern_now_ns() - t2, __ATOMIC_RELAXED);
     }
     int untracked = 0, changed = 0;
     for (uint64_t r = r0; r <= r1; r++) untracked |= snap_untracked[r];

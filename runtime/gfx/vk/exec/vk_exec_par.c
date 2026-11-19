@@ -124,6 +124,7 @@ static struct {
     uint64_t n_inpass;    // chunks cut inside a pass (at twice their draws without a target change)
     uint64_t n_qcut;      // chunks cut at a queue switch
     uint64_t n_pre, pre_ns;   // slots checked ahead, and the time (precheck)
+    uint64_t pre_texlock_ns, pre_snap_ns, pre_q_ns, pre_lock_ns, pre_up_n, pre_up_ns;   // MKW_TRACE=perf: its split
     // where the first send waits (summed over submissions): chunk 0's draws, walk start to its hand-out, to its record
     uint64_t t_walk, ch0_draws, ch0_pub_ns, ch0_rdy_ns;
     int wdraws;           // the walk's draws so far
@@ -200,16 +201,23 @@ static void tid_note(const uint64_t *h, int n) {
 // submission changes nothing; a slot bound and never sampled is checked as well. The chunks then find each slot
 // checked (vk_texture_checked) and skip the lock. MKW_REPLAY_PAR_PRECHECK=0: as before, to measure.
 // With MKW_REPLAY_PAR_PIPE, the slots noted since the last call, before the chunks holding them are handed out.
+extern uint64_t vk_pc_snap_ns, vk_pc_up_n, vk_pc_up_ns, vk_snap_q_ns, vk_snap_lock_ns;   // MKW_TRACE=perf split
+
 static void precheck(void) {
     if (P.pre_from >= P.ntid) return;
     uint64_t t0 = kern_now_ns();
+    uint64_t s0 = vk_pc_snap_ns, u0 = vk_pc_up_n, un0 = vk_pc_up_ns, q0 = vk_snap_q_ns, l0 = vk_snap_lock_ns;
+    uint64_t tl0 = kern_now_ns();
     uint32_t ep = vk_texture_epoch();
     vk_texture_lock();
+    P.pre_texlock_ns += kern_now_ns() - tl0;
     for (int i = P.pre_from; i < P.ntid; i++)
         if (!vk_texture_checked((int)P.tids[i], ep)) vk_texture_by_id_locked((int)P.tids[i], NULL, NULL), P.n_pre++;
     vk_texture_unlock();
     P.pre_from = P.ntid;
     P.pre_ns += kern_now_ns() - t0;
+    P.pre_snap_ns += vk_pc_snap_ns - s0, P.pre_up_n += vk_pc_up_n - u0, P.pre_up_ns += vk_pc_up_ns - un0;
+    P.pre_q_ns += vk_snap_q_ns - q0, P.pre_lock_ns += vk_snap_lock_ns - l0;
 }
 
 static void job_start(void);
@@ -853,6 +861,16 @@ void vk_exec_par_log(void) {
                P.n_par ? (double)P.ch0_pub_ns / 1e6 / (double)P.n_par : 0, P.n_par ? (double)P.ch0_rdy_ns / 1e6 / (double)P.n_par : 0,
                (unsigned long long)P.n_head, P.n_head ? (double)P.head_ndraws / (double)P.n_head : 0,
                P.n_head ? (double)P.head_ns / 1e6 / (double)P.n_head : 0);
+    if (P.n_pre) {
+        double f = (double)nf;
+        uint64_t rest = P.pre_ns - (P.pre_texlock_ns + P.pre_snap_ns + P.pre_up_ns < P.pre_ns
+                                    ? P.pre_texlock_ns + P.pre_snap_ns + P.pre_up_ns : P.pre_ns);
+        rt_log("perf: slots checked ahead, split per frame: texture lock %.3f ms, snapshot answers %.3f ms (write-watch "
+               "queries %.3f, gen_lock waits %.3f), uploads %.1f in %.3f ms, the rest %.3f ms",
+               P.pre_texlock_ns / 1e6 / f, P.pre_snap_ns / 1e6 / f, P.pre_q_ns / 1e6 / f, P.pre_lock_ns / 1e6 / f,
+               (double)P.pre_up_n / f, P.pre_up_ns / 1e6 / f, rest / 1e6 / f);
+    }
+    P.pre_texlock_ns = P.pre_snap_ns = P.pre_q_ns = P.pre_lock_ns = P.pre_up_n = P.pre_up_ns = 0;
     P.walk_ns = P.rec_ns = P.max_rec_ns = P.first_ns = P.n_par = P.n_chunks = P.n_draws = P.drops_early = P.w_subs = P.n_cond = P.n_again = 0;
     P.n_inpass = P.n_qcut = P.n_pre = P.pre_ns = P.n_pipe = P.ch0_draws = P.ch0_pub_ns = P.ch0_rdy_ns = 0;
     P.n_head = P.head_ndraws = P.head_ns = 0;

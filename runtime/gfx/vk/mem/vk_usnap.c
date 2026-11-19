@@ -291,7 +291,64 @@ static void cmp_note(uint64_t lo, uint64_t n, const uint8_t *took) {
                         (unsigned long long)n, (unsigned long long)diff);
 }
 
+// MKW_USNAP_ASYNC (default 1, "ab" to compare): the snapshot is taken on a thread of its own while the replay walks
+// the submission (vk_exec_par: the walk and the slots checked ahead, ~5 ms a frame on the PS5), instead of on the
+// replay thread before it: 0.53 ms a submission, two a race frame, ahead of the first chunk and so of the GPU
+// (tls-new4, 19/11/2026). Nothing reads it before recording starts; every reader below waits for it first (usnap_ready).
+static int async_mode = -1;
+static PlatMutex as_lock = PLAT_MUTEX_INIT;
+static PlatCond as_cv = PLAT_COND_INIT;
+static int as_pending;                      // a job handed to the thread and not finished (read unlocked: acquire)
+static struct { const uint64_t *handles; int n; uint64_t fence; } as_job;
+static int as_started;
+
+static void begin_now(const uint64_t *handles, int n, uint64_t fence);
+
+static void as_main(void *arg) {
+    (void)arg;
+    plat_mutex_lock(&as_lock);
+    for (;;) {
+        while (!as_pending) plat_cond_wait(&as_cv, &as_lock);
+        plat_mutex_unlock(&as_lock);
+        begin_now(as_job.handles, as_job.n, as_job.fence);
+        plat_mutex_lock(&as_lock);
+        __atomic_store_n(&as_pending, 0, __ATOMIC_RELEASE);
+        plat_cond_broadcast(&as_cv);
+    }
+}
+
+static void usnap_wait_slow(void) {
+    plat_mutex_lock(&as_lock);
+    while (__atomic_load_n(&as_pending, __ATOMIC_ACQUIRE)) plat_cond_wait(&as_cv, &as_lock);
+    plat_mutex_unlock(&as_lock);
+}
+
+// The snapshot of the submission being recorded is complete (one atomic load once it is).
+static inline void usnap_ready(void) {
+    if (__atomic_load_n(&as_pending, __ATOMIC_ACQUIRE)) usnap_wait_slow();
+}
+
 void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
+    usnap_ready();   // (the previous one ended with vk_usnap_end, which waited)
+    if (async_mode < 0) {
+        async_mode = rt_knob("USNAP_ASYNC", "1");
+        rt_log("vk_usnap: snapshots taken on a thread of their own during the walk%s (MKW_USNAP_ASYNC)",
+               async_mode == 2 ? " in the B blocks" : async_mode ? "" : ": off");
+    }
+    if (RT_KNOB_ON(async_mode) && !as_started) {
+        as_started = plat_thread_new(as_main, NULL, "vk usnap") != NULL;
+        if (!as_started) async_mode = 0, rt_log("vk_usnap: the snapshot thread did not start: snapshots stay inline");
+    }
+    if (!RT_KNOB_ON(async_mode) || !as_started) { begin_now(handles, n, fence); return; }
+    U.on = 0, U.fence = fence, U.gen++;   // what readers see until the snapshot is in: no snapshot (they wait first)
+    plat_mutex_lock(&as_lock);
+    as_job.handles = handles, as_job.n = n, as_job.fence = fence;
+    __atomic_store_n(&as_pending, 1, __ATOMIC_RELEASE);
+    plat_cond_broadcast(&as_cv);
+    plat_mutex_unlock(&as_lock);
+}
+
+static void begin_now(const uint64_t *handles, int n, uint64_t fence) {
     if (!U.mode) U.mode = rt_knob("UBO_SNAPSHOT", "1") + 1;   // stored +1: 0 is "not read yet"
     U.on = 0, U.fence = fence, U.gen++;
     summary(0);
@@ -370,6 +427,7 @@ void vk_usnap_begin(const uint64_t *handles, int n, uint64_t fence) {
 }
 
 void vk_usnap_end(uint64_t fence) {
+    usnap_ready();
     if (U.arena) vk_completion_add(fence, arena_done, U.arena), U.arena = NULL;
     U.on = 0, U.gen++;
 }
@@ -386,6 +444,7 @@ static int first_above(uint64_t a) {
 }
 
 int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferInfo *out) {
+    usnap_ready();
     if (!U.on || !n) return 0;
     // Consecutive bindings mostly fall in the region found last (2.5 % of the replay went to the search, rt-z6).
     static _Thread_local int last;   // per thread: MKW_REPLAY_PAR
@@ -405,6 +464,7 @@ int vk_usnap_find(uint64_t addr, uint64_t n, uint64_t align, VkDescriptorBufferI
 // As vk_usnap_find, uncounted: the cached host copy of addr when a binding of [addr, addr+n) would use the snapshot
 // (NULL without MKW_SPEC or MKW_CB_CENSUS: no such copy).
 const uint8_t *vk_usnap_peek(uint64_t addr, uint64_t n, uint64_t align) {
+    usnap_ready();
     if (!U.on || !n) return NULL;
     int i = first_above(addr);
     if (i >= U.nreg) return NULL;
@@ -427,10 +487,11 @@ static void log_add(int **a, int *n, int *cap, int v) {
 }
 
 void vk_usnap_log(VkUsnapLog *l) { ulog = l; }
-int vk_usnap_regions(void) { return U.on ? U.nreg : 0; }
-uint64_t vk_usnap_drop_at(int region) { return __atomic_load_n(&U.reg[region].drop_at, __ATOMIC_ACQUIRE); }
+int vk_usnap_regions(void) { usnap_ready(); return U.on ? U.nreg : 0; }
+uint64_t vk_usnap_drop_at(int region) { usnap_ready(); return __atomic_load_n(&U.reg[region].drop_at, __ATOMIC_ACQUIRE); }
 
 void vk_usnap_drop(uint64_t addr, uint64_t n) {
+    usnap_ready();
     if (!U.mode || !n) return;
     plat_mutex_lock(&drop_lock);
     if (U.nwr == U.cwr) U.wr = grow(U.wr, &U.cwr, sizeof *U.wr);
@@ -444,12 +505,13 @@ void vk_usnap_drop(uint64_t addr, uint64_t n) {
     plat_mutex_unlock(&drop_lock);
 }
 
-uint64_t vk_usnap_gen(void) { return U.gen; }
+uint64_t vk_usnap_gen(void) { usnap_ready(); return U.gen; }
 
 // The arenas back on the free list (vk_exec_draw_shutdown: the device is idle, every completion ran).
-void vk_usnap_summary(void) { summary(1); }
+void vk_usnap_summary(void) { usnap_ready(); summary(1); }
 
 void vk_usnap_shutdown(void) {
+    usnap_ready();
     plat_mutex_lock(&free_lock);
     for (Arena *a = free_arenas, *next; a; a = next) {
         next = a->next;

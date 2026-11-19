@@ -1096,6 +1096,9 @@ void make_fresh(Tex *e) {
 // make_fresh for draw bindings: the page check answers from this submission's write-watch snapshot (vk_memory.c
 // vk_mem_changed_snap) instead of a system call per texture. A write the snapshot of the texture's region missed (made
 // after it, during this replay) keeps its write-watch bit and is caught by the next submission's snapshot.
+// MKW_TRACE=perf: what the checks spend (vk_exec_par.c precheck's split): the snapshot answer, and the uploads.
+uint64_t vk_pc_snap_ns, vk_pc_up_n, vk_pc_up_ns;
+
 void make_fresh_snap(Tex *e) {
     e->seen = submit_epoch;   // as make_fresh
     if (!e->pub.mirrored) return;
@@ -1103,20 +1106,28 @@ void make_fresh_snap(Tex *e) {
     if (e->pub.gpu_owned) return;
     uint32_t now;
     n_checks++;
+    int perf = (rt_trace & RT_TRACE_PERF) != 0;
+    uint64_t t0 = perf ? kern_now_ns() : 0;
     int ch = vk_mem_changed_snap(e->pub.addr, e->t.L.size, e->uploaded ? e->wgen : 0, submit_epoch, &now);
+    uint64_t t1 = perf ? kern_now_ns() : 0;
+    if (perf) __atomic_add_fetch(&vk_pc_snap_ns, t1 - t0, __ATOMIC_RELAXED);
     e->wgen = now;
     tex_pin(e);
+    int up = 0;
     if (!e->uploaded) {
         note_storage(e);
-        upload(e);
+        upload(e), up = 1;
     } else {
         e->last_ch = ch;
         // not tracked (-1): the storage's hash decides, unless the CPU just took the texture back from the GPU
         if (ch < 0 && e->t.mem && !e->up_pending && !took && same_storage(e)) {
         } else if (ch || e->up_pending || took) {
-            upload(e);
+            upload(e), up = 1;
         }
     }
+    if (perf && up)
+        __atomic_add_fetch(&vk_pc_up_n, 1, __ATOMIC_RELAXED),
+            __atomic_add_fetch(&vk_pc_up_ns, kern_now_ns() - t1, __ATOMIC_RELAXED);
     tex_unpin(e);
 }
 

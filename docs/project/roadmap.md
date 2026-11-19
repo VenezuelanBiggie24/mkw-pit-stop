@@ -95,6 +95,12 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   5.9 us (4.0 ms, all threads; spin loops, cheaper ones only spin more, 15/11), SignalToAddress 387 at 4.3 us
   (1.7 ms), and a wait's handoff to running again 12-25 us, ~10 of it the OS wake (`MKW_ADDR_SPIN` A/B: -0.09 and
   +0.15 ms, none).
+- **Done: the uniform snapshot off the recording thread** (19/11/2026). Before the first chunk the replay thread
+  spent, a race frame: the walk 3.3 ms, the texture slots checked ahead 1.7-3.4 ms (about 2,400; write-watch queries
+  ~0.6 ms, gen_lock ~0.3 ms, the rest per slot) and the uniform snapshot ~1.1 ms (0.53 ms a submission). The snapshot
+  is now taken on a thread of its own during the walk (`MKW_USNAP_ASYNC`, default 1; its readers wait for it). In-race
+  A/B: frame -0.20 / -0.62 ms, median 16.70-16.75 ms with it, replay -0.9 to -1.5 ms. Next: the slots checked ahead
+  in parallel with the walk too. `MKW_TRACE=perf` now splits that check's time.
 - **Done: the recording threads' thread-locals in one block** (19/11/2026). The PS5 target's TLS is emulated: every
   `_Thread_local` access is a call to `__emutls_get_address`, one per variable per function, ~15 per draw and ~6 per
   replayed op. Native TLS does not link (the title's layout has no TLS segment). `VkRecTls vk_rt` (vk_exec.h) holds
