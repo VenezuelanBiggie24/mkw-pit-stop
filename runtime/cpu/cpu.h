@@ -79,13 +79,9 @@ typedef uint32_t __attribute__((aligned(1), may_alias)) u32u;
 typedef uint64_t __attribute__((aligned(1), may_alias)) u64u;
 typedef uint8_t __attribute__((may_alias)) u8a;
 
-// Function-entry profiler (core/diag/seqwatch.c, impcensus.c): one predictable branch per call when off. g_fnprof and
-// rt_patch_on (recomp/gen.py) are defined beside the generated code (build.py modules.c): hidden, so the game code
-// library reads them directly rather than through an import.
-extern volatile int g_fnprof __attribute__((visibility("hidden")));
+// rt_patch_on (recomp/gen.py) is defined beside the generated code (build.py modules.c): hidden, read directly.
 extern uint8_t rt_patch_on[] __attribute__((visibility("hidden")));
-void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
-#define FN_ENTER(a) do { if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c->x[30], c->x[0]); } while (0)
+#include "fn_enter.h"
 
 // A standalone synthetic test can supply checked pointers. The normal build
 // still dereferences the guest address directly.

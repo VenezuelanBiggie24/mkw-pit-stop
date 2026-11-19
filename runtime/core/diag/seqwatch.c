@@ -282,6 +282,10 @@ static void ui_name(const char *o, char *out, size_t cap) {
 
 static void listw_hit(uint64_t addr, uint64_t x0);
 
+#ifdef RT_FN_ENTER_THUNK
+__attribute__((naked, used)) void fnprof_thunk(void) { __asm__(RT_FN_THUNK_BODY); }
+#endif
+
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0) {
     if (g_fn_sampling) kern_fn_note(addr, lr);
     if (impcensus_on) impcensus_hit(addr, lr);

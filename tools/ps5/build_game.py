@@ -119,7 +119,8 @@ def ninja_path(path: Path) -> str:
 
 def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[str, str],
                     jobs: int, generated: Path | None, exefs: Path | None,
-                    pgo_use: Path | None = None, gen_opt: str = "O1") -> tuple[list[Path], bool]:
+                    pgo_use: Path | None = None, gen_opt: str = "O1",
+                    gen_frame_pointers: bool = False) -> tuple[list[Path], bool]:
     out = WORK / ("game-objects" if generated else "inventory-objects")
     out.mkdir(parents=True, exist_ok=True)
     write_changed(out / "guest_layout.h", ("#pragma once\n" + placement_defines(PROFILE)).encode())
@@ -131,7 +132,10 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
              f'-DRT_GAME_ID="{ident}"',
              "-fno-jump-tables", "-DVK_NO_PROTOTYPES", "-include", str(volk / "volk.h"),
              *(f"-I{p}" for p in [out, *include_dirs, *includes, template / "external", ROOT / "scratchpad/vma"])]
-    genflags = [*common, f"-{gen_opt}", "-Wno-return-type", "-Wno-unused-label", "-fvisibility=hidden",
+    # Without a frame pointer rbp is one more register in all the game's code (1.1 % less of it); the host's stack
+    # walkers fall back on scanning the stack (sigsample.c), and --gen-frame-pointers keeps it for a profile.
+    genflags = [*common, f"-{gen_opt}", "-fno-omit-frame-pointer" if gen_frame_pointers else "-fomit-frame-pointer",
+                "-Wno-return-type", "-Wno-unused-label", "-fvisibility=hidden",
                 f"-I{RUNTIME / 'cpu'}"]
     # PGO changes layout, inlining and branch weights only, never what a guest instruction computes.
     # -Wprofile-instr-missing: a function the profile does not know, i.e. not compiled in the instrumented build.
@@ -289,6 +293,8 @@ def main() -> int:
     parser.add_argument("--exefs", type=Path, help="local extracted ExeFS for the built-in module hashes")
     parser.add_argument("--gen-opt", choices=("O1", "O2"), default="O1",
                         help="optimization level of the generated C (default O1; O2 is meant for --pgo-use)")
+    parser.add_argument("--gen-frame-pointers", action="store_true",
+                        help="keep frame pointers in the generated C (profiling; default: omitted)")
     parser.add_argument("--pgo-use", type=Path, metavar="FILE",
                         help="profile for the generated C (.profdata from tools/build/build.py --pgo-gen runs)")
     args = parser.parse_args()
@@ -328,7 +334,7 @@ def main() -> int:
     sdk = Path(subprocess.check_output(["bash", str(title / "ps5/tools/setup-sdk.sh")], env=env, text=True).strip())
     with output_lock(generated) if generated else nullcontext():
         objects, complete = compile_objects(sdk, template, includes, env, args.jobs, generated, exefs, pgo_use,
-                                            args.gen_opt)
+                                            args.gen_opt, args.gen_frame_pointers)
     out = WORK / ("game-objects" if generated else "inventory-objects")
     aggregate = import_inventory(sdk, objects, env, out, reachable=False)
     loader = import_inventory(sdk, objects, env, out, reachable=True)
