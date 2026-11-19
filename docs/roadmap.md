@@ -59,6 +59,15 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   memory. Lower levels (soft 768 / hard 512 MiB, an A/B on 15/11/2026) let memory fall to 470-560 MiB: textures came
   out corrupted and the frame was slower (27.9 against 23.9 ms). The hard level holds memory where it is; the lever
   is using less (finalized pool storage kept backed since task 32, ~550-680 MiB; textures; shadows), not doing less.
+- **Measured: the race frame's critical path** (19/11/2026, PS5 1.8.0 at 60 fps, `MKW_TRACE=sched`,
+  `MKW_PROFILE_FN_MAINWAIT`). Main runs ~4.6 ms of a 22-23 ms frame; it waits ~6.5 ms in nvnSyncWait for the last
+  presented frame's fence and ~9.5 ms on an address the job chain signals. The fence wait is a real data dependency:
+  `MKW_PS5_OVERLAP` (the fence done once recorded) made the game's reads of GPU-written storage buffers wait instead
+  (~270 early-read waits per 600 frames against 3), faulted the shadow copies on the watched pages (~105,000 against
+  ~1,500), and the frame went to 41-44 ms. During the job wait ~3.7 other game threads run (all six cores a third of
+  the time), ~20 % of that in the runtime's WaitForAddress, CriticalSection Enter/Leave and GetTlsValue: the next
+  lever. Races of the same build run in one of two states: ~22 ms with ~25 emulated sibling reads a frame, or
+  18.8-19.7 ms with ~200; what sets it is not known.
 - **Done: pool storage no longer rebuilt over and over before the race, and the governor rate-limited** (19/11/2026,
   PS5). A pool backed again on use (`lazy_back`) kept its old last-use submit, so the next shadow trim freed it at once:
   ~1,600 rebuilds (~60 GiB) of the same 32 MiB pools before a race, with 1-6 s frames. `lazy_back` now marks the pool

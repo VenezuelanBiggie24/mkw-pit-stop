@@ -709,6 +709,16 @@ static struct { uint64_t addr, n, w; } fns[FNS_N];
 static struct { uint64_t fn, lr, n; } fsites[FNS_N];
 static uint64_t fns_dropped, fns_run, fns_ticks, fns_threads, fns_wait;
 static PlatMutex fns_lock = PLAT_MUTEX_INIT;
+// MKW_PROFILE_FN_MAINWAIT=1: the game's main thread spends ~9.5 ms of a 22 ms race frame blocked on an address that
+// the job chain signals (MKW_TRACE=sched, 19/11/2026). At each tick where main is so blocked: how many other game
+// threads hold a core, how many are off a core without a wait (waiting for a core, or in a blocking host call), and
+// the functions the running ones are in. Found (mw-fn3-20261119-172424): ~3.7 running, all 6 cores busy a third of
+// the time, ~20 % of it the runtime's own WaitForAddress, CriticalSection and GetTlsValue.
+#define MW_N 1024
+static int mw_on = -1;
+static struct { uint64_t addr, n; } mwf[MW_N];
+static uint64_t mw_nrun[8];   // ticks with N other game threads running (7: 7 or more)
+static uint64_t mw_ticks, mw_run, mw_core;
 
 void kern_fn_note(uint64_t addr, uint64_t lr) {
     RtThread *t = tcur;
@@ -751,6 +761,29 @@ static void fn_sampler_main(void *arg) {
             fns_run++;
         }
         fns_ticks++;
+        RtThread *m = g_main;
+        // While main is blocked on an address: how many game threads run then, and in what. A job chain that works
+        // shows threads running; one that waits on something outside the game's threads (the GPU, the replay) shows
+        // none. (The thread that woke main last is no guide: main is woken by a different worker from wait to wait.)
+        if (mw_on > 0 && m && m->cur_core < 0 && m->wkind == W_ADDRESS) {
+            mw_ticks++;
+            int nrun = 0;
+            for (RtThread *w = g_all; w; w = w->all) {
+                if (w == m) continue;
+                if (w->cur_core >= 0) {
+                    nrun++;
+                    uint64_t a = __atomic_load_n(&w->prof_fn, __ATOMIC_RELAXED);
+                    for (uint32_t i = (uint32_t)((a >> 2) * 0x9E3779B1u) % MW_N, k = 0; k < 32; k++, i = (i + 1) % MW_N) {
+                        if (mwf[i].addr == a) { mwf[i].n++; break; }
+                        if (!mwf[i].addr) { mwf[i].addr = a, mwf[i].n = 1; break; }
+                    }
+                } else if (w->wkind == W_NONE) {
+                    mw_core++;   // waiting for a core, or in a blocking host call (thread-ticks)
+                }
+            }
+            mw_nrun[nrun < 7 ? nrun : 7]++;
+            mw_run += (uint64_t)nrun;
+        }
         plat_mutex_unlock(&fns_lock);
         unlock();
     }
@@ -759,6 +792,10 @@ static void fn_sampler_main(void *arg) {
 int kern_fn_profile_start(uint32_t period_us) {
     if (period_us >= 100) fns_period_us = period_us;
     g_fn_sampling = 1;
+    if (mw_on < 0) {
+        const char *e = cfg_get("MKW_PROFILE_FN_MAINWAIT");
+        mw_on = e && *e && strcmp(e, "0");
+    }
     rt_fnprof_set(1);
     if (!plat_thread_new(fn_sampler_main, NULL, "fn sampler")) {
         g_fn_sampling = 0;
@@ -798,6 +835,23 @@ void kern_fn_profile_report(uint64_t frame, uint64_t frames) {
     memset(fns, 0, sizeof fns);
     memset(fsites, 0, sizeof fsites);
     fns_run = fns_ticks = fns_dropped = fns_threads = fns_wait = 0;
+    enum { MWTOP = 20 };
+    struct { uint64_t addr, n; } mwt[MWTOP] = {{0}};
+    for (int i = 0; i < MW_N; i++) {
+        if (!mwf[i].n) continue;
+        for (int j = 0; j < MWTOP; j++)
+            if (mwf[i].n > mwt[j].n) {
+                memmove(mwt + j + 1, mwt + j, (size_t)(MWTOP - 1 - j) * sizeof *mwt);
+                mwt[j].addr = mwf[i].addr, mwt[j].n = mwf[i].n;
+                break;
+            }
+    }
+    uint64_t m_nrun[8];
+    memcpy(m_nrun, mw_nrun, sizeof m_nrun);
+    uint64_t m_ticks = mw_ticks, m_run = mw_run, m_core = mw_core;
+    memset(mwf, 0, sizeof mwf);
+    memset(mw_nrun, 0, sizeof mw_nrun);
+    mw_ticks = mw_run = mw_core = 0;
     plat_mutex_unlock(&fns_lock);
     if (!frames || !ticks) return;
     double per = (double)fns_period_us / 1e3 / (double)frames;   // ms a frame per sample
@@ -817,5 +871,19 @@ void kern_fn_profile_report(uint64_t frame, uint64_t frames) {
         ldr_describe(tops[j].fn, d, sizeof d);
         ldr_describe(tops[j].lr, l, sizeof l);
         rt_log("prof:   s%-2d %5.1f%% %6.2f ms/f  %s <- %s", j + 1, 100.0 * tops[j].n / run, tops[j].n * per, d, l);
+    }
+    if (m_ticks) {
+        char hist[256];
+        int o = 0;
+        for (int j = 0; j < 8; j++)
+            o += snprintf(hist + o, sizeof hist - (size_t)o, " %d%s:%.0f%%", j, j == 7 ? "+" : "", 100.0 * m_nrun[j] / m_ticks);
+        rt_log("prof: frame %llu: main blocked on an address %.2f ms/f; other game threads running then %.2f on average, "
+               "off a core without a wait %.2f; share of that time with N running:%s (MKW_PROFILE_FN_MAINWAIT)",
+               (unsigned long long)frame, m_ticks * per, (double)m_run / m_ticks, (double)m_core / m_ticks, hist);
+        for (int j = 0; j < MWTOP && mwt[j].n; j++) {
+            char d[160];
+            ldr_describe(mwt[j].addr, d, sizeof d);
+            rt_log("prof:   while main waits, running in %s: %.2f thread-ms/f", d, mwt[j].n * per);
+        }
     }
 }
