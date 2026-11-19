@@ -24,7 +24,9 @@ from pathlib import Path
 from typing import Callable
 
 DEFAULT_PORT = 19913
-CHUNK_SIZE = 256 * 1024
+CHUNK_SIZE = 256 * 1024          # hashing reads
+SEND_CHUNK = 1024 * 1024         # file data reads: the receiver's pipeline slot (ps5_recv.c PIPE_SLOT_SIZE)
+SOCK_BUF = 4 * 1024 * 1024       # send buffer: Windows' default kept too little in flight to the console
 STAT_BATCH = 4096
 ACK_EVERY_FILES = 128
 ACK_SIZE_THRESHOLD = 256 * 1024
@@ -206,6 +208,10 @@ def send_directory(
 
     with socket.create_connection((host, port), timeout=timeout) as sock:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCK_BUF)
+        except OSError:
+            pass   # the default buffer still works
 
         sock.sendall(b"PIT1I")
         (info_len,) = struct.unpack("<I", _recv_exact(sock, 4))
@@ -268,6 +274,9 @@ def send_directory(
             on_phase("send", 0, send_bytes)
 
         bytes_sent = skipped_bytes = 0   # skipped: what a resumed file already had on the console
+        buf = bytearray(SEND_CHUNK)
+        view = memoryview(buf)
+        next_report = 0
         for idx, (rel, path, sz, digest) in enumerate(need, 1):
             is_last = idx == send_files
             ack = 1 if (is_last or rel == "eboot.bin" or sz >= ACK_SIZE_THRESHOLD or idx % ACK_EVERY_FILES == 0) else 0
@@ -289,17 +298,18 @@ def send_directory(
                 left = send_bytes - bytes_sent
                 if free_bytes is not None and left > free_bytes - (bytes_sent - skipped_bytes):
                     raise TransferError(_no_space(left, free_bytes - (bytes_sent - skipped_bytes)))
-            with path.open("rb") as f:
+            with path.open("rb", buffering=0) as f:
                 f.seek(start)
                 rem = sz - start
                 while rem > 0:
-                    chunk = f.read(min(CHUNK_SIZE, rem))
-                    if not chunk:
+                    n = f.readinto(view[: min(SEND_CHUNK, rem)])
+                    if not n:
                         raise TransferError(f"local file shrank while sending {rel}")
-                    sock.sendall(chunk)
-                    rem -= len(chunk)
-                    bytes_sent += len(chunk)
-                    if on_progress and (rem == 0 or bytes_sent % (4 * 1024 * 1024) < CHUNK_SIZE):
+                    sock.sendall(view[:n])
+                    rem -= n
+                    bytes_sent += n
+                    if on_progress and (rem == 0 or bytes_sent >= next_report):
+                        next_report = bytes_sent + 4 * 1024 * 1024
                         on_progress(bytes_sent, send_bytes, idx, send_files)
             if sz == 0 and on_progress:
                 on_progress(bytes_sent, send_bytes, idx, send_files)
