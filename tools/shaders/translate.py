@@ -144,6 +144,12 @@ def compile_check(gl: Path, spv: Path, stage: str) -> str:
         tmp = spv.with_name(spv.name + ".tmp")
         r = subprocess.run([GLSLC, "--target-env=vulkan1.3", f"-fshader-stage={GLSLC_STAGE[stage]}", "-O", str(gl),
                             "-o", str(tmp)], capture_output=True, text=True, check=False)  # fmt: skip
+        if r.returncode and not r.stderr.strip():
+            # glslc crashed (it prints nothing): no verdict, so the program is not recorded as failed and the next run
+            # translates it again. It had looked for the .tmp and stopped on FileNotFoundError; on 20/11/2026 a
+            # Windows PC's glslc died of an access violation under full load on a program it compiles alone.
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(f"glslc crashed on {gl.name} (exit code {r.returncode & 0xFFFFFFFF:#x})")
         err = r.stderr if r.returncode else ""
         if not err:
             os.replace(tmp, spv)
