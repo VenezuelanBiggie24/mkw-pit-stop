@@ -712,8 +712,8 @@ static PlatMutex fns_lock = PLAT_MUTEX_INIT;
 // MKW_PROFILE_FN_MAINWAIT=1: the game's main thread spends ~9.5 ms of a 22 ms race frame blocked on an address that
 // the job chain signals (MKW_TRACE=sched, 19/11/2026). At each tick where main is so blocked: how many other game
 // threads hold a core, how many are off a core without a wait (waiting for a core, or in a blocking host call), and
-// the functions the running ones are in. Found (mw-fn3-20261119-172424): ~3.7 running, all 6 cores busy a third of
-// the time, ~20 % of it the runtime's own WaitForAddress, CriticalSection and GetTlsValue.
+// the functions the running ones are in (as above, the last entered: CriticalSection Enter stands for the locked code
+// after it). Found (mw-fn3-20261119-172424): ~3.7 running, all 6 cores busy a third of the time.
 #define MW_N 1024
 static int mw_on = -1;
 static struct { uint64_t addr, n; } mwf[MW_N];

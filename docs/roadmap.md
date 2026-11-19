@@ -65,8 +65,11 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   `MKW_PS5_OVERLAP` (the fence done once recorded) made the game's reads of GPU-written storage buffers wait instead
   (~270 early-read waits per 600 frames against 3), faulted the shadow copies on the watched pages (~105,000 against
   ~1,500), and the frame went to 41-44 ms. During the job wait ~3.7 other game threads run (all six cores a third of
-  the time), ~20 % of that in the runtime's WaitForAddress, CriticalSection Enter/Leave and GetTlsValue: the next
-  lever. Races of the same build run in one of two states: ~22 ms with ~25 emulated sibling reads a frame, or
+  the time): the chain works rather than waits. The profile names WaitForAddress, CriticalSection Enter/Leave and
+  GetTlsValue in it, but it charges the code after a call to the function last entered: Enter's share is the locked
+  code, GetTlsValue (four loads) its callers'. The runtime's own cost, from `MKW_SVC_STATS`: yields 677 a frame at
+  5.9 us (4.0 ms, all threads; spin loops, cheaper ones only spin more, 15/11), SignalToAddress 387 at 4.3 us
+  (1.7 ms), and a wait's handoff to running again 12-25 us, ~10 of it the OS wake. Races of the same build run in one of two states: ~22 ms with ~25 emulated sibling reads a frame, or
   18.8-19.7 ms with ~200; what sets it is not known.
 - **Done: pool storage no longer rebuilt over and over before the race, and the governor rate-limited** (19/11/2026,
   PS5). A pool backed again on use (`lazy_back`) kept its old last-use submit, so the next shadow trim freed it at once:
