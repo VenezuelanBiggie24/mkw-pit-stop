@@ -261,10 +261,18 @@ class AluOps:
         fmt, wide = i.sym("fmt"), i.sym("fmt") in ("U64", "S64")
         lim = 64 if wide else 32
         b = self.src_u(i, "b")
-        amt = f"min({b}, {lim}u)" if i.sym("cw") == "C" else f"({b} & {lim - 1}u)"
+        clamp = i.sym("cw") == "C"
+        amt = f"min({b}, {lim}u)" if clamp else f"({b} & {lim - 1}u)"
         v = f"((uint64_t({self.src_u(i, 'c')}) << 32) | uint64_t({self.src_u(i, 'a')}))"
         sh = "<<" if i.sym("dir") == "L" else ">>"
-        v = f"uint64_t(int64_t({v}) {sh} {amt})" if fmt.startswith("S") else f"({v} {sh} {amt})"
+        arith = fmt.startswith("S")
+        if wide and clamp and arith and sh == ">>":  # a shift by 64 is undefined in GLSL: 63 gives the same sign fill
+            v = f"uint64_t(int64_t({v}) >> min({b}, 63u))"
+        elif wide and clamp:  # likewise: everything shifted out
+            shifted = f"uint64_t(int64_t({v}) {sh} {b})" if arith else f"({v} {sh} {b})"
+            v = f"({b} >= 64u ? 0ul : {shifted})"
+        else:
+            v = f"uint64_t(int64_t({v}) {sh} {amt})" if arith else f"({v} {sh} {amt})"
         e = f"uint({v} >> 32)" if i.sym("hilo") == "HI" else f"uint({v})"
         if u:
             n = i.v("URd")
@@ -387,9 +395,9 @@ class AluOps:
             op = {"PAND": "&&", "POR": "||", "PXOR": "!="}.get(i.sym("pop"))
             if op is None:
                 raise Unsupported(f"{i.cls}: pop {i.sym('pop')}")
-            sp = pred(i.v(f"{u}Pp"), i.v(f"{u}Pp@not"))
+            sp = pred(i.v(f"{u}Pp"), i.v(f"{u}Pp@not"), bool(u))
             tmp = f"lr{i.pc}"
-            res = f"uint {tmp} = {e}; p{pu} = ({tmp} != 0u) {op} {sp};"
+            res = f"uint {tmp} = {e}; {'up' if u else 'p'}{pu} = ({tmp} != 0u) {op} {sp};"
             if u:
                 n = i.v("URd")
                 if n != URZ:
