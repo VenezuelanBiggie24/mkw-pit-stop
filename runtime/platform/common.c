@@ -165,6 +165,8 @@ __attribute__((weak)) PlatEarlyResult plat_mem_early_protect(uint64_t addr, size
     if (plat_mem_protect(addr, n, on ? PLAT_PROT_NONE : restore_prot)) return PLAT_EARLY_OK;
     return on ? PLAT_EARLY_FAILED : PLAT_EARLY_UNRESTORED;
 }
+__attribute__((weak)) int plat_mem_early_open_read(uint64_t addr, size_t n) { return (void)addr, (void)n, 0; }
+__attribute__((weak)) uint32_t plat_mem_early_gen(uint64_t addr) { return (void)addr, 0; }
 __attribute__((weak)) void plat_mem_early_hold_hook(void (*fn)(uint64_t addr, size_t n)) { (void)fn; }
 __attribute__((weak)) void plat_mem_early_resolve(uint64_t addr, size_t n) { (void)addr, (void)n; }
 __attribute__((weak)) void plat_mem_thaw_hook(void (*fn)(uint64_t addr, size_t n)) { (void)fn; }

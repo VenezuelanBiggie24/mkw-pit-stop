@@ -939,11 +939,40 @@ static PlatEarlyResult early_protect(uint64_t addr, size_t n, int on, int restor
     return PLAT_EARLY_OK;
 }
 
+// Counted per native page, hashed: memory_early.c's page snapshots are good only while their page was not opened.
+#define EARLY_GEN_N 64
+static uint32_t early_gen[EARLY_GEN_N];
+
+uint32_t plat_mem_early_gen(uint64_t addr) {
+    return __atomic_load_n(&early_gen[(addr / PS5_MEM_PAGE) % EARLY_GEN_N], __ATOMIC_ACQUIRE);
+}
+
 __attribute__((noinline)) PlatEarlyResult plat_mem_early_protect(uint64_t addr, size_t n, int on, int restore_prot) {
     uint64_t t0 = plat_now_ns();
     PlatEarlyResult r = early_protect(addr, n, on, restore_prot);
+    uint64_t first = addr / PS5_MEM_PAGE, count = n ? (addr + n - 1) / PS5_MEM_PAGE - first + 1 : 0;
+    if (count > EARLY_GEN_N) first = 0, count = EARLY_GEN_N;
+    for (uint64_t i = 0; i < count; i++)
+        __atomic_add_fetch(&early_gen[(first + i) % EARLY_GEN_N], 1, __ATOMIC_RELEASE);
     pstat_add((uintptr_t)__builtin_return_address(0), plat_now_ns() - t0);
     return r;
+}
+
+__attribute__((noinline)) int plat_mem_early_open_read(uint64_t addr, size_t n) {
+    if (n != PS5_MEM_PAGE || addr & (PS5_MEM_PAGE - 1)) return 0;
+    uint64_t t0 = plat_now_ns();
+    Ps5MixedBlock *u = find_unit_lockfree(find_range_lockfree(addr), addr);
+    if (!u) return 0;
+    unit_lock(u);
+    int ok = u->backing.reserved && u->live_pages && u->backing.committed;
+    if (ok) {
+        int prot = PS5_KERNEL_PROT_CPU_READ;
+        if (prot_watch_has_gpu(addr, PS5_MEM_PAGE)) prot |= PS5_KERNEL_PROT_GPU_READ | PS5_KERNEL_PROT_GPU_WRITE;
+        ok = sceKernelMprotect((void *)(uintptr_t)addr, n, prot) == 0;
+    }
+    unit_unlock(u);
+    pstat_add((uintptr_t)__builtin_return_address(0), plat_now_ns() - t0);
+    return ok;
 }
 
 int plat_mem_back_hold_as(uint64_t addr, size_t n, int cause) {

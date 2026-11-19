@@ -128,7 +128,11 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   Grand Prix races at FPS=60 with `test` on: limit 32 23.21 and 24.87 ms, limit 128 22.90 and 22.40 ms; no read was left
   undecoded. An A/B of `test` at limit 128: -0.51 ms by means, -0.83 by medians, but -1.13 and +0.11 in its two races.
   Races differ: some run 56-79 emulated reads a frame against 12-16 (`main+0x1043f0` on one record), and one such race
-  took 25.62 ms even at 128. Those reads cost two protection changes each; a snapshot of the page would remove that.
+  took 25.62 ms even at 128. Those reads cost two protection changes each.
+- **Done: sibling reads from a copy of the page** (`MKW_EARLY_SIBLING_SNAP`, default 1, 19/11/2026). A/B at FPS=60: the
+  race with 141 emulated reads a frame 24.93 -> 21.99 ms, the race with 21 a frame 22.33 -> 22.14 ms. A check race
+  (`MKW_EARLY_SIBLING_SNAP_CHECK=1`) compared 868,731 reads with memory: none differed. With the default on, a confirming
+  race took 23.18 ms (worst frame 85.3 ms, no hang).
 - **Measured and set aside: profile-guided optimization** (19/11/2026). 1.8.0 on the PS5, Grand Prix at FPS=60, frame
   generation off, 210 s of race per run, in the order A B A B: `-O1` 23.87 and 24.85 ms, `-O2` with PGO 24.12 and
   23.97 ms. One run of each build had a single 4-6 s stall; without it `-O1` is 23.87 and 24.14 ms, PGO 23.64 and

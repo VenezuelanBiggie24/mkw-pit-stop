@@ -313,6 +313,11 @@ typedef enum {
     PLAT_EARLY_UNRESTORED,   // a restore failed; callers must stop without retrying or clearing trap state
 } PlatEarlyResult;
 PlatEarlyResult plat_mem_early_protect(uint64_t addr, size_t n, int on, int restore_prot);
+// A closed native page made readable but not writable, for a copy: a writer still faults, and waits for the caller's
+// lock. The caller closes it again with plat_mem_early_protect(on 1). 0: not possible here. plat_mem_early_gen: changes
+// whenever plat_mem_early_protect touches this native page (or another that shares its counter).
+int plat_mem_early_open_read(uint64_t addr, size_t n);
+uint32_t plat_mem_early_gen(uint64_t addr);
 void plat_mem_early_hold_hook(void (*fn)(uint64_t addr, size_t n));
 void plat_mem_frozen_hook(int (*fn)(uint64_t addr));
 // Frees frozen units that are all zero, up to target_bytes (0 no limit). cache: skip units found not all zero earlier

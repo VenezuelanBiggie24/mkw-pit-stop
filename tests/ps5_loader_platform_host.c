@@ -286,6 +286,16 @@ static void test_early_batch(uint64_t addr) {
     puts("early batch: second arm and second restore failed; native RW/NONE/RW, watch bits 0/1/1");
     assert(plat_mem_early_protect(addr, 3 * ep, 0, 0) == PLAT_EARLY_OK);
     plat_mem_gpu_import(addr + ep, 2 * ep, 0);
+    // A closed page opened for reading only, as memory_early.c's page copies do; closing it moves its counter once.
+    assert(plat_mem_early_protect(addr, ep, 1, 0) == PLAT_EARLY_OK);
+    assert(!plat_mem_early_open_read(addr + 1, ep) && !plat_mem_early_open_read(addr, 2 * ep));
+    assert(plat_mem_early_open_read(addr, ep));
+    check_early_page(addr, PROT_READ, 1);
+    uint32_t gen = plat_mem_early_gen(addr);
+    assert(plat_mem_early_protect(addr, ep, 1, 0) == PLAT_EARLY_OK);
+    assert(plat_mem_early_gen(addr) == gen + 1);
+    check_early_page(addr, PROT_NONE, 1);
+    assert(plat_mem_early_protect(addr, ep, 0, 0) == PLAT_EARLY_OK);
     assert(plat_mem_decommit(addr, 3 * ep));
 }
 
