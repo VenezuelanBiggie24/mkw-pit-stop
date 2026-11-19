@@ -69,8 +69,16 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   GetTlsValue in it, but it charges the code after a call to the function last entered: Enter's share is the locked
   code, GetTlsValue (four loads) its callers'. The runtime's own cost, from `MKW_SVC_STATS`: yields 677 a frame at
   5.9 us (4.0 ms, all threads; spin loops, cheaper ones only spin more, 15/11), SignalToAddress 387 at 4.3 us
-  (1.7 ms), and a wait's handoff to running again 12-25 us, ~10 of it the OS wake. Races of the same build run in one of two states: ~22 ms with ~25 emulated sibling reads a frame, or
-  18.8-19.7 ms with ~200; what sets it is not known.
+  (1.7 ms), and a wait's handoff to running again 12-25 us, ~10 of it the OS wake (`MKW_ADDR_SPIN` A/B: -0.09 and
+  +0.15 ms, none).
+- **Done: no shadow copies on the PS5** (19/11/2026). Races of one build ran in one of two states, ~22 ms or
+  18.8-19.7 ms: the fast ones were those where the governor's first hard pass had shed shadows
+  (`vk_mem_shadow_shed`) before the race's pools were made, so they were imported (fence write-backs ~5 MiB per log
+  window against ~285). Shadows answer the cost of importing on Linux (amdgpu userptrs), which the console's unified
+  memory does not have, and their copies and write-backs sat in main's wait for the last frame's fence. The PS5
+  device profile sets `MKW_SHADOW=0`: races 17.6-17.8 ms (three, against 22.0-22.4), GPU 7.6 -> 6.2 ms, free direct
+  memory median 375 -> 642 MiB (largest area down to 68 MiB at times, all areas >= 1.06 GiB); screenshots and the
+  user's menu check clean.
 - **Done: pool storage no longer rebuilt over and over before the race, and the governor rate-limited** (19/11/2026,
   PS5). A pool backed again on use (`lazy_back`) kept its old last-use submit, so the next shadow trim freed it at once:
   ~1,600 rebuilds (~60 GiB) of the same 32 MiB pools before a race, with 1-6 s frames. `lazy_back` now marks the pool

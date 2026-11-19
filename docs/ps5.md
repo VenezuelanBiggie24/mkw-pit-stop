@@ -126,6 +126,11 @@ not fail with `EFAULT`. On the PS5, `plat_mem_populated` walks the chunk directo
 
 ## Direct memory: GPU-only pools, shadow trim and staging
 
+The PS5's device profile turns shadow storage off (`MKW_SHADOW=0`, 19/11/2026): every CPU-visible pool is imported, so
+the GPU reads and writes guest memory directly and nothing is copied in before a submit or written back at a fence.
+Races went from 22.0-22.4 to 17.6-17.8 ms. `MKW_SHADOW=1` in mkw.ini brings the shadows back; the shadow trim below
+applies only then.
+
 MKW writes a CPU_NO_ACCESS pool's contents (BNTX texture blocks, vertex and index data) into its storage and then
 initializes the pool over it, so at `vk_pool_init` the bytes exist only in guest memory. The runtime reads them from
 there three ways:

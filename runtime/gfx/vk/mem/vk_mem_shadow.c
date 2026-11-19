@@ -21,7 +21,7 @@
 //   queried for written pages; pages stamped after a pool's sgen are copied in by the CPU.
 // - GPU -> guest: the GPU's writes stay pending from record time to their fence (vk_mem_wback.c); the CPU copies skip
 //   them meanwhile, or merge them by bytes where the range has a base (vk_mem_merge.c).
-// MKW_SHADOW=1/0 forces the mode on or off; the default is on for Linux.
+// MKW_SHADOW=1/0 forces the mode on or off; the default is on for Linux, off on the PS5 (its device profile, cfg.c).
 int shadow_on;                                    // shadow mode: imported pools get shadow storage (vk_mem_class_log)
 PlatMutex shadow_lock = PLAT_MUTEX_INIT;          // after pool_lock; before gen_lock
 // Pools resolved since the last sync, under a lock of their own: the recording threads add to it while the early

@@ -64,7 +64,7 @@ static const char *const known[] = {
     "REPLAY_PAR", "REPLAY_PAR_CHECK_BY_CHUNK", "REPLAY_PAR_FIRST", "REPLAY_PAR_HEAD", "REPLAY_PAR_JOIN", "REPLAY_PAR_PIPE",
     "REPLAY_PAR_PRECHECK", "REPLAY_PAR_THREADS",
     "SEQ_UNTIL",
-    "SEQ_WATCH", "GOV_RATE_LIMIT", "SHADOW_TRIM", "SNAP_BG", "SPARSE_EVICT", "SVC_STATS", "TEX_EVICT_IDLE", "TEX_READBACK", "TEX_UP_DUMP",
+    "SEQ_WATCH", "GOV_RATE_LIMIT", "SHADOW", "SHADOW_TRIM", "SNAP_BG", "SPARSE_EVICT", "SVC_STATS", "TEX_EVICT_IDLE", "TEX_READBACK", "TEX_UP_DUMP",
     "TEX_UP_DUMP_DIR", "TEX_UP_LOG", "TEX_UP_LOG_AT", "TEX_ZERO_LOG", "YIELD_NOLOCK", "ZERO_SCAN_CACHE",
     // the bench driver, multiplayer and extra pads (PS5 port)
     "BENCH", "BENCH_MAX", "KEYBOARD_PLAYER", "LOBBY", "LOCAL_WIRELESS", "NET_HOST", "NET_IFACE", "NET_JOIN", "NET_NAME",
@@ -290,6 +290,12 @@ static const struct { const char *key, *value; } PS5[] = {
     // 18/11/2026; vk_tex_alias.c), for ~2 fps (27.8 against 29.9). Until that is fixed where it breaks; ab or 1 in
     // mkw.ini brings it back.
     {"REPLAY_PAR_PIPE", "0"},
+    // CPU-visible pools imported, no shadow copies (vk_mem_shadow.c): shadows answer the cost of importing on Linux
+    // (amdgpu userptrs), which the console's unified memory does not have, and their copies and fence write-backs sat in
+    // the main thread's wait for the last frame's fence. Races 22.0-22.4 ms with them, 17.6-17.8 without (noshadow1/2,
+    // 19/11/2026; GPU 7.6 -> 6.2 ms, free direct memory median 375 -> 642 MiB); races that happened to start after the
+    // governor had shed shadows (vk_mem_shadow_shed) were the fast ones at 18.8-19.7. Menus checked by the user.
+    {"SHADOW", "0"},
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 
