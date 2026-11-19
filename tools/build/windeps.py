@@ -173,6 +173,27 @@ def sdl_tools() -> None:
         sys.exit(f"{' and '.join(missing)} not found{where}: SDL3 builds with CMake and Ninja (tools/build/README.md)")
 
 
+SDL_NO_WINDOW_FROM = "    creation_flags = CREATE_UNICODE_ENVIRONMENT;\n"
+SDL_NO_WINDOW_TO = SDL_NO_WINDOW_FROM + (
+    "    if (!GetConsoleWindow()) {  // mkw-recomp (tools/build/windeps.py): a parent without a console of its own\n"
+    "        creation_flags |= CREATE_NO_WINDOW;  // gives its console children a hidden one, not a window each\n"
+    "    }\n"
+)
+
+
+def patch_sdl_process(src: Path) -> None:
+    """SDL_CreateProcess hides a child's console only for background processes, whose exit code SDL then drops (always
+    0). mkw.exe is a GUI program (no console), so every Python child of the launcher (update check, dump search, last
+    run, setup, the PS5 builder) opened a console window of its own: a row of terminal windows flashing at each start
+    (20/11/2026). With CREATE_NO_WINDOW the child gets a console without a window and its own children (zig, clang,
+    glslc) share it; the exit code stays. A parent that has a console (mkw.exe run from a terminal) is unchanged."""
+    path = src / "src/process/windows/SDL_windowsprocess.c"
+    text = path.read_text()
+    if text.count(SDL_NO_WINDOW_FROM) != 1:
+        sys.exit(f"{path}: SDL changed the line the console patch follows; update patch_sdl_process()")
+    path.write_text(text.replace(SDL_NO_WINDOW_FROM, SDL_NO_WINDOW_TO))
+
+
 def build_sdl(source: Path) -> None:
     """SDL3.dll, its import library, headers and licence into build/win/deps, built with llvm-mingw against the libusb
     package already unpacked there."""
@@ -185,6 +206,7 @@ def build_sdl(source: Path) -> None:
     deps, cc = WIN / "deps", (WIN / "llvm-mingw/bin/x86_64-w64-mingw32-").as_posix()
     exe = ".exe" if HOST_WINDOWS else ""
     src = work / f"SDL3-{SDL_VERSION}"
+    patch_sdl_process(src)
     configure = [
         "cmake", "-S", str(src), "-B", str(work / "build"), "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release",
         "-DCMAKE_SYSTEM_NAME=Windows", "-DCMAKE_SYSTEM_PROCESSOR=x86_64", f"-DCMAKE_C_COMPILER={cc}clang{exe}",

@@ -19,6 +19,7 @@
 #endif
 
 #include "ui/launcher/launcher_update.h"
+#include "ui/launcher/launcher_setup.h"
 
 extern "C" {
 #include "cfg.h"
@@ -58,6 +59,10 @@ static bool find_tools(const char *exe_dir, char *python, char *script, size_t c
 static bool installable(const char *exe_dir, char *dest, size_t cap) {
     char python[1200], script[1200];
     if (!find_tools(exe_dir, python, script, sizeof python)) return false;
+    // The PS5 builder package (setup/ps5-bundle) is not the desktop release: the desktop update replaced its mkw.exe and
+    // setup/ with upstream's, which have no PS5 step, and the start screen lost Build for PS5 and the console's address
+    // (20/11/2026). It is updated by downloading the builder again.
+    if (setup_ps5_available(exe_dir)) return false;
 #ifdef _WIN32
     snprintf(dest, cap, "%s/update", exe_dir);
     return true;
