@@ -1,236 +1,271 @@
-Uma recompilação estática de *Mario Kart World* (Nintendo Switch 2, versões 1.0.0 e 1.8.0) num programa nativo de
-PC para Linux e Windows. Precisa da sua própria cópia do jogo, extraída da sua própria consola: nada do jogo está
-neste repositório nem nas suas versões publicadas.
+Um port homebrew nativo para PlayStation 5 (`PPSA99193`) de [**mkw-recomp**](https://github.com/adriadam10/mkw-recomp),
+a recompilação estática de *Mario Kart World* (Nintendo Switch 2, versões 1.8.0 e 1.0.0) feita por Adrià. Precisas da
+tua própria cópia do jogo, extraída da tua própria consola Switch 2: nada do jogo está neste repositório nem nas suas
+versões.
 
-**É uma recompilação, não um emulador.** O código AArch64 do jogo é traduzido para C antecipadamente e compilado para
-o CPU do PC (x86-64, ou AArch64 em Linux); não há interpretador nem JIT de CPU. A GPU também não é emulada: o NVN2, a
-API gráfica da Switch 2, é reimplementado sobre Vulkan ao nível da API, e os shaders SM86 do jogo são traduzidos para
-SPIR-V antecipadamente. As funções do SDK da Nintendo (`nn::*`) são substituídas pelo nome por código próprio.
+**É uma recompilação estática, não um emulador.** O código AArch64 do jogo é traduzido para C com antecedência e
+compilado para a CPU x86-64 Zen 2 da PS5 (layout de endereços do convidado `ps5-high144`); não há interpretador de CPU
+nem JIT. A GPU também não é emulada: o NVN2, a API gráfica do Switch 2, é reimplementado no nível da API sobre Vulkan com
+o controlador RADV do Mesa para a PS5, e os shaders SM86 do jogo são traduzidos para SPIR-V com antecedência no teu PC. As
+funções do SDK da Nintendo (`nn::*`) são substituídas pelo nome por código próprio.
 
-## Estado
+> **Projeto para PC (upstream):** procuras a versão para Linux ou Windows? Vê
+> [**adriadam10/mkw-recomp**](https://github.com/adriadam10/mkw-recomp) ([instruções para PC abaixo](#@pc)).
 
-Numa fase inicial, e a avançar depressa. A 12/11/2026:
+## Status (PS5)
 
-- Arranca, reproduz os vídeos de introdução, percorre os menus e corre corridas, em Linux e em Windows (x86-64), e em
-  Linux sobre AArch64 (com o seu próprio AppImage; testado numa consola portátil com Adreno 740).
-- O ecrã inicial prepara o jogo a partir da sua cópia na sua máquina (gera e compila o C, traduz os shaders, aquece a
-  cache de pipelines) e guarda todas as definições: ecrã, qualidade gráfica, controlos, hacks.
-- As corridas correm a 60 fps em GPUs topo de gama e a 30 nas de gama média; veja [Desempenho](#performance).
-- Problemas conhecidos: alguns menus (modo, seleção de personagem e de veículo) ainda precisam de trabalho, a sombra do
-  kart perde um fotograma de vez em quando, parte do áudio corta-se nos vídeos e com alguns controladores da AMD a GPU
-  pode bloquear. Não há jogo online.
+No início, e a avançar depressa. A 18/11/2026, numa PS5 normal:
 
-## Roteiro
+- **O arranque, os vídeos, os menus e as corridas funcionam**, com saída Vulkan direta pelo RADV, som estéreo pelo
+  `sceAudioOut` e até quatro comandos DualSense com sessão iniciada, com vibração e ícones de botões da PlayStation.
+- **As corridas correm a 60 fps por predefinição, sem geração de imagens**: cerca de 57-59 fps em média num benchmark de Grand
+  Prix, e uma ou outra imagem mais lenta deixa a corrida a 0,95-0,98x do tempo real (veja [Desempenho](#@performance)).
+  O modo de 30 fps do jogo (velocidade total) e a geração de imagens são opções em **Pit Stop > Display**.
+- **Multijogador:** o ecrã dividido do jogo (um DualSense por jogador com sessão iniciada) e seu modo sem fio local pela LAN,
+  entre PS5 ou com a versão de PC da mesma versão ([docs/ps5/multiplayer.md](docs/ps5/multiplayer.md)). Não há jogo online
+  da Nintendo.
+- **Sobreposição Pit Stop no jogo.** Prime **Options + clique no touchpad** a qualquer momento para abrir o
+  **Pit Stop**, um menu de definições pensado para o comando, com linhas rápidas (**Master volume**,
+  **Vibration strength**, **Performance HUD**), todas as categorias de definições e remapeamento dos botões do
+  DualSense em tempo real, guardado em `/app0/mkw.ini`.
+- **Problemas conhecidos ([docs/project/roadmap.md](docs/project/roadmap.md)):**
+  - *Sessões longas:* a memória livre cai corrida após corrida porque o jogo guarda dados de pistas anteriores; quando
+    fica baixa, as texturas podem sair corrompidas ou faltar. Reinicia o título depois de algumas corridas se isso
+    acontecer.
+  - *Blocos esparsos:* desde o arranque alguns blocos de texturas esparsas não carregam: pequenas falhas de textura
+    perto da linha de partida e uma introdução de corrida em preto e branco.
+  - *Multijogador:* a primeira corrida numa pista pode expulsar um jogador cujos shaders ainda estão compilando; as
+    seguintes funcionam. O ecrã dividido fica abaixo dos 30 fps em cenas cheias.
+  - *Menus:* os ecrãs de seleção de modo, personagem e veículo ainda diferem um pouco da consola.
 
-O principal trabalho em aberto, por ordem; os pormenores estão em [docs/project/roadmap.md](docs/project/roadmap.md).
+## O que precisas
 
-- **60 fps nas corridas.** Hoje um fotograma de corrida é uma cadeia em série: o jogo termina o seu fotograma
-  (~3 ms\*), depois o back end Vulkan grava o grande envio do jogo (~19 ms\*), depois a GPU executa-o (~10 ms\*), e só
-  então começa o fotograma seguinte.
-  Gravar está no caminho crítico, por isso o trabalho é gravar com menos CPU: estado dinâmico só quando muda, caches de
-  desenhos entre fotogramas, gravação em paralelo e uma thread do jogo mais rápida.
-- **A imagem como na consola**: os últimos erros do tradutor de shaders, a sombra do kart, push constants, zero erros
-  de validação do Vulkan.
-- **Todos os menus verificados** com a consola: os próximos são modo e seleção de personagem e de veículo.
-- **Sem bloqueios de GPU** e menos memória de GPU; depois, carregamentos sem soluços e um pacote para distribuições
-  Linux que não são rolling release.
-- **A 1.8.0 ao nível da 1.0.0**: o seu formato ultrawide, o tamanho do mapa de sombras e a semente fixa
-  ([#19](https://github.com/adriadam10/mkw-recomp/issues/19)).
+1. **O teu próprio dump de *Mario Kart World*** da tua própria Nintendo Switch 2: versão **1.8.0** (`exefs/main`, ID
+   de build `d00e4f399e411d06`) ou 1.0.0 (`9e244438c3d8ef1c`), como pastas `exefs/` e `romfs/` descriptografadas ou um
+   ficheiro `.nup`. Um dump da consola com a atualização 1.8.0 em `updates/` é usado tal como está, e quando há as duas
+   é compilada a 1.8.0.
+2. **Uma PS5 desbloqueada** com um carregador de payloads homebrew (`etaHEN` ou `elfldr`), `kstuff` e
+   **ShadowMountPlus 1.7 Beta 5** ou mais recente (monta e regista `/data/homebrew/PPSA99193` no ecrã inicial). O
+   firmware suportado depende do teu desbloqueio, do `kstuff` e do ambiente homebrew do RADV (vê
+   [docs/ps5/ps5.md](docs/ps5/ps5.md)).
+3. **Um PC com cerca de 30 GB livres** na mesma rede da PS5, para compilar o título a partir do teu dump:
+   - **Windows 10 ou 11 (64 bits):** nada mais a instalar, sem WSL. O compilador para Windows traz o seu próprio Python,
+     zig e glslc ([passos para Windows](#@windows)).
+   - **Linux x86-64 ou WSL2:** `clang`, `lld` e Python 3 ([passos para Linux](#@linux)).
 
-\* Medido a 09/11/2026 na nossa máquina de testes: APU Radeon 660M (Ryzen 5 7535HS), Linux, resolução interna 720p.
+## Instalação no Windows (sem WSL)
 
-<a id="performance"></a>
+1. **Coloca o título provisório na PS5.** Descompacta `mkw-pit-stop-<version>-ps5-placeholder-PPSA99193.zip` das
+   [**versões**](https://github.com/exploitizm/mkw-pit-stop/releases) e envia a pasta `PPSA99193` para `/data/homebrew/`
+   com um cliente FTP (FileZilla, WinSCP), de forma a que `/data/homebrew/PPSA99193/eboot.bin` exista. Quando o
+   ShadowMountPlus o registar, abre **Mario Kart World: Pit Stop**: ele mostra **Game files missing** e
+   `Console IP: <endereço> (port 19913)`. Deixa esse ecrã aberto; a PS5 só recebe ficheiros enquanto ele aparece.
+   <p align="center"><img src="docs/images/placeholder-ps5.png" width="560" alt="O título provisório na PS5: ficheiros do jogo em falta, o endereço da consola e a etapa e o progresso da compilação no PC"></p>
+2. **Descompacta o compilador no PC.** Transfere `mkw-pit-stop-<version>-ps5-builder-windows-x86_64.zip`, clica com o
+   botão direito, **Propriedades**, marca **Desbloquear** e extrai numa pasta curta de uma unidade com 30 GB livres,
+   como `C:\PitStop` (não `Program Files` nem OneDrive).
+3. **Compila e envia.** Executa `mkw.exe` nessa pasta. Em **Game files**, escolhe o teu dump com **Choose folder** (ou
+   **Choose .nup or .nx file**); em **Build for PS5**, escreve o endereço do ecrã da PS5 em **PS5 IP** e prime
+   **Build for PS5**. O botão de desktop **Set up** não é necessário para a PS5. Ou, numa Linha de Comandos nessa pasta:
+   ```bat
+   prepare_ps5.bat --source "D:\Dumps\MKW" --send 192.168.1.50
+   ```
+   <p align="center"><img src="docs/images/launcher-ps5.png" width="560" alt="O ecrã inicial do compilador para PS5: a tua cópia escolhida, o endereço da PS5 escrito e o botão Build for PS5"></p>
+4. **Inicia o jogo.** Enquanto o PC compila, o ecrã da PS5 mostra a etapa e o progresso; mostra
+   **Transfer complete!** quando todos os ficheiros chegaram e foram verificados: prime **X** e abre
+   **Mario Kart World: Pit Stop** de novo.
 
-## Desempenho
+**A tua cópia já está na PS5?** Marca **My game files are already on the PS5** e escreve ali a pasta dela (por exemplo
+`/data/mkw`, com `exefs` e `romfs` dentro ou no seu `updates\<version>`): só o código do jogo e os shaders são enviados,
+e o título encontra o jogo nessa pasta. O PC continua a precisar do teu dump para compilar.
 
-Os tempos por fotograma medidos, cada um com a versão testada, estão em [docs/project/performance.md](docs/project/performance.md). Para
-acrescentar a sua máquina, abra um
-[relatório de desempenho](https://github.com/adriadam10/mkw-recomp/issues/new?template=performance.yml): entra na
-tabela com a versão indicada. Os tempos são os fotogramas do próprio jogo: a geração de fotogramas mostra mais
-fotogramas, mas não os encurta. 16,7 ms são 60 fps; com a Taxa de fotogramas em Automático (a da consola) desce para
-30 fps quando não se chega aos 60, e um fotograma acima de 33,3 ms faz a corrida andar mais devagar do que o tempo
-real.
+**Sem rede? Usa uma pen USB.** No passo 3, escolhe **To a USB drive** e **Choose drive** em vez de escrever o endereço
+da PS5: o título é gravado em `homebrew\PPSA99193` na unidade (**exFAT**, cerca de 25 GB livres), e o ShadowMountPlus o
+encontra ali quando a unidade é ligada à PS5 (ele procura em `/mnt/usb0`-`usb7/homebrew/`). O título provisório do
+passo 1 não é necessário para isso; se estiver instalado, apaga `/data/homebrew/PPSA99193` antes, para que só uma cópia
+do título fique registada. Compilar de novo atualiza só o que mudou na unidade.
 
-| Data | GPU | Resolução interna | fps na corrida | Tempo por fotograma |
-|---|---|---|---|---|
-| 11/11/2026 | RX 7900 XTX (Windows) | 2160p | 60 | 16,7 ms |
-| 11/11/2026 | RX 9070 XT (Linux, RADV) | 720p a 2160p | 60 | 16,7 ms |
-| 10/11/2026 | RTX 3060 (Windows) | 1080p | ~48 | ~21 ms |
-| 11/11/2026 | RTX 3050 Laptop (Windows) | 720p | ~37 | 26,7 ms |
-| 09/11/2026 | Radeon 660M (Linux, RADV) | 720p | 30-32 | 31-33 ms |
-| 11/11/2026 | GTX 1650 SUPER (Windows) | 1080p | ~24 | ~41 ms |
-| 09/11/2026 | GTX 1050 Ti (Windows) | 1080p | 22-24 | 42-45 ms |
+Se a PS5 ficar em **Waiting for connection**, verifica o endereço e se os dois estão na mesma rede; uma compilação que
+falhou é explicada em `logs/setup.log`, ao lado de `mkw.exe`. Para atualizar, descompacta o novo compilador e compila de
+novo.
 
-## Como jogar
+## Instalação e atualização na PS5 (Linux ou WSL2)
 
-![O ecrã inicial com o jogo já preparado](docs/images/launcher-main.png)
+Como o `eboot.bin` liga o código recompilado do jogo e `spirv/` guarda os shaders traduzidos dele, **nenhum `eboot.bin`
+ou `spirv/` pronto é distribuído**. Compilas a pasta do título `PPSA99193` no teu PC a partir do compilador da
+versão, que não contém nada do jogo, e do teu próprio dump:
 
-![A página Ficheiros do jogo, onde a preparação recebe o dump do jogador](docs/images/launcher-files.png)
+1. Transfere `mkw-pit-stop-<version>-ps5-builder-linux-x86_64.tar.zst` das
+   [**versões**](https://github.com/exploitizm/mkw-pit-stop/releases), verifica o hash com `SHA256SUMS` e descompacta no
+   Linux ou WSL2:
+   ```sh
+   tar --zstd -xf mkw-pit-stop-*-ps5-builder-linux-x86_64.tar.zst
+   cd mkw-pit-stop-*
+   ```
+2. Executa `prepare_ps5.py` a apontar para o teu dump de *Mario Kart World* (uma pasta ou um ficheiro `.nup`):
+   ```sh
+   python3 prepare_ps5.py --source /path/to/your/mkw-dump --out ./PPSA99193
+   ```
+   O script descobre a versão do teu dump (1.8.0 ou 1.0.0), traduz o ExeFS AArch64 para C (`ps5-high144`), compila e
+   liga o `eboot.bin` com o runtime pré-compilado e o pacote RADV da PS5, transfere o `nvdisasm` e o `ptxas` da NVIDIA
+   (fixados por SHA-256) para gerar localmente a especificação de instruções SM86, traduz todos os 11.561 shaders para
+   `PPSA99193/spirv/` e coloca `exefs/` e `romfs/` em `PPSA99193/`.
+3. Transfere `PPSA99193` para `/data/homebrew/PPSA99193` na tua PS5 por FTP ou USB — ou passa `--deploy <PS5_IP>` para
+   enviar, verificar cada ficheiro por SHA-256 e renovar o `param.json` e o `icon0.png` registados pelo ShadowMountPlus
+   em `/user/app/PPSA99193/sce_sys`.
+4. Abre **Mario Kart World: Pit Stop** a partir do ecrã inicial da PS5.
 
-1. Extraia o dump de Mario Kart World 1.0.0 ou 1.8.0 da sua Switch 2 (`exefs/` e `romfs/`, desencriptados; a 1.8.0 com
-   a atualização integrada na RomFS do jogo base), ou esse mesmo dump empacotado num único ficheiro `.nup` ou `.nx`.
-2. Transfira o launcher para o seu sistema em [Versões](https://github.com/adriadam10/mkw-recomp/releases): em Linux o
-   `.AppImage` (`-aarch64` em ARM; a pasta do jogo por omissão é `~/.local/share/mkw-recomp`; glibc 2.31 ou mais
-   recente: Debian 11, Ubuntu 20.04, SteamOS e posteriores), em Windows o `.zip`, descompactado numa pasta. Ambos
-   precisam de cerca de 30 GB livres.
-3. Execute o AppImage (antes, `chmod +x`) ou o `mkw.exe`, abra **Ficheiros do jogo**, se quiser use **Escolher pasta do
-   jogo** para escolher onde o jogo será instalado (ou uma instalação já existente), indique o seu dump (**Escolher
-   pasta** ou **Escolher ficheiro .nup ou .nx**) e carregue em **Preparar**. O launcher lembra-se da pasta de
-   instalação; é aí que ficam o jogo compilado, os ficheiros preparados, os jogos guardados, as definições e as caches.
-   Escolher outra pasta deixa os ficheiros existentes onde estão.
-   A primeira preparação demora algum tempo (compila o jogo inteiro e transfere o `nvdisasm` e o `ptxas` da NVIDIA,
-   84 MB em Linux e 126 MB em Windows, para descrever a codificação dos shaders na sua máquina); depois, **Jogar**.
-4. Quando sai uma versão nova, o ecrã inicial propõe-na (**Atualizar para vX**): transfere-a, verifica-a, substitui o
-   programa e volta a preparar só o que mudou. **Definições → Menu → Procurar atualizações** desativa essa verificação.
+**Atualizar:** descompacta o compilador mais recente e executa `prepare_ps5.py` com as mesmas pastas `--work` e `--out`. As
+etapas cujas entradas não mudaram (como `romfs/` e shaders inalterados) são saltadas, e os teus jogos guardados (`profile/`) e
+definições (`mkw.ini`) na consola são mantidos.
 
-Requisitos: CPU x86-64 com AVX2 (ou, em Linux, AArch64 com ARMv8.2: LSE, FP16, RCpc, DotProd, CRC32), uma GPU com
-Vulkan 1.3 (`VK_EXT_mesh_shader` recomendado; sem ele, os task e mesh shaders correm como compute) e 16 GB de RAM
-recomendados. Num contentor Docker ou Podman em Linux, permita `userfaultfd` no perfil seccomp (o do Docker recusa-o
-por omissão): sem ele, o port não sabe que memória do jogo mudou e fica várias vezes mais lento.
+## Sobreposição de definições Pit Stop
 
-## Funcionalidades extra
+Prime **Options + clique no touchpad** no DualSense (ou **F1** no computador) em qualquer ecrã para abrir o
+**Pit Stop** ([docs/ps5/pit-stop.md](docs/ps5/pit-stop.md)):
 
-Para além da consola, todas opcionais e desligadas (ou no valor da consola) por omissão:
+| Comando | Ação |
+|---|---|
+| **Options + clique no touchpad** | Abrir ou fechar o Pit Stop em qualquer ecrã |
+| **Botões direcionais / joystick esquerdo para cima e para baixo** | Mover uma linha |
+| **Botões direcionais / joystick esquerdo para a esquerda e direita** | Ajustar a definição selecionada (Desligado/Ligado ou um valor em passos) |
+| **Círculo / X** | Confirmar / Voltar (segue a tua disposição de botões Nintendo ou Xbox) |
+| **L1 / R1** | Categoria anterior / seguinte em **All settings** |
 
-- **Ecrã**: resolução interna acima ou abaixo da da consola, 21:9, 32:9 e 48:9 (as corridas mostram mais dos lados),
-  escalamento AMD FSR 1, HDR em ecrãs HDR, VSync, apresentação mailbox ou imediata.
-- **Geração de fotogramas**: fotogramas criados entre os do jogo (uma corrida a 30 fps mostrada a 60, ou a 240 num ecrã
-  de 240 Hz). Mais fluido, não mais rápido: a imagem chega até um fotograma mais tarde, e o movimento rápido e o
-  minimapa podem ficar esborratados.
-- **Gráficos**: filtragem e qualidade de texturas, distância de detalhe e qualidade das sombras acima ou abaixo das da
-  consola.
-- **Som**: som surround 5.1.
-- **Controlos**: todas as teclas e botões reatribuíveis, câmara com o rato, ícones de botões da Nintendo, Xbox ou
-  PlayStation, direção por movimento, intensidade da vibração; multijogador local com um comando para cada um.
-  Os comandos da Switch 2 (Pro Controller, Joy-Con, GameCube) funcionam por Bluetooth e, em Linux, por USB; em Windows
-  o USB precisa de um passo único com o controlador, mais abaixo.
-- **Hacks**: turbo (manter ou alternar F2), saltar vídeos, desbloquear tudo, a mesma aleatoriedade sempre, diretamente
-  para contrarrelógio ou modo livre.
-- **Idiomas**: os menus em 20 idiomas; o próprio jogo também em catalão, galego e basco.
-- **Ficheiros do jogo**: escolher a pasta de instalação; um dump em pastas ou num único ficheiro `.nup` ou `.nx`, usado
-  onde está; atualizações a partir do ecrã inicial.
-- **Sobreposição de desempenho** (FPS, ou CPU, GPU e memória por completo) e informação do sistema num clique para os
-  relatórios de erros.
+- **As linhas rápidas** do primeiro ecrã ajustam em tempo real **Master volume** (0–100%), **Vibration strength**
+  (0–300%) e **Performance HUD** (Off, FPS, Full).
+- **All settings** abre **Display**, **Graphics**, **Controls** (com captura de botões por ação em tempo real),
+  **Audio**, **General**, **Advanced**, **Hacks** (desbloquear todos os pilotos, veículos, adesivos e a Copa Especial) e
+  **Multiplayer**. As alterações são guardadas automaticamente em `/app0/mkw.ini`.
 
-### Comandos da Switch 2 por USB em Windows
+## Jogar no PC (Linux e Windows)
 
-Estes comandos só arrancam depois de uma ordem enviada à sua segunda interface USB, que o Windows deixa sem um
-controlador que uma aplicação possa usar. Uma vez por comando, com o [Zadig](https://zadig.akeo.ie/):
+Do projeto upstream [mkw-recomp](https://github.com/adriadam10/mkw-recomp):
 
-1. Ligue o comando com um cabo USB-C e abra o Zadig.
-2. **Options → List All Devices**, e escolha a **Interface 1** do comando (ID USB `057E` e `2069` para o Pro
-   Controller, `2066`/`2067` para o Joy-Con direito/esquerdo, `2073` para o comando de GameCube). Não a Interface 0:
-   essa é a entrada normal do comando, e substituí-la esconde-o de todas as outras aplicações.
-3. Controlador **WinUSB**, depois **Replace Driver** (ou **Install Driver**).
+<p align="center">
+  <img src="docs/images/launcher-files.png" width="400" alt="A página Game files do ecrã inicial antes da preparação">
+  <img src="docs/images/launcher-main.png" width="400" alt="O ecrã inicial com o jogo já preparado">
+</p>
 
-O mesmo vale para um comando virtual que apareça com esses ID USB (o modo USB/IP do Switch2Connect). Para desfazer,
-desinstale o dispositivo dessa interface no Gestor de Dispositivos com «eliminar o controlador» marcado.
-
-## Mods
-
-A página **Mods** do ecrã inicial instala os mods tal como são publicados para o jogo e lista-os em dois separadores:
-
-- **Procurar no GameBanana**: os mods de Mario Kart World no [GameBanana](https://gamebanana.com/games/22152),
-  listados ou pesquisados, com o autor, a licença, as capturas de ecrã e a descrição de cada um. **Instalar** transfere
-  o ficheiro do GameBanana, só quando o pede.
-- **Instalados**: os seus mods, cada um com o seu interruptor; **Importar zip / Importar pasta** recebe um mod que já
-  tenha (`.zip`, `.rar` ou `.7z`, com `romfs/` e/ou `exefs/` em qualquer sítio, incluindo a estrutura
-  `atmosphere/contents/`).
-
-Os mods que substituem ficheiros do jogo (`romfs/`: skins, texturas, textos, pistas) aplicam-se no arranque seguinte.
-Os que mudam o código do jogo (patches `.ips` ou `.pchtxt` de `exefs/`, como 200cc ou 30 FPS) são integrados no código
-do jogo: ligar ou desligar um volta a compilá-lo antes de jogar (alguns minutos). Dois mods que mudam o mesmo pacote
-são combinados ficheiro a ficheiro, e a página pergunta qual prevalece onde os dois mudam o mesmo ficheiro. A página
-avisa sobre mods que substituem as definições gráficas ou os shaders do jogo, que o port trata à sua maneira.
-
-Os mods são feitos por outras pessoas e não são testados por este projeto: um mod pode bloquear o jogo ou danificar o
-seu jogo guardado. Leia a página de um mod antes de o instalar, guarde uma cópia do seu jogo guardado e comunique os
-problemas de um mod ao seu autor; quando reportar um erro aqui, diga que mods estavam ligados (o registo lista-os), ou
-experimente antes sem eles.
+1. Extrai o Mario Kart World 1.0.0 ou 1.8.0 da tua Switch 2 (`exefs/` e `romfs/`, descriptografados).
+2. Transfere o launcher de PC das [versões do mkw-recomp](https://github.com/adriadam10/mkw-recomp/releases): no Linux o
+   `.AppImage` (guarda o jogo que compila em `~/.local/share/mkw-recomp`; glibc 2.31 ou mais recente), no Windows o
+   `.zip`. Os dois precisam de cerca de 30 GB livres.
+3. Executa o AppImage ou o `mkw.exe`, abre **Game files**, aponta para o teu dump e prime **Prepare**, depois
+   **Play**.
 
 ## Compilar a partir do código-fonte
 
-Linux, com `uv`, `clang`, `lld`, `ninja`, SDL3, Opus, libvpx, zstd, xxHash, os cabeçalhos do Vulkan e VMA 3.4.0
-(pormenores em [tools/build/README.md](tools/build/README.md)). Coloque o seu dump em `game/` (`game/exefs`,
-`game/romfs`) ou defina `MKW_GAME=<dir>`, e a partir da raiz do repositório:
+### Alvo nativo da PS5 (`PPSA99193`)
+
+Vê [docs/ps5/ps5.md](docs/ps5/ps5.md) e [tools/ps5/README.md](tools/ps5/README.md) para as cópias fixadas de
+`PS5_VulkanTemplate`, `PS5_Vulkan`, `PS5_Mesa` e `PS5_PayloadSDK`:
 
 ```sh
-uv run python recomp/gen.py --exefs game/exefs --out build/generated --jobs 8 --patches recomp/patches-mkw.txt  # 1.8.0: patches-mkw-180.txt
-uv run tools/shaders/extract.py && uv run tools/shaders/translate.py
-uv run tools/build/build.py              # build/mkw; --target windows compila o mkw.exe com llvm-mingw
-build/mkw
+python3 recomp/gen.py --exefs "$MKW_GAME/exefs" --guest-layout ps5-high144 \
+    --out build/ps5-game/generated --patches recomp/patches-mkw.txt
+python3 tools/shaders/extract.py && python3 tools/shaders/translate.py
+python3 tools/ps5/build_game.py --stack "$stack" --include "$headers" \
+    --generated build/ps5-game/generated --exefs "$MKW_GAME/exefs"
+python3 tools/ps5/deploy.py <PS5_IP> --game
 ```
 
-A partir de um dump empacotado (`.nup`, `.nx`) e para Linux em AArch64:
-[tools/build/README.md](tools/build/README.md#a-packed-dump) e [a sua secção AArch64](tools/build/README.md#linux-aarch64).
+Para empacotar uma versão do compilador para PS5 sem nada do jogo a partir do inventário do runtime (`--inventory`):
 
-Traduzir os shaders precisa da especificação da codificação SM86, gerada a partir do `nvdisasm` da NVIDIA (não
-distribuído): veja [tools/shaders/README.md](tools/shaders/README.md). Tudo o que é gerado vai para `build/`, nunca
-para o git.
+```sh
+python3 tools/ps5/build_game.py --stack "$stack" --include "$headers" --inventory
+python3 tools/ps5/release_ps5.py --stack "$stack" --version 0.1.0
+```
+
+### Compilações para Linux e Windows
+
+Detalhes em [tools/build/README.md](tools/build/README.md):
+
+```sh
+python3 recomp/gen.py --exefs game/exefs --out build/generated --jobs 8 --patches recomp/patches-mkw.txt
+python3 tools/shaders/extract.py && python3 tools/shaders/translate.py
+python3 tools/build/build.py              # build/mkw; --target windows builds mkw.exe with llvm-mingw
+build/mkw
+```
 
 | Pasta | Conteúdo |
 |---|---|
 | [recomp/](recomp/README.md) | O gerador: AArch64 → C |
-| [runtime/](runtime/README.md) | O que faz de consola: kernel, memória, substitutos do SDK, NVN2 sobre Vulkan, áudio, entrada, menus e launcher |
+| [runtime/](runtime/README.md) | O que faz o papel da consola: kernel, memória, substitutos do SDK, NVN2 sobre Vulkan, áudio, entrada, Pit Stop e launcher |
 | [sm86/](sm86/README.md) | O tradutor de shaders: SASS SM86 → GLSL → SPIR-V |
-| [i18n/](i18n/README.md) | Os textos dos menus, do ecrã inicial e da preparação em todos os idiomas (gettext `.po`) |
-| [tools/](tools/README.md) | Análise, preparação, compilação, sessões de jogo e diagnósticos |
-| [tests/](tests/README.md) | Testes sem o jogo nem GPU, no CI em Linux e Windows |
-| [docs/](docs/README.md) | Investigação, fontes e desempenho |
-| `.github/` | CI, modelos de issues e de pull requests |
+| [tools/](tools/README.md) | Análise, preparação, compilação, empacotamento para PS5, execuções do jogo e diagnóstico |
+| [tests/](tests/README.md) | Testes sem o jogo nem GPU, na CI em Linux e Windows |
+| [docs/](docs/README.md) | Arquitetura da PS5, Pit Stop, pesquisa, fontes, roteiro e desempenho |
+| [i18n/](i18n/README.md) | Os textos do menu como ficheiros gettext (`mkw.pot`, um `.po` por idioma) |
+| [server/](server/README.md) | O servidor de salas para o jogo sem fio local pela internet (`server/lobby`) |
+| `.github/` | CI, modelos de issues e pull requests |
 
-Na raiz: `pyproject.toml` e `uv.lock` (o ambiente Python das ferramentas), `.gitignore`, `LICENSE`, `CONTRIBUTING.md`,
-`CHANGELOG.md` (as alterações de cada versão, as suas notas) e `AGENTS.md` (um guia para agentes de programação).
+Na raiz: `pyproject.toml` e `uv.lock` (o ambiente Python das ferramentas), `Makefile` (atalhos para as versões e a CI),
+`.gitignore`, `LICENSE`, `CONTRIBUTING.md`, `CHANGELOG.md` (as mudanças de cada versão, suas notas), `AGENTS.md` (um
+guia para agentes de programação).
 
-## Decisões de conceção (30/10/2026)
+## Desempenho
 
-| Tema | Decisão | Porquê |
-|---|---|---|
-| CPU | Tradutor AArch64→C baseado no do [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) (MIT), alargado a ARMv8.1-8.3: atómicos LSE, CAS, LDAPR; PAC como identidade, etiquetas MTE a 0 | A mesma família de motor do MKW, e já escala para um executável grande |
-| Sistema | As funções `nn::*` do SDK substituídas pelo nome; assinaturas tiradas dos nomes decorados dos 1 289 imports do `main` | Não há serviços da consola a emular |
-| Gráficos | NVN2 sobre Vulkan: 529 das suas 699 funções têm o mesmo nome que no NVN1 (assinaturas conhecidas pelo totk-pc-recomp e pelo nxnative); 170 são novas | Recompilação, não emulação da GPU |
-| Shaders | Tradutor próprio SM86→SPIR-V, offline, com um descodificador gerado a partir da especificação do DocumentSASS / nvsass-disassembler | Cobre mesh/task e o que falta à Maxwell |
-| Funcionalidades opcionais da Switch 2 | HDR ligado sozinho quando o ecrã está em HDR, como na consola (Definições > Ecrã > HDR: Automático ou Não); DLSS, ray tracing e toque atrás de opções, desligados por omissão; desligados, as funções do NVN2 existem mas não fazem nada, para o jogo seguir o caminho normal | Extras do hardware da consola, não fazem falta para jogar |
-| Predefinições | O aspeto e a resolução da consola; definições mais baixas são opções | Escolhe o jogador |
+Numa PS5 normal, Mario Kart World 1.8.0, um benchmark de corrida de Grand Prix (`tools/ps5/bench.py`, 210 s de corrida,
+1080p, geração de imagens desligada):
 
-## Como foi feito
+| Data | Taxa de imagens | Tempo médio por imagem | Imagem típica | 1% mais baixo | Velocidade da corrida |
+|---|---|---|---|---|---|
+| 20/11/2026 | 60 fps (a nova predefinição) | 17,0–17,4 ms (57–59 fps) | 16,7 ms (no limite) | 35–41 fps | 0,95–0,98x |
+| 16/11/2026 | 30 fps (a predefinição anterior) | 33,3 ms | 33,3 ms | | 1,00x |
 
-Este port foi escrito com o [Claude](https://claude.com/claude-code) (o agente de programação da Anthropic) a fazer a
-maior parte da escrita, sob a minha direção, em cerca de dez dias de trabalho a tempo inteiro: 489 commits desde
-30/10/2026, cada um revisto, medido ou testado antes de entrar. Não foi um prompt e pronto. Por trás disso:
+A nova predefinição não foi testada na consola tal como é distribuída: estes números vêm de corridas de benchmark com o
+registo de desempenho do runtime ligado (`MKW_TRACE=perf`, que custa um pouco), postas a 60 fps à mão. Menus,
+contrarrelógio, ecrã dividido, sessões longas e outras pistas ainda não foram jogados com a nova predefinição.
 
-- **Método mais do que prompts.** Cada alteração de desempenho foi medida com um A/B dentro da mesma sessão (duas
-  sessões do mesmo build diferem até 12 ms por fotograma); cada correção de imagem foi verificada com a imagem da
-  própria consola; as alterações ao tradutor de shaders são testadas fora da GPU em cada um dos 11 561 programas do MKW
-  antes de uma sessão; capturas de fotogramas reproduzem o back end em segundos sem o jogo. As regras que saíram dos
-  erros estão escritas e são aplicadas por scripts, para o mesmo erro não acontecer duas vezes.
-- **O que tinha aprendido antes.** O recompilador e o runtime nasceram do
-  [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) e do seu port para Linux, e do meu trabalho anterior
-  noutros recomps (SavageWindRecomp, smo-recomp): o tradutor, o launcher e a preparação que compila o jogo na máquina
-  do jogador, os ícones de botões, o fluxo de controlo dos shaders. Como responsável pelo
-  [AnyPS5](https://github.com/boykopovar/AnyPS5) aprendi a traduzir shaders de GPU com fidelidade, a correr mesh
-  shaders como compute em GPUs que não os têm e a manter um projeto grande honesto com verificações e medições.
-- **A investigação da comunidade.** As notas do [eden-nx2](https://git.eden-emu.dev/Takoroka/eden-nx2) sobre a
-  Switch 2, a codificação SASS da NVIDIA tal como documentada pelo DocumentSASS e pelo nvsass-disassembler, o Ryujinx e
-  o Mesa NAK para a semântica dos shaders, e os outros ports de Switch 2 listados nas fontes.
+Cerca de 2% das imagens de corrida levam mais de 20 ms: é onde uma pista carrega texturas novas, e são elas que definem o 1% mais
+baixo e a ligeira câmara lenta. O que foi medido e o que falta está em [docs/project/roadmap.md](docs/project/roadmap.md) e
+[docs/ps5/ps5.md](docs/ps5/ps5.md#frame-rate); os números de PC, em [docs/project/performance.md](docs/project/performance.md).
 
-## Licenças e créditos
+## Comunicar erros
 
-Este projeto está sob a [Licença MIT](LICENSE). O código tirado de outros projetos mantém a sua própria licença, junto
-a ele (ficheiros `LICENSE.*` em [recomp/](recomp/), [runtime/](runtime/), [sm86/decode/](sm86/decode/) e
-[runtime/third_party/](runtime/third_party/README.md)): totk-pc-recomp, nvsass-disassembler, Dear ImGui, bc7enc,
-stb_image, AMD FidelityFX FSR 1 e Roboto. Cada fonte usada, com a sua licença e o que dela foi tirado (código só de
-projetos MIT; de projetos GPL, só ideias), está listada em [docs/project/research.md](docs/project/research.md#sources).
+Vê [CONTRIBUTING.md](CONTRIBUTING.md). Comunica problemas da PS5 nas
+[issues deste fork](https://github.com/exploitizm/mkw-pit-stop/issues) e anexa o registo do kernel da consola (`klog`, com o
+prefixo `[Mario Kart World: Pit Stop]`) e o `logs/setup.log` do compilador de PC. Para problemas no computador, anexa
+`logs/mkw.log` e `logs/setup.log`. Nunca anexes ficheiros do jogo, dumps ou binários `eboot.bin` compilados a partir
+do teu dump.
 
-Mario Kart World é © Nintendo. Este projeto não é afiliado nem apoiado pela Nintendo, não contém código nem recursos do
-jogo e não ajuda a obtê-los.
+## Licenças, créditos e aviso legal
 
-Os mods pertencem aos seus autores e têm as suas próprias licenças. Este projeto não é afiliado nem apoiado pelo
-GameBanana nem pelo autor de nenhum mod, não aloja, revê nem distribui mods, e não é responsável pelo que um mod faz:
-o ecrã inicial só mostra a listagem pública do GameBanana e transfere um mod do GameBanana quando o pede.
+O código-fonte deste repositório está sob a [licença MIT](LICENSE) (`Copyright (c) 2026 Adrià`).
 
-## Contribuir
+**Os ficheiros das versões para PS5 são GPL-3.0-or-later.** Cada título de PS5 liga a camada de plataforma do fork do SDK
+de payloads e o código de inicialização do `PS5_Vulkan` (GPL-3.0-or-later), então o título provisório, o `ps5-bundle/`
+do compilador e cada título que compilares com eles ficam sob GPL-3.0-or-later como um todo; o código próprio do
+mkw-recomp continua MIT. Cada versão traz `LEGAL.txt` e `licenses/` (cada parte com sua licença, copyright e revisão de
+origem) e anexa o código-fonte completo de cada parte como `source/*.tar.gz` (`source/SOURCES.txt`), gerados por
+[tools/ps5/release_notices.py](tools/ps5/release_notices.py).
 
-Veja o [CONTRIBUTING.md](CONTRIBUTING.md). Os erros e os relatórios de desempenho vão para as
-[Issues](https://github.com/adriadam10/mkw-recomp/issues), as perguntas para as
-[Discussions](https://github.com/adriadam10/mkw-recomp/discussions).
+- **Projeto upstream:** [**mkw-recomp**](https://github.com/adriadam10/mkw-recomp) de Adrià — o tradutor AArch64→C, o
+  kernel do Switch 2 e os substitutos do SDK `nn::*`, o renderizador NVN2 sobre Vulkan e o tradutor de shaders
+  SM86→SPIR-V offline.
+- **Projetos MIT e permissivos** (ficheiros `LICENSE.*` em [recomp/](recomp/), [runtime/](runtime/),
+  [sm86/decode/](sm86/decode/) e [runtime/third_party/](runtime/third_party/README.md)):
+  [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) e seu port para Linux,
+  [SavageWindRecomp](https://github.com/Revivedx/SavageWindRecomp),
+  [DocumentSASS](https://github.com/0xD0GF00D/DocumentSASS) e
+  [nvsass-disassembler](https://github.com/reoLantern/nvsass-disassembler),
+  [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx), [Mesa NAK](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/nouveau/compiler),
+  [mario-kart-world-save-editor](https://github.com/Ca1nM/mario-kart-world-save-editor), Dear ImGui,
+  [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo), AMD FidelityFX FSR 1, Vulkan Memory Allocator, Roboto e
+  Lato.
+- **Ferramentas e runtime da PS5:** [PS5_VulkanTemplate](https://github.com/mihawk-99/PS5_VulkanTemplate) (MIT, Sascha
+  Willems e Mihawk), [PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa) (MIT, RADV para PS5),
+  [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) e [PS5_PayloadSDK](https://github.com/mihawk-99/PS5_PayloadSDK)
+  (GPL-3.0-or-later, Mihawk e [John Törnblom / ps5-payload-dev](https://github.com/ps5-payload-dev/sdk)), e
+  [ShadowMountPlus](https://github.com/drakmor/shadowMountPlus). Quando ligado a um título de PS5 com a camada de
+  plataforma do SDK de payloads e a CRT e os stubs do `PS5_Vulkan`, o binário combinado do título de PS5 fica sob
+  GPL-3.0-or-later (`LEGAL.txt` e `licenses/` dentro do título compilado).
+- **Só pesquisa e ideias de design** (nenhum código copiado de projetos GPL ou sem licença): eden-nx2, Hookshot,
+  PS5_Hookshot, EglantinePS5, AnyPS5, prosper e shadPS4. Cada fonte está documentada em
+  [docs/project/research.md](docs/project/research.md#sources).
+
+**Aviso legal:** *Mario Kart World* e *Mario* são marcas registadas da Nintendo. «PlayStation» e «PS5» são marcas
+registadas da Sony Interactive Entertainment Inc. Este projeto não está afiliado nem é apoiado pela Nintendo, pela Sony
+Interactive Entertainment nem por nenhuma editora de jogos, não contém código, shaders ou recursos do jogo e não ajuda a
+obtê-los.

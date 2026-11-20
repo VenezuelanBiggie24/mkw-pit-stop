@@ -1,31 +1,24 @@
-<!-- translated from README.md 16076e62707f body 987984a7ca70 -->
+<!-- translated from README.md 84c6832c04b6 body 9b07bf4b9e1f -->
 
-<p align="center"><img src="../images/logo.svg" width="128" alt="mkw-recomp logo"></p>
+<p align="center"><img src="../images/icon.svg" width="144" alt="Mario Kart World: Pit Stop icon"></p>
 
-<h1 align="center">mkw-recomp</h1>
+<h1 align="center">Mario Kart World: Pit Stop</h1>
 
 <p align="center">
-  <b>《马力欧赛车 世界》（Nintendo Switch 2）的重编译版本，可在 Linux 和 Windows 上原生运行。</b>
+  <b>《马力欧赛车 世界》（Nintendo Switch 2）的原生 PlayStation 5 自制移植版，基于静态重编译。</b>
 </p>
 
 <p align="center">
-  <a href="https://github.com/adriadam10/mkw-recomp/releases/latest"><img src="https://img.shields.io/badge/%E2%AC%87_%E4%B8%8B%E8%BD%BD-Windows_%E6%9C%80%E6%96%B0%E7%89%88-0078d6?style=for-the-badge&labelColor=1b2740" alt="下载: Windows 最新版"></a>
-  <a href="https://github.com/adriadam10/mkw-recomp/releases/latest"><img src="https://img.shields.io/badge/%E2%AC%87_%E4%B8%8B%E8%BD%BD-Linux_%E6%9C%80%E6%96%B0%E7%89%88_%28AppImage%29-e95420?style=for-the-badge&labelColor=1b2740" alt="下载: Linux 最新版 (AppImage)"></a>
-  <a href="https://github.com/adriadam10/mkw-recomp/releases/latest"><img src="https://img.shields.io/badge/%E2%AC%87_%E4%B8%8B%E8%BD%BD-Linux_ARM_%E6%9C%80%E6%96%B0%E7%89%88-8957e5?style=for-the-badge&labelColor=1b2740" alt="下载: Linux ARM 最新版"></a>
+  <a href="https://github.com/exploitizm/mkw-pit-stop/releases/latest"><img src="https://img.shields.io/badge/%E2%AC%87_%E4%B8%8B%E8%BD%BD-PS5_%E6%9C%80%E6%96%B0%E7%89%88-0070d1?style=for-the-badge&labelColor=1b2740" alt="下载: PS5 最新版"></a>
 </p>
 
 <p align="center">
-  <b><a href="https://github.com/adriadam10/mkw-recomp/releases">发布</a></b> ·
-  <b><a href="https://github.com/adriadam10/mkw-recomp/wiki">帮助 Wiki</a></b> ·
-  <b><a href="https://discord.gg/8uYBkjQkEg">Discord</a></b> ·
+  <b><a href="https://github.com/exploitizm/mkw-pit-stop/releases">发布</a></b> ·
   <a href="../../CHANGELOG.md">更新日志</a> ·
   <a href="../../CONTRIBUTING.md">参与贡献</a> ·
-  <a href="../../docs/project/research.md#sources">来源</a> ·
   <a href="../../docs/project/roadmap.md">路线图</a> ·
-  <a href="../../docs/project/performance.md">性能</a> ·
-  <a href="https://github.com/adriadam10/mkw-recomp/issues">问题</a> ·
-  <a href="https://github.com/adriadam10/mkw-recomp/discussions">讨论</a> ·
-  <a href="https://archive.org/search?query=subject%3A%22mkw-recomp%22">存档</a>
+  <a href="../../docs/ps5/ps5.md">PS5 说明</a> ·
+  <a href="https://github.com/exploitizm/mkw-pit-stop/issues">问题</a>
 </p>
 
 <!-- i18n-bar:start -->
@@ -41,206 +34,242 @@
 </p>
 <!-- i18n-bar:end -->
 
-将《马力欧赛车 世界》（*Mario Kart World*，Nintendo Switch 2，1.0.0 和 1.8.0 版）静态重编译为 Linux 和 Windows 上的原生
-PC 程序。你需要自己的游戏副本，并从你自己的主机中导出：本仓库及其发布版本中不包含任何游戏内容。
+这是 [**mkw-recomp**](https://github.com/adriadam10/mkw-recomp) 的原生 PlayStation 5 自制移植版（`PPSA99193`）；mkw-recomp 是
+Adrià 对《马力欧赛车 世界》（*Mario Kart World*，Nintendo Switch 2，1.8.0 和 1.0.0 版本）的静态重编译。你需要自己的游戏副本，
+从你自己的 Switch 2 主机中提取：本仓库及其发布中不包含任何游戏内容。
 
-**这是重编译，不是模拟器。** 游戏的 AArch64 代码会被预先翻译成 C，再针对 PC 的 CPU（x86-64，或 Linux 上的 AArch64）编译；
-没有 CPU 解释器，也没有 JIT。GPU 同样不是模拟的：Switch 2 的图形 API NVN2 在 API 层面基于 Vulkan 重新实现，游戏的 SM86
-着色器会被预先翻译成 SPIR-V。任天堂 SDK 的函数（`nn::*`）按名称替换为我们自己的代码。
+**这是静态重编译，不是模拟器。** 游戏的 AArch64 代码会预先翻译成 C，并为 PS5 的 x86-64 Zen 2 CPU 编译（客体地址布局
+`ps5-high144`）；没有 CPU 解释器，也没有 JIT。GPU 同样不是模拟的：Switch 2 的图形 API NVN2 在 API 层面基于 Vulkan 重新实现，
+使用 Mesa 为 PS5 移植的 RADV 驱动；游戏的 SM86 着色器则在你的电脑上预先翻译成 SPIR-V。Nintendo SDK 的函数（`nn::*`）按名称
+替换为我们自己的代码。
 
-## 状态
+> **上游 PC 项目：** 想要 Linux 或 Windows 版本？请看
+> [**adriadam10/mkw-recomp**](https://github.com/adriadam10/mkw-recomp)（[下方的 PC 说明](#在电脑上游玩linux-和-windows)）。
 
-尚处早期，但进展很快。截至 2026/11/12：
+## 状态（PS5）
 
-- 它可以启动、播放开场视频、浏览菜单并进行比赛，支持 Linux 和 Windows（x86-64），以及 AArch64 上的 Linux（有独立的
-  AppImage；已在搭载 Adreno 740 的掌机上测试）。
-- 启动界面会在你的电脑上用你的副本完成游戏设置（生成并编译 C 代码、翻译着色器、预热管线缓存），并管理所有设置：显示、
-  画质、操作、修改项（hacks）。
-- 高端 GPU 上比赛可达 60 fps，中端 GPU 上为 30 fps；参见[性能](#performance)。
-- 已知问题：部分菜单（模式、角色和车辆选择）仍需完善，赛车的阴影偶尔会丢失一帧，视频中部分音频会中断，在某些 AMD
-  驱动上 GPU 可能卡死。没有在线游戏。
+尚处早期，进展很快。截至 2026 年 11 月 18 日，在一台标准版 PS5 上：
 
-## 路线图
+- **启动、过场动画、菜单和比赛均可运行**，通过 RADV 直接以 Vulkan 输出画面，经 `sceAudioOut` 输出立体声，并支持最多四个已登录
+  的 DualSense 手柄，带振动和 PlayStation 按键图标。
+- **比赛默认以 60 fps 运行，不使用插帧**：在大奖赛基准测试中平均约 57-59 fps，偶尔较慢的帧会让比赛以实时速度的 0.95-0.98 倍
+  进行（见[性能](#性能)）。游戏的 30 fps 模式（全速）和插帧是 **Pit Stop > Display** 中的选项。
+- **多人游戏：** 游戏的分屏（每位已登录玩家一个 DualSense），以及通过局域网的本地无线模式，可在多台 PS5 之间进行，或与同一版本的
+  PC 版联机（[docs/ps5/multiplayer.md](../../docs/ps5/multiplayer.md)）。不支持 Nintendo 在线游戏。
+- **游戏内 Pit Stop 覆盖菜单。** 随时按 **Options + 触控板按下** 打开 **Pit Stop**：一个为手柄设计的设置菜单，包含快捷行
+  （**Master volume**、**Vibration strength**、**Performance HUD**）、所有设置分类以及实时 DualSense 按键重映射，保存到
+  `/app0/mkw.ini`。
+- **已知问题（[docs/project/roadmap.md](../../docs/project/roadmap.md)）：**
+  - *长时间游玩：* 由于游戏会保留之前赛道的数据，可用内存会一场比赛接一场比赛地减少；内存不足时，纹理可能损坏或缺失。若出现这种
+    情况，请在几场比赛后重启本作。
+  - *稀疏图块：* 从启动开始就有少量稀疏纹理图块未加载：起跑线附近有轻微纹理错误，比赛开场画面为黑白。
+  - *多人游戏：* 某赛道的第一场比赛可能会掉线一位着色器仍在编译中的玩家；之后的比赛正常。分屏在复杂场景中低于 30 fps。
+  - *菜单：* 模式、角色和车辆选择界面与主机版仍略有不同。
 
-主要的待办工作，按优先顺序；详情见 [docs/project/roadmap.md](../../docs/project/roadmap.md)。
+## 你需要准备
 
-- **比赛 60 fps。** 目前比赛的每一帧是串行的：游戏完成它的帧（约 3 ms\*），然后 Vulkan 后端录制游戏的大批提交
-  （约 19 ms\*），然后 GPU 执行（约 10 ms\*），之后下一帧才开始。
-  录制处于关键路径上，因此工作重点是用更少的 CPU 完成录制：只在变化时设置动态状态、跨帧的绘制缓存、并行录制，以及更快的
-  游戏线程。
-- **与主机一致的画面**：着色器翻译器的最后几个错误、赛车阴影、push constants、Vulkan 验证零错误。
-- **所有菜单**都与主机对照检查：接下来是模式、角色和车辆选择。
-- **不再出现 GPU 卡死**、更少的显存占用，然后是无卡顿的加载，以及面向非滚动更新发行版的 Linux 包。
-- **1.8.0 与 1.0.0 持平**：它的超宽屏比例、阴影贴图尺寸和固定随机种子
-  （[#19](https://github.com/adriadam10/mkw-recomp/issues/19)）。
+1. **你自己的《马力欧赛车 世界》dump**，来自你自己的 Nintendo Switch 2：**1.8.0** 版（`exefs/main` 构建 ID
+   `d00e4f399e411d06`）或 1.0.0 版（`9e244438c3d8ef1c`），可以是已解密的 `exefs/` 和 `romfs/` 文件夹，或 `.nup` 文件。
+   在 `updates/` 中带有 1.8.0 更新的主机 dump 可直接使用；两者都有时会构建 1.8.0。
+2. **一台已越狱的 PS5**，运行自制 payload 加载器（`etaHEN` 或 `elfldr`）、`kstuff`，以及 **ShadowMountPlus 1.7 Beta 5**
+   或更新版本（它会挂载 `/data/homebrew/PPSA99193` 并在主屏幕上注册）。支持哪些固件取决于你的越狱、`kstuff` 和 RADV 自制环境
+   （见 [docs/ps5/ps5.md](../../docs/ps5/ps5.md)）。
+3. **一台约有 30 GB 可用空间的电脑**，与 PS5 处于同一网络，用于从你的 dump 构建本作：
+   - **Windows 10 或 11（64 位）：** 无需安装其他任何东西，也不需要 WSL。Windows 构建器自带 Python、zig 和 glslc
+     （[Windows 步骤](#在-windows-上安装无需-wsl)）。
+   - **Linux x86-64 或 WSL2：** 需要 `clang`、`lld` 和 Python 3（[Linux 步骤](#在-ps5-上安装和更新linux-或-wsl2)）。
 
-\* 测量于 2026/11/09，我们的测试机：Radeon 660M APU（Ryzen 5 7535HS），Linux，720p 内部分辨率。
+## 在 Windows 上安装（无需 WSL）
 
-<a id="performance"></a>
+1. **把占位程序放到 PS5 上。** 从[**发布页**](https://github.com/exploitizm/mkw-pit-stop/releases)解压
+   `mkw-pit-stop-<version>-ps5-placeholder-PPSA99193.zip`，用 FTP 客户端（FileZilla、WinSCP）把其中的 `PPSA99193` 文件夹上传到
+   `/data/homebrew/`，使 `/data/homebrew/PPSA99193/eboot.bin` 存在。ShadowMountPlus 注册后，启动
+   **Mario Kart World: Pit Stop**：它会显示 **Game files missing** 和 `Console IP: <地址> (port 19913)`。请保持该画面打开；
+   只有在显示该画面时 PS5 才会接收文件。
+   <p align="center"><img src="../../docs/images/placeholder-ps5.png" width="560" alt="PS5 上的占位程序：缺少游戏文件、主机地址，以及电脑端构建的步骤和进度"></p>
+2. **在电脑上解压构建器。** 下载 `mkw-pit-stop-<version>-ps5-builder-windows-x86_64.zip`，右键点击它，选择**属性**，勾选
+   **解除锁定**，然后解压到一个有 30 GB 可用空间的磁盘上路径较短的文件夹，例如 `C:\PitStop`（不要用 `Program Files` 或
+   OneDrive）。
+3. **构建并发送。** 在该文件夹中运行 `mkw.exe`。在 **Game files** 中用 **Choose folder**（或 **Choose .nup or .nx file**）
+   选择你的 dump；在 **Build for PS5** 下，把 PS5 画面上的地址填入 **PS5 IP**，然后按 **Build for PS5**。PS5 不需要桌面版的
+   **Set up** 按钮。也可以在该文件夹的命令提示符中运行：
+   ```bat
+   prepare_ps5.bat --source "D:\Dumps\MKW" --send 192.168.1.50
+   ```
+   <p align="center"><img src="../../docs/images/launcher-ps5.png" width="560" alt="PS5 构建器的启动界面：已选择你的副本，已填入 PS5 地址，以及 Build for PS5 按钮"></p>
+4. **启动游戏。** 电脑构建期间，PS5 画面会显示当前步骤和进度；所有文件都到达并校验完毕后会显示 **Transfer complete!**：按
+   **叉键**，然后再次启动 **Mario Kart World: Pit Stop**。
 
-## 性能
+**你的副本已经在 PS5 上了？** 勾选 **My game files are already on the PS5** 并在那里填写它的文件夹（例如 `/data/mkw`，其中或其
+`updates\<version>` 中包含 `exefs` 和 `romfs`）：只会发送游戏代码和着色器，本作会在该文件夹中找到游戏。电脑构建时仍然需要你的
+dump。
 
-实测的帧时间及其所用版本见 [docs/project/performance.md](../../docs/project/performance.md)。要添加你的机器，请提交一份
-[性能报告](https://github.com/adriadam10/mkw-recomp/issues/new?template=performance.yml)：它会以报告中的版本加入表格。这些时间是
-游戏自身的帧：插帧会显示更多帧，但不会缩短它们。16.7 ms 即 60 fps；帧率设为自动（与主机相同）时，达不到 60 会降到
-30 fps，而超过 33.3 ms 的帧会让比赛慢于实时。
+**没有网络？用 U 盘。** 在第 3 步中选择 **To a USB drive** 和 **Choose drive**，而不是填写 PS5 的地址：本作会写入该盘的
+`homebrew\PPSA99193`（**exFAT**，约 25 GB 可用空间），把盘插到 PS5 上后 ShadowMountPlus 会在那里找到它（它会扫描
+`/mnt/usb0`-`usb7/homebrew/`）。这种方式不需要第 1 步的占位程序；如果已经安装，请先删除 `/data/homebrew/PPSA99193`，确保只注册
+一个副本。再次构建只会更新盘上发生变化的部分。
 
-| 日期 | GPU | 内部分辨率 | 比赛 fps | 比赛帧时间 |
-|---|---|---|---|---|
-| 2026/11/11 | RX 7900 XTX (Windows) | 2160p | 60 | 16.7 ms |
-| 2026/11/11 | RX 9070 XT (Linux, RADV) | 720p 至 2160p | 60 | 16.7 ms |
-| 2026/11/10 | RTX 3060 (Windows) | 1080p | ~48 | ~21 ms |
-| 2026/11/11 | RTX 3050 Laptop (Windows) | 720p | ~37 | 26.7 ms |
-| 2026/11/09 | Radeon 660M (Linux, RADV) | 720p | 30-32 | 31-33 ms |
-| 2026/11/11 | GTX 1650 SUPER (Windows) | 1080p | ~24 | ~41 ms |
-| 2026/11/09 | GTX 1050 Ti (Windows) | 1080p | 22-24 | 42-45 ms |
+如果 PS5 一直停在 **Waiting for connection**，请检查地址以及两者是否在同一网络；构建失败的原因写在 `mkw.exe` 旁边的
+`logs/setup.log` 中。更新时，解压新的构建器并重新构建即可。
 
-## 如何游玩
+## 在 PS5 上安装和更新（Linux 或 WSL2）
 
-![游戏设置完成后的启动界面](../../docs/images/launcher-main.png)
+由于 `eboot.bin` 链接了重编译的游戏代码，而 `spirv/` 包含翻译后的游戏着色器，**不会分发可直接运行的 `eboot.bin` 或
+`spirv/`**。你需要在自己的电脑上，用不含游戏内容的发布版构建器和你自己的 dump 构建 `PPSA99193` 文件夹：
 
-![游戏文件页面，设置程序在这里读取玩家的游戏导出](../../docs/images/launcher-files.png)
+1. 从[**发布页**](https://github.com/exploitizm/mkw-pit-stop/releases)下载
+   `mkw-pit-stop-<version>-ps5-builder-linux-x86_64.tar.zst`，用 `SHA256SUMS` 核对其摘要，并在 Linux 或 WSL2 上解压：
+   ```sh
+   tar --zstd -xf mkw-pit-stop-*-ps5-builder-linux-x86_64.tar.zst
+   cd mkw-pit-stop-*
+   ```
+2. 运行 `prepare_ps5.py`，指向你的《马力欧赛车 世界》dump（文件夹或 `.nup` 文件）：
+   ```sh
+   python3 prepare_ps5.py --source /path/to/your/mkw-dump --out ./PPSA99193
+   ```
+   脚本会识别 dump 的版本（1.8.0 或 1.0.0），把 AArch64 ExeFS 翻译成 C（`ps5-high144`），针对预编译的运行时和 PS5 RADV 归档
+   编译并链接 `eboot.bin`，下载 NVIDIA 的 `nvdisasm` 和 `ptxas`（以 SHA-256 固定）以在本地生成 SM86 指令规格，把全部
+   11,561 个着色器翻译到 `PPSA99193/spirv/`，并把 `exefs/` 和 `romfs/` 放入 `PPSA99193/`。
+3. 通过 FTP 或 USB 把 `PPSA99193` 传到 PS5 的 `/data/homebrew/PPSA99193` —— 或者加上 `--deploy <PS5_IP>`，自动上传、逐个文件
+   以 SHA-256 校验，并刷新 ShadowMountPlus 在 `/user/app/PPSA99193/sce_sys` 中注册的 `param.json` 和 `icon0.png`。
+4. 从 PS5 主屏幕启动 **Mario Kart World: Pit Stop**。
 
-1. 从你的 Switch 2 导出《马力欧赛车 世界》1.0.0 或 1.8.0（`exefs/` 和 `romfs/`，已解密；1.8.0 需将更新合并进本体的
-   RomFS），或将同一导出打包成单个 `.nup` 或 `.nx` 文件。
-2. 从[发布](https://github.com/adriadam10/mkw-recomp/releases)下载适合你系统的启动器：Linux 下载 `.AppImage`（ARM 上用
-   `-aarch64`；默认游戏文件夹是 `~/.local/share/mkw-recomp`；需要 glibc 2.31 或更新：Debian 11、Ubuntu 20.04、SteamOS
-   及之后的版本），Windows 下载 `.zip` 并解压到一个文件夹。两者都需要约 30 GB 可用空间。
-3. 运行 AppImage（先 `chmod +x`）或 `mkw.exe`，打开**游戏文件**，可选用**选择游戏文件夹**指定游戏的安装位置（或一个已有的
-   安装），再指向你的导出（**选择文件夹**或**选择 .nup 或 .nx 文件**），然后点击**开始设置**。启动器会记住安装文件夹；编译好的
-   游戏、设置生成的文件、存档、设置和缓存都放在那里。换选另一个文件夹不会移动已有的文件。
-   第一次设置需要一些时间（它会编译整个游戏，并下载 NVIDIA 的 `nvdisasm` 和 `ptxas`，Linux 上 84 MB、Windows 上 126 MB，
-   用于在你的机器上描述着色器编码）；之后点击**开始游戏**。
-4. 有新版本时，启动界面会提示（**更新到 vX**）：它会下载、校验、替换程序，并只重新设置有变化的部分。
-   **设置 → 菜单 → 检查更新** 可以关闭此检查。
+**更新：** 解压更新的构建器，用相同的 `--work` 和 `--out` 目录运行 `prepare_ps5.py`。输入未变化的步骤（例如 `romfs/` 和未改动的
+着色器）会被跳过，主机上的存档（`profile/`）和设置（`mkw.ini`）都会保留。
 
-要求：支持 AVX2 的 x86-64 CPU（或 Linux 上支持 ARMv8.2 的 AArch64：LSE、FP16、RCpc、DotProd、CRC32），支持 Vulkan 1.3 的
-GPU（推荐 `VK_EXT_mesh_shader`；没有它时，task 和 mesh 着色器会以 compute 方式运行），建议 16 GB 内存。在 Linux 的 Docker 或
-Podman 容器中，需要在其 seccomp 配置中允许 `userfaultfd`（Docker 默认拒绝）：否则移植版无法得知游戏的哪部分内存发生了变化，
-运行速度会慢好几倍。
+## Pit Stop 设置覆盖菜单
 
-## 额外功能
+在任何画面按 DualSense 上的 **Options + 触控板按下**（桌面版按 **F1**）打开 **Pit Stop**
+（[docs/ps5/pit-stop.md](../../docs/ps5/pit-stop.md)）：
 
-超出主机的部分，全部可选，默认关闭（或与主机相同）：
+| 操作 | 功能 |
+|---|---|
+| **Options + 触控板按下** | 在任何画面打开或关闭 Pit Stop |
+| **方向键 / 左摇杆 上下** | 移动一行 |
+| **方向键 / 左摇杆 左右** | 调整当前设置（关/开或按步进调整数值） |
+| **圆圈键 / 叉键** | 确认 / 返回（跟随你的 Nintendo 或 Xbox 按键布局） |
+| **L1 / R1** | 在 **All settings** 中切换到上一个 / 下一个分类 |
 
-- **显示**：高于或低于主机的内部分辨率、21:9、32:9 和 48:9（比赛时两侧显示更多）、AMD FSR 1 缩放、HDR 屏幕上的 HDR、垂直同步、
-  mailbox 或 immediate 呈现模式。
-- **插帧**：在游戏的帧之间生成额外的帧（30 fps 的比赛以 60 显示，或在 240 Hz 屏幕上以 240 显示）。更流畅，但不更快：画面
-  最多晚一帧，快速运动和小地图可能出现拖影。
-- **画质**：纹理过滤和纹理质量、细节距离和阴影质量，可高于或低于主机。
-- **声音**：5.1 环绕声。
-- **操作**：所有按键和按钮都可重新绑定，鼠标控制视角，任天堂、Xbox 或 PlayStation 按钮图标，体感转向，振动强度；本地多人
-  游戏，每人一个手柄。Switch 2 的手柄（Pro 手柄、Joy-Con、GameCube 手柄）可通过蓝牙使用，在 Linux 上也可通过 USB；在
-  Windows 上，USB 需要一次性的驱动步骤，见下文。
-- **修改项（hacks）**：加速（按住或切换 F2）、跳过视频、全部解锁、每次相同的随机性、直接进入计时赛或自由漫游。
-- **语言**：菜单支持 20 种语言；游戏本身另外支持加泰罗尼亚语、加利西亚语和巴斯克语。
-- **游戏文件**：选择安装文件夹；导出可以是文件夹，也可以是单个 `.nup` 或 `.nx` 文件，原地使用；可从启动界面更新。
-- **性能叠加层**（FPS，或完整的 CPU、GPU 和内存信息），以及一键获取系统信息用于错误报告。
+- 第一屏的**快捷行**可实时调整 **Master volume**（0–100%）、**Vibration strength**（0–300%）和 **Performance HUD**
+  （Off、FPS、Full）。
+- **All settings** 打开 **Display**、**Graphics**、**Controls**（可实时为每个动作捕获按键）、**Audio**、**General**、
+  **Advanced**、**Hacks**（解锁所有车手、车辆、贴纸和特别杯）和 **Multiplayer**。更改会自动保存到 `/app0/mkw.ini`。
 
-### 在 Windows 上通过 USB 使用 Switch 2 手柄
+## 在电脑上游玩（Linux 和 Windows）
 
-这些手柄只有在收到发往其第二个 USB 接口的命令后才会启动，而 Windows 没有给该接口安装应用程序可用的驱动。每个手柄只需用
-[Zadig](https://zadig.akeo.ie/) 做一次：
+来自上游项目 [mkw-recomp](https://github.com/adriadam10/mkw-recomp)：
 
-1. 用 USB-C 线连接手柄，打开 Zadig。
-2. **Options → List All Devices**，然后选择手柄的 **Interface 1**（USB ID：Pro 手柄为 `057E` 和 `2069`，右/左 Joy-Con 为
-   `2066`/`2067`，GameCube 手柄为 `2073`）。不要选 Interface 0：那是手柄的正常输入接口，替换它会让所有其他程序都看不到手柄。
-3. 驱动选 **WinUSB**，然后 **Replace Driver**（或 **Install Driver**）。
+<p align="center">
+  <img src="../../docs/images/launcher-files.png" width="400" alt="设置前启动界面的 Game files 页面">
+  <img src="../../docs/images/launcher-main.png" width="400" alt="游戏设置完成后的启动界面">
+</p>
 
-以这些 USB ID 出现的虚拟手柄（Switch2Connect 的 USB/IP 模式）也适用同样的步骤。要撤销，在设备管理器中卸载该接口的设备，并
-勾选“删除驱动程序”。
-
-## 模组
-
-启动界面的**模组**页面会按照模组发布时的样子安装它们，并在两个标签页中列出：
-
-- **在 GameBanana 上查找**：[GameBanana](https://gamebanana.com/games/22152) 上的《马力欧赛车 世界》模组，可浏览或搜索，
-  显示每个模组的作者、许可证、截图和说明。**安装**会从 GameBanana 下载文件，仅在你要求时进行。
-- **已安装**：你的模组，每个都有开关；**导入 zip / 导入文件夹** 可导入你已有的模组（`.zip`、`.rar` 或 `.7z`，其中任意
-  位置包含 `romfs/` 和/或 `exefs/`，也包括 `atmosphere/contents/` 结构）。
-
-替换游戏文件的模组（`romfs/`：皮肤、纹理、文本、赛道）会在下次启动时生效。修改游戏代码的模组（`exefs/` 中的 `.ips` 或
-`.pchtxt` 补丁，例如 200cc 或 30 FPS）会被编入游戏代码：开启或关闭其中一个会在游戏前重新编译（需要几分钟）。修改同一个
-档案的两个模组会逐个文件合并，若两者修改了同一个文件，页面会询问以哪个为准。页面会对替换游戏画质设置或着色器的模组给出
-提醒，因为移植版以自己的方式处理这些内容。
-
-模组由其他人制作，本项目不对其进行测试：一个模组可能导致游戏崩溃或损坏你的存档。安装前请阅读模组页面，备份你的存档，并将
-模组的问题反馈给其作者；在这里报告错误时，请说明启用了哪些模组（日志中会列出），或先在不启用它们的情况下再试一次。
+1. 从你的 Switch 2 提取《马力欧赛车 世界》1.0.0 或 1.8.0（`exefs/` 和 `romfs/`，已解密）。
+2. 从 [mkw-recomp 的发布页](https://github.com/adriadam10/mkw-recomp/releases)下载 PC 启动器：Linux 上用 `.AppImage`（构建的
+   游戏保存在 `~/.local/share/mkw-recomp`；需要 glibc 2.31 或更新），Windows 上用 `.zip`。两者都需要约 30 GB 可用空间。
+3. 运行 AppImage 或 `mkw.exe`，打开 **Game files**，指向你的 dump 并按 **Prepare**，然后按 **Play**。
 
 ## 从源代码构建
 
-Linux，需要 `uv`、`clang`、`lld`、`ninja`、SDL3、Opus、libvpx、zstd、xxHash、Vulkan 头文件和 VMA 3.4.0（详见
-[tools/build/README.md](../../tools/build/README.md)）。把你的导出放在 `game/`（`game/exefs`、`game/romfs`），或设置
-`MKW_GAME=<dir>`，然后在仓库根目录执行：
+### PS5 原生目标（`PPSA99193`）
+
+固定版本的 `PS5_VulkanTemplate`、`PS5_Vulkan`、`PS5_Mesa` 和 `PS5_PayloadSDK` 检出请见 [docs/ps5/ps5.md](../../docs/ps5/ps5.md) 和
+[tools/ps5/README.md](../../tools/ps5/README.md)：
 
 ```sh
-uv run python recomp/gen.py --exefs game/exefs --out build/generated --jobs 8 --patches recomp/patches-mkw.txt  # 1.8.0: patches-mkw-180.txt
-uv run tools/shaders/extract.py && uv run tools/shaders/translate.py
-uv run tools/build/build.py              # build/mkw; --target windows builds mkw.exe with llvm-mingw
-build/mkw
+python3 recomp/gen.py --exefs "$MKW_GAME/exefs" --guest-layout ps5-high144 \
+    --out build/ps5-game/generated --patches recomp/patches-mkw.txt
+python3 tools/shaders/extract.py && python3 tools/shaders/translate.py
+python3 tools/ps5/build_game.py --stack "$stack" --include "$headers" \
+    --generated build/ps5-game/generated --exefs "$MKW_GAME/exefs"
+python3 tools/ps5/deploy.py <PS5_IP> --game
 ```
 
-从打包的导出（`.nup`、`.nx`）构建以及 AArch64 上的 Linux：[tools/build/README.md](../../tools/build/README.md#a-packed-dump)
-和[其 AArch64 部分](../../tools/build/README.md#linux-aarch64)。
+从运行时清单（`--inventory`）打包不含游戏内容的 PS5 构建器发布版：
 
-翻译着色器需要 SM86 编码规范，它由 NVIDIA 的 `nvdisasm` 生成（不随项目分发）：参见
-[tools/shaders/README.md](../../tools/shaders/README.md)。所有生成的内容都放在 `build/`，绝不进入 git。
+```sh
+python3 tools/ps5/build_game.py --stack "$stack" --include "$headers" --inventory
+python3 tools/ps5/release_ps5.py --stack "$stack" --version 0.1.0
+```
+
+### Linux 和 Windows 主机构建
+
+详见 [tools/build/README.md](../../tools/build/README.md)：
+
+```sh
+python3 recomp/gen.py --exefs game/exefs --out build/generated --jobs 8 --patches recomp/patches-mkw.txt
+python3 tools/shaders/extract.py && python3 tools/shaders/translate.py
+python3 tools/build/build.py              # build/mkw; --target windows builds mkw.exe with llvm-mingw
+build/mkw
+```
 
 | 文件夹 | 内容 |
 |---|---|
 | [recomp/](../../recomp/README.md) | 生成器：AArch64 → C |
-| [runtime/](../../runtime/README.md) | 扮演主机的部分：内核、内存、SDK 替代实现、基于 Vulkan 的 NVN2、音频、输入、菜单和启动器 |
+| [runtime/](../../runtime/README.md) | 替代主机的部分：内核、内存、SDK 替代实现、基于 Vulkan 的 NVN2、音频、输入、Pit Stop 和启动器 |
 | [sm86/](../../sm86/README.md) | 着色器翻译器：SM86 SASS → GLSL → SPIR-V |
-| [i18n/](../../i18n/README.md) | 菜单、启动界面和设置程序在各语言下的文本（gettext `.po`） |
-| [tools/](../../tools/README.md) | 分析、设置、构建、游戏运行和诊断 |
+| [tools/](../../tools/README.md) | 分析、设置、构建、PS5 打包、游戏运行和诊断 |
 | [tests/](../../tests/README.md) | 不需要游戏或 GPU 的测试，在 Linux 和 Windows 的 CI 中运行 |
-| [docs/](../../docs/README.md) | 研究、来源和性能 |
+| [docs/](../../docs/README.md) | PS5 架构、Pit Stop、研究、来源、路线图和性能 |
+| [i18n/](../../i18n/README.md) | 菜单文本的 gettext 文件（`mkw.pot`，每种语言一个 `.po`） |
+| [server/](../../server/README.md) | 通过互联网进行本地无线游戏的大厅服务器（`server/lobby`） |
 | `.github/` | CI、issue 和 pull request 模板 |
 
-根目录下：`pyproject.toml` 和 `uv.lock`（工具的 Python 环境）、`.gitignore`、`LICENSE`、`CONTRIBUTING.md`、`CHANGELOG.md`
-（每个版本的更改，即其发布说明）和 `AGENTS.md`（给编程智能体的指南）。
+根目录：`pyproject.toml` 和 `uv.lock`（工具的 Python 环境）、`Makefile`（发布和 CI 流程的快捷方式）、`.gitignore`、
+`LICENSE`、`CONTRIBUTING.md`、`CHANGELOG.md`（每个版本的更改及其说明）、`AGENTS.md`（给编程代理的指南）。
 
-## 设计决策（2026/10/30）
+## 性能
 
-| 主题 | 决策 | 原因 |
-|---|---|---|
-| CPU | 基于 [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp)（MIT）的 AArch64→C 翻译器，扩展到 ARMv8.1-8.3：LSE 原子操作、CAS、LDAPR；PAC 视为恒等，MTE 标签视为 0 | 与 MKW 同属一个引擎家族，并且已能处理大型可执行文件 |
-| 系统 | SDK 的 `nn::*` 函数按名称替换；签名来自 `main` 的 1 289 个导入符号的修饰名 | 无需模拟主机服务 |
-| 图形 | 基于 Vulkan 的 NVN2：其 699 个函数中有 529 个与 NVN1 同名（签名已由 totk-pc-recomp 和 nxnative 得知）；170 个是新的 | 重编译，而非 GPU 模拟 |
-| 着色器 | 自研的离线 SM86→SPIR-V 翻译器，解码器由 DocumentSASS / nvsass-disassembler 规范生成 | 覆盖 mesh/task 以及 Maxwell 缺少的部分 |
-| Switch 2 的可选功能 | 屏幕处于 HDR 时自动开启 HDR，与主机相同（设置 > 画面 > HDR：自动或 OFF）；DLSS、光线追踪和触屏需在选项中开启，默认关闭；关闭时它们的 NVN2 函数存在但不做任何事，游戏走正常路径 | 主机硬件的附加功能，游玩不需要 |
-| 默认值 | 与主机相同的外观和分辨率；更低的设置作为选项 | 由玩家选择 |
+在标准版 PS5 上，《马力欧赛车 世界》1.8.0，大奖赛比赛基准测试（`tools/ps5/bench.py`，比赛 210 秒，1080p，关闭插帧）：
 
-## 它是如何完成的
+| 日期 | 帧率设置 | 平均帧时间 | 典型帧 | 1% 低帧 | 比赛速度 |
+|---|---|---|---|---|---|
+| 2026-11-20 | 60 fps（新的默认值） | 17.0–17.4 ms（57–59 fps） | 16.7 ms（达到上限） | 35–41 fps | 0.95–0.98 倍 |
+| 2026-11-16 | 30 fps（之前的默认值） | 33.3 ms | 33.3 ms | | 1.00 倍 |
 
-这个移植版是在我的指导下，由 [Claude](https://claude.com/claude-code)（Anthropic 的编程智能体）完成大部分编码工作写成的，
-用了大约十天的全职工作：自 2026/10/30 起共 489 个提交，每一个都在合入前经过审查、测量或测试。它不是一条提示词就完成的。
-背后有：
+新的默认值尚未在主机上以发布状态测试过：这些数据来自开启了运行时性能日志（`MKW_TRACE=perf`，会带来少量开销）、手动设为 60 fps
+的基准比赛。菜单、计时赛、分屏、长时间游玩和其他赛道尚未在新的默认值下游玩过。
 
-- **方法重于提示词。** 每项性能改动都在同一次运行中用 A/B 测量（同一构建的两次运行每帧最多相差 12 ms）；每个画面修正都与
-  主机自己的画面对照检查；着色器翻译器的改动在运行游戏前，会在 GPU 之外对 MKW 的全部 11 561 个程序进行测试；帧捕获可以
-  在几秒内脱离游戏重放后端。从错误中总结出的规则被写下来并由脚本强制执行，同样的错误不会犯第二次。
-- **我之前学到的东西。** 重编译器和运行时源自 [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) 及其 Linux
-  移植，以及我之前在其他重编译项目（SavageWindRecomp、smo-recomp）上的工作：翻译器、启动器和在玩家机器上构建游戏的设置程序、
-  按钮图标、着色器的控制流。作为 [AnyPS5](https://github.com/boykopovar/AnyPS5) 的维护者，我学会了如何忠实地翻译 GPU
-  着色器、在不支持 mesh 着色器的 GPU 上以 compute 方式运行它们，以及如何用检查和测量让一个大型项目保持可靠。
-- **社区的研究。** [eden-nx2](https://git.eden-emu.dev/Takoroka/eden-nx2) 关于 Switch 2 的笔记，DocumentSASS 和
-  nvsass-disassembler 记录的 NVIDIA SASS 编码，Ryujinx 和 Mesa NAK 提供的着色器语义，以及来源中列出的其他 Switch 2 移植。
+约 2% 的比赛帧超过 20 ms：它们出现在赛道加载新纹理的地方，决定了 1% 低帧和轻微的慢动作。已测量的内容和尚待处理的问题见
+[docs/project/roadmap.md](../../docs/project/roadmap.md) 和 [docs/ps5/ps5.md](../../docs/ps5/ps5.md#frame-rate)；电脑上的数据见
+[docs/project/performance.md](../../docs/project/performance.md)。
 
-## 许可证与致谢
+## 报告问题
 
-本项目采用 [MIT 许可证](../../LICENSE)。取自其他项目的代码保留其自身的许可证，放在代码旁边（[recomp/](../../recomp/)、
-[runtime/](../../runtime/)、[sm86/decode/](../../sm86/decode/) 和 [runtime/third_party/](../../runtime/third_party/README.md) 中的
-`LICENSE.*` 文件）：totk-pc-recomp、nvsass-disassembler、Dear ImGui、bc7enc、stb_image、AMD FidelityFX FSR 1 和 Roboto。
-使用过的每个来源及其许可证和所取内容（代码仅取自 MIT 项目；对 GPL 项目只取思路）都列在
-[docs/project/research.md](../../docs/project/research.md#sources) 中。
+请看 [CONTRIBUTING.md](../../CONTRIBUTING.md)。PS5 问题请在[本分支的 issues](https://github.com/exploitizm/mkw-pit-stop/issues) 中报告，
+并附上主机内核日志（`klog`，前缀为 `[Mario Kart World: Pit Stop]`）以及电脑端构建器的 `logs/setup.log`。桌面版问题请附上
+`logs/mkw.log` 和 `logs/setup.log`。切勿附上游戏文件、dump 或由你的 dump 构建的 `eboot.bin` 二进制文件。
 
-《马力欧赛车 世界》© Nintendo。本项目与任天堂无关，也未获其认可，不包含任何游戏代码或资源，也不协助获取它们。
+## 许可证、致谢和免责声明
 
-模组归其作者所有，并遵循各自的许可证。本项目与 GameBanana 或任何模组作者无关，也未获其认可，不托管、审查或分发模组，也不对
-模组的行为负责：启动界面只显示 GameBanana 的公开列表，并在你要求时从 GameBanana 下载模组。
+本仓库的源代码采用 [MIT 许可证](../../LICENSE)（`Copyright (c) 2026 Adrià`）。
 
-## 参与贡献
+**PS5 发布文件采用 GPL-3.0-or-later。** 每个 PS5 程序都链接了 payload SDK 分支的平台层和 `PS5_Vulkan` 的启动代码
+（GPL-3.0-or-later），因此占位程序、构建器的 `ps5-bundle/` 以及你用它们构建的每个程序整体上都采用 GPL-3.0-or-later；
+mkw-recomp 自己的代码仍为 MIT。每个发布都带有 `LEGAL.txt` 和 `licenses/`（每个部分及其许可证、版权和源码版本），并以
+`source/*.tar.gz`（`source/SOURCES.txt`）附上每个部分的完整源代码，由 [tools/ps5/release_notices.py](../../tools/ps5/release_notices.py)
+生成。
 
-参见 [CONTRIBUTING.md](../../CONTRIBUTING.md)。错误和性能报告请提交到 [Issues](https://github.com/adriadam10/mkw-recomp/issues)，
-问题请发到 [Discussions](https://github.com/adriadam10/mkw-recomp/discussions)。
+- **上游项目：** Adrià 的 [**mkw-recomp**](https://github.com/adriadam10/mkw-recomp) —— AArch64→C 提升器、Switch 2 内核和
+  `nn::*` SDK 替代实现、基于 Vulkan 的 NVN2 渲染器，以及离线 SM86→SPIR-V 着色器翻译器。
+- **MIT 及宽松许可的项目**（[recomp/](../../recomp/)、[runtime/](../../runtime/)、[sm86/decode/](../../sm86/decode/) 和
+  [runtime/third_party/](../../runtime/third_party/README.md) 中的 `LICENSE.*` 文件）：
+  [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) 及其 Linux 移植、
+  [SavageWindRecomp](https://github.com/Revivedx/SavageWindRecomp)、
+  [DocumentSASS](https://github.com/0xD0GF00D/DocumentSASS) 和
+  [nvsass-disassembler](https://github.com/reoLantern/nvsass-disassembler)、
+  [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx)、[Mesa NAK](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/nouveau/compiler)、
+  [mario-kart-world-save-editor](https://github.com/Ca1nM/mario-kart-world-save-editor)、Dear ImGui、
+  [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo)、AMD FidelityFX FSR 1、Vulkan Memory Allocator、Roboto 和 Lato。
+- **PS5 工具链和运行时：** [PS5_VulkanTemplate](https://github.com/mihawk-99/PS5_VulkanTemplate)（MIT，Sascha Willems 和
+  Mihawk）、[PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa)（MIT，PS5 版 RADV）、
+  [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) 和 [PS5_PayloadSDK](https://github.com/mihawk-99/PS5_PayloadSDK)
+  （GPL-3.0-or-later，Mihawk 和 [John Törnblom / ps5-payload-dev](https://github.com/ps5-payload-dev/sdk)），以及
+  [ShadowMountPlus](https://github.com/drakmor/shadowMountPlus)。与 payload SDK 平台层和 `PS5_Vulkan` 的 CRT/存根一起链接进
+  PS5 程序时，合并后的 PS5 程序二进制文件采用 GPL-3.0-or-later（见构建出的程序中的 `LEGAL.txt` 和 `licenses/`）。
+- **仅参考研究和设计思路**（未从 GPL 或无许可证项目中复制代码）：eden-nx2、Hookshot、PS5_Hookshot、EglantinePS5、AnyPS5、
+  prosper 和 shadPS4。每个来源都记录在 [docs/project/research.md](../../docs/project/research.md#sources) 中。
+
+**免责声明：** *Mario Kart World* 和 *Mario* 是 Nintendo 的商标。"PlayStation" 和 "PS5" 是 Sony Interactive Entertainment Inc.
+的商标。本项目与 Nintendo、Sony Interactive Entertainment 或任何游戏发行商无关，也未获得其认可；本项目不包含任何游戏代码、着色器
+或资源，也不帮助获取它们。

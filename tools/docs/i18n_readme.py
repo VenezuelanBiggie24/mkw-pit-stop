@@ -20,59 +20,42 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 I18N = ROOT / "docs/i18n"
-REPO = "https://github.com/adriadam10/mkw-recomp"
+REPO = "https://github.com/exploitizm/mkw-pit-stop"
 # (code, name in its own language, right to left)
 LANGS = [("zh-CN", "简体中文", False), ("es", "Español", False), ("ar", "العربية", True), ("hi", "हिन्दी", False),
          ("pt-BR", "Português (Brasil)", False), ("pt-PT", "Português (Portugal)", False),
          ("de", "Deutsch", False)]  # fmt: skip
-# per language: tagline, download, latest for Windows / Linux (AppImage) / Linux ARM, and the link row's names
+# per language: tagline, download, latest for PS5, and the link row's names (LINKS' order)
 # fmt: off
 STRINGS = {
-    "zh-CN": ("《马力欧赛车 世界》（Nintendo Switch 2）的重编译版本，可在 Linux 和 Windows 上原生运行。", "下载",
-              "Windows 最新版", "Linux 最新版 (AppImage)", "Linux ARM 最新版",
-              ["发布", "帮助 Wiki", "Discord", "更新日志", "参与贡献", "来源", "路线图", "性能", "问题", "讨论", "存档"]),
-    "es": ("Mario Kart World (Nintendo Switch 2) recompilado para funcionar de forma nativa en Linux y Windows.",
-           "Descargar", "última para Windows", "última para Linux (AppImage)", "última para Linux ARM",
-           ["Versiones", "Wiki de ayuda", "Discord", "Cambios", "Contribuir", "Fuentes", "Hoja de ruta", "Rendimiento", "Issues", "Discussions",
-            "Archivo"]),
-    "ar": ("ماريو كارت وورلد (Nintendo Switch 2) معاد تجميعها لتعمل أصليًا على Linux وWindows.", "تنزيل",
-           "أحدث إصدار لـ Windows", "أحدث إصدار لـ Linux (AppImage)", "أحدث إصدار لـ Linux ARM",
-           ["الإصدارات", "الويكي", "Discord", "سجل التغييرات", "المساهمة", "المصادر", "خارطة الطريق", "الأداء", "المشكلات", "النقاشات", "الأرشيف"]),
-    "hi": ("Mario Kart World (Nintendo Switch 2), Linux और Windows पर नेटिव रूप से चलने के लिए रीकम्पाइल किया गया।",
-           "डाउनलोड", "Windows के लिए नवीनतम", "Linux के लिए नवीनतम (AppImage)", "Linux ARM के लिए नवीनतम",
-           ["रिलीज़", "विकी", "Discord", "बदलाव", "योगदान", "स्रोत", "रोडमैप", "प्रदर्शन", "इश्यू", "चर्चाएँ", "आर्काइव"]),
-    "pt-BR": ("Mario Kart World (Nintendo Switch 2) recompilado para rodar nativamente no Linux e no Windows.",
-              "Baixar", "mais recente para Windows", "mais recente para Linux (AppImage)",
-              "mais recente para Linux ARM",
-              ["Versões", "Wiki de ajuda", "Discord", "Mudanças", "Contribuir", "Fontes", "Roteiro", "Desempenho", "Issues", "Discussões",
-               "Arquivo"]),
-    "pt-PT": ("Mario Kart World (Nintendo Switch 2) recompilado para correr nativamente em Linux e Windows.",
-              "Transferir", "mais recente para Windows", "mais recente para Linux (AppImage)",
-              "mais recente para Linux ARM",
-              ["Versões", "Wiki de ajuda", "Discord", "Alterações", "Contribuir", "Fontes", "Roteiro", "Desempenho", "Issues", "Discussões",
-               "Arquivo"]),
-    "de": ("Mario Kart World (Nintendo Switch 2), rekompiliert, um nativ unter Linux und Windows zu laufen.",
-           "Download", "neueste für Windows", "neueste für Linux (AppImage)", "neueste für Linux ARM",
-           ["Releases", "Hilfe-Wiki", "Änderungen", "Mitwirken", "Quellen", "Roadmap", "Leistung", "Issues", "Discussions",
-            "Archiv"]),
+    "zh-CN": ("《马力欧赛车 世界》（Nintendo Switch 2）的原生 PlayStation 5 自制移植版，基于静态重编译。", "下载",
+              "PS5 最新版", ["发布", "更新日志", "参与贡献", "路线图", "PS5 说明", "问题"]),
+    "es": ("Un port homebrew nativo para PlayStation 5 de Mario Kart World (Nintendo Switch 2), por recompilación estática.",
+           "Descargar", "última para PS5", ["Versiones", "Cambios", "Contribuir", "Hoja de ruta", "Notas de PS5", "Issues"]),
+    "ar": ("منفذ homebrew أصلي لـ PlayStation 5 للعبة Mario Kart World (Nintendo Switch 2)، بإعادة تجميع ثابتة.", "تنزيل",
+           "أحدث إصدار لـ PS5", ["الإصدارات", "سجل التغييرات", "المساهمة", "خارطة الطريق", "ملاحظات PS5", "المشكلات"]),
+    "hi": ("Mario Kart World (Nintendo Switch 2) का नेटिव PlayStation 5 होमब्रू पोर्ट, स्टैटिक रीकम्पाइलेशन से।",
+           "डाउनलोड", "PS5 के लिए नवीनतम", ["रिलीज़", "बदलाव", "योगदान", "रोडमैप", "PS5 नोट्स", "इश्यू"]),
+    "pt-BR": ("Um port homebrew nativo para PlayStation 5 de Mario Kart World (Nintendo Switch 2), por recompilação estática.",
+              "Baixar", "mais recente para PS5", ["Versões", "Mudanças", "Contribuir", "Roteiro", "Notas do PS5", "Issues"]),
+    "pt-PT": ("Um port homebrew nativo para PlayStation 5 de Mario Kart World (Nintendo Switch 2), por recompilação estática.",
+              "Transferir", "mais recente para PS5", ["Versões", "Alterações", "Contribuir", "Roteiro", "Notas da PS5", "Issues"]),
+    "de": ("Ein nativer PlayStation-5-Homebrew-Port von Mario Kart World (Nintendo Switch 2), per statischer Rekompilierung.",
+           "Download", "neueste für PS5", ["Releases", "Änderungen", "Mitwirken", "Roadmap", "PS5-Hinweise", "Issues"]),
 }
 # fmt: on
 LINKS = [
     f"{REPO}/releases",
-    # Help for players: installation, settings, controls, known errors, FAQ (its source is the repository's wiki)
-    f"{REPO}/wiki",
-    # Permanent invite to the Discord server (#rules); declared with prevent_destroy in the server repo
-    "https://discord.gg/8uYBkjQkEg",
     "../../CHANGELOG.md",
     "../../CONTRIBUTING.md",
-    "../../docs/project/research.md#sources",
     "../../docs/project/roadmap.md",
-    "../../docs/project/performance.md",
+    "../../docs/ps5/ps5.md",
     f"{REPO}/issues",
-    f"{REPO}/discussions",
-    # Daily copy of the repository, issues, discussions and releases (tools/github/archive.py)
-    "https://archive.org/search?query=subject%3A%22mkw-recomp%22",
 ]  # fmt: skip
+# The body's links to its own sections: (#@key) in a body becomes the anchor GitHub makes from that language's heading
+# (the README's level-2 headings in order: Status, What you need, Installing on Windows, Installing on PS5 from Linux,
+# Pit Stop, Playing on PC, Building from source, Performance, Reporting bugs, Licenses).
+SECTION_KEYS = {"windows": 2, "linux": 3, "pc": 5, "performance": 7}
 # Scripts whose letters join (Arabic) or stack (Devanagari): their buttons stay in English (13/11/2026, seen on GitHub)
 LATIN_BUTTONS = {"ar", "hi"}
 SOURCE = re.compile(r"<!-- translated from README.md ([0-9a-f]{12})(?: body ([0-9a-f]{12}))? -->")
@@ -105,10 +88,29 @@ def bar(code: str) -> str:
     return '<!-- i18n-bar:start -->\n<p align="center">\n  ' + " ·\n  ".join(items) + "\n</p>\n<!-- i18n-bar:end -->"
 
 
+def slug(heading: str) -> str:
+    """GitHub's anchor for a heading: lower case, letters, digits, marks, spaces, hyphens and underscores kept, spaces
+    to hyphens."""
+    import unicodedata
+
+    t = heading.strip().lower()
+    t = "".join(ch for ch in t if ch in " -_" or unicodedata.category(ch)[0] in "LNM")
+    return t.replace(" ", "-")
+
+
+def section_links(body: str) -> str:
+    heads = [ln[3:] for ln in body.splitlines() if ln.startswith("## ")]
+
+    def repl(m: re.Match) -> str:
+        return "(#" + slug(heads[SECTION_KEYS[m.group(1)]]) + ")"
+
+    return re.sub(r"\(#@([a-z]+)\)", repl, body)
+
+
 def build(code: str, rtl: bool) -> str:
-    tag, dl, win, lin, arm, names = STRINGS[code]
+    tag, dl, ps5, names = STRINGS[code]
     if code in LATIN_BUTTONS:  # shields.io's for-the-badge spaces and capitalises letters one by one: it breaks
-        dl, win, lin, arm = "Download", "latest for Windows", "latest for Linux (AppImage)", "latest for Linux ARM"
+        dl, ps5 = "Download", "latest for PS5"
     from urllib.parse import quote
 
     def button(what: str, color: str) -> str:
@@ -116,20 +118,19 @@ def build(code: str, rtl: bool) -> str:
         return (f'  <a href="{REPO}/releases/latest"><img src="{url}?style=for-the-badge&labelColor=1b2740" '
                 f'alt="{dl}: {what}"></a>')  # fmt: skip
 
-    links = " ·\n  ".join(f'<a href="{u}">{n}</a>' if i > 2 else f'<b><a href="{u}">{n}</a></b>'
+    links = " ·\n  ".join(f'<a href="{u}">{n}</a>' if i > 0 else f'<b><a href="{u}">{n}</a></b>'
                           for i, (u, n) in enumerate(zip(LINKS, names)))  # fmt: skip
     body = (I18N / f"{code}.body.md").read_text(encoding="utf-8").strip()
     stamp = source_stamp(code, body)
-    body = REL_HTML.sub(r"\1../../\2", REL_MD.sub(r"\1../../\2", body))
+    body = section_links(REL_HTML.sub(r"\1../../\2", REL_MD.sub(r"\1../../\2", body)))
     if rtl:
         body = f'<div dir="rtl">\n\n{body}\n\n</div>'
     head = "\n\n".join([
         stamp,
-        '<p align="center"><img src="../images/logo.svg" width="128" alt="mkw-recomp logo"></p>',
-        '<h1 align="center">mkw-recomp</h1>',
+        '<p align="center"><img src="../images/icon.svg" width="144" alt="Mario Kart World: Pit Stop icon"></p>',
+        '<h1 align="center">Mario Kart World: Pit Stop</h1>',
         f'<p align="center">\n  <b>{tag}</b>\n</p>',
-        '<p align="center">\n' + "\n".join([button(win, "0078d6"), button(lin, "e95420"), button(arm, "8957e5")])
-        + "\n</p>",
+        '<p align="center">\n' + button(ps5, "0070d1") + "\n</p>",
         f'<p align="center">\n  {links}\n</p>',
         bar(code),
     ])  # fmt: skip

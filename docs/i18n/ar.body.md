@@ -1,214 +1,250 @@
-إعادة تجميع ثابتة للعبة *Mario Kart World* (‏Nintendo Switch 2، الإصداران 1.0.0 و1.8.0) إلى برنامج أصلي للحاسوب يعمل على
-Linux وWindows. تحتاج إلى نسختك الخاصة من اللعبة، مستخرجة من جهازك أنت: لا يوجد أي شيء من اللعبة في هذا المستودع ولا في
-إصداراته.
+منفذ homebrew أصلي لـ PlayStation 5 (`PPSA99193`) من [**mkw-recomp**](https://github.com/adriadam10/mkw-recomp)، وهو
+إعادة التجميع الثابتة التي أعدّها Adrià للعبة *Mario Kart World* (Nintendo Switch 2، الإصداران 1.8.0 و1.0.0). تحتاج إلى نسختك
+الخاصة من اللعبة، مستخرجة من جهاز Switch 2 الخاص بك: لا يوجد أي شيء من اللعبة في هذا المستودع ولا في إصداراته.
 
-**إنها إعادة تجميع، وليست محاكيًا.** يُترجَم كود AArch64 الخاص باللعبة إلى لغة C مسبقًا ثم يُجمَّع لمعالج الحاسوب (x86-64، أو
-AArch64 على Linux)؛ لا يوجد مفسّر ولا JIT للمعالج. ولا تتم محاكاة الـ GPU أيضًا: أُعيد تنفيذ NVN2، واجهة الرسوميات في Switch 2،
-فوق Vulkan على مستوى الواجهة، وتُترجَم مظلِّلات SM86 الخاصة باللعبة إلى SPIR-V مسبقًا. تُستبدل دوال SDK الخاص بـ Nintendo
-(`nn::*`) بالاسم بكود خاص بنا.
+**إنها إعادة تجميع ثابتة، وليست محاكيًا.** تُترجم شيفرة AArch64 الخاصة باللعبة إلى C مسبقًا وتُجمَّع لمعالج x86-64 Zen 2 في
+PS5 (تخطيط عناوين الضيف `ps5-high144`)؛ لا يوجد مفسّر للمعالج ولا JIT. ولا تتم محاكاة وحدة الرسوميات أيضًا: أُعيد تنفيذ NVN2،
+واجهة الرسوميات في Switch 2، على مستوى الواجهة فوق Vulkan باستخدام برنامج تشغيل RADV من Mesa لـ PS5، وتُترجم مظلّلات SM86
+الخاصة باللعبة إلى SPIR-V مسبقًا على حاسوبك. وتُستبدل دوال Nintendo SDK (`nn::*`) بأسمائها بشيفرتنا الخاصة.
 
-## الحالة
+> **مشروع الحاسوب الأصلي (upstream):** تبحث عن نسخة Linux أو Windows؟ راجع
+> [**adriadam10/mkw-recomp**](https://github.com/adriadam10/mkw-recomp) ([تعليمات الحاسوب أدناه](#@pc)).
 
-في مرحلة مبكرة، ويتقدم بسرعة. حتى 12/11/2026:
+## الحالة (PS5)
 
-- يقلع، ويعرض مقاطع الفيديو الافتتاحية، ويتنقل في القوائم ويخوض السباقات، على Linux وWindows (‏x86-64)، وعلى Linux بمعالج
-  AArch64 (بملف AppImage خاص به؛ جُرِّب على جهاز محمول بـ Adreno 740).
-- تجهّز شاشة البدء اللعبة من نسختك على جهازك (تولّد كود C وتجمّعه، وتترجم المظلِّلات، وتسخّن ذاكرة الـ pipelines المؤقتة)
-  وتحتفظ بكل الإعدادات: العرض، وجودة الرسوميات، والتحكم، والتعديلات (hacks).
-- تعمل السباقات بـ 60 إطارًا في الثانية على بطاقات الرسوميات القوية و30 على المتوسطة؛ انظر [الأداء](#performance).
-- مشكلات معروفة: بعض القوائم (الوضع، واختيار الشخصية والمركبة) ما زالت تحتاج إلى عمل، وظل الكارت يفقد إطارًا من حين لآخر،
-  وينقطع بعض الصوت أثناء مقاطع الفيديو، وقد يتجمد الـ GPU مع بعض تعريفات AMD. لا يوجد لعب عبر الإنترنت.
+في مرحلة مبكرة، ويتقدّم بسرعة. حتى 18/11/2026 على جهاز PS5 أساسي:
 
-## خارطة الطريق
+- **الإقلاع والمقاطع والقوائم والسباقات تعمل**، مع عرض Vulkan مباشر عبر RADV، وصوت ستيريو عبر `sceAudioOut`، وما يصل إلى أربع
+  وحدات تحكم DualSense بحسابات مسجّلة، مع الاهتزاز وأيقونات أزرار PlayStation.
+- **تعمل السباقات بمعدل 60 إطارًا في الثانية افتراضيًا، دون توليد إطارات**: نحو 57-59 إطارًا في الثانية في المتوسط في اختبار
+  أداء للجائزة الكبرى، وبعض الإطارات الأبطأ أحيانًا تُبقي السباق عند 0.95-0.98 من الزمن الحقيقي (انظر [الأداء](#@performance)).
+  وضع 30 إطارًا في الثانية الخاص باللعبة (بالسرعة الكاملة) وتوليد الإطارات خياران في **Pit Stop > Display**.
+- **اللعب الجماعي:** الشاشة المقسومة الخاصة باللعبة (وحدة DualSense لكل لاعب مسجّل) ووضعها اللاسلكي المحلي عبر الشبكة المحلية،
+  بين أجهزة PS5 أو مع نسخة الحاسوب من الإصدار نفسه ([docs/ps5/multiplayer.md](docs/ps5/multiplayer.md)). لا يوجد لعب عبر
+  الإنترنت من Nintendo.
+- **واجهة Pit Stop داخل اللعبة.** اضغط **Options + نقرة لوحة اللمس** في أي وقت لفتح **Pit Stop**، وهي قائمة إعدادات مصمّمة
+  لوحدة التحكم، فيها صفوف سريعة (**Master volume** و**Vibration strength** و**Performance HUD**)، وكل فئات الإعدادات، وإعادة
+  تعيين أزرار DualSense مباشرةً، وتُحفظ في `/app0/mkw.ini`.
+- **مشكلات معروفة ([docs/project/roadmap.md](docs/project/roadmap.md)):**
+  - *الجلسات الطويلة:* تنخفض الذاكرة المتاحة سباقًا بعد سباق لأن اللعبة تحتفظ ببيانات الحلبات السابقة؛ وعندما تقلّ، قد تظهر
+    الخامات تالفة أو مفقودة. أعد تشغيل اللعبة بعد بضعة سباقات إذا حدث ذلك.
+  - *البلاطات المتفرّقة:* منذ الإقلاع تبقى بعض بلاطات الخامات المتفرّقة غير محمّلة: عيوب طفيفة في الخامات قرب خط البداية ومقدمة
+    سباق بالأبيض والأسود.
+  - *اللعب الجماعي:* قد يُسقط السباق الأول على حلبة لاعبًا ما زالت مظلّلاته قيد التجميع؛ والسباقات التالية تعمل. تعمل الشاشة
+    المقسومة بأقل من 30 إطارًا في الثانية في المشاهد المزدحمة.
+  - *القوائم:* ما زالت شاشات اختيار الوضع والشخصية والمركبة تختلف قليلًا عن الجهاز الأصلي.
 
-العمل الرئيسي المتبقي، بالترتيب؛ والتفاصيل في [docs/project/roadmap.md](docs/project/roadmap.md).
+## ما تحتاجه
 
-- **60 إطارًا في الثانية في السباقات.** اليوم إطار السباق سلسلة متتابعة: تُنهي اللعبة إطارها (~3 ms\*)، ثم تسجّل الواجهة
-  الخلفية لـ Vulkan الإرسال الكبير للعبة (~19 ms\*)، ثم ينفّذه الـ GPU (~10 ms\*)، وعندها فقط يبدأ الإطار التالي.
-  التسجيل على المسار الحرج، لذا فالعمل هو التسجيل بقدر أقل من المعالج: حالة ديناميكية فقط عند تغيّرها، وذاكرات مؤقتة للرسم بين
-  الإطارات، وتسجيل متوازٍ، وخيط لعبة أسرع.
-- **الصورة كما على الجهاز**: آخر أخطاء مترجم المظلِّلات، وظل الكارت، وpush constants، وصفر أخطاء في تحقق Vulkan.
-- **فحص كل القوائم** مقارنةً بالجهاز: التالي هو الوضع واختيار الشخصية والمركبة.
-- **لا تجمّد للـ GPU** وذاكرة رسوميات أقل، ثم تحميل بلا تقطّع وحزمة Linux للتوزيعات غير المتجددة باستمرار.
-- **الإصدار 1.8.0 على قدم المساواة مع 1.0.0**: نسبة العرض فائقة الاتساع، وحجم خريطة الظلال، والبذرة الثابتة
-  ([#19](https://github.com/adriadam10/mkw-recomp/issues/19)).
+1. **نسختك المستخرجة الخاصة من *Mario Kart World*** من جهاز Nintendo Switch 2 الخاص بك: الإصدار **1.8.0** (`exefs/main`،
+   معرّف البناء `d00e4f399e411d06`) أو 1.0.0 (`9e244438c3d8ef1c`)، على شكل مجلدَي `exefs/` و`romfs/` مفكوكَي التشفير أو ملف
+   `.nup`. تُستخدم النسخة المستخرجة من الجهاز التي تحتوي على تحديث 1.8.0 في `updates/` كما هي، وإذا وُجد الاثنان فيُبنى 1.8.0.
+2. **جهاز PS5 مكسور الحماية** يشغّل محمّل حمولات homebrew (`etaHEN` أو `elfldr`) و`kstuff` و**ShadowMountPlus 1.7 Beta 5**
+   أو أحدث (يركّب `/data/homebrew/PPSA99193` ويسجّله على الشاشة الرئيسية). يعتمد دعم البرنامج الثابت على كسر الحماية لديك وعلى
+   `kstuff` وبيئة RADV الخاصة بالـ homebrew (انظر [docs/ps5/ps5.md](docs/ps5/ps5.md)).
+3. **حاسوب فيه نحو 30 غيغابايت من المساحة الحرة** على الشبكة نفسها التي عليها PS5، لبناء اللعبة من نسختك المستخرجة:
+   - **Windows 10 أو 11 (64 بت):** لا حاجة إلى تثبيت أي شيء آخر، ولا WSL. يحمل مُنشئ Windows نسخته الخاصة من Python وzig وglslc
+     ([خطوات Windows](#@windows)).
+   - **Linux x86-64 أو WSL2:** `clang` و`lld` وPython 3 ([خطوات Linux](#@linux)).
 
-\* قيس في 09/11/2026 على جهاز الاختبار لدينا: معالج Radeon 660M المدمج (Ryzen 5 7535HS)، ‏Linux، دقة داخلية 720p.
+## التثبيت على Windows (دون WSL)
 
-<a id="performance"></a>
+1. **ضع اللعبة المؤقتة على PS5.** فكّ ضغط `mkw-pit-stop-<version>-ps5-placeholder-PPSA99193.zip` من
+   [**الإصدارات**](https://github.com/exploitizm/mkw-pit-stop/releases) وارفع مجلد `PPSA99193` الموجود فيه إلى `/data/homebrew/`
+   ببرنامج FTP (FileZilla أو WinSCP)، بحيث يوجد `/data/homebrew/PPSA99193/eboot.bin`. بعد أن يسجّلها ShadowMountPlus، شغّل
+   **Mario Kart World: Pit Stop**: ستعرض **Game files missing** و`Console IP: <العنوان> (port 19913)`. اترك تلك الشاشة مفتوحة؛ لا
+   يستقبل PS5 الملفات إلا أثناء عرضها.
+   <p align="center"><img src="docs/images/placeholder-ps5.png" width="560" alt="اللعبة المؤقتة على PS5: ملفات اللعبة مفقودة، وعنوان الجهاز، وخطوة البناء على الحاسوب وتقدّمه"></p>
+2. **فكّ ضغط المُنشئ على الحاسوب.** نزّل `mkw-pit-stop-<version>-ps5-builder-windows-x86_64.zip`، وانقر عليه بالزر الأيمن، ثم
+   **Properties**، وضع علامة على **Unblock**، ثم استخرجه إلى مجلد قصير الاسم على قرص فيه 30 غيغابايت حرة، مثل `C:\PitStop` (وليس
+   `Program Files` أو OneDrive).
+3. **ابنِ وأرسل.** شغّل `mkw.exe` من ذلك المجلد. في **Game files**، اختر نسختك المستخرجة بـ **Choose folder** (أو
+   **Choose .nup or .nx file**)؛ وتحت **Build for PS5**، اكتب العنوان الظاهر على شاشة PS5 في **PS5 IP** واضغط **Build for PS5**. لا
+   حاجة إلى زر **Set up** الخاص بنسخة الحاسوب من أجل PS5. أو من موجّه الأوامر في ذلك المجلد:
+   ```bat
+   prepare_ps5.bat --source "D:\Dumps\MKW" --send 192.168.1.50
+   ```
+   <p align="center"><img src="docs/images/launcher-ps5.png" width="560" alt="شاشة بدء مُنشئ PS5: نسختك مختارة، وعنوان PS5 مكتوب، وزر Build for PS5"></p>
+4. **ابدأ اللعبة.** أثناء بناء الحاسوب، تعرض شاشة PS5 الخطوة والتقدّم؛ وتعرض **Transfer complete!** عندما تصل كل الملفات ويتم
+   التحقق منها: اضغط **X**، ثم شغّل **Mario Kart World: Pit Stop** مرة أخرى.
 
-## الأداء
+**نسختك موجودة على PS5 بالفعل؟** ضع علامة على **My game files are already on the PS5** واكتب مجلدها هناك (مثلًا `/data/mkw`،
+وفيه أو في `updates\<version>` الخاص به المجلدان `exefs` و`romfs`): تُرسل شيفرة اللعبة والمظلّلات فقط، وتجد اللعبة نفسها في
+ذلك المجلد. وما زال الحاسوب يحتاج إلى نسختك المستخرجة للبناء.
 
-أزمنة الإطارات المقيسة، كل منها بالإصدار الذي اختُبر، موجودة في [docs/project/performance.md](docs/project/performance.md). لإضافة جهازك، افتح
-[تقرير أداء](https://github.com/adriadam10/mkw-recomp/issues/new?template=performance.yml): يدخل الجدول بالإصدار المذكور فيه. هذه
-الأزمنة هي إطارات اللعبة نفسها: توليد الإطارات يعرض إطارات أكثر لكنه لا يقصّرها. ‏16.7 ms تعني 60 إطارًا في الثانية؛ ومع ضبط
-Frame rate على Automatic (كما في الجهاز) ينخفض إلى 30 إطارًا عندما يتعذر بلوغ 60، والإطار الذي يتجاوز 33.3 ms يجعل السباق
-أبطأ من الزمن الحقيقي.
+**لا توجد شبكة؟ استخدم قرص USB.** في الخطوة 3، اختر **To a USB drive** و**Choose drive** بدلًا من كتابة عنوان PS5: تُكتب
+اللعبة في `homebrew\PPSA99193` على القرص (**exFAT**، نحو 25 غيغابايت حرة)، ويجدها ShadowMountPlus هناك بمجرد توصيل القرص بـ PS5
+(فهو يبحث في `/mnt/usb0`-`usb7/homebrew/`). لا حاجة إلى اللعبة المؤقتة من الخطوة 1 لهذا؛ وإذا كانت مثبّتة، فاحذف
+`/data/homebrew/PPSA99193` أولًا حتى تُسجَّل نسخة واحدة فقط من اللعبة. وإعادة البناء تحدّث فقط ما تغيّر على القرص.
 
-| التاريخ | GPU | الدقة الداخلية | إطارات السباق | زمن إطار السباق |
-|---|---|---|---|---|
-| 11/11/2026 | RX 7900 XTX (Windows) | 2160p | 60 | 16.7 ms |
-| 11/11/2026 | RX 9070 XT (Linux, RADV) | 720p إلى 2160p | 60 | 16.7 ms |
-| 10/11/2026 | RTX 3060 (Windows) | 1080p | ~48 | ~21 ms |
-| 11/11/2026 | RTX 3050 Laptop (Windows) | 720p | ~37 | 26.7 ms |
-| 09/11/2026 | Radeon 660M (Linux, RADV) | 720p | 30-32 | 31-33 ms |
-| 11/11/2026 | GTX 1650 SUPER (Windows) | 1080p | ~24 | ~41 ms |
-| 09/11/2026 | GTX 1050 Ti (Windows) | 1080p | 22-24 | 42-45 ms |
+إذا بقي PS5 على **Waiting for connection**، فتحقّق من العنوان ومن أن الجهازين على الشبكة نفسها؛ ويُشرح سبب فشل البناء في
+`logs/setup.log` بجانب `mkw.exe`. للتحديث، فكّ ضغط المُنشئ الجديد وابنِ مرة أخرى.
 
-## اللعب
+## التثبيت والتحديث على PS5 (Linux أو WSL2)
 
-![شاشة البدء بعد تجهيز اللعبة](docs/images/launcher-main.png)
+لأن `eboot.bin` يربط شيفرة اللعبة المعاد تجميعها ويحتوي `spirv/` على مظلّلات اللعبة المترجمة، **لا يتم توزيع أي `eboot.bin` أو
+`spirv/` جاهز للتشغيل**. تبني مجلد اللعبة `PPSA99193` على حاسوبك من مُنشئ الإصدار الخالي من اللعبة ومن نسختك المستخرجة:
 
-![صفحة Game files، حيث يأخذ التجهيز نسخة اللاعب المستخرجة](docs/images/launcher-files.png)
+1. نزّل `mkw-pit-stop-<version>-ps5-builder-linux-x86_64.tar.zst` من
+   [**الإصدارات**](https://github.com/exploitizm/mkw-pit-stop/releases)، وطابق بصمته مع `SHA256SUMS`، وفكّ ضغطه على Linux أو WSL2:
+   ```sh
+   tar --zstd -xf mkw-pit-stop-*-ps5-builder-linux-x86_64.tar.zst
+   cd mkw-pit-stop-*
+   ```
+2. شغّل `prepare_ps5.py` موجّهًا إلى نسختك المستخرجة من *Mario Kart World* (مجلد أو ملف `.nup`):
+   ```sh
+   python3 prepare_ps5.py --source /path/to/your/mkw-dump --out ./PPSA99193
+   ```
+   يتعرّف السكربت على إصدار نسختك (1.8.0 أو 1.0.0)، ويترجم ExeFS الخاص بـ AArch64 إلى C (`ps5-high144`)، ويجمّع `eboot.bin`
+   ويربطه بوقت التشغيل المبني مسبقًا وأرشيف RADV الخاص بـ PS5، وينزّل `nvdisasm` و`ptxas` من NVIDIA (مثبّتين ببصمة SHA-256)
+   لتوليد مواصفات تعليمات SM86 محليًا، ويترجم كل المظلّلات البالغ عددها 11,561 إلى `PPSA99193/spirv/`، ويضع `exefs/` و`romfs/` في
+   `PPSA99193/`.
+3. انقل `PPSA99193` إلى `/data/homebrew/PPSA99193` على جهاز PS5 عبر FTP أو USB — أو مرّر `--deploy <PS5_IP>` للرفع، والتحقق من كل
+   ملف ببصمة SHA-256، وتحديث `param.json` و`icon0.png` اللذين سجّلهما ShadowMountPlus في `/user/app/PPSA99193/sce_sys`.
+4. شغّل **Mario Kart World: Pit Stop** من الشاشة الرئيسية لـ PS5.
 
-1. استخرج Mario Kart World 1.0.0 أو 1.8.0 من جهاز Switch 2 الخاص بك (`exefs/` و`romfs/`، بعد فك تشفيرهما؛ والإصدار 1.8.0
-   مع دمج التحديث في RomFS اللعبة الأساسية)، أو النسخة نفسها مجمّعة في ملف واحد `.nup` أو `.nx`.
-2. نزّل المشغّل لنظامك من [الإصدارات](https://github.com/adriadam10/mkw-recomp/releases): على Linux ملف `.AppImage`
-   (‏`-aarch64` على ARM؛ مجلد اللعبة الافتراضي هو `~/.local/share/mkw-recomp`؛ يتطلب glibc 2.31 أو أحدث: Debian 11 وUbuntu
-   20.04 وSteamOS وما بعدها)، وعلى Windows ملف `.zip` بعد فك ضغطه في مجلد. يحتاج كلاهما إلى نحو 30 GB من المساحة الحرة.
-3. شغّل ملف AppImage (بعد `chmod +x`) أو `mkw.exe`، وافتح **Game files**، واختر إن شئت عبر **Choose game folder** مكان
-   تثبيت اللعبة (أو تثبيتًا موجودًا)، ثم حدّد نسختك المستخرجة (**Choose folder** أو **Choose .nup or .nx file**) واضغط
-   **Set up**. يتذكر المشغّل مجلد التثبيت؛ وفيه تُحفظ اللعبة المجمَّعة والملفات المجهَّزة وملفات الحفظ والإعدادات وذاكرة
-   التخزين المؤقت. اختيار مجلد آخر يترك الملفات الموجودة في مكانها.
-   يستغرق التجهيز الأول بعض الوقت (يجمّع اللعبة كاملة وينزّل `nvdisasm` و`ptxas` من NVIDIA، ‏84 MB على Linux و126 MB على
-   Windows، لوصف ترميز المظلِّلات على جهازك)؛ بعد ذلك، **Play**.
-4. عند صدور إصدار أحدث تعرضه شاشة البدء (**Update to vX**): تنزّله وتتحقق منه وتستبدل البرنامج وتعيد تجهيز ما تغيّر فقط.
-   ويوقف **Settings → Menu → Check for updates** هذا التحقق.
+**التحديث:** فكّ ضغط المُنشئ الأحدث وشغّل `prepare_ps5.py` بمجلدَي `--work` و`--out` نفسيهما. تُتخطّى الخطوات التي لم تتغيّر
+مدخلاتها (مثل `romfs/` والمظلّلات غير المتغيّرة)، وتبقى ملفات الحفظ (`profile/`) والإعدادات (`mkw.ini`) على الجهاز كما هي.
 
-المتطلبات: معالج x86-64 يدعم AVX2 (أو، على Linux، معالج AArch64 بمعيار ARMv8.2: ‏LSE وFP16 وRCpc وDotProd وCRC32)، وبطاقة
-رسوميات تدعم Vulkan 1.3 (يُنصح بـ `VK_EXT_mesh_shader`؛ ومن دونه تعمل مظلِّلات task وmesh كحوسبة compute)، و16 GB من الذاكرة
-مستحسنة. في حاوية Docker أو Podman على Linux، اسمح بـ `userfaultfd` في ملف seccomp الخاص بها (الإعداد الافتراضي لـ Docker
-يرفضه): من دونه لا يعرف المنفذ أي ذاكرة من اللعبة تغيّرت، فيعمل أبطأ بعدة مرات.
+## واجهة إعدادات Pit Stop
 
-## ميزات إضافية
+اضغط **Options + نقرة لوحة اللمس** على DualSense (أو **F1** على الحاسوب) من أي شاشة لفتح **Pit Stop**
+([docs/ps5/pit-stop.md](docs/ps5/pit-stop.md)):
 
-ما يتجاوز الجهاز، وكلها اختيارية ومطفأة (أو على قيمة الجهاز) افتراضيًا:
+| التحكم | الإجراء |
+|---|---|
+| **Options + نقرة لوحة اللمس** | فتح Pit Stop أو إغلاقه من أي شاشة |
+| **أزرار الاتجاه / العصا اليسرى أعلى وأسفل** | الانتقال صفًا واحدًا |
+| **أزرار الاتجاه / العصا اليسرى يمين ويسار** | تعديل الإعداد المحدد (إيقاف/تشغيل أو قيمة متدرّجة) |
+| **الدائرة / X** | تأكيد / رجوع (يتبع تخطيط أزرار Nintendo أو Xbox لديك) |
+| **L1 / R1** | الفئة السابقة / التالية داخل **All settings** |
 
-- **العرض**: دقة داخلية أعلى أو أقل من دقة الجهاز، ونسب 21:9 و32:9 و48:9 (تُظهر السباقات المزيد على الجانبين)، وتكبير AMD FSR 1،
-  وHDR على الشاشات الداعمة له، وVSync، وعرض mailbox أو immediate.
-- **توليد الإطارات**: إطارات تُصنع بين إطارات اللعبة (سباق بـ 30 إطارًا يُعرض بـ 60، أو بـ 240 على شاشة 240 Hz). أكثر سلاسة،
-  لا أسرع: تصل الصورة متأخرة حتى إطار واحد، وقد تتلطخ الحركة السريعة والخريطة المصغّرة.
-- **الرسوميات**: ترشيح الإكساء وجودته، ومسافة التفاصيل، وجودة الظلال، أعلى أو أقل مما في الجهاز.
-- **الصوت**: صوت محيطي 5.1.
-- **التحكم**: إمكانية إعادة تعيين كل مفتاح وزر، وكاميرا بالفأرة، وأيقونات أزرار Nintendo أو Xbox أو PlayStation، وتوجيه
-  بالحركة، وشدة الاهتزاز؛ ولعب جماعي محلي بيد تحكم لكل لاعب. أيدي تحكم Switch 2 (‏Pro Controller وJoy-Con وGameCube)
-  تعمل عبر Bluetooth، وعلى Linux عبر USB أيضًا؛ وعلى Windows يحتاج USB إلى خطوة واحدة لتعريف المشغّل، أدناه.
-- **التعديلات (hacks)**: تسريع (اضغط مطولًا على F2 أو بدّله)، وتخطي الفيديوهات، وفتح كل شيء، والعشوائية نفسها في كل مرة،
-  والانتقال مباشرة إلى سباق الوقت أو التجوال الحر.
-- **اللغات**: القوائم بـ 20 لغة؛ واللعبة نفسها أيضًا بالكتالونية والجاليكية والباسكية.
-- **ملفات اللعبة**: اختيار مجلد التثبيت؛ نسخة مستخرجة كمجلدات أو كملف واحد `.nup` أو `.nx`، تُستخدم في مكانها؛ وتحديثات
-  من شاشة البدء.
-- **طبقة الأداء** (عدد الإطارات، أو المعالج والـ GPU والذاكرة بالكامل) ومعلومات النظام بنقرة واحدة لتقارير الأخطاء.
+- **الصفوف السريعة** في الشاشة الأولى تضبط مباشرةً **Master volume** (0–100%) و**Vibration strength** (0–300%) و
+  **Performance HUD** (Off وFPS وFull).
+- **All settings** تفتح **Display** و**Graphics** و**Controls** (مع التقاط الأزرار لكل إجراء مباشرةً) و**Audio** و**General**
+  و**Advanced** و**Hacks** (فتح كل السائقين والمركبات والملصقات والكأس الخاصة) و**Multiplayer**. تُحفظ التغييرات تلقائيًا في
+  `/app0/mkw.ini`.
 
-### أيدي تحكم Switch 2 عبر USB على Windows
+## اللعب على الحاسوب (Linux وWindows)
 
-لا تبدأ أيدي التحكم هذه إلا بعد أمر يُرسل إلى واجهتها USB الثانية، التي يتركها Windows بلا مشغّل يمكن للتطبيقات
-استخدامه. مرة واحدة لكل يد تحكم، باستخدام [Zadig](https://zadig.akeo.ie/):
+من المشروع الأصلي [mkw-recomp](https://github.com/adriadam10/mkw-recomp):
 
-1. وصّل يد التحكم بكابل USB-C وافتح Zadig.
-2. **Options → List All Devices**، ثم اختر **Interface 1** الخاصة بيد التحكم (معرّف USB ‏`057E` و`2069` لـ Pro
-   Controller، و`2066`/`2067` لـ Joy-Con الأيمن/الأيسر، و`2073` ليد تحكم GameCube). ليس Interface 0: فهي الإدخال العادي
-   ليد التحكم، واستبدالها يخفي يد التحكم عن كل التطبيقات الأخرى.
-3. المشغّل **WinUSB**، ثم **Replace Driver** (أو **Install Driver**).
+<p align="center">
+  <img src="docs/images/launcher-files.png" width="400" alt="صفحة Game files في شاشة البدء قبل الإعداد">
+  <img src="docs/images/launcher-main.png" width="400" alt="شاشة البدء بعد إعداد اللعبة">
+</p>
 
-تنطبق الخطوات نفسها على يد تحكم افتراضية تظهر بمعرّفات USB هذه (وضع USB/IP في Switch2Connect). للتراجع، ألغِ تثبيت
-جهاز تلك الواجهة من «إدارة الأجهزة» مع تحديد خيار «حذف المشغّل».
+1. استخرج Mario Kart World 1.0.0 أو 1.8.0 من جهاز Switch 2 الخاص بك (`exefs/` و`romfs/`، مفكوكَي التشفير).
+2. نزّل مشغّل الحاسوب من [إصدارات mkw-recomp](https://github.com/adriadam10/mkw-recomp/releases): على Linux ملف `.AppImage` (يحفظ
+   اللعبة التي يبنيها في `~/.local/share/mkw-recomp`؛ glibc 2.31 أو أحدث)، وعلى Windows ملف `.zip`. يحتاج كلاهما إلى نحو 30
+   غيغابايت حرة.
+3. شغّل AppImage أو `mkw.exe`، وافتح **Game files**، ووجّهه إلى نسختك المستخرجة واضغط **Prepare**، ثم **Play**.
 
-## التعديلات (Mods)
+## البناء من الشيفرة المصدرية
 
-تثبّت صفحة **Mods** في شاشة البدء التعديلات كما تُنشر للعبة، وتعرضها في تبويبين:
+### هدف PS5 الأصلي (`PPSA99193`)
 
-- **Find on GameBanana**: تعديلات Mario Kart World على [GameBanana](https://gamebanana.com/games/22152)، معروضة أو مبحوث
-  عنها، مع مؤلف كل تعديل وترخيصه ولقطات شاشته ووصفه. ينزّل **Install** الملف من GameBanana، فقط عندما تطلب ذلك.
-- **Installed**: تعديلاتك، لكل منها مفتاح تشغيل وإيقاف؛ ويأخذ **Import zip / Import folder** تعديلًا لديك بالفعل (`.zip` أو
-  `.rar` أو `.7z`، يحتوي `romfs/` و/أو `exefs/` في أي مكان بداخله، بما في ذلك بنية `atmosphere/contents/`).
-
-التعديلات التي تستبدل ملفات اللعبة (`romfs/`: الأشكال، والإكساءات، والنصوص، والحلبات) تسري عند التشغيل التالي. والتعديلات التي
-تغيّر كود اللعبة (رقع `.ips` أو `.pchtxt` في `exefs/`، مثل 200cc أو 30 FPS) تُدمج في كود اللعبة: تشغيل أحدها أو إيقافه يعيد
-تجميع اللعبة قبل اللعب (بضع دقائق). يُدمج تعديلان يغيّران الأرشيف نفسه ملفًا بملف، وتسأل الصفحة أيهما يسري حيث يغيّر كلاهما
-الملف نفسه. وتنبّه الصفحة إلى التعديلات التي تستبدل إعدادات رسوميات اللعبة أو مظلِّلاتها، والتي يعالجها المنفذ بطريقته.
-
-التعديلات يصنعها أشخاص آخرون ولا يختبرها هذا المشروع: قد يتسبب تعديل في انهيار اللعبة أو إتلاف حفظك. اقرأ صفحة التعديل قبل
-تثبيته، واحتفظ بنسخة من حفظك، وأبلغ مؤلف التعديل بمشكلاته؛ وعند الإبلاغ عن خطأ هنا، اذكر التعديلات التي كانت مفعّلة (يسردها
-السجل)، أو جرّب أولًا من دونها.
-
-## البناء من المصدر
-
-على Linux، مع `uv` و`clang` و`lld` و`ninja` وSDL3 وOpus وlibvpx وzstd وxxHash وترويسات Vulkan وVMA 3.4.0 (التفاصيل في
-[tools/build/README.md](tools/build/README.md)). ضع نسختك المستخرجة في `game/` (‏`game/exefs` و`game/romfs`) أو اضبط
-`MKW_GAME=<dir>`، ثم من جذر المستودع:
+راجع [docs/ps5/ps5.md](docs/ps5/ps5.md) و[tools/ps5/README.md](tools/ps5/README.md) للنسخ المثبّتة من `PS5_VulkanTemplate`
+و`PS5_Vulkan` و`PS5_Mesa` و`PS5_PayloadSDK`:
 
 ```sh
-uv run python recomp/gen.py --exefs game/exefs --out build/generated --jobs 8 --patches recomp/patches-mkw.txt  # 1.8.0: patches-mkw-180.txt
-uv run tools/shaders/extract.py && uv run tools/shaders/translate.py
-uv run tools/build/build.py              # build/mkw; --target windows builds mkw.exe with llvm-mingw
-build/mkw
+python3 recomp/gen.py --exefs "$MKW_GAME/exefs" --guest-layout ps5-high144 \
+    --out build/ps5-game/generated --patches recomp/patches-mkw.txt
+python3 tools/shaders/extract.py && python3 tools/shaders/translate.py
+python3 tools/ps5/build_game.py --stack "$stack" --include "$headers" \
+    --generated build/ps5-game/generated --exefs "$MKW_GAME/exefs"
+python3 tools/ps5/deploy.py <PS5_IP> --game
 ```
 
-من نسخة مستخرجة مجمّعة (`.nup`، `.nx`) ولنظام Linux على AArch64: [tools/build/README.md](tools/build/README.md#a-packed-dump)
-و[قسمه الخاص بـ AArch64](tools/build/README.md#linux-aarch64).
+لحزم إصدار مُنشئ PS5 خالٍ من اللعبة من جرد وقت التشغيل (`--inventory`):
 
-تتطلب ترجمة المظلِّلات مواصفة ترميز SM86، المولَّدة من `nvdisasm` الخاص بـ NVIDIA (غير مرفق): انظر
-[tools/shaders/README.md](tools/shaders/README.md). كل ما يُولَّد يذهب إلى `build/`، وليس إلى git أبدًا.
+```sh
+python3 tools/ps5/build_game.py --stack "$stack" --include "$headers" --inventory
+python3 tools/ps5/release_ps5.py --stack "$stack" --version 0.1.0
+```
+
+### البناء لـ Linux وWindows
+
+التفاصيل في [tools/build/README.md](tools/build/README.md):
+
+```sh
+python3 recomp/gen.py --exefs game/exefs --out build/generated --jobs 8 --patches recomp/patches-mkw.txt
+python3 tools/shaders/extract.py && python3 tools/shaders/translate.py
+python3 tools/build/build.py              # build/mkw; --target windows builds mkw.exe with llvm-mingw
+build/mkw
+```
 
 | المجلد | المحتوى |
 |---|---|
 | [recomp/](recomp/README.md) | المولّد: AArch64 → C |
-| [runtime/](runtime/README.md) | ما يؤدي دور الجهاز: النواة، والذاكرة، وبدائل SDK، و NVN2 فوق Vulkan، والصوت، والإدخال، والقوائم، والمشغّل |
-| [sm86/](sm86/README.md) | مترجم المظلِّلات: SM86 SASS → GLSL → SPIR-V |
-| [i18n/](i18n/README.md) | نصوص القوائم وشاشة البدء والتجهيز بكل اللغات (gettext `.po`) |
-| [tools/](tools/README.md) | التحليل، والتجهيز، والبناء، وتشغيل اللعبة، والتشخيص |
-| [tests/](tests/README.md) | اختبارات بلا لعبة ولا GPU، في التكامل المستمر على Linux وWindows |
-| [docs/](docs/README.md) | البحث، والمصادر، والأداء |
-| `.github/` | التكامل المستمر، وقوالب issues وpull requests |
+| [runtime/](runtime/README.md) | ما يقوم مقام الجهاز: النواة والذاكرة وبدائل SDK وNVN2 فوق Vulkan والصوت والإدخال وPit Stop والمشغّل |
+| [sm86/](sm86/README.md) | مترجم المظلّلات: SM86 SASS → GLSL → SPIR-V |
+| [tools/](tools/README.md) | التحليل والإعداد والبناء وحزم PS5 وتشغيل اللعبة والتشخيص |
+| [tests/](tests/README.md) | اختبارات دون اللعبة أو وحدة رسوميات، في التكامل المستمر على Linux وWindows |
+| [docs/](docs/README.md) | بنية PS5 وPit Stop والبحث والمصادر وخارطة الطريق والأداء |
+| [i18n/](i18n/README.md) | نصوص القائمة كملفات gettext (`mkw.pot`، وملف `.po` لكل لغة) |
+| [server/](server/README.md) | خادم الردهة للعب اللاسلكي المحلي عبر الإنترنت (`server/lobby`) |
+| `.github/` | التكامل المستمر وقوالب المشكلات وطلبات الدمج |
 
-في الجذر: `pyproject.toml` و`uv.lock` (بيئة Python للأدوات)، و`.gitignore`، و`LICENSE`، و`CONTRIBUTING.md`، و`CHANGELOG.md`
-(تغييرات كل إصدار، أي ملاحظاته)، و`AGENTS.md` (دليل لوكلاء البرمجة).
+في الجذر: `pyproject.toml` و`uv.lock` (بيئة Python للأدوات)، و`Makefile` (اختصارات لمسارات الإصدار والتكامل المستمر)،
+و`.gitignore` و`LICENSE` و`CONTRIBUTING.md` و`CHANGELOG.md` (تغييرات كل إصدار وملاحظاته) و`AGENTS.md` (دليل لوكلاء البرمجة).
 
-## قرارات التصميم (30/10/2026)
+## الأداء
 
-| الموضوع | القرار | السبب |
-|---|---|---|
-| المعالج | مترجم AArch64→C مبني على مترجم [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) (‏MIT)، موسّع حتى ARMv8.1-8.3: عمليات LSE الذرية، وCAS، وLDAPR؛ PAC كتطابق، ووسوم MTE كصفر | عائلة المحرك نفسها التي تنتمي إليها MKW، ويتسع بالفعل لملف تنفيذي كبير |
-| النظام | دوال `nn::*` من SDK مستبدلة بالاسم؛ والتواقيع من الأسماء المزخرفة لـ 1 289 استيرادًا في `main` | لا خدمات للجهاز تحتاج إلى محاكاة |
-| الرسوميات | NVN2 فوق Vulkan: ‏529 من دواله الـ 699 تحمل الاسم نفسه في NVN1 (تواقيعها معروفة من totk-pc-recomp وnxnative)؛ و170 جديدة | إعادة تجميع، لا محاكاة للـ GPU |
-| المظلِّلات | مترجم خاص بنا من SM86 إلى SPIR-V، يعمل مسبقًا، بمفكك مولَّد من مواصفة DocumentSASS / nvsass-disassembler | يغطي mesh/task وما ينقص معمارية Maxwell |
-| ميزات Switch 2 الاختيارية | يعمل HDR تلقائيًا عندما تكون الشاشة في وضع HDR، كما في الجهاز (Settings > Screen > HDR: ‏Automatic أو Off)؛ وDLSS وتتبع الأشعة واللمس خلف خيارات، مطفأة افتراضيًا؛ وعند إطفائها تبقى دوال NVN2 الخاصة بها موجودة لكنها لا تفعل شيئًا، لتسلك اللعبة مسارها العادي | إضافات في عتاد الجهاز، غير لازمة للعب |
-| الإعدادات الافتراضية | مظهر الجهاز ودقته؛ والإعدادات الأدنى خيارات | اللاعب يختار |
+على جهاز PS5 أساسي، Mario Kart World 1.8.0، اختبار أداء لسباق الجائزة الكبرى (`tools/ps5/bench.py`، 210 ثوانٍ من السباق،
+1080p، توليد الإطارات متوقف):
 
-## كيف صُنع
+| التاريخ | إعداد معدل الإطارات | متوسط زمن الإطار | الإطار المعتاد | أدنى 1% | سرعة السباق |
+|---|---|---|---|---|---|
+| 20/11/2026 | 60 إطارًا/ث (الافتراضي الجديد) | 17.0–17.4 مللي ثانية (57–59 إطارًا/ث) | 16.7 مللي ثانية (عند الحد) | 35–41 إطارًا/ث | 0.95–0.98x |
+| 16/11/2026 | 30 إطارًا/ث (الافتراضي السابق) | 33.3 مللي ثانية | 33.3 مللي ثانية | | 1.00x |
 
-كُتب هذا المنفذ بمساعدة [Claude](https://claude.com/claude-code) (وكيل البرمجة من Anthropic) الذي تولّى معظم الكتابة، تحت
-إشرافي، في نحو عشرة أيام من العمل بدوام كامل: ‏489 إيداعًا منذ 30/10/2026، كل منها رُوجع أو قيس أو اختُبر قبل دخوله. لم يكن
-موجّهًا واحدًا وانتهى الأمر. وراءه:
+لم يُختبر الافتراضي الجديد على الجهاز كما يُشحن: تأتي هذه الأرقام من سباقات اختبار أداء مع تشغيل سجل الأداء الخاص بوقت التشغيل
+(`MKW_TRACE=perf`، وله كلفة بسيطة)، مضبوطة على 60 إطارًا في الثانية يدويًا. لم تُلعب القوائم وسباقات الوقت والشاشة المقسومة
+والجلسات الطويلة والحلبات الأخرى بالافتراضي الجديد بعد.
 
-- **المنهج أكثر من الموجِّهات.** قيس كل تغيير في الأداء بمقارنة A/B داخل التشغيل نفسه (يختلف تشغيلان للبناء نفسه حتى 12 ms
-  في الإطار)؛ وكل إصلاح للصورة قورن بصورة الجهاز نفسه؛ وتُختبر تغييرات مترجم المظلِّلات خارج الـ GPU على كل برنامج من برامج
-  MKW البالغة 11 561 قبل أي تشغيل للعبة؛ وتعيد لقطات الإطارات تشغيل الواجهة الخلفية في ثوانٍ بلا لعبة. والقواعد التي خرجت من
-  الأخطاء مكتوبة وتفرضها نصوص برمجية، كي لا يتكرر الخطأ نفسه.
-- **ما تعلمته من قبل.** نشأ المترجم ووقت التشغيل من [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) ومنفذه إلى
-  Linux، ومن عملي السابق على مشاريع إعادة تجميع أخرى (SavageWindRecomp وsmo-recomp): المترجم، والمشغّل، والتجهيز الذي يبني
-  اللعبة على جهاز اللاعب، وأيقونات الأزرار، وتدفق التحكم في المظلِّلات. وبصفتي مشرفًا على [AnyPS5](https://github.com/boykopovar/AnyPS5)
-  تعلمت ترجمة مظلِّلات الـ GPU بأمانة، وتشغيل مظلِّلات mesh كحوسبة على بطاقات لا تدعمها، والحفاظ على مشروع كبير صادقًا بالفحوص
-  والقياسات.
-- **بحث المجتمع.** ملاحظات [eden-nx2](https://git.eden-emu.dev/Takoroka/eden-nx2) عن Switch 2، وترميز SASS من NVIDIA كما
-  وثّقه DocumentSASS وnvsass-disassembler، وRyujinx وMesa NAK لدلالات المظلِّلات، ومنافذ Switch 2 الأخرى المذكورة في المصادر.
+نحو 2% من إطارات السباق تستغرق أكثر من 20 مللي ثانية: وهي حيث تحمّل الحلبة خامات جديدة، وهي التي تحدد أدنى 1% والتباطؤ
+الطفيف. ما قيس وما بقي موجود في [docs/project/roadmap.md](docs/project/roadmap.md) و[docs/ps5/ps5.md](docs/ps5/ps5.md#frame-rate)؛
+وأرقام الحاسوب في [docs/project/performance.md](docs/project/performance.md).
 
-## التراخيص والإشادات
+## الإبلاغ عن الأخطاء
 
-هذا المشروع مرخص بموجب [رخصة MIT](LICENSE). الكود المأخوذ من مشاريع أخرى يحتفظ بترخيصه إلى جانبه (ملفات `LICENSE.*` في
-[recomp/](recomp/) و[runtime/](runtime/) و[sm86/decode/](sm86/decode/) و[runtime/third_party/](runtime/third_party/README.md)):
-‏totk-pc-recomp وnvsass-disassembler وDear ImGui وbc7enc وstb_image وAMD FidelityFX FSR 1 وRoboto. وكل مصدر استُخدم، مع ترخيصه
-وما أُخذ منه (الكود من مشاريع MIT فقط؛ ومن مشاريع GPL الأفكار فقط)، مذكور في [docs/project/research.md](docs/project/research.md#sources).
+راجع [CONTRIBUTING.md](CONTRIBUTING.md). أبلغ عن مشكلات PS5 في [مشكلات هذا الفرع](https://github.com/exploitizm/mkw-pit-stop/issues)
+وأرفق سجل نواة الجهاز (`klog`، بالبادئة `[Mario Kart World: Pit Stop]`) و`logs/setup.log` من مُنشئ الحاسوب. ولمشكلات نسخة
+الحاسوب، أرفق `logs/mkw.log` و`logs/setup.log`. لا ترفق أبدًا ملفات اللعبة أو النسخ المستخرجة أو ملفات `eboot.bin` المبنية من
+نسختك.
 
-‏Mario Kart World ‏© Nintendo. هذا المشروع غير تابع لـ Nintendo ولا معتمد منها، ولا يحتوي على أي كود أو أصول من اللعبة، ولا
-يساعد في الحصول عليها.
+## التراخيص والشكر وإخلاء المسؤولية
 
-التعديلات ملك لمؤلفيها وتخضع لتراخيصها الخاصة. هذا المشروع غير تابع لـ GameBanana ولا لأي مؤلف تعديل ولا معتمد منهم، ولا
-يستضيف التعديلات أو يراجعها أو يوزعها، وليس مسؤولًا عما يفعله أي تعديل: تعرض شاشة البدء القائمة العامة لـ GameBanana فقط،
-وتنزّل تعديلًا من GameBanana عندما تطلب ذلك.
+الشيفرة المصدرية لهذا المستودع مرخّصة بـ [رخصة MIT](LICENSE) (`Copyright (c) 2026 Adrià`).
 
-## المساهمة
+**ملفات إصدارات PS5 مرخّصة بـ GPL-3.0-or-later.** كل لعبة PS5 تربط طبقة المنصة من فرع SDK الحمولات وشيفرة الإقلاع من
+`PS5_Vulkan` (GPL-3.0-or-later)، لذا فإن اللعبة المؤقتة و`ps5-bundle/` الخاص بالمُنشئ وكل لعبة تبنيها بهما مرخّصة ككل بـ
+GPL-3.0-or-later؛ وتبقى شيفرة mkw-recomp الخاصة بـ MIT. يحمل كل إصدار `LEGAL.txt` و`licenses/` (كل جزء مع رخصته وحقوق نشره
+ومراجعة مصدره) ويرفق الشيفرة المصدرية الكاملة لكل جزء على شكل `source/*.tar.gz` (`source/SOURCES.txt`)، يولّدها
+[tools/ps5/release_notices.py](tools/ps5/release_notices.py).
 
-انظر [CONTRIBUTING.md](CONTRIBUTING.md). الأخطاء وتقارير الأداء إلى [Issues](https://github.com/adriadam10/mkw-recomp/issues)،
-والأسئلة إلى [Discussions](https://github.com/adriadam10/mkw-recomp/discussions).
+- **المشروع الأصلي:** [**mkw-recomp**](https://github.com/adriadam10/mkw-recomp) لـ Adrià — رافع AArch64→C، ونواة Switch 2
+  وبدائل `nn::*` SDK، ومُصيّر NVN2 فوق Vulkan، ومترجم المظلّلات SM86→SPIR-V دون اتصال.
+- **مشروعات MIT والمشروعات المتساهلة** (ملفات `LICENSE.*` في [recomp/](recomp/) و[runtime/](runtime/) و
+  [sm86/decode/](sm86/decode/) و[runtime/third_party/](runtime/third_party/README.md)):
+  [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) ومنفذه لـ Linux،
+  [SavageWindRecomp](https://github.com/Revivedx/SavageWindRecomp)،
+  [DocumentSASS](https://github.com/0xD0GF00D/DocumentSASS) و
+  [nvsass-disassembler](https://github.com/reoLantern/nvsass-disassembler)،
+  [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx)، [Mesa NAK](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/nouveau/compiler)،
+  [mario-kart-world-save-editor](https://github.com/Ca1nM/mario-kart-world-save-editor)، وDear ImGui،
+  [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo)، وAMD FidelityFX FSR 1، وVulkan Memory Allocator، وRoboto وLato.
+- **سلسلة أدوات PS5 ووقت التشغيل:** [PS5_VulkanTemplate](https://github.com/mihawk-99/PS5_VulkanTemplate) (MIT، Sascha Willems
+  وMihawk)، و[PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa) (MIT، RADV لـ PS5)،
+  و[PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) و[PS5_PayloadSDK](https://github.com/mihawk-99/PS5_PayloadSDK)
+  (GPL-3.0-or-later، Mihawk و[John Törnblom / ps5-payload-dev](https://github.com/ps5-payload-dev/sdk))، و
+  [ShadowMountPlus](https://github.com/drakmor/shadowMountPlus). عند ربطها في لعبة PS5 مع طبقة منصة SDK الحمولات وCRT/الدوال
+  البديلة من `PS5_Vulkan`، يكون الملف الثنائي المجمّع للعبة PS5 مرخّصًا بـ GPL-3.0-or-later (`LEGAL.txt` و`licenses/` داخل اللعبة
+  المبنية).
+- **أفكار بحث وتصميم فقط** (لم تُنسخ شيفرة من مشروعات GPL أو غير مرخّصة): eden-nx2 وHookshot وPS5_Hookshot وEglantinePS5
+  وAnyPS5 وprosper وshadPS4. كل مصدر موثّق في [docs/project/research.md](docs/project/research.md#sources).
+
+**إخلاء المسؤولية:** *Mario Kart World* و*Mario* علامتان تجاريتان لـ Nintendo. و"PlayStation" و"PS5" علامتان تجاريتان لـ Sony
+Interactive Entertainment Inc. هذا المشروع غير تابع لـ Nintendo أو Sony Interactive Entertainment أو أي ناشر ألعاب ولا يحظى
+بتأييدها، ولا يحتوي على أي شيفرة أو مظلّلات أو أصول من اللعبة، ولا يساعد في الحصول عليها.

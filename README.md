@@ -2,6 +2,19 @@
 
 # Mario Kart World: Pit Stop
 
+<!-- i18n-bar:start -->
+<p align="center">
+  <b>English</b> ·
+  <a href="docs/i18n/README.zh-CN.md">简体中文</a> ·
+  <a href="docs/i18n/README.es.md">Español</a> ·
+  <a href="docs/i18n/README.ar.md">العربية</a> ·
+  <a href="docs/i18n/README.hi.md">हिन्दी</a> ·
+  <a href="docs/i18n/README.pt-BR.md">Português (Brasil)</a> ·
+  <a href="docs/i18n/README.pt-PT.md">Português (Portugal)</a> ·
+  <a href="docs/i18n/README.de.md">Deutsch</a>
+</p>
+<!-- i18n-bar:end -->
+
 A native PlayStation 5 homebrew port (`PPSA99193`) of [**mkw-recomp**](https://github.com/adriadam10/mkw-recomp),
 Adrià's static recompilation of *Mario Kart World* (Nintendo Switch 2, versions 1.8.0 and 1.0.0). It needs your own copy of the
 game, dumped from your own Switch 2 console: nothing of the game is in this repository or in its releases.

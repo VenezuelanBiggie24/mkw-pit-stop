@@ -1,31 +1,24 @@
-<!-- translated from README.md dae9dd5efeb2 body 64ebb7c6f3fe -->
+<!-- translated from README.md 84c6832c04b6 body 2a1dd7a634a5 -->
 
-<p align="center"><img src="../images/logo.svg" width="128" alt="mkw-recomp logo"></p>
+<p align="center"><img src="../images/icon.svg" width="144" alt="Mario Kart World: Pit Stop icon"></p>
 
-<h1 align="center">mkw-recomp</h1>
+<h1 align="center">Mario Kart World: Pit Stop</h1>
 
 <p align="center">
-  <b>Mario Kart World (Nintendo Switch 2), Linux और Windows पर नेटिव रूप से चलने के लिए रीकम्पाइल किया गया।</b>
+  <b>Mario Kart World (Nintendo Switch 2) का नेटिव PlayStation 5 होमब्रू पोर्ट, स्टैटिक रीकम्पाइलेशन से।</b>
 </p>
 
 <p align="center">
-  <a href="https://github.com/adriadam10/mkw-recomp/releases/latest"><img src="https://img.shields.io/badge/%E2%AC%87_Download-latest_for_Windows-0078d6?style=for-the-badge&labelColor=1b2740" alt="Download: latest for Windows"></a>
-  <a href="https://github.com/adriadam10/mkw-recomp/releases/latest"><img src="https://img.shields.io/badge/%E2%AC%87_Download-latest_for_Linux_%28AppImage%29-e95420?style=for-the-badge&labelColor=1b2740" alt="Download: latest for Linux (AppImage)"></a>
-  <a href="https://github.com/adriadam10/mkw-recomp/releases/latest"><img src="https://img.shields.io/badge/%E2%AC%87_Download-latest_for_Linux_ARM-8957e5?style=for-the-badge&labelColor=1b2740" alt="Download: latest for Linux ARM"></a>
+  <a href="https://github.com/exploitizm/mkw-pit-stop/releases/latest"><img src="https://img.shields.io/badge/%E2%AC%87_Download-latest_for_PS5-0070d1?style=for-the-badge&labelColor=1b2740" alt="Download: latest for PS5"></a>
 </p>
 
 <p align="center">
-  <b><a href="https://github.com/adriadam10/mkw-recomp/releases">रिलीज़</a></b> ·
-  <b><a href="https://github.com/adriadam10/mkw-recomp/wiki">विकी</a></b> ·
-  <b><a href="https://discord.gg/8uYBkjQkEg">Discord</a></b> ·
+  <b><a href="https://github.com/exploitizm/mkw-pit-stop/releases">रिलीज़</a></b> ·
   <a href="../../CHANGELOG.md">बदलाव</a> ·
   <a href="../../CONTRIBUTING.md">योगदान</a> ·
-  <a href="../../docs/project/research.md#sources">स्रोत</a> ·
   <a href="../../docs/project/roadmap.md">रोडमैप</a> ·
-  <a href="../../docs/project/performance.md">प्रदर्शन</a> ·
-  <a href="https://github.com/adriadam10/mkw-recomp/issues">इश्यू</a> ·
-  <a href="https://github.com/adriadam10/mkw-recomp/discussions">चर्चाएँ</a> ·
-  <a href="https://archive.org/search?query=subject%3A%22mkw-recomp%22">आर्काइव</a>
+  <a href="../../docs/ps5/ps5.md">PS5 नोट्स</a> ·
+  <a href="https://github.com/exploitizm/mkw-pit-stop/issues">इश्यू</a>
 </p>
 
 <!-- i18n-bar:start -->
@@ -41,221 +34,252 @@
 </p>
 <!-- i18n-bar:end -->
 
-*Mario Kart World* (Nintendo Switch 2, संस्करण 1.0.0 और 1.8.0) का स्टैटिक रीकम्पाइलेशन, Linux और Windows के लिए एक नेटिव PC
-प्रोग्राम के रूप में। इसके लिए आपको गेम की अपनी कॉपी चाहिए, जो आपने अपने कंसोल से डंप की हो: गेम का कुछ भी इस रिपॉज़िटरी या
-इसकी रिलीज़ में शामिल नहीं है।
+[**mkw-recomp**](https://github.com/adriadam10/mkw-recomp) का एक नेटिव PlayStation 5 होमब्रू पोर्ट (`PPSA99193`); mkw-recomp,
+Adrià का *Mario Kart World* (Nintendo Switch 2, संस्करण 1.8.0 और 1.0.0) का स्टैटिक रीकम्पाइलेशन है। इसके लिए आपको गेम की अपनी
+कॉपी चाहिए, जो आपके अपने Switch 2 कंसोल से डंप की गई हो: इस रिपॉज़िटरी या इसकी रिलीज़ में गेम का कुछ भी नहीं है।
 
-**यह रीकम्पाइलेशन है, एम्युलेटर नहीं।** गेम का AArch64 कोड पहले से C में अनुवादित किया जाता है और PC के CPU (x86-64, या Linux
-पर AArch64) के लिए कम्पाइल किया जाता है; कोई CPU इंटरप्रेटर या JIT नहीं है। GPU भी एम्युलेट नहीं होता: Switch 2 का ग्राफ़िक्स
-API, NVN2, API स्तर पर Vulkan के ऊपर दोबारा लागू किया गया है, और गेम के SM86 शेडर पहले से SPIR-V में अनुवादित किए जाते हैं।
-Nintendo SDK के फ़ंक्शन (`nn::*`) नाम से हमारे अपने कोड से बदल दिए जाते हैं।
+**यह स्टैटिक रीकम्पाइलेशन है, एमुलेटर नहीं।** गेम का AArch64 कोड पहले से C में अनुवादित होता है और PS5 के x86-64 Zen 2 CPU के लिए
+कम्पाइल होता है (गेस्ट एड्रेस लेआउट `ps5-high144`); कोई CPU इंटरप्रेटर या JIT नहीं है। GPU भी एमुलेट नहीं होता: Switch 2 का ग्राफ़िक्स
+API, NVN2, API स्तर पर Vulkan के ऊपर दोबारा लिखा गया है, जिसमें PS5 के लिए Mesa का RADV ड्राइवर उपयोग होता है, और गेम के SM86 शेडर
+आपके PC पर पहले से SPIR-V में अनुवादित होते हैं। Nintendo SDK के फ़ंक्शन (`nn::*`) नाम के आधार पर हमारे अपने कोड से बदले जाते हैं।
 
-## स्थिति
+> **अपस्ट्रीम PC प्रोजेक्ट:** Linux या Windows संस्करण चाहिए? देखें
+> [**adriadam10/mkw-recomp**](https://github.com/adriadam10/mkw-recomp) ([नीचे PC निर्देश](#pc-पर-खेलना-linux-और-windows))।
 
-शुरुआती दौर में, और तेज़ी से आगे बढ़ रहा है। 12/11/2026 तक:
+## स्थिति (PS5)
 
-- यह बूट होता है, शुरुआती वीडियो चलाता है, मेनू से गुज़रता है और रेस चलाता है, Linux और Windows (x86-64) पर, और AArch64 पर
-  Linux में (इसकी अपनी AppImage के साथ; Adreno 740 वाले हैंडहेल्ड पर परखा गया)।
-- स्टार्ट स्क्रीन आपकी मशीन पर आपकी कॉपी से गेम सेट अप करती है (C बनाती और कम्पाइल करती है, शेडर का अनुवाद करती है,
-  पाइपलाइन कैश गर्म करती है) और हर सेटिंग संभालती है: डिस्प्ले, ग्राफ़िक्स गुणवत्ता, कंट्रोल, हैक्स।
-- हाई-एंड GPU पर रेस 60 fps पर और मिड-रेंज पर 30 पर चलती है; देखें [प्रदर्शन](#performance)।
-- ज्ञात समस्याएँ: कुछ मेनू (मोड, कैरेक्टर और व्हीकल चयन) पर अभी काम बाकी है, कार्ट की छाया कभी-कभी एक फ़्रेम छोड़ देती है,
-  वीडियो में कुछ ऑडियो कट जाता है, और कुछ AMD ड्राइवरों पर GPU अटक सकता है। ऑनलाइन खेल नहीं है।
+शुरुआती दौर में, और तेज़ी से आगे बढ़ रहा है। 18/11/2026 तक, एक बेस PS5 पर:
 
-## रोडमैप
+- **बूट, वीडियो, मेनू और रेस काम करते हैं**, RADV के ज़रिए सीधे Vulkan डिस्प्ले, `sceAudioOut` से स्टीरियो साउंड, और साइन-इन किए
+  हुए चार तक DualSense कंट्रोलर, वाइब्रेशन और PlayStation बटन आइकन के साथ।
+- **रेस डिफ़ॉल्ट रूप से 60 fps पर चलती हैं, फ़्रेम जनरेशन के बिना**: ग्रां प्री बेंचमार्क में औसतन लगभग 57-59 fps; कभी-कभी धीमा
+  फ़्रेम रेस को असली समय के 0.95-0.98x पर रखता है ([प्रदर्शन](#प्रदर्शन) देखें)। गेम का 30 fps मोड (पूरी गति) और फ़्रेम जनरेशन
+  **Pit Stop > Display** में विकल्प हैं।
+- **मल्टीप्लेयर:** गेम का स्प्लिट स्क्रीन (साइन-इन किए हर खिलाड़ी के लिए एक DualSense) और LAN पर इसका लोकल वायरलेस मोड, कई PS5 के बीच
+  या उसी संस्करण के PC बिल्ड के साथ ([docs/ps5/multiplayer.md](../../docs/ps5/multiplayer.md))। Nintendo ऑनलाइन प्ले नहीं है।
+- **गेम के अंदर Pit Stop ओवरले।** कभी भी **Options + टचपैड क्लिक** दबाकर **Pit Stop** खोलें: कंट्रोलर के लिए बना सेटिंग्स मेनू, जिसमें
+  त्वरित पंक्तियाँ (**Master volume**, **Vibration strength**, **Performance HUD**), सभी सेटिंग श्रेणियाँ और DualSense बटनों की लाइव
+  रीमैपिंग है, जो `/app0/mkw.ini` में सहेजी जाती है।
+- **ज्ञात समस्याएँ ([docs/project/roadmap.md](../../docs/project/roadmap.md)):**
+  - *लंबे सत्र:* गेम पिछले ट्रैकों का डेटा रखता है, इसलिए हर रेस के बाद खाली मेमोरी घटती जाती है; कम होने पर टेक्सचर खराब या गायब हो
+    सकते हैं। ऐसा हो तो कुछ रेस के बाद टाइटल दोबारा शुरू करें।
+  - *स्पार्स टाइल:* बूट से ही कुछ स्पार्स टेक्सचर टाइल लोड नहीं होतीं: स्टार्ट लाइन के पास हल्की टेक्सचर गड़बड़ी और काला-सफ़ेद रेस इंट्रो।
+  - *मल्टीप्लेयर:* किसी ट्रैक की पहली रेस में वह खिलाड़ी हट सकता है जिसके शेडर अभी कम्पाइल हो रहे हों; बाद की रेस ठीक चलती हैं।
+    भीड़-भाड़ वाले दृश्यों में स्प्लिट स्क्रीन 30 fps से नीचे चलता है।
+  - *मेनू:* मोड, कैरेक्टर और वाहन चुनने की स्क्रीन अभी भी कंसोल से थोड़ी अलग हैं।
 
-मुख्य बाकी काम, प्राथमिकता के क्रम में; विवरण [docs/project/roadmap.md](../../docs/project/roadmap.md) में हैं।
+## आपको क्या चाहिए
 
-- **रेस में 60 fps।** आज रेस का एक फ़्रेम एक क्रमिक श्रृंखला है: गेम अपना फ़्रेम पूरा करता है (~3 ms\*), फिर Vulkan बैक एंड गेम
-  का बड़ा सबमिट रिकॉर्ड करता है (~19 ms\*), फिर GPU उसे चलाता है (~10 ms\*), और उसके बाद ही अगला फ़्रेम शुरू होता है।
-  रिकॉर्डिंग क्रिटिकल पाथ पर है, इसलिए काम है कम CPU से रिकॉर्ड करना: डायनेमिक स्टेट केवल बदलने पर, फ़्रेमों के बीच ड्रॉ कैश,
-  समानांतर रिकॉर्डिंग, और तेज़ गेम थ्रेड।
-- **कंसोल जैसी तस्वीर**: शेडर अनुवादक की आख़िरी गड़बड़ियाँ, कार्ट की छाया, push constants, Vulkan वैलिडेशन की शून्य त्रुटियाँ।
-- **हर मेनू** कंसोल से मिलाकर जाँचा गया: अगले हैं मोड, कैरेक्टर और व्हीकल चयन।
-- **कोई GPU हैंग नहीं** और कम GPU मेमोरी, फिर बिना अटके लोडिंग और गैर-रोलिंग डिस्ट्रीब्यूशन के लिए एक Linux पैकेज।
-- **1.8.0, 1.0.0 के बराबर**: उसका अल्ट्रावाइड आस्पेक्ट, शैडो मैप का आकार और स्थिर सीड
-  ([#19](https://github.com/adriadam10/mkw-recomp/issues/19))।
+1. **आपके अपने Nintendo Switch 2 से *Mario Kart World* का आपका अपना डंप**: संस्करण **1.8.0** (`exefs/main` बिल्ड ID
+   `d00e4f399e411d06`) या 1.0.0 (`9e244438c3d8ef1c`), डिक्रिप्ट किए गए `exefs/` और `romfs/` फ़ोल्डर या `.nup` फ़ाइल के रूप में।
+   जिस कंसोल डंप में `updates/` के अंदर 1.8.0 अपडेट हो, वह वैसा ही उपयोग होता है, और दोनों हों तो 1.8.0 बनाया जाता है।
+2. **एक जेलब्रेक किया हुआ PS5**, जिसमें होमब्रू पेलोड लोडर (`etaHEN` या `elfldr`), `kstuff`, और **ShadowMountPlus 1.7 Beta 5** या
+   नया संस्करण हो (यह `/data/homebrew/PPSA99193` को माउंट करके होम स्क्रीन पर रजिस्टर करता है)। कौन-सा फ़र्मवेयर चलेगा, यह आपके
+   जेलब्रेक, `kstuff` और RADV होमब्रू वातावरण पर निर्भर है ([docs/ps5/ps5.md](../../docs/ps5/ps5.md) देखें)।
+3. **लगभग 30 GB खाली जगह वाला PC**, PS5 वाले नेटवर्क पर ही, ताकि आपके डंप से टाइटल बनाया जा सके:
+   - **Windows 10 या 11 (64-बिट):** और कुछ इंस्टॉल नहीं करना, WSL नहीं। Windows बिल्डर अपना Python, zig और glslc साथ लाता है
+     ([Windows के चरण](#windows-पर-इंस्टॉल-करना-wsl-के-बिना))।
+   - **Linux x86-64 या WSL2:** `clang`, `lld` और Python 3 ([Linux के चरण](#ps5-पर-इंस्टॉल-और-अपडेट-करना-linux-या-wsl2))।
 
-\* 09/11/2026 को हमारी परीक्षण मशीन पर मापा गया: Radeon 660M APU (Ryzen 5 7535HS), Linux, 720p आंतरिक रिज़ॉल्यूशन।
+## Windows पर इंस्टॉल करना (WSL के बिना)
 
-<a id="performance"></a>
+1. **प्लेसहोल्डर टाइटल PS5 पर रखें।** [**रिलीज़**](https://github.com/exploitizm/mkw-pit-stop/releases) से
+   `mkw-pit-stop-<version>-ps5-placeholder-PPSA99193.zip` अनज़िप करें और उसका `PPSA99193` फ़ोल्डर किसी FTP क्लाइंट (FileZilla,
+   WinSCP) से `/data/homebrew/` में अपलोड करें, ताकि `/data/homebrew/PPSA99193/eboot.bin` मौजूद हो। ShadowMountPlus के रजिस्टर
+   करने के बाद **Mario Kart World: Pit Stop** चलाएँ: यह **Game files missing** और `Console IP: <पता> (port 19913)` दिखाता है। वह
+   स्क्रीन खुली रहने दें; PS5 फ़ाइलें तभी लेता है जब वह दिख रही हो।
+   <p align="center"><img src="../../docs/images/placeholder-ps5.png" width="560" alt="PS5 पर प्लेसहोल्डर टाइटल: गेम फ़ाइलें नहीं हैं, कंसोल का पता, और PC बिल्ड का चरण और प्रगति"></p>
+2. **PC पर बिल्डर अनपैक करें।** `mkw-pit-stop-<version>-ps5-builder-windows-x86_64.zip` डाउनलोड करें, उस पर राइट-क्लिक करें,
+   **Properties**, **Unblock** पर टिक करें, फिर उसे 30 GB खाली जगह वाली ड्राइव के किसी छोटे फ़ोल्डर में निकालें, जैसे `C:\PitStop`
+   (`Program Files` या OneDrive नहीं)।
+3. **बनाएँ और भेजें।** उस फ़ोल्डर से `mkw.exe` चलाएँ। **Game files** में **Choose folder** (या **Choose .nup or .nx file**) से अपना
+   डंप चुनें; **Build for PS5** के नीचे PS5 स्क्रीन वाला पता **PS5 IP** में लिखें और **Build for PS5** दबाएँ। PS5 के लिए डेस्कटॉप वाला
+   **Set up** बटन ज़रूरी नहीं है। या उस फ़ोल्डर में Command Prompt से:
+   ```bat
+   prepare_ps5.bat --source "D:\Dumps\MKW" --send 192.168.1.50
+   ```
+   <p align="center"><img src="../../docs/images/launcher-ps5.png" width="560" alt="PS5 बिल्डर की स्टार्ट स्क्रीन: आपकी कॉपी चुनी हुई, PS5 का पता लिखा हुआ, और Build for PS5 बटन"></p>
+4. **गेम शुरू करें।** PC के बनाते समय PS5 स्क्रीन चरण और प्रगति दिखाती है; जब हर फ़ाइल पहुँचकर जाँच ली जाती है तो यह
+   **Transfer complete!** दिखाती है: **क्रॉस** दबाएँ, फिर **Mario Kart World: Pit Stop** दोबारा चलाएँ।
 
-## प्रदर्शन
+**आपकी कॉपी पहले से PS5 पर है?** **My game files are already on the PS5** पर टिक करें और वहाँ उसका फ़ोल्डर लिखें (जैसे `/data/mkw`,
+जिसमें या जिसके `updates\<version>` में `exefs` और `romfs` हों): सिर्फ़ गेम कोड और शेडर भेजे जाते हैं, और टाइटल उस फ़ोल्डर में गेम ढूँढ
+लेता है। बनाने के लिए PC को फिर भी आपका डंप चाहिए।
 
-मापे गए फ़्रेम समय, हर एक अपने संस्करण के साथ, [docs/project/performance.md](../../docs/project/performance.md) में हैं। अपनी मशीन जोड़ने के लिए एक
-[प्रदर्शन रिपोर्ट](https://github.com/adriadam10/mkw-recomp/issues/new?template=performance.yml) खोलें: वह रिपोर्ट के संस्करण
-के साथ तालिका में जुड़ जाती है। ये समय गेम के अपने फ़्रेम हैं: फ़्रेम जनरेशन ज़्यादा फ़्रेम दिखाता है पर उन्हें छोटा नहीं करता।
-16.7 ms यानी 60 fps; Frame rate को Automatic (कंसोल वाला) पर रखने पर 60 न पहुँचने पर यह 30 fps पर आ जाता है, और 33.3 ms से
-लंबा फ़्रेम रेस को असली समय से धीमा चलाता है।
+**नेटवर्क नहीं है? USB ड्राइव लें।** चरण 3 में PS5 का पता लिखने के बजाय **To a USB drive** और **Choose drive** चुनें: टाइटल ड्राइव
+पर `homebrew\PPSA99193` में लिखा जाता है (**exFAT**, लगभग 25 GB खाली), और ड्राइव PS5 में लगते ही ShadowMountPlus उसे वहाँ ढूँढ लेता है
+(यह `/mnt/usb0`-`usb7/homebrew/` खोजता है)। इसके लिए चरण 1 का प्लेसहोल्डर ज़रूरी नहीं; अगर वह इंस्टॉल है, तो पहले
+`/data/homebrew/PPSA99193` हटाएँ ताकि टाइटल की एक ही कॉपी रजिस्टर रहे। दोबारा बनाने पर ड्राइव पर सिर्फ़ बदला हुआ हिस्सा अपडेट होता है।
 
-| तारीख़ | GPU | आंतरिक रिज़ॉल्यूशन | रेस fps | रेस फ़्रेम समय |
-|---|---|---|---|---|
-| 11/11/2026 | RX 7900 XTX (Windows) | 2160p | 60 | 16.7 ms |
-| 11/11/2026 | RX 9070 XT (Linux, RADV) | 720p से 2160p | 60 | 16.7 ms |
-| 10/11/2026 | RTX 3060 (Windows) | 1080p | ~48 | ~21 ms |
-| 11/11/2026 | RTX 3050 Laptop (Windows) | 720p | ~37 | 26.7 ms |
-| 09/11/2026 | Radeon 660M (Linux, RADV) | 720p | 30-32 | 31-33 ms |
-| 11/11/2026 | GTX 1650 SUPER (Windows) | 1080p | ~24 | ~41 ms |
-| 09/11/2026 | GTX 1050 Ti (Windows) | 1080p | 22-24 | 42-45 ms |
+अगर PS5 **Waiting for connection** पर ही रहे, तो पता जाँचें और देखें कि दोनों एक ही नेटवर्क पर हैं; असफल बिल्ड का कारण `mkw.exe` के
+पास `logs/setup.log` में लिखा होता है। अपडेट करने के लिए नया बिल्डर अनपैक करें और दोबारा बनाएँ।
 
-## खेलना
+## PS5 पर इंस्टॉल और अपडेट करना (Linux या WSL2)
 
-![गेम सेट अप होने के बाद स्टार्ट स्क्रीन](../../docs/images/launcher-main.png)
+क्योंकि `eboot.bin` रीकम्पाइल किया गया गेम कोड लिंक करता है और `spirv/` में गेम के अनुवादित शेडर होते हैं, **कोई तैयार `eboot.bin` या
+`spirv/` वितरित नहीं किया जाता**। आप `PPSA99193` टाइटल फ़ोल्डर अपने PC पर, गेम-रहित रिलीज़ बिल्डर और अपने डंप से बनाते हैं:
 
-![Game files पेज, जहाँ सेटअप खिलाड़ी का डंप लेता है](../../docs/images/launcher-files.png)
+1. [**रिलीज़**](https://github.com/exploitizm/mkw-pit-stop/releases) से
+   `mkw-pit-stop-<version>-ps5-builder-linux-x86_64.tar.zst` डाउनलोड करें, उसका डाइजेस्ट `SHA256SUMS` से मिलाएँ, और Linux या WSL2 पर
+   अनपैक करें:
+   ```sh
+   tar --zstd -xf mkw-pit-stop-*-ps5-builder-linux-x86_64.tar.zst
+   cd mkw-pit-stop-*
+   ```
+2. अपने *Mario Kart World* डंप (फ़ोल्डर या `.nup` फ़ाइल) की ओर इशारा करते हुए `prepare_ps5.py` चलाएँ:
+   ```sh
+   python3 prepare_ps5.py --source /path/to/your/mkw-dump --out ./PPSA99193
+   ```
+   स्क्रिप्ट आपके डंप का संस्करण (1.8.0 या 1.0.0) पहचानती है, AArch64 ExeFS को C (`ps5-high144`) में अनुवादित करती है, पहले से
+   बने रनटाइम और PS5 RADV आर्काइव के साथ `eboot.bin` कम्पाइल और लिंक करती है, SM86 निर्देश विनिर्देश स्थानीय रूप से बनाने के लिए NVIDIA
+   के `nvdisasm` और `ptxas` (SHA-256 से तय) डाउनलोड करती है, सभी 11,561 शेडर `PPSA99193/spirv/` में अनुवादित करती है, और `exefs/` व
+   `romfs/` को `PPSA99193/` में रखती है।
+3. `PPSA99193` को FTP या USB से अपने PS5 पर `/data/homebrew/PPSA99193` में भेजें — या `--deploy <PS5_IP>` दें, ताकि अपलोड हो, हर फ़ाइल
+   SHA-256 से जाँची जाए, और `/user/app/PPSA99193/sce_sys` में ShadowMountPlus द्वारा रजिस्टर `param.json` और `icon0.png` ताज़ा हों।
+4. PS5 की होम स्क्रीन से **Mario Kart World: Pit Stop** चलाएँ।
 
-1. अपने Switch 2 से Mario Kart World 1.0.0 या 1.8.0 डंप करें (`exefs/` और `romfs/`, डिक्रिप्ट किए हुए; 1.8.0 में अपडेट बेस गेम
-   की RomFS में मिला हुआ), या वही डंप एक `.nup` या `.nx` फ़ाइल में पैक किया हुआ।
-2. [Releases](https://github.com/adriadam10/mkw-recomp/releases) से अपने सिस्टम के लिए लॉन्चर डाउनलोड करें: Linux पर
-   `.AppImage` (ARM पर `-aarch64`; डिफ़ॉल्ट गेम फ़ोल्डर `~/.local/share/mkw-recomp` है; glibc 2.31 या नया: Debian 11,
-   Ubuntu 20.04, SteamOS और उसके बाद के), Windows पर `.zip`, एक फ़ोल्डर में अनज़िप करके। दोनों के लिए लगभग 30 GB ख़ाली जगह
+**अपडेट करना:** नया बिल्डर अनपैक करें और उन्हीं `--work` और `--out` फ़ोल्डरों के साथ `prepare_ps5.py` चलाएँ। जिन चरणों के इनपुट नहीं
+बदले (जैसे `romfs/` और बिना बदले शेडर) वे छोड़ दिए जाते हैं, और कंसोल पर आपके सेव (`profile/`) और सेटिंग्स (`mkw.ini`) बने रहते हैं।
+
+## Pit Stop सेटिंग्स ओवरले
+
+किसी भी स्क्रीन से DualSense पर **Options + टचपैड क्लिक** (या डेस्कटॉप पर **F1**) दबाकर **Pit Stop** खोलें
+([docs/ps5/pit-stop.md](../../docs/ps5/pit-stop.md)):
+
+| कंट्रोल | काम |
+|---|---|
+| **Options + टचपैड क्लिक** | किसी भी स्क्रीन से Pit Stop खोलें या बंद करें |
+| **D-pad / बायाँ स्टिक ऊपर और नीचे** | एक पंक्ति आगे-पीछे |
+| **D-pad / बायाँ स्टिक बाएँ और दाएँ** | चुनी हुई सेटिंग बदलें (बंद/चालू या चरण वाला मान) |
+| **सर्कल / क्रॉस** | पुष्टि / वापस (आपके Nintendo या Xbox बटन लेआउट के अनुसार) |
+| **L1 / R1** | **All settings** में पिछली / अगली श्रेणी |
+
+- पहली स्क्रीन की **त्वरित पंक्तियाँ** लाइव बदलती हैं: **Master volume** (0–100%), **Vibration strength** (0–300%) और
+  **Performance HUD** (Off, FPS, Full)।
+- **All settings** में **Display**, **Graphics**, **Controls** (हर एक्शन के लिए लाइव बटन कैप्चर), **Audio**, **General**,
+  **Advanced**, **Hacks** (सभी ड्राइवर, वाहन, स्टिकर और स्पेशल कप अनलॉक) और **Multiplayer** खुलते हैं। बदलाव अपने-आप
+  `/app0/mkw.ini` में सहेजे जाते हैं।
+
+## PC पर खेलना (Linux और Windows)
+
+अपस्ट्रीम [mkw-recomp](https://github.com/adriadam10/mkw-recomp) से:
+
+<p align="center">
+  <img src="../../docs/images/launcher-files.png" width="400" alt="सेटअप से पहले स्टार्ट स्क्रीन का Game files पेज">
+  <img src="../../docs/images/launcher-main.png" width="400" alt="गेम सेट होने के बाद स्टार्ट स्क्रीन">
+</p>
+
+1. अपने Switch 2 से Mario Kart World 1.0.0 या 1.8.0 डंप करें (`exefs/` और `romfs/`, डिक्रिप्ट किए हुए)।
+2. [mkw-recomp की रिलीज़](https://github.com/adriadam10/mkw-recomp/releases) से PC लॉन्चर डाउनलोड करें: Linux पर `.AppImage`
+   (बनाया गया गेम `~/.local/share/mkw-recomp` में रखता है; glibc 2.31 या नया), Windows पर `.zip`। दोनों को लगभग 30 GB खाली जगह
    चाहिए।
-3. AppImage (पहले `chmod +x`) या `mkw.exe` चलाएँ, **Game files** खोलें, चाहें तो **Choose game folder** से चुनें कि गेम कहाँ
-   इंस्टॉल होगा (या कोई पहले से मौजूद इंस्टॉलेशन), फिर अपना डंप चुनें (**Choose folder** या **Choose .nup or .nx file**)
-   और **Set up** दबाएँ। लॉन्चर इंस्टॉलेशन फ़ोल्डर याद रखता है; कम्पाइल किया गया गेम, तैयार फ़ाइलें, सेव, सेटिंग्स और कैश वहीं
-   रहते हैं। दूसरा फ़ोल्डर चुनने से मौजूदा फ़ाइलें अपनी जगह रहती हैं।
-   पहला सेटअप कुछ समय लेता है (यह पूरा गेम कम्पाइल करता है और आपकी मशीन पर शेडर एन्कोडिंग बताने के लिए NVIDIA के `nvdisasm`
-   और `ptxas` डाउनलोड करता है, Linux पर 84 MB और Windows पर 126 MB); उसके बाद, **Play**।
-4. नई रिलीज़ आने पर स्टार्ट स्क्रीन उसे पेश करती है (**Update to vX**): वह उसे डाउनलोड करती है, जाँचती है, प्रोग्राम बदलती है और
-   सिर्फ़ जो बदला उसे दोबारा सेट अप करती है। **Settings → Menu → Check for updates** इस जाँच को बंद करता है।
+3. AppImage या `mkw.exe` चलाएँ, **Game files** खोलें, अपना डंप चुनें और **Prepare** दबाएँ, फिर **Play**।
 
-ज़रूरतें: AVX2 वाला x86-64 CPU (या Linux पर ARMv8.2 वाला AArch64: LSE, FP16, RCpc, DotProd, CRC32), Vulkan 1.3 वाला GPU
-(`VK_EXT_mesh_shader` अनुशंसित; इसके बिना task और mesh शेडर compute के रूप में चलते हैं), 16 GB RAM अनुशंसित। Linux पर Docker
-या Podman कंटेनर में, उसकी seccomp प्रोफ़ाइल में `userfaultfd` की अनुमति दें (Docker का डिफ़ॉल्ट इसे मना करता है): इसके बिना
-पोर्ट यह नहीं जान पाता कि गेम की कौन-सी मेमोरी बदली, और कई गुना धीमा चलता है।
+## सोर्स से बनाना
 
-## अतिरिक्त सुविधाएँ
+### PS5 नेटिव टारगेट (`PPSA99193`)
 
-कंसोल से आगे की, सब वैकल्पिक और डिफ़ॉल्ट रूप से बंद (या कंसोल के मान पर):
-
-- **डिस्प्ले**: कंसोल से ऊपर या नीचे का आंतरिक रिज़ॉल्यूशन, 21:9, 32:9 और 48:9 (रेस में किनारों पर ज़्यादा दिखता है), AMD FSR 1
-  स्केलिंग, HDR स्क्रीन पर HDR, VSync, mailbox या immediate प्रेज़ेंटेशन।
-- **फ़्रेम जनरेशन**: गेम के फ़्रेमों के बीच बनाए गए फ़्रेम (30 fps की रेस 60 पर, या 240 Hz स्क्रीन पर 240 पर दिखाई जाती है)।
-  ज़्यादा स्मूथ, तेज़ नहीं: तस्वीर एक फ़्रेम तक देर से आती है, और तेज़ गति और मिनीमैप धुँधले हो सकते हैं।
-- **ग्राफ़िक्स**: टेक्सचर फ़िल्टरिंग और गुणवत्ता, डिटेल दूरी और छाया गुणवत्ता, कंसोल से ऊपर या नीचे।
-- **ध्वनि**: 5.1 सराउंड।
-- **कंट्रोल**: हर कुंजी और बटन फिर से असाइन करने योग्य, माउस कैमरा, Nintendo, Xbox या PlayStation बटन आइकन, मोशन स्टीयरिंग,
-  वाइब्रेशन की तीव्रता; हर खिलाड़ी के लिए एक कंट्रोलर के साथ लोकल मल्टीप्लेयर। Switch 2 के कंट्रोलर (Pro Controller,
-  Joy-Con, GameCube) Bluetooth से और Linux पर USB से भी चलते हैं; Windows पर USB के लिए एक बार का ड्राइवर चरण चाहिए, नीचे।
-- **हैक्स**: टर्बो (F2 दबाए रखें या टॉगल करें), वीडियो छोड़ें, सब कुछ अनलॉक करें, हर बार एक जैसी रैंडमनेस, सीधे टाइम ट्रायल या
-  फ़्री रोम पर।
-- **भाषाएँ**: मेनू 20 भाषाओं में; गेम ख़ुद कैटलन, गैलिशियन और बास्क में भी।
-- **गेम फ़ाइलें**: इंस्टॉलेशन फ़ोल्डर चुनें; फ़ोल्डरों के रूप में या एक `.nup` या `.nx` फ़ाइल के रूप में डंप, जहाँ है वहीं से
-  इस्तेमाल; स्टार्ट स्क्रीन से अपडेट।
-- **प्रदर्शन ओवरले** (FPS, या पूरा CPU, GPU और मेमोरी) और बग रिपोर्ट के लिए एक क्लिक में सिस्टम जानकारी।
-
-### Windows पर USB से Switch 2 कंट्रोलर
-
-ये कंट्रोलर तभी शुरू होते हैं जब उनके दूसरे USB इंटरफ़ेस को एक कमांड भेजी जाए, और Windows उस इंटरफ़ेस पर कोई ऐसा ड्राइवर
-नहीं रखता जिसे कोई ऐप इस्तेमाल कर सके। हर कंट्रोलर के लिए एक बार, [Zadig](https://zadig.akeo.ie/) से:
-
-1. कंट्रोलर को USB-C केबल से जोड़ें और Zadig खोलें।
-2. **Options → List All Devices**, फिर कंट्रोलर का **Interface 1** चुनें (USB ID: Pro Controller के लिए `057E` और `2069`,
-   दाएँ/बाएँ Joy-Con के लिए `2066`/`2067`, GameCube कंट्रोलर के लिए `2073`)। Interface 0 नहीं: वह कंट्रोलर का सामान्य
-   इनपुट है, और उसे बदलने से कंट्रोलर बाकी सभी ऐप्स से छिप जाता है।
-3. ड्राइवर **WinUSB**, फिर **Replace Driver** (या **Install Driver**)।
-
-यही चरण उस वर्चुअल कंट्रोलर पर भी लागू होते हैं जो इन्हीं USB ID के साथ दिखता है (Switch2Connect का USB/IP मोड)। वापस करने
-के लिए, Device Manager में उस इंटरफ़ेस का डिवाइस "delete the driver" टिक करके अनइंस्टॉल करें।
-
-## मॉड
-
-स्टार्ट स्क्रीन का **Mods** पेज मॉड वैसे ही इंस्टॉल करता है जैसे वे गेम के लिए प्रकाशित होते हैं, और उन्हें दो टैब में दिखाता है:
-
-- **Find on GameBanana**: [GameBanana](https://gamebanana.com/games/22152) पर Mario Kart World के मॉड, सूची या खोज के ज़रिए,
-  हर मॉड के लेखक, लाइसेंस, स्क्रीनशॉट और विवरण के साथ। **Install** फ़ाइल GameBanana से डाउनलोड करता है, सिर्फ़ तब जब आप कहें।
-- **Installed**: आपके मॉड, हर एक का अपना ऑन/ऑफ़ स्विच; **Import zip / Import folder** आपके पास पहले से मौजूद मॉड लेता है
-  (`.zip`, `.rar` या `.7z`, जिसमें कहीं भी `romfs/` और/या `exefs/` हो, `atmosphere/contents/` ढाँचे सहित)।
-
-जो मॉड गेम फ़ाइलें बदलते हैं (`romfs/`: स्किन, टेक्सचर, टेक्स्ट, ट्रैक) वे अगली शुरुआत पर लागू होते हैं। जो मॉड गेम का कोड बदलते
-हैं (`exefs/` के `.ips` या `.pchtxt` पैच, जैसे 200cc या 30 FPS) वे गेम कोड में जोड़े जाते हैं: किसी एक को चालू या बंद करने पर
-खेलने से पहले गेम दोबारा कम्पाइल होता है (कुछ मिनट)। एक ही आर्काइव बदलने वाले दो मॉड फ़ाइल-दर-फ़ाइल मिलाए जाते हैं, और जहाँ दोनों
-एक ही फ़ाइल बदलते हैं वहाँ पेज पूछता है कि कौन-सा लागू हो। पेज उन मॉड के बारे में चेतावनी देता है जो गेम की ग्राफ़िक्स सेटिंग या
-शेडर बदलते हैं, जिन्हें पोर्ट अपने तरीक़े से संभालता है।
-
-मॉड दूसरे लोग बनाते हैं और यह प्रोजेक्ट उनका परीक्षण नहीं करता: कोई मॉड गेम क्रैश कर सकता है या आपका सेव ख़राब कर सकता है।
-इंस्टॉल करने से पहले मॉड का पेज पढ़ें, अपने सेव की कॉपी रखें, और मॉड की समस्याएँ उसके लेखक को बताएँ; यहाँ बग रिपोर्ट करते समय
-बताएँ कि कौन-से मॉड चालू थे (लॉग में उनकी सूची होती है), या पहले उनके बिना फिर से आज़माएँ।
-
-## सोर्स से बिल्ड करना
-
-Linux, `uv`, `clang`, `lld`, `ninja`, SDL3, Opus, libvpx, zstd, xxHash, Vulkan हेडर और VMA 3.4.0 के साथ (विवरण
-[tools/build/README.md](../../tools/build/README.md) में)। अपना डंप `game/` (`game/exefs`, `game/romfs`) में रखें या
-`MKW_GAME=<dir>` सेट करें, फिर रिपॉज़िटरी की जड़ से:
+`PS5_VulkanTemplate`, `PS5_Vulkan`, `PS5_Mesa` और `PS5_PayloadSDK` के तय चेकआउट के लिए [docs/ps5/ps5.md](../../docs/ps5/ps5.md) और
+[tools/ps5/README.md](../../tools/ps5/README.md) देखें:
 
 ```sh
-uv run python recomp/gen.py --exefs game/exefs --out build/generated --jobs 8 --patches recomp/patches-mkw.txt  # 1.8.0: patches-mkw-180.txt
-uv run tools/shaders/extract.py && uv run tools/shaders/translate.py
-uv run tools/build/build.py              # build/mkw; --target windows builds mkw.exe with llvm-mingw
-build/mkw
+python3 recomp/gen.py --exefs "$MKW_GAME/exefs" --guest-layout ps5-high144 \
+    --out build/ps5-game/generated --patches recomp/patches-mkw.txt
+python3 tools/shaders/extract.py && python3 tools/shaders/translate.py
+python3 tools/ps5/build_game.py --stack "$stack" --include "$headers" \
+    --generated build/ps5-game/generated --exefs "$MKW_GAME/exefs"
+python3 tools/ps5/deploy.py <PS5_IP> --game
 ```
 
-पैक किए गए डंप (`.nup`, `.nx`) से और AArch64 पर Linux के लिए: [tools/build/README.md](../../tools/build/README.md#a-packed-dump)
-और [उसका AArch64 हिस्सा](../../tools/build/README.md#linux-aarch64)।
+रनटाइम इन्वेंटरी (`--inventory`) से गेम-रहित PS5 बिल्डर रिलीज़ पैक करने के लिए:
 
-शेडर का अनुवाद करने के लिए SM86 एन्कोडिंग का विनिर्देश चाहिए, जो NVIDIA के `nvdisasm` से बनाया जाता है (साथ में नहीं दिया जाता):
-देखें [tools/shaders/README.md](../../tools/shaders/README.md)। जो कुछ बनाया जाता है वह `build/` में जाता है, git में कभी नहीं।
+```sh
+python3 tools/ps5/build_game.py --stack "$stack" --include "$headers" --inventory
+python3 tools/ps5/release_ps5.py --stack "$stack" --version 0.1.0
+```
+
+### Linux और Windows होस्ट बिल्ड
+
+विवरण [tools/build/README.md](../../tools/build/README.md) में:
+
+```sh
+python3 recomp/gen.py --exefs game/exefs --out build/generated --jobs 8 --patches recomp/patches-mkw.txt
+python3 tools/shaders/extract.py && python3 tools/shaders/translate.py
+python3 tools/build/build.py              # build/mkw; --target windows builds mkw.exe with llvm-mingw
+build/mkw
+```
 
 | फ़ोल्डर | सामग्री |
 |---|---|
 | [recomp/](../../recomp/README.md) | जनरेटर: AArch64 → C |
-| [runtime/](../../runtime/README.md) | जो कंसोल की भूमिका निभाता है: कर्नेल, मेमोरी, SDK के विकल्प, Vulkan पर NVN2, ऑडियो, इनपुट, मेनू और लॉन्चर |
+| [runtime/](../../runtime/README.md) | कंसोल की जगह लेने वाला हिस्सा: कर्नेल, मेमोरी, SDK के विकल्प, Vulkan पर NVN2, ऑडियो, इनपुट, Pit Stop और लॉन्चर |
 | [sm86/](../../sm86/README.md) | शेडर अनुवादक: SM86 SASS → GLSL → SPIR-V |
-| [i18n/](../../i18n/README.md) | मेनू, स्टार्ट स्क्रीन और सेटअप के टेक्स्ट हर भाषा में (gettext `.po`) |
-| [tools/](../../tools/README.md) | विश्लेषण, सेटअप, बिल्ड, गेम रन और डायग्नोस्टिक्स |
-| [tests/](../../tests/README.md) | गेम या GPU के बिना परीक्षण, Linux और Windows के CI में |
-| [docs/](../../docs/README.md) | शोध, स्रोत और प्रदर्शन |
-| `.github/` | CI, issue और pull request टेम्पलेट |
+| [tools/](../../tools/README.md) | विश्लेषण, सेटअप, बिल्ड, PS5 पैकेजिंग, गेम रन और डायग्नॉस्टिक्स |
+| [tests/](../../tests/README.md) | गेम या GPU के बिना टेस्ट, Linux और Windows की CI में |
+| [docs/](../../docs/README.md) | PS5 आर्किटेक्चर, Pit Stop, शोध, स्रोत, रोडमैप और प्रदर्शन |
+| [i18n/](../../i18n/README.md) | मेनू के टेक्स्ट gettext फ़ाइलों के रूप में (`mkw.pot`, हर भाषा के लिए एक `.po`) |
+| [server/](../../server/README.md) | इंटरनेट पर लोकल-वायरलेस खेल के लिए लॉबी सर्वर (`server/lobby`) |
+| `.github/` | CI, इश्यू और पुल रिक्वेस्ट टेम्पलेट |
 
-जड़ में: `pyproject.toml` और `uv.lock` (टूल्स का Python वातावरण), `.gitignore`, `LICENSE`, `CONTRIBUTING.md`,
-`CHANGELOG.md` (हर रिलीज़ के बदलाव, उसके नोट्स) और `AGENTS.md` (कोडिंग एजेंटों के लिए गाइड)।
+रूट में: `pyproject.toml` और `uv.lock` (टूल्स का Python वातावरण), `Makefile` (रिलीज़ और CI के शॉर्टकट), `.gitignore`, `LICENSE`,
+`CONTRIBUTING.md`, `CHANGELOG.md` (हर रिलीज़ के बदलाव, उसके नोट्स), `AGENTS.md` (कोडिंग एजेंटों के लिए गाइड)।
 
-## डिज़ाइन निर्णय (30/10/2026)
+## प्रदर्शन
 
-| विषय | निर्णय | क्यों |
-|---|---|---|
-| CPU | [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) (MIT) पर आधारित AArch64→C अनुवादक, ARMv8.1-8.3 तक बढ़ाया गया: LSE एटॉमिक्स, CAS, LDAPR; PAC को identity, MTE टैग को 0 | MKW वाले ही इंजन परिवार का, और पहले से बड़े एक्ज़ीक्यूटेबल तक स्केल करता है |
-| सिस्टम | SDK के `nn::*` फ़ंक्शन नाम से बदले गए; सिग्नेचर `main` के 1 289 इम्पोर्ट के मैंगल्ड नामों से | कंसोल की कोई सेवा एम्युलेट नहीं करनी |
-| ग्राफ़िक्स | Vulkan पर NVN2: इसके 699 में से 529 फ़ंक्शन का नाम NVN1 जैसा है (सिग्नेचर totk-pc-recomp और nxnative से ज्ञात); 170 नए हैं | रीकम्पाइलेशन, GPU एम्युलेशन नहीं |
-| शेडर | हमारा अपना ऑफ़लाइन SM86→SPIR-V अनुवादक, DocumentSASS / nvsass-disassembler विनिर्देश से बने डिकोडर के साथ | mesh/task और Maxwell में जो नहीं है उसे कवर करता है |
-| Switch 2 की वैकल्पिक सुविधाएँ | डिस्प्ले HDR में हो तो HDR अपने आप चालू, कंसोल की तरह (Settings > Screen > HDR: Automatic या Off); DLSS, रे ट्रेसिंग और टच विकल्पों के पीछे, डिफ़ॉल्ट रूप से बंद; बंद होने पर उनके NVN2 फ़ंक्शन मौजूद रहते हैं पर कुछ नहीं करते, ताकि गेम अपने सामान्य रास्ते पर चले | कंसोल हार्डवेयर के अतिरिक्त, खेलने के लिए ज़रूरी नहीं |
-| डिफ़ॉल्ट | कंसोल जैसा रूप और रिज़ॉल्यूशन; कम सेटिंग विकल्प हैं | खिलाड़ी चुनता है |
+एक बेस PS5 पर, Mario Kart World 1.8.0, ग्रां प्री रेस बेंचमार्क (`tools/ps5/bench.py`, 210 s रेस, 1080p, फ़्रेम जनरेशन बंद):
 
-## यह कैसे बना
+| तारीख | फ़्रेम रेट सेटिंग | औसत फ़्रेम समय | सामान्य फ़्रेम | 1% लो | रेस की गति |
+|---|---|---|---|---|---|
+| 20/11/2026 | 60 fps (नया डिफ़ॉल्ट) | 17.0–17.4 ms (57–59 fps) | 16.7 ms (सीमा पर) | 35–41 fps | 0.95–0.98x |
+| 16/11/2026 | 30 fps (पिछला डिफ़ॉल्ट) | 33.3 ms | 33.3 ms | | 1.00x |
 
-यह पोर्ट मेरे निर्देशन में [Claude](https://claude.com/claude-code) (Anthropic का कोडिंग एजेंट) ने ज़्यादातर टाइपिंग करके लिखा,
-लगभग दस दिन के पूर्णकालिक काम में: 30/10/2026 से 489 कमिट, हर एक शामिल होने से पहले समीक्षा, माप या परीक्षण से गुज़रा। यह एक
-प्रॉम्प्ट में नहीं बना। इसके पीछे:
+नया डिफ़ॉल्ट कंसोल पर उसी रूप में नहीं जाँचा गया है जिसमें वह जारी होता है: ये आँकड़े उन बेंचमार्क रेस से हैं जिनमें रनटाइम का प्रदर्शन लॉग
+चालू था (`MKW_TRACE=perf`, जिसकी थोड़ी लागत है) और जिन्हें हाथ से 60 fps पर सेट किया गया था। मेनू, टाइम ट्रायल, स्प्लिट स्क्रीन, लंबे
+सत्र और दूसरे ट्रैक अभी नए डिफ़ॉल्ट पर नहीं खेले गए हैं।
 
-- **प्रॉम्प्ट से ज़्यादा तरीक़ा।** प्रदर्शन का हर बदलाव उसी रन के भीतर A/B से मापा गया (एक ही बिल्ड के दो रन में प्रति फ़्रेम
-  12 ms तक का अंतर होता है); तस्वीर का हर सुधार कंसोल की अपनी तस्वीर से मिलाया गया; शेडर अनुवादक के बदलाव गेम चलाने से पहले
-  GPU के बाहर MKW के सभी 11 561 प्रोग्रामों पर परखे जाते हैं; फ़्रेम कैप्चर बैक एंड को गेम के बिना सेकंडों में दोहराते हैं। ग़लतियों
-  से निकले नियम लिखे गए हैं और स्क्रिप्ट से लागू किए जाते हैं, ताकि वही ग़लती दोबारा न हो।
-- **जो मैंने पहले सीखा था।** रीकम्पाइलर और रनटाइम [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) और उसके Linux
-  पोर्ट से, और दूसरे रीकम्प (SavageWindRecomp, smo-recomp) पर मेरे पिछले काम से निकले: अनुवादक, लॉन्चर और खिलाड़ी की मशीन पर गेम
-  बनाने वाला सेटअप, बटन आइकन, शेडर का कंट्रोल फ़्लो। [AnyPS5](https://github.com/boykopovar/AnyPS5) के मेंटेनर के रूप में मैंने
-  GPU शेडर का सटीक अनुवाद करना, mesh शेडर को उन GPU पर compute के रूप में चलाना जिनमें वे नहीं हैं, और जाँच और माप से एक बड़े
-  प्रोजेक्ट को भरोसेमंद रखना सीखा।
-- **समुदाय का शोध।** Switch 2 पर [eden-nx2](https://git.eden-emu.dev/Takoroka/eden-nx2) के नोट्स, DocumentSASS और
-  nvsass-disassembler द्वारा दर्ज NVIDIA का SASS एन्कोडिंग, शेडर अर्थ के लिए Ryujinx और Mesa NAK, और स्रोतों में सूचीबद्ध दूसरे
-  Switch 2 पोर्ट।
+लगभग 2% रेस फ़्रेम 20 ms से ज़्यादा लेते हैं: ये वहाँ होते हैं जहाँ कोई ट्रैक नए टेक्सचर लोड करता है, और यही 1% लो और हल्की स्लो मोशन तय
+करते हैं। क्या मापा गया और क्या बाकी है, यह [docs/project/roadmap.md](../../docs/project/roadmap.md) और
+[docs/ps5/ps5.md](../../docs/ps5/ps5.md#frame-rate) में है; PC के आँकड़े [docs/project/performance.md](../../docs/project/performance.md) में।
 
-## लाइसेंस और श्रेय
+## बग रिपोर्ट करना
 
-यह प्रोजेक्ट [MIT लाइसेंस](../../LICENSE) के तहत है। दूसरे प्रोजेक्टों से लिया गया कोड अपना लाइसेंस साथ रखता है
-([recomp/](../../recomp/), [runtime/](../../runtime/), [sm86/decode/](../../sm86/decode/) और
-[runtime/third_party/](../../runtime/third_party/README.md) में `LICENSE.*` फ़ाइलें): totk-pc-recomp, nvsass-disassembler,
-Dear ImGui, bc7enc, stb_image, AMD FidelityFX FSR 1 और Roboto। इस्तेमाल किया गया हर स्रोत, उसके लाइसेंस और उससे क्या लिया गया
-(कोड सिर्फ़ MIT प्रोजेक्टों से; GPL प्रोजेक्टों से सिर्फ़ विचार), [docs/project/research.md](../../docs/project/research.md#sources) में सूचीबद्ध है।
+[CONTRIBUTING.md](../../CONTRIBUTING.md) देखें। PS5 समस्याएँ [इस फ़ोर्क के इश्यू](https://github.com/exploitizm/mkw-pit-stop/issues) में
+रिपोर्ट करें और कंसोल का कर्नेल लॉग (`klog`, `[Mario Kart World: Pit Stop]` उपसर्ग के साथ) और PC बिल्डर का `logs/setup.log` संलग्न
+करें। डेस्कटॉप समस्याओं के लिए `logs/mkw.log` और `logs/setup.log` संलग्न करें। गेम फ़ाइलें, डंप, या आपके डंप से बने `eboot.bin` कभी
+संलग्न न करें।
 
-Mario Kart World © Nintendo है। यह प्रोजेक्ट Nintendo से संबद्ध या उसके द्वारा समर्थित नहीं है, इसमें गेम का कोई कोड या एसेट
-नहीं है, और यह उन्हें पाने में मदद नहीं करता।
+## लाइसेंस, श्रेय और अस्वीकरण
 
-मॉड उनके लेखकों के हैं और उनके अपने लाइसेंस के तहत आते हैं। यह प्रोजेक्ट GameBanana या किसी मॉड लेखक से संबद्ध या उनके द्वारा
-समर्थित नहीं है, मॉड होस्ट, समीक्षा या वितरित नहीं करता, और किसी मॉड के व्यवहार के लिए ज़िम्मेदार नहीं है: स्टार्ट स्क्रीन सिर्फ़
-GameBanana की सार्वजनिक सूची दिखाती है और आपके कहने पर GameBanana से मॉड डाउनलोड करती है।
+इस रिपॉज़िटरी का सोर्स कोड [MIT लाइसेंस](../../LICENSE) (`Copyright (c) 2026 Adrià`) के अंतर्गत है।
 
-## योगदान
+**PS5 रिलीज़ फ़ाइलें GPL-3.0-or-later हैं।** हर PS5 टाइटल पेलोड SDK फ़ोर्क की प्लेटफ़ॉर्म लेयर और `PS5_Vulkan` का स्टार्ट-अप कोड
+(GPL-3.0-or-later) लिंक करता है, इसलिए प्लेसहोल्डर टाइटल, बिल्डर का `ps5-bundle/` और इनसे बनाया गया हर टाइटल पूरे रूप में
+GPL-3.0-or-later के अंतर्गत है; mkw-recomp का अपना कोड MIT ही रहता है। हर रिलीज़ में `LEGAL.txt` और `licenses/` (हर हिस्सा उसके
+लाइसेंस, कॉपीराइट और सोर्स रिविज़न के साथ) होते हैं और हर हिस्से का पूरा सोर्स `source/*.tar.gz` (`source/SOURCES.txt`) के रूप में
+संलग्न होता है, जो [tools/ps5/release_notices.py](../../tools/ps5/release_notices.py) बनाता है।
 
-देखें [CONTRIBUTING.md](../../CONTRIBUTING.md)। बग और प्रदर्शन रिपोर्ट [Issues](https://github.com/adriadam10/mkw-recomp/issues)
-में, सवाल [Discussions](https://github.com/adriadam10/mkw-recomp/discussions) में।
+- **अपस्ट्रीम प्रोजेक्ट:** Adrià का [**mkw-recomp**](https://github.com/adriadam10/mkw-recomp) — AArch64→C लिफ़्टर, Switch 2 कर्नेल
+  और `nn::*` SDK के विकल्प, Vulkan पर NVN2 रेंडरर, और ऑफ़लाइन SM86→SPIR-V शेडर अनुवादक।
+- **MIT और अनुमेय (permissive) प्रोजेक्ट** ([recomp/](../../recomp/), [runtime/](../../runtime/), [sm86/decode/](../../sm86/decode/) और
+  [runtime/third_party/](../../runtime/third_party/README.md) में `LICENSE.*` फ़ाइलें):
+  [totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp) और उसका Linux पोर्ट,
+  [SavageWindRecomp](https://github.com/Revivedx/SavageWindRecomp),
+  [DocumentSASS](https://github.com/0xD0GF00D/DocumentSASS) और
+  [nvsass-disassembler](https://github.com/reoLantern/nvsass-disassembler),
+  [Ryujinx](https://git.ryujinx.app/ryubing/ryujinx), [Mesa NAK](https://gitlab.freedesktop.org/mesa/mesa/-/tree/main/src/nouveau/compiler),
+  [mario-kart-world-save-editor](https://github.com/Ca1nM/mario-kart-world-save-editor), Dear ImGui,
+  [bc7enc_rdo](https://github.com/richgel999/bc7enc_rdo), AMD FidelityFX FSR 1, Vulkan Memory Allocator, Roboto और Lato।
+- **PS5 टूलचेन और रनटाइम:** [PS5_VulkanTemplate](https://github.com/mihawk-99/PS5_VulkanTemplate) (MIT, Sascha Willems और
+  Mihawk), [PS5_Mesa](https://github.com/mihawk-99/PS5_Mesa) (MIT, PS5 के लिए RADV),
+  [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) और [PS5_PayloadSDK](https://github.com/mihawk-99/PS5_PayloadSDK)
+  (GPL-3.0-or-later, Mihawk और [John Törnblom / ps5-payload-dev](https://github.com/ps5-payload-dev/sdk)), और
+  [ShadowMountPlus](https://github.com/drakmor/shadowMountPlus)। पेलोड SDK प्लेटफ़ॉर्म लेयर और `PS5_Vulkan` CRT/स्टब के साथ किसी
+  PS5 टाइटल में लिंक होने पर, मिला हुआ PS5 टाइटल बाइनरी GPL-3.0-or-later के अंतर्गत आता है (बने हुए टाइटल के अंदर `LEGAL.txt` और
+  `licenses/`)।
+- **सिर्फ़ शोध और डिज़ाइन के विचार** (GPL या बिना लाइसेंस वाले प्रोजेक्टों से कोई कोड कॉपी नहीं किया गया): eden-nx2, Hookshot,
+  PS5_Hookshot, EglantinePS5, AnyPS5, prosper और shadPS4। हर स्रोत [docs/project/research.md](../../docs/project/research.md#sources) में
+  दर्ज है।
+
+**अस्वीकरण:** *Mario Kart World* और *Mario* Nintendo के ट्रेडमार्क हैं। "PlayStation" और "PS5" Sony Interactive Entertainment Inc.
+के ट्रेडमार्क हैं। यह प्रोजेक्ट Nintendo, Sony Interactive Entertainment या किसी गेम प्रकाशक से संबद्ध या उनके द्वारा समर्थित नहीं है, इसमें
+कोई गेम कोड, शेडर या एसेट नहीं हैं, और यह उन्हें पाने में मदद नहीं करता।
