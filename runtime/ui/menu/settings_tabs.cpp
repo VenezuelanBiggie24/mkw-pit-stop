@@ -92,6 +92,7 @@ static void row_window_size(void) {
 }
 #endif
 
+#ifndef MKW_PS5_NATIVE   // the PS5 has one graphics device
 static void row_gpu(void) {
     const char *vals[MAX_GPUS + 1], *names[MAX_GPUS + 1];
     char idx[MAX_GPUS][4];
@@ -104,6 +105,7 @@ static void row_gpu(void) {
     }
     opt_choice_list("MKW_GPU_INDEX", UI_MENU_GPU, vals, names, g_gpu_n + 1, UI_MENU_GPU_DESC);
 }
+#endif
 
 // The game language: one entry per language MKW ships (romfs/Mals: a Switch code that names it), each under its
 // own name.
@@ -151,6 +153,7 @@ const char *settings_present_name(const char *mode) {
     return nullptr;
 }
 
+#ifndef MKW_PS5_NATIVE
 // "in use: VSync" under the Presentation value when the swapchain got another mode than the setting (a driver without
 // mailbox gets fifo); NULL when they agree or before the first swapchain.
 static const char *present_note(void) {
@@ -160,20 +163,24 @@ static const char *present_note(void) {
     snprintf(note, sizeof note, menu_text(UI_MENU_PRESENT_IN_USE), name);
     return note;
 }
+#endif
 
 // ---- the tabs
-// The window and the picture's shape on it.
+// The window and the picture's shape on it. On the PS5 only how the picture fits the TV: the console has one screen
+// and no window, one graphics device, VideoOut's own vsynced present (no mailbox or tearing mode), the TV's 16:9 output
+// (the ultrawide aspects and "fit the window" have nothing to fit) and an SDR swapchain (ps5_window.c wsys_hdr).
 static void rows_screen(void) {
-#ifndef MKW_PS5_NATIVE   // the console has one screen and no window
+#ifndef MKW_PS5_NATIVE
     opt_toggle("MKW_FULLSCREEN", UI_MENU_FULLSCREEN, UI_MENU_FULLSCREEN_DESC);
     row_window_size();
-#endif
     row_gpu();
     static const UiTextId present[] = {UI_MENU_PRESENT_MAILBOX, UI_MENU_PRESENT_VSYNC, UI_MENU_PRESENT_IMMEDIATE};
     opt_choice("MKW_VK_PRESENT", UI_MENU_PRESENT, present, 3, UI_MENU_PRESENT_DESC, present_note());
+#endif
     opt_group(UI_MENU_GRAPHICS);
     static const UiTextId fit[] = {UI_MENU_PICTURE_FIT_KEEP, UI_MENU_PICTURE_FIT_STRETCH};
     opt_choice("MKW_PICTURE_FIT", UI_MENU_PICTURE_FIT, fit, 2, UI_MENU_PICTURE_FIT_DESC);
+#ifndef MKW_PS5_NATIVE
     {   // the cameras' aspect and the output's width (core/boot/patches.c, set aspect), read at start
         static const char *const vals[] = {"16:9", "window", "21:9", "32:9", "48:9"};   // 48:9: three screens, #264
         const char *names[5] = {"16:9", menu_text(UI_MENU_ASPECT_WINDOW), "21:9", "32:9", "48:9"};
@@ -184,6 +191,7 @@ static void rows_screen(void) {
         const char *names[2] = {menu_text(UI_MENU_FPS_AUTO), menu_text(UI_MENU_PERF_OFF)};
         opt_choice_list("MKW_HDR", UI_MENU_HDR, vals, names, 2, UI_MENU_HDR_DESC);
     }
+#endif
 }
 
 static void tab_screen(float scale) {
@@ -233,6 +241,7 @@ static void row_quality(void) {
 // presets: no dedicated card or under 6 GB (GTX 1050 Ti, 1650 SUPER, RTX 3050 Laptop: 22-37 fps at 720-1080p) Medium
 // at 720p; under 16 GB (RTX 3060: ~48 fps at 1080p) Console at 1080p; above (RX 7900 XTX: 60 fps at 2160p) High at the
 // screen's height. Never above the screen. Undo puts back what it changed.
+#ifndef MKW_PS5_NATIVE   // the PS5's memory is shared: Auto-set read it as a light card and picked Medium at 720p
 static const char *const kAutoKeys[] = {"MKW_QUALITY",         "MKW_ANISO",       "MKW_TEX_QUALITY", "MKW_DETAIL_DISTANCE",
                                         "MKW_SHADOW_SIZE", "MKW_RESOLUTION", "MKW_UPSCALER"};
 enum { NAUTO = sizeof kAutoKeys / sizeof *kAutoKeys };
@@ -290,13 +299,16 @@ static void auto_undo(void) {
     g_auto_done = false;
     opt_save_soon();
 }
+#endif
 
 // What the graphics card draws and how much, each row the console's by default: the preset first with the four rows it
 // sets hanging under it, then the resolution, then how fast frames come.
 static void rows_graphics(void) {
+#ifndef MKW_PS5_NATIVE
     static bool auto_test = getenv("MKW_LAUNCHER_AUTOSET") != nullptr;   // (test) once, as the button does
     if (opt_button("##autoset", UI_MENU_AUTOSET, UI_MENU_AUTOSET_DESC) || auto_test) auto_set(), auto_test = false;
     if (g_auto_done && opt_button("##autoset_undo", UI_MENU_AUTOSET_UNDO, UI_MENU_AUTOSET_UNDO_DESC)) auto_undo();
+#endif
     row_quality();
     opt_indent(true);
     {   // a floor on anisotropic filtering (gfx/vk/tex/vk_tex_slots.c make_sampler)
@@ -343,7 +355,9 @@ static void rows_graphics(void) {
         opt_choice_list("MKW_FRAMEGEN", UI_MENU_FRAMEGEN, vals, names, 6, UI_MENU_FRAMEGEN_DESC);
         if (vk_fg_uneven()) opt_text(UI_MENU_FRAMEGEN_UNEVEN, true);   // a fixed factor that judders on this screen
     }
+#ifndef MKW_PS5_NATIVE   // VideoOut runs at the TV's fixed rate here
     opt_toggle("MKW_VRR", UI_MENU_VRR, UI_MENU_VRR_DESC);   // gfx/vk/device/vk_framegen.c fits, live
+#endif
     opt_toggle("MKW_LOW_LATENCY", UI_MENU_LOW_LATENCY, UI_MENU_LOW_LATENCY_DESC);   // core/boot/frame_jit.c, live
     static const UiTextId perf[] = {UI_MENU_PERF_OFF, UI_MENU_PERF_FPS, UI_MENU_PERF_FULL};
     opt_choice("MKW_PERF_OVERLAY", UI_MENU_PERF_OVERLAY, perf, 3, UI_MENU_PERF_OVERLAY_DESC);
@@ -357,6 +371,7 @@ static void tab_graphics(float scale) {
 
 static void rows_sound(void) {
     opt_slider("MKW_VOLUME", UI_MENU_VOLUME, 0, 100, UI_MENU_VOLUME_DESC, 5, "%.0f %%");
+#ifndef MKW_PS5_NATIVE   // the PS5's AudioOut is opened stereo (audio_mixer.c) and the title has no window to leave
     {   // the game's 5.1 mix on a 6-channel output (audio/audio_mixer.c audio_output_channels), at the next start
         static const char *const vals[] = {"auto", "2", "6"};
         const char *names[3] = {menu_text(UI_MENU_FPS_AUTO), menu_text(UI_MENU_SPEAKERS_STEREO),
@@ -364,6 +379,7 @@ static void rows_sound(void) {
         opt_choice_list("MKW_AUDIO_CHANNELS", UI_MENU_SPEAKERS, vals, names, 3, UI_MENU_SPEAKERS_DESC);
     }
     opt_toggle("MKW_BACKGROUND_MUTE", UI_MENU_BACKGROUND_MUTE, UI_MENU_BACKGROUND_MUTE_DESC);   // audio/audio_mixer.c
+#endif
 }
 
 static void tab_sound(float scale) {
@@ -416,7 +432,12 @@ static void rows_controls(void) {
     opt_choice("MKW_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 3, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());
     static const UiTextId icons[] = {UI_MENU_AUTO, UI_MENU_ICONS_NINTENDO, UI_MENU_ICONS_XBOX, UI_MENU_ICONS_PLAYSTATION,
                                      UI_MENU_ICONS_KEYBOARD};
-    opt_choice("MKW_BUTTON_ICONS", UI_MENU_BUTTON_ICONS, icons, 5, UI_MENU_BUTTON_ICONS_DESC, button_icons_note());
+#ifdef MKW_PS5_NATIVE
+    const int n_icons = 4;   // no keyboard icons on the console (the last value)
+#else
+    const int n_icons = 5;
+#endif
+    opt_choice("MKW_BUTTON_ICONS", UI_MENU_BUTTON_ICONS, icons, n_icons, UI_MENU_BUTTON_ICONS_DESC, button_icons_note());
 #ifndef MKW_PS5_NATIVE
     opt_toggle("MKW_MOTION", UI_MENU_MOTION, UI_MENU_MOTION_DESC);
 #endif
@@ -467,7 +488,9 @@ static void rows_general(void) {
     static const UiTextId start[] = {UI_MENU_AUTO, UI_MENU_START_ALWAYS, UI_MENU_START_SKIP};
     opt_choice("MKW_START_SCREEN", UI_MENU_START_SCREEN, start, 3, UI_MENU_START_SCREEN_DESC);   // launcher.cpp console_start
 #endif
+#ifndef MKW_PS5_NATIVE   // no Discord client on the console
     opt_toggle("MKW_DISCORD", UI_MENU_DISCORD, UI_MENU_DISCORD_DESC);   // core/presence/presence.c
+#endif
 }
 
 static void tab_general(float scale) {
@@ -485,6 +508,7 @@ static void row_set_or_not(const char *key, UiTextId label, UiTextId desc, const
     opt_choice_list(key, label, vals, names, 2, desc, *cfg_value(key) ? 1 : 0);
 }
 
+#ifndef MKW_PS5_NATIVE
 static bool validation_layer_present(void) {
     static int have = -1;
     if (have < 0) {
@@ -498,6 +522,7 @@ static bool validation_layer_present(void) {
     }
     return have != 0;
 }
+#endif
 
 // Every setting the menu shows back to its default (the environment's keys stay), written to mkw.ini. The Mods page's
 // keys have rows too but are the player's choices, not settings: a reset left every mod disabled.
@@ -538,8 +563,10 @@ static bool rows_advanced(void) {
     static const UiTextId preempt[] = {UI_MENU_PREEMPT_OFF, UI_MENU_PREEMPT_ON, UI_MENU_PREEMPT_INHERIT};   // 0|1|2
     opt_choice("MKW_ASYNC_PREEMPT", UI_MENU_ASYNC_PREEMPT, preempt, 3, UI_MENU_ASYNC_PREEMPT_DESC);
     opt_toggle("MKW_REPLAY_ASYNC", UI_MENU_REPLAY_ASYNC, UI_MENU_REPLAY_ASYNC_DESC);
+#ifndef MKW_PS5_NATIVE   // on the PS5 the first crashes the game and the second is Windows' timer (a no-op there)
     opt_toggle("MKW_FREE_CORES", UI_MENU_FREE_CORES, UI_MENU_FREE_CORES_DESC);
     opt_toggle("MKW_TIMER_1MS", UI_MENU_TIMER_1MS, UI_MENU_TIMER_1MS_DESC);
+#endif
 
     opt_group(UI_MENU_GROUP_SHADERS);
     static const UiTextId wait[] = {UI_MENU_PIPE_WAIT_DEFAULT, UI_MENU_PIPE_WAIT_DRAW};
@@ -552,9 +579,11 @@ static bool rows_advanced(void) {
     opt_group(UI_MENU_GROUP_TEXMEM);
     static const UiTextId astc[] = {UI_MENU_ASTC_AUTO, UI_MENU_ASTC_GPU, UI_MENU_ASTC_NATIVE, UI_MENU_ASTC_CPU};
     opt_choice("MKW_ASTC", UI_MENU_ASTC, astc, 4, UI_MENU_ASTC_DESC);
+#ifndef MKW_PS5_NATIVE   // the PS5's memory is shared and imported; mirroring is a discrete card's, untested there
     static const UiTextId mem[] = {UI_MENU_MEMORY_AUTO, UI_MENU_MEMORY_IMPORT, UI_MENU_MEMORY_MIRROR,
                                    UI_MENU_MEMORY_VERIFY};
     opt_choice("MKW_MEMORY", UI_MENU_MEMORY, mem, 4, UI_MENU_MEMORY_DESC);
+#endif
     opt_toggle("MKW_TEX_ALIAS", UI_MENU_TEX_ALIAS, UI_MENU_TEX_ALIAS_DESC);
 
     opt_group(UI_MENU_GROUP_FIXES);
@@ -569,8 +598,10 @@ static bool rows_advanced(void) {
     opt_slider("MKW_SPLIT_DRAWS", UI_MENU_SPLIT_DRAWS, 0, 1000, UI_MENU_SPLIT_DRAWS_DESC, 8, "%.0f");
 
     opt_group(UI_MENU_GROUP_VULKAN);
+#ifndef MKW_PS5_NATIVE   // the PS5 title carries no validation layer
     if (!validation_layer_present() && !cfg_bool("MKW_VK_VALIDATION")) opt_disable_next(UI_MENU_VK_VALIDATION_MISSING);
     opt_toggle("MKW_VK_VALIDATION", UI_MENU_VK_VALIDATION, UI_MENU_VK_VALIDATION_DESC);
+#endif
     static const UiTextId dyn[] = {UI_MENU_AUTO, UI_MENU_OFF, UI_MENU_ON};   // unset, 0, 1
     opt_choice("MKW_VK_DYN_VERTEX", UI_MENU_VK_DYN_VERTEX, dyn, 3, UI_MENU_VK_DYN_VERTEX_DESC);
     opt_toggle("MKW_VK_SUBGROUP_PIN", UI_MENU_VK_SUBGROUP_PIN, UI_MENU_VK_SUBGROUP_PIN_DESC);
@@ -649,7 +680,9 @@ static void rows_hacks(void) {
     opt_choice("MKW_QUICK_RACE", UI_MENU_QUICK_RACE, quick, 4, UI_MENU_QUICK_RACE_DESC);
     static const UiTextId bench[] = {UI_MENU_OFF, UI_MENU_QUICK_RACE_TT, UI_MENU_QUICK_RACE_GP};
     opt_choice("MKW_BENCH", UI_MENU_BENCH, bench, 3, UI_MENU_BENCH_DESC);   // core/diag/bench.c
+#ifndef MKW_PS5_NATIVE   // keyboard keys
     opt_toggle("MKW_FREEZE_KEYS", UI_MENU_FREEZE_KEYS, UI_MENU_FREEZE_KEYS_DESC);
+#endif
     opt_toggle("MKW_CLASSIC_GP", UI_MENU_CLASSIC_GP, UI_MENU_CLASSIC_GP_DESC);
     opt_toggle("MKW_CLASSIC_VS", UI_MENU_CLASSIC_VS, UI_MENU_CLASSIC_VS_DESC);
 }

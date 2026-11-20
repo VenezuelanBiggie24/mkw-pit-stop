@@ -77,6 +77,15 @@ cells from Controls.
 - On PS5, route desktop-only features through platform availability. The current PS5 window fixes the client
   dimensions to its output mode, the native input path has no motion sensor polling, and the platform stubs for
   opening a folder and copying to the clipboard return failure. Show controls and actions where their backends work.
+- Rows the PS5 build leaves out (20/11/2026, `settings_tabs.cpp` under `MKW_PS5_NATIVE`), each because it does nothing
+  or the wrong thing on the console: fullscreen and window size (no window), graphics card (one device), presentation
+  mode (VideoOut's own vsynced present), aspect (the TV's 16:9: the ultrawide modes and "fit the window" have nothing to
+  fit), HDR (the swapchain is SDR, `ps5_window.c` `wsys_hdr`), Auto-set (it reads the card's dedicated memory and took
+  the PS5's shared memory for a light card: Medium at 720p), VRR (VideoOut runs at the TV's fixed rate), speakers 5.1 and
+  background mute (AudioOut opens stereo, the title has no window to leave), keyboard button icons, motion, trigger
+  rumble, Switch 2 and DSU controllers, mouse and keyboard rows, Discord, the update check and start screen, free cores
+  (the game crashes) and the 1 ms timer (Windows'), memory mode (mirroring is a discrete card's, untested on shared
+  memory), Vulkan validation (no layer in the title), and the freeze keys (keyboard).
 
 ## Acceptance checks
 
