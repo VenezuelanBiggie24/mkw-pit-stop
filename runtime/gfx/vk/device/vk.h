@@ -126,9 +126,13 @@ int vk_fg_wanted(void);   // MKW_FRAMEGEN is not off: the swapchain keeps spare 
 // One game frame: copies the crop rectangle {x, y, w, h} of src (GENERAL, all its writes submitted) into a picture of
 // its own and submits the frames made between the last game frame and it. out: what to show, in order (the made
 // frames, then the game's), each a GENERAL R8G8B8A8_UNORM image of *w x *h; *step: the time between two of them.
-// Returns how many; 0 = off or not possible now: the caller presents src as without it. at: the pacer's display time.
-int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkImage out[VK_FG_MAX], int *w, int *h,
-                uint64_t *step);
+// Returns how many; 0 = off or not possible now: the caller presents src as without it. at: the pacer's display time;
+// frame: the present's number (MKW_BLACK_CHECK's log lines).
+int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, uint64_t frame, VkImage out[VK_FG_MAX],
+                int *w, int *h, uint64_t *step);
+// MKW_BLACK_CHECK (vk_backend.c): the texture and image each of the last 64 presents showed, and its description
+void vk_present_source_note(uint64_t frame, const tex_t *t, VkImage image, int w, int h, const int crop[4]);
+int vk_present_source_desc(uint64_t frame, char *out, size_t n);
 // What vk_fg_frame records, into cb, with `made` frames between the last call's picture and this one (none on the
 // first call): for --probe-framegen. Returns the frames in out, 0 on failure.
 int vk_fg_record(VkCommandBuffer cb, VkImage src, int sw, int sh, const int crop[4], int made, VkImage out[VK_FG_MAX],
@@ -258,6 +262,10 @@ void vk_usnap_log(VkUsnapLog *l);   // NULL: stop
 int vk_usnap_regions(void);
 uint64_t vk_usnap_drop_at(int region);
 uint64_t vk_exec_op_pos(void);   // vk_exec.c: the replay position of the op this thread records (1 for the first)
+uint64_t vk_exec_op_pos0(void);  // the position before the first op of what this thread records (a chunk's; 0 serial)
+// vk_tex_alias.c: while pos is not 0, an alias image made on this thread takes its content at that replay position,
+// recorded by the chunk that reaches it, not here (MKW_REPLAY_PAR's walk); 0 turns it off
+void vk_texture_alias_defer(uint64_t pos);
 // vk_spec.c: specialization of fixed-address constant words
 int vk_spec_census_on(void);
 void vk_spec_observe(const GfxShader *s, const uint32_t *val, const uint8_t *known);

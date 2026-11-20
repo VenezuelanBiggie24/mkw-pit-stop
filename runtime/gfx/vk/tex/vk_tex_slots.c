@@ -257,10 +257,13 @@ void vk_texture_new_submit(void) {
     uint64_t f = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED) / 60;
     if ((rt_trace & RT_TRACE_PERF) && f != log_at && tex_alias > 0) {
         log_at = f;
-        rt_log("perf: frame %llu: texture aliases: content copied %llu, filled from storage %llu, left uninitialised %llu",
+        rt_log("perf: frame %llu: texture aliases: content copied %llu, filled from storage %llu, left uninitialised %llu; "
+               "copies the replay's walk deferred %llu, made at their place %llu, dropped %llu",
                (unsigned long long)f * 60, (unsigned long long)n_alias_copied, (unsigned long long)n_alias_upload,
-               (unsigned long long)n_alias_uninit);
+               (unsigned long long)n_alias_uninit, (unsigned long long)n_alias_deferred,
+               (unsigned long long)n_alias_placed, (unsigned long long)n_alias_dropped);
         n_alias_copied = n_alias_upload = n_alias_uninit = 0;
+        n_alias_deferred = n_alias_placed = n_alias_dropped = 0;
         tex_zero_tail_recheck(f * 60);
         rt_log("perf: frame %llu: texture re-uploads %llu (%.1f MiB, %.2f ms), after WriteTexels %llu (%.1f MiB, %.2f ms); "
                "region copies from storage %llu (%.1f MiB, %.2f ms)",

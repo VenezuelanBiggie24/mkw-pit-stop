@@ -82,7 +82,7 @@ static void present_main(void *arg) {
         VkImage fo[VK_FG_MAX];
         int fw = 0, fh = 0;
         uint64_t step = 0;
-        int nf = vk_fg_frame(j.image, j.w, j.h, j.has_crop ? j.crop : NULL, j.at, fo, &fw, &fh, &step);
+        int nf = vk_fg_frame(j.image, j.w, j.h, j.has_crop ? j.crop : NULL, j.at, j.frame, fo, &fw, &fh, &step);
         for (int k = 0; k < nf; k++) vk_present_blit_ahead(fo[k], VK_IMAGE_LAYOUT_GENERAL, VK_FORMAT_R8G8B8A8_UNORM, fw, fh, NULL);
         if (!nf) vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
         uint64_t f = vk_sync_submit(NULL, 0);   // a timeline value after the blit: deferred destruction waits for the blit too
@@ -130,6 +130,37 @@ void vk_present_drain(void) {
     perf_end(PERF_DRAIN, p0);
 }
 
+// MKW_BLACK_CHECK (vk_framegen.c): what each recent present showed, by frame, for its log lines about an odd picture:
+// whether the game presented another texture that frame or the same texture came out as another Vulkan image
+#define SRC_RING 64
+static struct { uint64_t frame, serial; const void *mem; VkImage image; int w, h, crop[4]; uint32_t fmt; } src_ring[SRC_RING];
+static PlatMutex src_lk = PLAT_MUTEX_INIT;
+
+void vk_present_source_note(uint64_t frame, const tex_t *t, VkImage image, int w, int h, const int crop[4]) {
+    plat_mutex_lock(&src_lk);
+    src_ring[frame % SRC_RING].frame = frame, src_ring[frame % SRC_RING].serial = t->serial;
+    src_ring[frame % SRC_RING].mem = t->mem, src_ring[frame % SRC_RING].image = image;
+    src_ring[frame % SRC_RING].w = w, src_ring[frame % SRC_RING].h = h, src_ring[frame % SRC_RING].fmt = t->d.format;
+    for (int i = 0; i < 4; i++) src_ring[frame % SRC_RING].crop[i] = crop ? crop[i] : 0;
+    plat_mutex_unlock(&src_lk);
+}
+
+int vk_present_source_desc(uint64_t frame, char *out, size_t n) {
+    plat_mutex_lock(&src_lk);
+    int r = src_ring[frame % SRC_RING].frame == frame;
+    if (r)
+        snprintf(out, n, "present %llu: texture %p serial %llu fmt %#x, image %p %dx%d crop %d,%d %dx%d",
+                 (unsigned long long)frame, src_ring[frame % SRC_RING].mem,
+                 (unsigned long long)src_ring[frame % SRC_RING].serial, src_ring[frame % SRC_RING].fmt,
+                 (void *)src_ring[frame % SRC_RING].image, src_ring[frame % SRC_RING].w, src_ring[frame % SRC_RING].h,
+                 src_ring[frame % SRC_RING].crop[0], src_ring[frame % SRC_RING].crop[1], src_ring[frame % SRC_RING].crop[2],
+                 src_ring[frame % SRC_RING].crop[3]);
+    else
+        snprintf(out, n, "present %llu: not kept", (unsigned long long)frame);
+    plat_mutex_unlock(&src_lk);
+    return r;
+}
+
 // The present after the frame count: resolves the image and hands the blit to the present thread. queued: when the game
 // presented; value: the timeline value queued for this present (asynchronous replay), 0 for the next one (synchronous).
 static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uint64_t queued, uint64_t frame,
@@ -159,6 +190,7 @@ static void present_image(const tex_t *t, const int crop[4], uint64_t at_ns, uin
     if (t->d.format != __atomic_exchange_n(&last_fmt, t->d.format, __ATOMIC_RELAXED))
         rt_log("vk: present of NVN format %#x (Vulkan %d) from frame %llu", t->d.format, (int)img->format,
                (unsigned long long)frame);
+    vk_present_source_note(frame, t, img->image, (int)img->width, (int)img->height, crop);
     PresentJob j = {.image = img->image, .format = img->format, .w = (int)img->width, .h = (int)img->height, .frame = frame,
                     .at = at_ns, .queued = queued, .value = value};
     if (crop) {

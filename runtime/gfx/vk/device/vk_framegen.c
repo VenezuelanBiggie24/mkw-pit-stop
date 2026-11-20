@@ -451,8 +451,246 @@ static void dump_write(VkFence fence, int n, int w, int h) {
            F.interval / 1e6);
 }
 
-int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkImage out[VK_FG_MAX], int *w, int *h,
-                uint64_t *step) {
+// MKW_BLACK_CHECK (on unless 0; checking): every picture frame generation shows is sampled at a 16x9 grid of pixels,
+// read back when its slot comes round again (SLOTS game frames later: the present thread never waits for it), and a
+// short run of black pictures between two that are not (a flash, not a fade) is logged with the present it belongs to
+// and whether each was the game's picture (g) or a made one (m). Why (18/11/2026): the PS5 showed quick whole-screen
+// black flashes from the first race, on the TV too; the flip waits for each image's fence and fg_synth.comp only
+// blends the two game pictures, so the question is which picture is black and at which frame.
+#define BC_W 16
+#define BC_H 9
+#define BC_DARK 6        // a sample is dark when no channel is over 6/255
+#define BC_FLASH 6       // a run of at most this many black pictures is a flash; longer is a fade or a load
+static struct {
+    int on;   // 0 unknown, 1 on, -1 off
+    VkBuffer buf;
+    VmaAllocation alloc;
+    uint8_t *map;
+    struct { uint64_t frame; int n; } slot[SLOTS];   // what each slot's samples hold; n 0 = nothing
+    // the shown sequence: the black run in progress (pictures, the present and kind of each, up to BC_FLASH + 1)
+    int run, run_kinds[BC_FLASH + 1];
+    uint64_t run_frames[BC_FLASH + 1], before_frame, flashes, black_pictures, pictures;
+    int seen_lit;   // a picture that was not black came before the run
+    // each game picture box-blitted to BC_TW x BC_TH into a ring of BC_TR (by record count): written out as PNGs for
+    // an odd one and the two either side (read SLOTS + 1 records later at most)
+    VkImage th;
+    VmaAllocation th_alloc;
+    VkBuffer tb;
+    VmaAllocation tb_alloc;
+    uint8_t *tmap;
+    int th_fresh;
+    uint64_t rec;   // records so far
+    uint64_t slot_rec[SLOTS];
+    uint32_t pngs;
+} BC;
+#define BC_TW 480
+#define BC_TH 270
+#define BC_TR 8
+
+static int bc_record(VkCommandBuffer cb, unsigned slot, const VkImage *out, int n, int w, int h, uint64_t frame) {
+    if (!BC.on) BC.on = cfg_get("MKW_BLACK_CHECK") && !strcmp(cfg_get("MKW_BLACK_CHECK"), "0") ? -1 : 1;
+    BC.slot[slot].n = 0;
+    if (BC.on < 0 || w < BC_W || h < BC_H) return 0;
+    VkCtx *c = vk_ctx();
+    const VkDeviceSize per = (VkDeviceSize)BC_W * BC_H * 4;
+    if (!BC.buf) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = per * VK_FG_MAX * SLOTS,
+                                 .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        if (vmaCreateBuffer(c->vma, &bi, &ai, &BC.buf, &BC.alloc, &info) != VK_SUCCESS) {
+            rt_log("vk: black check off: no memory for its samples");
+            BC.on = -1;
+            return 0;
+        }
+        BC.map = info.pMappedData;
+        rt_log("vk: black check on: each shown picture sampled at %dx%d pixels, flashes of up to %d pictures logged "
+               "(MKW_BLACK_CHECK=0 turns it off)", BC_W, BC_H, BC_FLASH);
+    }
+    VkBufferImageCopy r[BC_W * BC_H];
+    for (int k = 0; k < n; k++) {
+        for (int i = 0; i < BC_W * BC_H; i++)
+            r[i] = (VkBufferImageCopy){.bufferOffset = per * (slot * VK_FG_MAX + (unsigned)k) + (VkDeviceSize)i * 4,
+                                       .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                       .imageOffset = {(2 * (i % BC_W) + 1) * w / (2 * BC_W),
+                                                       (2 * (i / BC_W) + 1) * h / (2 * BC_H), 0},
+                                       .imageExtent = {1, 1, 1}};
+        vkCmdCopyImageToBuffer(cb, out[k], VK_IMAGE_LAYOUT_GENERAL, BC.buf, BC_W * BC_H, r);
+    }
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                           .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+                           .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo d = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &d);
+    if (!BC.th && !BC.tb) {   // (once; on failure no PNGs, the rest goes on)
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D,
+                                .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {BC_TW, BC_TH, 1}, .mipLevels = 1,
+                                .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+        VmaAllocationCreateInfo ia = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                 .size = (VkDeviceSize)BC_TW * BC_TH * 4 * BC_TR, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ba = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        if (vmaCreateImage(c->vma, &ci, &ia, &BC.th, &BC.th_alloc, NULL) != VK_SUCCESS) BC.th = VK_NULL_HANDLE;
+        else if (vmaCreateBuffer(c->vma, &bi, &ba, &BC.tb, &BC.tb_alloc, &info) != VK_SUCCESS) BC.tb = VK_NULL_HANDLE;
+        else BC.tmap = info.pMappedData, BC.th_fresh = 1;
+        if (!BC.tmap) rt_log("vk: black check: no memory for its thumbnails; odd pictures are not written out");
+    }
+    BC.slot_rec[slot] = BC.rec++;
+    if (BC.tmap) {
+        VkImageMemoryBarrier2 ib = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                    .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                    .srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                    .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                    .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                    .oldLayout = BC.th_fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL,
+                                    .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = BC.th,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        VkDependencyInfo id = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1,
+                               .pImageMemoryBarriers = &ib};
+        vkCmdPipelineBarrier2(cb, &id);
+        BC.th_fresh = 0;
+        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {w, h, 1}},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                          .dstOffsets = {{0, 0, 0}, {BC_TW, BC_TH, 1}}};
+        vkCmdBlitImage(cb, out[n - 1], VK_IMAGE_LAYOUT_GENERAL, BC.th, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        ib.oldLayout = VK_IMAGE_LAYOUT_GENERAL, ib.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        ib.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier2(cb, &id);
+        VkBufferImageCopy tc = {.bufferOffset = (VkDeviceSize)BC_TW * BC_TH * 4 * (BC.slot_rec[slot] % BC_TR),
+                                .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                .imageExtent = {BC_TW, BC_TH, 1}};
+        vkCmdCopyImageToBuffer(cb, BC.th, VK_IMAGE_LAYOUT_GENERAL, BC.tb, 1, &tc);
+    }
+    VkMemoryBarrier2 hb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                           .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+                           .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo hd = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &hb};
+    vkCmdPipelineBarrier2(cb, &hd);
+    BC.slot[slot].frame = frame, BC.slot[slot].n = n;
+    return 1;
+}
+
+// An odd game picture's thumbnails (the one before, it, the one after) next to the log: <log>.odd<present>-{b,o,a}.png
+static void bc_png(uint64_t frame, const uint64_t rec[3]) {
+    // MKW_BLACK_CHECK=log: no PNGs (each set stalled the PS5's present thread for seconds on its storage, and the game
+    // with it: runs pipe-on at 0.26x and 0.40x, 18/11/2026)
+    const char *mode = cfg_get("MKW_BLACK_CHECK");
+    if (mode && !strcmp(mode, "log")) return;
+    if (!BC.tmap || BC.pngs >= 12 || rec[0] + BC_TR <= BC.rec) return;   // (the oldest overwritten already)
+    const char *log = rt_log_path();
+    char path[1100];
+    vmaInvalidateAllocation(vk_ctx()->vma, BC.tb_alloc, 0, VK_WHOLE_SIZE);
+    for (int i = 0; i < 3; i++) {
+        snprintf(path, sizeof path, "%s.odd%llu-%c.png", log ? log : "mkw", (unsigned long long)frame, "boa"[i]);
+        rt_write_png(path, BC.tmap + (size_t)BC_TW * BC_TH * 4 * (rec[i] % BC_TR), BC_TW, BC_TH);
+    }
+    BC.pngs++;
+    rt_log("vk: odd picture: written to %s.odd%llu-{b,o,a}.png", log ? log : "mkw", (unsigned long long)frame);
+}
+
+// One shown picture, in display order: kind 'g' the game's, 'm' made
+static void bc_picture(int black, int kind, uint64_t frame) {
+    BC.pictures++;
+    if (black) {
+        BC.black_pictures++;
+        if (BC.run <= BC_FLASH) BC.run_kinds[BC.run] = kind, BC.run_frames[BC.run] = frame;
+        BC.run++;
+        return;
+    }
+    if (BC.run && BC.run <= BC_FLASH && BC.seen_lit) {
+        BC.flashes++;
+        char what[BC_FLASH * 24 + 1];
+        int o = 0;
+        for (int i = 0; i < BC.run; i++)
+            o += snprintf(what + o, sizeof what - (size_t)o, "%s%c%llu", i ? " " : "", BC.run_kinds[i],
+                          (unsigned long long)BC.run_frames[i]);
+        if (BC.flashes <= 300)
+            rt_log("vk: black flash %llu: %d picture%s black (%s) between present %llu and %llu; %llu of %llu "
+                   "pictures black so far (MKW_BLACK_CHECK)",
+                   (unsigned long long)BC.flashes, BC.run, BC.run > 1 ? "s" : "", what,
+                   (unsigned long long)BC.before_frame, (unsigned long long)frame,
+                   (unsigned long long)BC.black_pictures, (unsigned long long)BC.pictures);
+    }
+    BC.run = 0, BC.seen_lit = 1, BC.before_frame = frame;
+}
+
+// The share of samples that differ between two pictures: a channel more than BC_DIFF apart
+#define BC_N (BC_W * BC_H)
+#define BC_DIFF 40
+#define BC_ODD 0.25    // an odd picture differs from both its neighbours in at least this share of samples...
+#define BC_CALM 0.12   // ...while they differ from each other in at most this share (no cut, no fast pan)
+static float bc_dist(const uint8_t *a, const uint8_t *b) {
+    int d = 0;
+    for (int i = 0; i < BC_N; i++)
+        d += abs(a[i * 4] - b[i * 4]) > BC_DIFF || abs(a[i * 4 + 1] - b[i * 4 + 1]) > BC_DIFF ||
+             abs(a[i * 4 + 2] - b[i * 4 + 2]) > BC_DIFF;
+    return (float)d / BC_N;
+}
+
+// The pictures around the newest game picture: the game's two before it (gp the older, gl the last; frames gpf, glf)
+static struct { uint8_t gp[BC_N * 4], gl[BC_N * 4]; uint64_t gpf, glf, gpr, glr; int have; uint64_t odd_g, odd_m; } BH;
+
+static void bc_odd(char kind, uint64_t frame, float before, float after, float around, uint64_t fb, uint64_t fa) {
+    if (kind == 'g') BH.odd_g++;
+    else BH.odd_m++;
+    if (BH.odd_g + BH.odd_m > 300) return;
+    rt_log("vk: odd picture: %s of present %llu differs from the pictures either side in %.0f%% and %.0f%% of "
+           "samples, they from each other in %.0f%%; odd so far: game %llu, made %llu (MKW_BLACK_CHECK)",
+           kind == 'g' ? "the game's picture" : "a made picture", (unsigned long long)frame, before * 100,
+           after * 100, around * 100, (unsigned long long)BH.odd_g, (unsigned long long)BH.odd_m);
+    // what the game presented then: another texture, or the same one as another image
+    const uint64_t fs[3] = {fb, frame, fa};
+    for (int i = 0; i < 3; i++) {
+        if (kind == 'm' && i == 1) continue;   // (a made picture has no present of its own)
+        char d[256];
+        vk_present_source_desc(fs[i], d, sizeof d);
+        rt_log("vk: odd picture:   %s %s", i == 0 ? "before" : i == 1 ? "odd   " : "after ", d);
+    }
+}
+
+// The slot's samples, its fence signalled: each picture black when every sample is dark; odd ones (above) logged
+static void bc_read(unsigned slot) {
+    int n = BC.slot[slot].n;
+    if (!n || !BC.map) return;
+    vmaInvalidateAllocation(vk_ctx()->vma, BC.alloc, 0, VK_WHOLE_SIZE);
+    const VkDeviceSize per = (VkDeviceSize)BC_N * 4;
+    const uint64_t frame = BC.slot[slot].frame;
+    const uint8_t *g = BC.map + per * (slot * VK_FG_MAX + (unsigned)(n - 1));   // the game's, shown last
+    if (n == 1) BH.have = 0;   // nothing made: the first after a hitch or a pause, its neighbours are not near it
+    for (int k = 0; k < n; k++) {
+        const uint8_t *p = BC.map + per * (slot * VK_FG_MAX + (unsigned)k);
+        int dark = 0;
+        for (int i = 0; i < BC_N; i++)
+            dark += p[i * 4] <= BC_DARK && p[i * 4 + 1] <= BC_DARK && p[i * 4 + 2] <= BC_DARK;
+        bc_picture(dark == BC_N, k == n - 1 ? 'g' : 'm', frame);
+        // a made picture between the last game picture and this one, unlike both while they agree
+        if (k < n - 1 && BH.have >= 1) {
+            float a = bc_dist(p, BH.gl), b = bc_dist(p, g), ab = bc_dist(BH.gl, g);
+            if (a >= BC_ODD && b >= BC_ODD && ab <= BC_CALM) bc_odd('m', frame, a, b, ab, BH.glf, frame);
+        }
+    }
+    // the last game picture, now that the one after it is known
+    if (BH.have >= 2) {
+        float a = bc_dist(BH.gl, BH.gp), b = bc_dist(BH.gl, g), ab = bc_dist(BH.gp, g);
+        if (a >= BC_ODD && b >= BC_ODD && ab <= BC_CALM) {
+            bc_odd('g', BH.glf, a, b, ab, BH.gpf, frame);
+            const uint64_t rec[3] = {BH.gpr, BH.glr, BC.slot_rec[slot]};
+            bc_png(BH.glf, rec);
+        }
+    }
+    memcpy(BH.gp, BH.gl, sizeof BH.gp), BH.gpf = BH.glf, BH.gpr = BH.glr;
+    memcpy(BH.gl, g, sizeof BH.gl), BH.glf = frame, BH.glr = BC.slot_rec[slot];
+    if (BH.have < 2) BH.have++;
+    BC.slot[slot].n = 0;
+}
+
+int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, uint64_t frame, VkImage out[VK_FG_MAX],
+                int *w, int *h, uint64_t *step) {
     // the game's frame interval: an average of the pacer's display times, a hitch left out
     int gap = !F.last_at || at <= F.last_at || at - F.last_at > GAP_NS;
     if (!gap) {
@@ -479,6 +717,7 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
         rt_log("vk: frame generation: fence wait timed out");
         return 0;
     }
+    bc_read(slot);   // (in display order: the slots come round in turn)
     VkCommandBuffer cb = F.cb[slot];
     vkResetCommandBuffer(cb, 0);
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -486,6 +725,8 @@ int vk_fg_frame(VkImage src, int sw, int sh, const int crop[4], uint64_t at, VkI
     vkBeginCommandBuffer(cb, &bi);
     int n = vk_fg_record(cb, src, sw, sh, crop, m - 1, out, w, h);
     int dump = n && dump_record(cb, out, n, *w, *h);
+    if (n) bc_record(cb, slot, out, n, *w, *h, frame);
+    else BC.slot[slot].n = 0;
     vkEndCommandBuffer(cb);
     if (!n) return 0;   // (recorded nothing the GPU must run: the command buffer is reset next time)
     vkResetFences(c->device, 1, &F.fence[slot]);
@@ -523,6 +764,11 @@ void vk_fg_release(void) {
     if (!c || !F.tried) return;
     if (D.buf) vmaDestroyBuffer(c->vma, D.buf, D.alloc);
     memset(&D, 0, sizeof D);
+    if (BC.buf) vmaDestroyBuffer(c->vma, BC.buf, BC.alloc);
+    if (BC.tb) vmaDestroyBuffer(c->vma, BC.tb, BC.tb_alloc);
+    if (BC.th) vmaDestroyImage(c->vma, BC.th, BC.th_alloc);
+    memset(&BC, 0, sizeof BC);
+    memset(&BH, 0, sizeof BH);
     free_images(c);
     VkPipeline ps[] = {F.luma, F.coarse, F.fine, F.full, F.median, F.synth};
     for (size_t i = 0; i < sizeof ps / sizeof *ps; i++)
