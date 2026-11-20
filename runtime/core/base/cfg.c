@@ -334,16 +334,14 @@ int cfg_reload_key(const char *name) {
 static const struct { const char *key, *value; } DECK[] = {
     {"FULLSCREEN", "1"}, {"WINDOW_SIZE", "1280x800"}, {"VK_PRESENT", "fifo"}, {"RESOLUTION", "720"},
 };
-// The PS5: the game's 30 fps (MKW_FPS 30: two game ticks a frame, the race at full speed). The race's work is ~26-27
-// ms a frame on the first course and does not reach 16.7 ms (docs/project/roadmap.md); with auto the game swapped 60 and 30 Hz
-// ~1,400 times a minute (36-41 fps). At 30, a busier course (16/11/2026, fps30-20261116-063832) held 33.3 ms in every
-// window, speed 1.00x, 27 slow frames in 5,300. A weaker machine's setting, so a profile, not the table's default.
+// The PS5: the game's 60 fps, as the console runs it, and no frame generation (the table's default, off). Until
+// 20/11/2026 the profile set 30 fps with frame generation at 2x: a race frame's work was ~26-27 ms. With the shadow copies
+// off and the replay's work cut it is ~17 ms: a Grand Prix race at 60 averages 17.0-17.4 ms, window medians at the cap
+// (16.7), 1% lows 35-41 fps, game speed 0.95-0.98x (frames over 16.7 ms slow the race down; at 30 it kept 1.00x). 60 and
+// not auto: auto swapped the 60 and 30 Hz intervals ~1,400 times a minute when frames ran ~26 ms, not measured since.
+// 30 and frame generation stay in Pit Stop > Display.
 static const struct { const char *key, *value; } PS5[] = {
-    {"FPS", "30"},
-    // Frame generation at 2x: the 30 fps race shown at 60 (vk_framegen.c). Unlike the rest of this table, not what the
-    // console does: the user's choice for the PS5 (16/11/2026, then on upstream's MKW_FRAMEGEN, 17/11/2026), which the
-    // Pit Stop menu turns off. Untested on the console so far.
-    {"FRAMEGEN", "2"},
+    {"FPS", "60"},
     // The parallel replay as before the 0.1.13 merge (18/11/2026, one player at MKW_FPS=60): the serial head records
     // ~600 draws a frame on the replay thread alone, 5.8-6.3 ms on these cores (reg-1p60: race median 25.9 against
     // 25.1 ms without); the slots checked by chunk and the replay thread recording after its walk (vk_exec_par.c).

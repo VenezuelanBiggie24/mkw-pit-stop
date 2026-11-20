@@ -217,11 +217,15 @@ copies from storage`, and `MKW_TEX_COPY_LOG=N` logs each copy out of such a text
 
 ## Frame rate
 
-The PS5 build runs races at the game's own 30 fps: its device profile (`runtime/core/base/cfg.c`, `MKW_DEVICE_PROFILE`
-auto or `ps5`) sets `MKW_FPS` to 30, below `mkw.ini` and Pit Stop, so `FPS = auto` or `60` still applies. At 30 the
-game advances two ticks a frame and the race keeps full speed. A race frame's work is ~26-27 ms on the first course
-(docs/project/roadmap.md, "On the PS5"), so 60 is out of reach for now; with `auto` the game swapped its 60 and 30 Hz present
-interval ~1,400 times a minute (36-41 fps, uneven). Measured at 30 on a busier course (16/11/2026,
+The PS5 build runs races at 60 fps without frame generation: its device profile (`runtime/core/base/cfg.c`,
+`MKW_DEVICE_PROFILE` auto or `ps5`) sets `MKW_FPS` to 60, below `mkw.ini` and Pit Stop, so `FPS = 30` or `auto` and
+`FRAMEGEN` still apply. A Grand Prix race at 60 (20/11/2026, 1.8.0, `MKW_TRACE=perf`): 17.0-17.4 ms a frame on
+average, window medians at the 16.7 ms cap, 1% lows 35-41 fps, game speed 0.95-0.98x, since frames over 16.7 ms slow the
+race down (about 2% take over 20 ms, where a course streams in new textures: docs/project/roadmap.md). Not yet played at
+this default outside that benchmark (menus, time trials, split screen, long sessions). At 30 the game advances two
+ticks a frame and the race keeps full speed; that was the default until 20/11/2026, when a race frame's work was ~26-27
+ms, and with `auto` the game then swapped its 60 and 30 Hz present interval ~1,400 times a minute (36-41 fps, uneven).
+Measured at 30 on a busier course (16/11/2026,
 `fps30-20261116-063832`): every 600-frame window at 33.3 ms, speed 1.00x, 27 slow frames in 5,300 (single hitches up to
 236 ms, some blocked on texture uploads), replay 15-18 ms a frame against ~14 on the first course. The slack under
 33.3 ms is not in that log: `FRAME_TRACE = 1` logs the game's own frame time. Local split screen multiplies the draws

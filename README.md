@@ -20,9 +20,9 @@ Early, and moving fast. On 18/11/2026 on a base PS5:
 
 - **Boot, movies, menus and races work**, with direct Vulkan display over RADV, stereo sound through `sceAudioOut`, and
   up to four signed-in DualSense controllers with rumble and PlayStation button prompts.
-- **Races run in the game's 30 fps mode**, about 28 fps on average in a Grand Prix benchmark, shown at 60 with frame
-  generation (the PS5 profile's default; Pit Stop turns it off). 60 fps is an option in **Pit Stop > Display > Frame
-  rate**, but races then run slower than real time.
+- **Races run at 60 fps by default, without frame generation**: about 57-59 fps on average in a Grand Prix benchmark,
+  with the occasional slower frame keeping the race at 0.95-0.98x real time (see [Performance](#performance)). The
+  game's 30 fps mode (full speed) and frame generation are options in **Pit Stop > Display**.
 - **Multiplayer:** the game's split screen (one DualSense per signed-in player) and its local wireless mode over the
   LAN, between PS5s or with the PC build of the same version ([docs/ps5/multiplayer.md](docs/ps5/multiplayer.md)). There is no
   Nintendo online play.
@@ -202,14 +202,22 @@ release and CI flows), `.gitignore`, `LICENSE`,
 
 ## Performance
 
-Measured frame times, each with its date, are in [docs/project/performance.md](docs/project/performance.md) and
-[docs/ps5/ps5.md](docs/ps5/ps5.md#frame-rate).
+On a base PS5, Mario Kart World 1.8.0, a Grand Prix race benchmark (`tools/ps5/bench.py`, 210 s of racing, 1080p,
+frame generation off):
 
-| Date | Platform / GPU | Internal resolution | Race frame time |
-|---|---|---|---|
-| 16/11/2026 | PlayStation 5 (base, RADV, 30 fps default) | 1080p | 33.3 ms (1.00x speed; ~26–28 ms busy) |
-| 09/11/2026 | Radeon 660M (Linux, RADV) | 720p | 31–33 ms |
-| 09/11/2026 | GTX 1050 Ti (Windows) | 1080p | 42–45 ms |
+| Date | Frame rate setting | Average frame time | Typical frame | 1% low | Race speed |
+|---|---|---|---|---|---|
+| 20/11/2026 | 60 fps (the new default) | 17.0–17.4 ms (57–59 fps) | 16.7 ms (at the cap) | 35–41 fps | 0.95–0.98x |
+| 16/11/2026 | 30 fps (the previous default) | 33.3 ms | 33.3 ms | | 1.00x |
+
+The new default is untested on the console as it ships: these numbers come from benchmark races with the runtime's
+performance logging on (`MKW_TRACE=perf`, which costs a little), set to 60 fps by hand. Menus, time trials, split
+screen, long sessions and other courses have not been played at the new default yet.
+
+About 2% of race frames take over 20 ms: they are where a course streams in new textures, and they set the 1% lows
+and the slight slow motion. What was measured and what is left is in
+[docs/project/roadmap.md](docs/project/roadmap.md) and [docs/ps5/ps5.md](docs/ps5/ps5.md#frame-rate); PC numbers are in
+[docs/project/performance.md](docs/project/performance.md).
 
 ## Reporting bugs
 
