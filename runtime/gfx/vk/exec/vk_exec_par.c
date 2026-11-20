@@ -423,8 +423,13 @@ static int plan(const VkExec *ex0, const uint64_t *handles, int n, int C) {
                 // The targets' images, made now as the pass would make them (vk_texture_get): a chunk recorded before
                 // the one rendering a target samples it, and a target the game registers anew each frame had no image
                 // yet: the title's shadow map bound as a 32x32 stand-in, Mario lit wrong (dp01/dp10, MKW_DUMP).
+                // An alias copy they need is made where the chunk recording this op reaches it, not in the replay
+                // thread's command buffer now (vk_tex_alias.c); the serial head records this op next, in place.
+                // (P.plan_ops + 1: the position a recording gives this op, vk_exec_op)
+                vk_texture_alias_defer(P.head_now ? 0 : P.plan_ops + 1);
                 for (int i = 0; i < w->rt.n && i < 8; i++)
                     if (w->rt.color[i]) vk_texture_get(w->rt.color[i]);
+                vk_texture_alias_defer(0);
             }
             break;
         case OP_CLEAR_DS:

@@ -262,6 +262,10 @@ void vk_usnap_log(VkUsnapLog *l);   // NULL: stop
 int vk_usnap_regions(void);
 uint64_t vk_usnap_drop_at(int region);
 uint64_t vk_exec_op_pos(void);   // vk_exec.c: the replay position of the op this thread records (1 for the first)
+uint64_t vk_exec_op_pos0(void);  // the position before the first op of what this thread records (a chunk's; 0 serial)
+// vk_tex_alias.c: while pos is not 0, an alias image made on this thread takes its content at that replay position,
+// recorded by the chunk that reaches it, not here (MKW_REPLAY_PAR's walk); 0 turns it off
+void vk_texture_alias_defer(uint64_t pos);
 // vk_spec.c: specialization of fixed-address constant words
 int vk_spec_census_on(void);
 void vk_spec_observe(const GfxShader *s, const uint32_t *val, const uint8_t *known);

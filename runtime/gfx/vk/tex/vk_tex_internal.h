@@ -24,6 +24,11 @@ typedef struct Tex {
     TexVkFormat f;
     VmaAllocation alloc;          // own memory; NULL when bound into pool memory
     VmaAllocation bound_to;       // the pool memory it is bound into
+    // An alias copy deferred by the replay's walk (vk_texture_alias_defer): from alias_src at replay position
+    // alias_pos of the submission of alias_epoch; NULL none
+    struct Tex *alias_src;
+    uint64_t alias_pos;
+    uint32_t alias_epoch;
     uint32_t wgen;                // page generation of the last upload check
     uint32_t checked;             // submit_epoch of the last check from a draw binding
     uint32_t seen;                // submit_epoch of the last lookup of any kind (evict_idle: idle since then)
@@ -100,6 +105,7 @@ extern UpSlow up_slow;
 extern uint64_t rc_n, rc_bytes, rc_ns;   // vk_texture_region_copy (vk_tex_upload.c)
 extern int tex_alias;
 extern uint64_t n_alias_copied, n_alias_upload, n_alias_uninit;
+extern uint64_t n_alias_deferred, n_alias_placed, n_alias_dropped;   // vk_tex_alias.c (MKW_REPLAY_PAR's walk)
 extern uint32_t submit_epoch, tex_gen, slots_gen, samp_gen, reg_serial;
 extern PlatMutex owned_lock;
 extern Tex **owned;

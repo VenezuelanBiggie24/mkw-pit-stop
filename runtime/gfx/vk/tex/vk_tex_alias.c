@@ -94,6 +94,43 @@ static int alias_copy(Tex *e, const Tex *src) {
     return 1;
 }
 
+// ---- MKW_REPLAY_PAR: alias copies at their place in the frame
+// The parallel replay's walk makes each new render target's image as it goes (vk_exec_par.c plan, OP_SET_RT), on the
+// replay thread, whose command buffer is not where the frame uses the target: with chunks already sent (the pipelined
+// walk) an alias copy recorded there ran between the chunks on the GPU and the ones still recording, after the frame
+// had cleared the old image and before it drew into it. On the PS5 (18/11/2026) the race's lit scene came out black
+// for one frame, the HUD and late particles drawn over it, or a stretch of ground washed out: 55 frames in a race with
+// MKW_REPLAY_PAR_PIPE=1, 1 (a false positive) with 0 (pipeC-on, pipeC-off; MKW_BLACK_CHECK), 0 with no chunk threads.
+// Without the pipe the copy went before every chunk: last frame's picture, unseen. The walk now notes the copy (the
+// source and the target's replay position) and the recording that reaches that position makes it there: the chunk
+// that starts at or before it, or the serial replay when the submission stays serial.
+static _Thread_local uint64_t alias_defer_at;
+void vk_texture_alias_defer(uint64_t pos) { alias_defer_at = pos; }
+// per window of the alias perf line: copies deferred, made at their place, dropped (the source gone, or the
+// submission ended first)
+uint64_t n_alias_deferred, n_alias_placed, n_alias_dropped;
+
+static int entry_alive_at(uint64_t addr, const Tex *x) {
+    for (Tex *p = nvn_hm_get(&by_addr, &addr); p; p = p->next_at)
+        if (p == x) return !p->released || p->pub.image != VK_NULL_HANDLE;
+    return 0;
+}
+
+// e's deferred copy, if this recording has reached its place (texture lock held)
+static void alias_place(Tex *e) {
+    if (e->alias_epoch != submit_epoch) {   // the submission ended without a recording reaching it
+        e->alias_src = NULL, n_alias_dropped++;
+        return;
+    }
+    uint64_t pos = vk_exec_op_pos(), pos0 = vk_exec_op_pos0();
+    if (pos < e->alias_pos || pos0 >= e->alias_pos) return;   // before its place, or a later chunk: not this one
+    Tex *src = e->alias_src;
+    e->alias_src = NULL;
+    if (!entry_alive_at(e->pub.addr, src)) { n_alias_dropped++; return; }
+    if (alias_copy(e, src)) n_alias_placed++;
+    else n_alias_dropped++;
+}
+
 // The entries at a storage address, chained by next_at (ui/glyphs/glyphs.c re-uploads all of them). Texture lock held.
 Tex *entries_at(uint64_t addr) { return nvn_hm_get(&by_addr, &addr); }
 
@@ -122,7 +159,12 @@ Tex *entry_of(const tex_t *t) {
         }
         if (alias) perf_count(PERF_CNT_TEX_ALIAS);
         if (tex_alias) {
-            if (src && alias_copy(e, src)) {
+            int deferred = 0;
+            if (src && alias_defer_at) {   // the replay's walk: copied where the frame reaches the target (above)
+                e->alias_src = src, e->alias_pos = alias_defer_at, e->alias_epoch = submit_epoch;
+                deferred = 1, n_alias_deferred++;
+            }
+            if (src && (deferred || alias_copy(e, src))) {
                 n_alias_copied++;
                 if (e->pub.mirrored) {   // the content is src's GPU render, newer than the storage bytes
                     vk_mem_changed(e->pub.addr, e->t.L.size, 0, &e->wgen);
@@ -146,6 +188,7 @@ Tex *entry_of(const tex_t *t) {
     }
     if (e->released) e->released = 0, nreleased--, rel_unlink(e), tex_gen_bump(k.addr);
     e->t = *t;
+    if (e->alias_src && !alias_defer_at) alias_place(e);
     return e;
 }
 

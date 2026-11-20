@@ -50,8 +50,11 @@ static int x_ready;
 #define x_here_ex (vk_rt.x_here_ex)   // X while this thread is in vk_exec_record
 #define x_pos (vk_rt.x_pos)           // ops handed to vk_exec_op in this submission (a chunk starts at its first)
 
+static _Thread_local uint64_t x_pos0;     // x_pos where this recording began: a chunk's first op, 0 for a submission
+
 uint64_t vk_exec_op_pos(void) { return x_pos; }
-void vk_exec_op_pos_set(uint64_t pos) { x_pos = pos; }
+uint64_t vk_exec_op_pos0(void) { return x_pos0; }
+void vk_exec_op_pos_set(uint64_t pos) { x_pos = x_pos0 = pos; }
 
 // ---- MKW_TRACE=gfx frame counters
 
@@ -753,7 +756,7 @@ int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint64_t 
     split_draws = part_start = 0;
     part_t0 = kern_now_ns();
     x_cur = x_here_ex = ex;
-    x_pos = 0;
+    x_pos = x_pos0 = 0;
     // queue states live within one submission (queue_switch), or one queue order episode's parts; a submission without
     // handles (an empty part) leaves them
     if (n && !vk_exec_queue_cont(handles, n)) vk_exec_qs.n = 0, vk_exec_qs.cur = 0;
