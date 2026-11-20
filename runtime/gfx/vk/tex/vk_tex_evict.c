@@ -226,14 +226,15 @@ Tex *rel_oldest(void) {
 }
 
 // A released image the GPU wrote in the last REL_HOT frames is kept by the count, the memory cap, the overwrite rule
-// and the governor's trim (only running out of memory takes it, rel_oldest): it holds what the GPU drew there, which
-// the console keeps in that memory, and the game still uses it. The race's screen-tiled volumes (56x32-88x48 by 256
+// (up to REL_KEEP_OVER) and the governor's trim; only running out of memory takes it (rel_oldest). It holds what the
+// GPU drew there, which the console keeps in that memory, and the game still uses it. The race's screen-tiled volumes (56x32-88x48 by 256
 // slices, 3.5-6 MiB; released and taken back every frame, each frame reading what the last one wrote) were dropped by
 // those rules, the governor's trim most of all, and made again cleared to zero: the lit scene black for a frame with
 // the HUD drawn, 37-91 times a race on the PS5. With this, 0 in a race, free direct memory at least 646 MiB (runs
 // tr-trace, tr2, fix6 with MKW_ODD_CHECK, 21/11/2026; 0 also with new images left uncleared, MKW_FIX_ZERO=0, where the
 // new one happened to get the old memory). Keyed on the game taking it back, it never engaged: each went before that.
 #define REL_HOT 600
+#define REL_KEEP_OVER (16ull << 20)   // drop_overwritten heeds rel_keep up to this size
 static int rel_keep(const Tex *e) {
     return !e->pub.mirrored && (e->pub.gpu_owned || e->gpu_dirty) && !e->sparse && e->gpu_frame &&
            vk_exec_presented + 1 - e->gpu_frame <= REL_HOT;
@@ -369,7 +370,13 @@ static void drop_overwritten(void) {
     qsort(w, (size_t)nw, sizeof *w, by_lo);
     uint64_t over = released_bytes - released_cap(), freed = 0;   // the caller: over the cap
     for (Tex *e = rel_head; e && freed < over; e = e->rel_next) {
-        if (recreatable(e) || rel_keep(e) || e->sparse || !e->wr_fence || !e->t.L.size) continue;
+        // rel_keep only up to REL_KEEP_OVER: the volumes it is for (8.6 MiB at most) are written through a second
+        // descriptor of the same memory, which counts here as a newer image over them (with half coverage required
+        // they still went, black frames 0-2 a race, fix7r1/r2), while a scene's shadow map (~96 MiB, written every
+        // frame) is covered whole by the next scene's: kept, the released ones held 3 GB and free direct memory fell to
+        // 68 MiB in a race (bug2c3, 21/11/2026).
+        if (recreatable(e) || (rel_keep(e) && e->t.L.size <= REL_KEEP_OVER) || e->sparse || !e->wr_fence || !e->t.L.size)
+            continue;
         uint64_t lo = e->key.addr, hi = lo + e->t.L.size, from = lo > WRITER_SPAN ? lo - WRITER_SPAN : 0;
         int a = 0, b = nw;   // the first writer starting at from or later
         while (a < b) {
