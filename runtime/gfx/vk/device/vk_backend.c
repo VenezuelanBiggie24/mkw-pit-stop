@@ -425,6 +425,7 @@ static void replay_main(void *arg) {
             uint64_t frame = __atomic_add_fetch(&gfx_counters.frames, 1, __ATOMIC_RELAXED);
             present_image(it.tex, it.has_crop ? it.crop : NULL, it.at, it.queued, frame, it.value);
             vk_tl_present(it.value, frame);
+            vk_texture_spin_update();
         }
         if (w0) vk_tl_replay_time(it.kind == RI_SUBMIT ? VK_TL_SUBMIT : it.kind == RI_RELEASE ? VK_TL_RELEASE
                                   : it.kind == RI_PRESENT ? VK_TL_PRESENT : VK_TL_REG, (int64_t)plat_now_ns() - w1);

@@ -538,6 +538,7 @@ uint32_t vk_texture_slot_format(int id, uint64_t *addr);   // NVN format the gam
 // The replay looks up many slots per draw: it takes the texture lock once around them (vk_texture_lock) and uses the
 // _locked lookups; vk_texture_slots_gen changes whenever a slot may resolve to another image or view.
 void vk_texture_lock(void);
+void vk_texture_spin_update(void);   // MKW_TEX_LOCK_SPIN, per present (vk_texture.c)
 void vk_texture_unlock(void);
 const VkTexImage *vk_texture_by_id_locked(int id, view_t *view, int *has_view);
 // The same for a storage-image binding: an image whose first upload is deferred is returned, not NULL (the zero

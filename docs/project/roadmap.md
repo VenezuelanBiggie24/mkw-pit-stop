@@ -128,6 +128,17 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   46-62 and textures evicted 5.8-6.4 -> 1.6 GiB per race; frame -0.20 / +0.14 ms, median -0.05 / 0.00, within
   noise. All free memory still dips to 924-1,174 MiB, under the 1 GiB hard level. Re-uploads stay at ~60 per 60
   frames either way: the game rewrites those textures, so eviction is not their source.
+- **Measured: what the 1% lows are, and a first fix** (20/11/2026, PS5 1.8.0). About 2% of race frames take over 20 ms:
+  the replay finishes the last submission of the frame just presented after the game starts waiting on its fence. A
+  probe of the replay thread's time by part showed those frames bring a course's streaming in: ~30 new textures,
+  created and uploaded serially in the slot precheck (7.4-9.1 ms against 2.3), and chunk recording slowed by contention
+  on tex_lock (waits 3.8 ms a frame while the holds came to 0.9: ~1 us holds, each contended acquire sleeping ~15-20 us).
+  Not the cause: the walk, pipelines, image views, descriptor sets, the present thread (its drain waits on the blit, not
+  on pacing), held submissions, sparse binds. Faster on average but no fewer slow frames: smaller or even chunks, more
+  chunk threads, the precheck on a helper, its uploads in parallel. `MKW_TEX_LOCK_SPIN` (default 1) spins up to 30 us
+  before sleeping on tex_lock: its waits -70%, the frame slightly better in three races, the slow frames as many.
+  "Not yet recorded" in the SyncWait line means the fence's first part was not sent (vk_sync.c part_sent), not that the
+  submission was not recorded.
 - **Done, no frame gain: textures made faster on the replay thread** (20/11/2026, PS5 1.8.0). Timing the texture
   lock's holds showed the replay's slot precheck as its longest holder (~1.1 ms twice a frame, up to 36 ms); ~2% of
   frames have a pass over 5 ms (median 7 ms), half of it making new textures (~100 per 60 frames as the course

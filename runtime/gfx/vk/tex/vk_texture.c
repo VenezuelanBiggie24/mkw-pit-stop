@@ -48,6 +48,16 @@ uint64_t n_uploads, n_reuploads;
 // Re-uploads since the last perf line (tex_lock): all, and those of textures a WriteTexels wrote since their last upload.
 uint64_t ru_n, ru_bytes, ru_ns, ru_wt_n, ru_wt_bytes, ru_wt_ns;
 uint64_t tl_n, tl_ns, tl_max;       // lock() waits (MKW_TRACE=perf), vk_tex_internal.h
+volatile int tex_spin_on = 1;        // MKW_TEX_LOCK_SPIN (vk_tex_internal.h)
+void vk_texture_spin_update(void) {   // per present (vk_backend.c), so "ab" follows the blocks
+    static int mode = -1;
+    if (mode < 0) {
+        mode = rt_knob("TEX_LOCK_SPIN", "1");
+        if (mode != 1) rt_log("vk: texture lock spins before sleeping%s (MKW_TEX_LOCK_SPIN)", mode ? " in the B blocks" : ": off");
+    }
+    int on = RT_KNOB_ON(mode);
+    if (on != tex_spin_on) __atomic_store_n(&tex_spin_on, on, __ATOMIC_RELAXED);
+}
 uint64_t up_ph_ns[UPH_N], up_ph_n; // upload() phases (MKW_TRACE=perf)
 UpSlow up_slow;
 uint64_t rc_n, rc_bytes, rc_ns;   // copies out of CPU-written storage (vk_texture_region_copy), for the same perf line

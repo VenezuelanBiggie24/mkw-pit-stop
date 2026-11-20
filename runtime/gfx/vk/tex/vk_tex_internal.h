@@ -124,15 +124,32 @@ void barrier(VkCommandBuffer cb, VkPipelineStageFlags2 src, VkAccessFlags2 sa, V
 // (run hang05, 16/11/2026) had the game's texture registration and the chunk threads waiting on tex_lock while the
 // replay re-uploaded whole textures under it.
 extern uint64_t tl_n, tl_ns, tl_max;
+// MKW_TEX_LOCK_SPIN (default 1; "ab", applied per present by vk_texture_spin_update): a lock() that finds tex_lock
+// taken tries again for up to TEX_SPIN_NS before it sleeps. Its holds are ~1 us (the chunk threads' descriptor
+// lookups, 1,100-1,500 a frame) and a sleep costs a wake of ~15-20 us: in a course's streaming bursts the chunk threads
+// took it twice as often and waited 3.8 ms a frame on it while their holds came to 0.9 (PS5, 20/11/2026). In-race
+// A/B, three races: its waits 138-154 -> 41-50 ms per 60 frames, the replay -0.4 to -0.9 ms a frame, the frame
+// -0.05 to -0.41 ms (medians -0.07 to -0.15); the frames over 20 ms no fewer.
+#define TEX_SPIN_NS 30000
+extern volatile int tex_spin_on;
+static inline int tex_spin(void) {
+    if (!__atomic_load_n(&tex_spin_on, __ATOMIC_RELAXED)) return 0;
+    uint64_t t0 = plat_now_ns();
+    do {
+        for (int i = 0; i < 16; i++) __builtin_ia32_pause();
+        if (plat_rmutex_trylock(&tex_lock)) return 1;
+    } while (plat_now_ns() - t0 < TEX_SPIN_NS);
+    return 0;
+}
 static inline void lock(void) {
     if (!__atomic_load_n(&tex_ready, __ATOMIC_ACQUIRE)) plat_once(&tex_once, tex_init, NULL);
     if (!(rt_trace & RT_TRACE_PERF)) {
-        plat_rmutex_lock(&tex_lock);
+        if (!plat_rmutex_trylock(&tex_lock) && !tex_spin()) plat_rmutex_lock(&tex_lock);
         return;
     }
     if (plat_rmutex_trylock(&tex_lock)) return;
     uint64_t t0 = plat_now_ns();
-    plat_rmutex_lock(&tex_lock);
+    if (!tex_spin()) plat_rmutex_lock(&tex_lock);
     uint64_t dt = plat_now_ns() - t0;
     tl_n++, tl_ns += dt;
     if (dt > tl_max) tl_max = dt;
