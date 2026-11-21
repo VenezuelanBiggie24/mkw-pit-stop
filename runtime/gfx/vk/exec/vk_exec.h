@@ -237,6 +237,7 @@ extern int vk_rtstats_on;
 void vk_rtstats_init(void);                                   // reads the environment; vk_exec_record's first call
 void vk_rtstats_every(uint32_t n);                            // turns it on, one frame in n (--probe-vkexec)
 void vk_rtstats_pass_end(VkExec *ex);                         // after vkCmdEndRendering
+void vk_rtsig_odd(uint64_t frame);                            // MKW_RTSIG: an odd frame MKW_ODD_CHECK found
 void vk_rtstats_dispatch(VkExec *ex, const VkPipeInfo *info); // after a dispatch
 void vk_rtstats_flush(void);           // waits for every submission and for the checks of their copies
 void vk_rtstats_shutdown(void);        // after completion callbacks stop: joins scan workers
