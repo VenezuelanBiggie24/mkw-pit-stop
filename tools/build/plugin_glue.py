@@ -5,7 +5,7 @@ Why: a plugin is written as a library (mkw_plugin.h: mods/<mod>/plugin/*.so|dll)
 there it has to be linked into the executable. A library keeps its own names to itself; linked in, a plugin's globals
 (its plat_*, log_*, config_*...) would meet the runtime's and every other plugin's. So each folder is built the way a
 library would be and then sealed:
-  1. every .c and .cpp of the folder compiled with the target's compiler, -fvisibility=hidden and -I runtime/plugin
+  1. every .c and .cpp of the folder (or the ones its plugin.list names) compiled with the target's compiler, -fvisibility=hidden and -I runtime/plugin
      (the plugin's own headers first, as in its library build; none of the runtime's), MKW_PLUGIN_LINKED defined;
   2. the objects partially linked into one (ld.lld -r): references between the plugin's files are resolved there;
   3. every global it defines made local except mkw_plugin_init (llvm-objcopy --keep-global-symbol), which is then
@@ -20,13 +20,40 @@ from pathlib import Path
 RUNTIME_PLUGIN = Path(__file__).resolve().parents[2] / "runtime/plugin"
 
 
+LIST = "plugin.list"
+
+
+def read_list(folder: Path) -> tuple[str | None, list[Path]] | None:
+    """A folder's plugin.list, if it has one: `name=NAME` (the mod it stands for) and one source per line, relative to
+    the folder ('#' starts a comment). For a plugin whose sources sit beside others it must not build (another
+    platform's), or whose folder is not named after its mod. None without the file."""
+    path = folder / LIST
+    if not path.is_file():
+        return None
+    name, srcs = None, []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("name="):
+            name = line[5:].strip()
+            continue
+        src = (folder / line).resolve()
+        if src.suffix not in (".c", ".cpp") or not src.is_file():
+            raise SystemExit(f"{path}: {line}: not a .c or .cpp file")
+        srcs.append(src)
+    return name, srcs
+
+
 def plugin_name(folder: Path) -> str:
-    """A C identifier from the folder's name: the mod the plugin stands for (mods/<name>, its settings)."""
-    return re.sub(r"\W", "_", folder.resolve().name)
+    """A C identifier: plugin.list's name, else the folder's (the mod the plugin stands for: mods/<name>)."""
+    listed = read_list(folder.resolve())
+    name = listed[0] if listed and listed[0] else folder.resolve().name
+    return re.sub(r"\W", "_", name)
 
 
 def plugin_sources(folders: list[Path]) -> list[tuple[str, Path, list[Path]]]:
-    """(name, folder, sources) of each folder: every .c and .cpp under it."""
+    """(name, folder, sources) of each folder: plugin.list's, else every .c and .cpp under it."""
     out, names = [], set()
     for folder in folders:
         if not folder.is_dir():
@@ -35,7 +62,8 @@ def plugin_sources(folders: list[Path]) -> list[tuple[str, Path, list[Path]]]:
         if name in names:
             raise SystemExit(f"--plugin {folder}: another plugin folder has the name {name}")
         names.add(name)
-        srcs = sorted(p for pattern in ("*.c", "*.cpp") for p in folder.resolve().rglob(pattern))
+        listed = read_list(folder.resolve())
+        srcs = listed[1] if listed else sorted(p for pattern in ("*.c", "*.cpp") for p in folder.resolve().rglob(pattern))
         if not srcs:
             raise SystemExit(f"--plugin {folder}: no .c or .cpp files")
         out.append((name, folder.resolve(), srcs))
@@ -77,7 +105,8 @@ def plugin_ninja(folders: list[Path], out: Path, cc: str, cxx: str, flags: list[
         base = out / "plugin" / name
         objs = []
         for src in srcs:
-            obj = base / src.relative_to(folder).with_suffix(".o")
+            rel = src.relative_to(folder) if src.is_relative_to(folder) else Path(src.name)
+            obj = base / rel.with_suffix(".o")
             objs.append(str(obj))
             rule = "plugcxx" if src.suffix == ".cpp" else "plugcc"
             lines.append(f"build {obj}: {rule} {src}\n  plugdir = {src.parent}")
