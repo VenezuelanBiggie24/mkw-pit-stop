@@ -18,6 +18,7 @@
 #include "vk.h"
 #include "platform/platform.h"
 #include "ui/menu/boot_screen.h"
+#include "plugin.h"
 #include "presence.h"
 #include "version.h"
 
@@ -396,6 +397,7 @@ void rt_boot(void) {
     boot_screen_task(BOOT_TASK_SHADERS, BOOT_TASK_RUNNING);
     PlatThread *warm = plat_thread_new(prewarm_main, NULL, "prewarm");
     boot_screen_task(BOOT_TASK_CODE, BOOT_TASK_RUNNING);
+    plugins_load();   // the enabled mods' native plugins: their overrides by name go in before the loader binds
     ldr_load(rt_config()->exefs);
     rt_patches_init();
     seqwatch_init();
@@ -405,8 +407,10 @@ void rt_boot(void) {
     cb_addr[0] = hostfn_register("<rtld loader_ready>", cb_loader_ready);
     cb_addr[1] = hostfn_register("<rtld module_inits>", cb_module_inits);
     cb_addr[2] = hostfn_register("<rtld module_finis>", cb_module_finis);
+    plugins_game_loaded();   // their overrides by address go in before the dispatch table is built
     hostfn_seal();
     boot_screen_task(BOOT_TASK_CODE, BOOT_TASK_DONE);
+    plugins_started();
     uint64_t held = plat_now_ms();
     if (warm) plat_thread_join(warm);
     else vk_pipeline_prewarm(), boot_screen_task(BOOT_TASK_SHADERS, BOOT_TASK_DONE);
