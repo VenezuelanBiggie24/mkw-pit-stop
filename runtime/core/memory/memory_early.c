@@ -175,6 +175,27 @@ void mem_copy_out(void *dst, uint64_t a, uint64_t n) {
     }
 }
 
+// The same copy for a caller that must not wait (vk_usnap_take on the game's thread inside the submit, or on the
+// replay's when it lets a held submission go): a watched page that cannot be read through its protection is not read
+// the plain way, whose fault would wait for the page's GPU writer, which can be the very submission being taken (the
+// suspected cause of a hang with the held take, ucmp 21/11/2026; with this, none in uats-1/2). 0 when such a page was
+// left out.
+int mem_copy_out_try(void *dst, uint64_t a, uint64_t n) {
+    if (mem_early_on() <= 0 || !watched(a, n)) {
+        memcpy(dst, (const void *)(uintptr_t)a, n);
+        return 1;
+    }
+    for (uint64_t x = a, y; x < a + n; x = y) {
+        int w = __atomic_load_n(&trapped[x / PAGE], __ATOMIC_RELAXED) == 2;
+        for (y = (x & ~(PAGE - 1)) + PAGE; y < a + n && (__atomic_load_n(&trapped[y / PAGE], __ATOMIC_RELAXED) == 2) == w; y += PAGE) {}
+        if (y > a + n) y = a + n;
+        uint8_t *d = (uint8_t *)dst + (x - a);
+        if (!w) memcpy(d, (const void *)(uintptr_t)x, y - x);
+        else if (!plat_mem_peek(d, x, y - x)) return 0;
+    }
+    return 1;
+}
+
 void mem_early_set_done(uint64_t (*done)(void), int (*wait)(uint64_t, uint64_t), uint64_t (*queued)(void),
                         int (*issued_wait)(uint64_t, uint64_t)) {
     mem_fence_done = done, fence_wait = wait, mem_fence_queued = queued, fence_issued_wait = issued_wait;

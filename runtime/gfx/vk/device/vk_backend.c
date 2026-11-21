@@ -744,6 +744,7 @@ static void vk_be_held_fill(void *slot, const uint64_t *handles, int n) {
     uint64_t *c = n > 0 ? malloc(sizeof *c * (size_t)n) : NULL;
     if (n > 0 && !c) rt_fatal("vk: out of memory (replay queue)");
     if (n > 0) memcpy(c, handles, sizeof *c * (size_t)n);
+    vk_usnap_take(handles, n);   // MKW_USNAP_AT_SUBMIT: as the game's last submit of its part finds the blocks
     plat_mutex_lock(&rl);
     h->h = c, h->n = n, h->submit_no = nvn_submit_count(), h->ready = 1;
     plat_cond_broadcast(&rcv);

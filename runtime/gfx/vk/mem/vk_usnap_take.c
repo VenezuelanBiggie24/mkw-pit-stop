@@ -66,7 +66,15 @@ void vk_usnap_take(const uint64_t *handles, int n) {
         t->rng[t->nrng] = (Rng){lo, hi}, t->off[t->nrng++] = total, total += hi - lo;
     }
     if (total && !(t->bytes = malloc(total))) rt_fatal("vk_usnap: out of memory (take of %llu bytes)", (unsigned long long)total);
-    for (int i = 0; i < t->nrng; i++) mem_copy_out(t->bytes + t->off[i], t->rng[i].lo, t->rng[i].hi - t->rng[i].lo);
+    // Never waiting (mem_copy_out_try): a range with a page the early-read watch holds is left out of the take (made
+    // empty, so usnap_take_bytes finds nothing there) and the snapshot reads guest memory for it as before.
+    static uint64_t n_out;
+    for (int i = 0; i < t->nrng; i++)
+        if (!mem_copy_out_try(t->bytes + t->off[i], t->rng[i].lo, t->rng[i].hi - t->rng[i].lo)) {
+            t->rng[i].hi = t->rng[i].lo;
+            uint64_t k = __atomic_add_fetch(&n_out, 1, __ATOMIC_RELAXED);
+            if (!(k & (k - 1))) rt_log("vk_usnap: %llu uniform ranges left out of a submit's copy: a page the GPU has yet to write", (unsigned long long)k);
+        }
     plat_mutex_lock(&lock);
     if (tail) tail->next = t;
     else head = t;
@@ -76,22 +84,34 @@ void vk_usnap_take(const uint64_t *handles, int n) {
 
 int usnap_take_compare(void) { return mode() && cmp_on; }
 
+// The oldest take of this submission, wherever it is in the queue: a held submission (nvn_qorder.c) keeps its place in
+// the replay but gets its handles, and so its take (vk_be_held_fill), only once its wait is met, after the takes of
+// submissions the game made meanwhile. Held ones took nothing before, and popping the head only would pair every take
+// after a held one with the wrong submission, all dropped (a race holds ~2 submissions a frame, inflb-1). Takes no
+// submission claims (a submission of no handles) are dropped once TAKE_KEEP newer ones wait behind them.
+#define TAKE_KEEP 64
 UsnapTake *usnap_take_pop(const uint64_t *handles, int n) {
-    if (!head) return NULL;   // read without the lock: a take queued meanwhile belongs to a later submission
+    if (!head || n <= 0) return NULL;   // read without the lock: a take queued meanwhile belongs to a later submission
+    UsnapTake *t, *prev = NULL, *stale = NULL;
     plat_mutex_lock(&lock);
-    UsnapTake *t = head;
+    for (t = head; t && (t->h0 != handles[0] || t->n != n); prev = t, t = t->next) {}
     if (t) {
-        head = t->next, queued--;
+        if (prev) prev->next = t->next;
+        else head = t->next;
+        if (tail == t) tail = prev;
+        queued--;
+    }
+    if (queued > TAKE_KEEP && head) {   // the oldest has waited too long for its submission
+        stale = head, head = head->next, queued--;
         if (!head) tail = NULL;
     }
     plat_mutex_unlock(&lock);
-    if (t && (n <= 0 || t->h0 != handles[0] || t->n != n)) {   // not this submission's: guest memory as before
+    if (stale) {
         static volatile int32_t said;
-        if (plat_inc32(&said) <= 3) rt_log("vk_usnap: a submit's copy did not match its submission: left out");
-        usnap_take_free(t);
-        return NULL;
+        if (plat_inc32(&said) <= 3) rt_log("vk_usnap: a submit's copy no submission claimed: dropped");
+        usnap_take_free(stale);
     }
-    return t;
+    return t;   // NULL: none of this submission's (guest memory as before)
 }
 
 const uint8_t *usnap_take_bytes(const UsnapTake *t, uint64_t lo, uint64_t hi) {
