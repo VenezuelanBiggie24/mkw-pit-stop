@@ -21,4 +21,4 @@ and dispatches, descriptors, and their parallel recording.
 | `vk_exec_xfer.c` | Copies, texture clears, events, counters and conditional rendering; copies into sparse arrays out of CPU-written textures read from the source's storage (ASTC decoded, other formats region by region), and `MKW_TEX_COPY_LOG` |
 | `vk_exec_par.c` | `MKW_REPLAY_PAR`: a submit recorded in chunks on several threads after a light walk that tracks the state (`MKW_REPLAY_WALK` measures it) |
 | `vk_mesh_cs.c` | Task/mesh as compute without mesh shaders: VRAM buffers per submit, compaction pipeline and whether a draw takes that path (`MKW_MESH_COMPUTE`) |
-| `vk_ind_read.c` | Diagnostics `MKW_IND_READ` (indirect arguments the GPU used, copied at the end of each pass) and `MKW_IND_BARRIER` (their barriers without copies) |
+| `vk_ind_read.c` | Diagnostics `MKW_IND_READ` (indirect arguments the GPU used, copied at the end of each pass; `MKW_IND_READ_FRAMES=<from>-<to>`: those frames only, one summary line each) and `MKW_IND_BARRIER` (their barriers without copies) |
