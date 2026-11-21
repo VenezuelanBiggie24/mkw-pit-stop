@@ -28,6 +28,7 @@ from pathlib import Path
 from build_smoke import (APP_SDK, GLM, MESA, ROOT, TEMPLATE, VULKAN, png, require_checkout,
                          require_radv, write_changed)
 from build import game_id, module_glue, port_version
+from ext_glue import ext_sources, ext_table
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "i18n"))
 import catalog  # noqa: E402  (tools/i18n: the menu texts of every language, from i18n/*.po)
@@ -120,7 +121,7 @@ def ninja_path(path: Path) -> str:
 def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[str, str],
                     jobs: int, generated: Path | None, exefs: Path | None,
                     pgo_use: Path | None = None, gen_opt: str = "O1",
-                    gen_frame_pointers: bool = False) -> tuple[list[Path], bool]:
+                    gen_frame_pointers: bool = False, ext: list[Path] | None = None) -> tuple[list[Path], bool]:
     out = WORK / ("game-objects" if generated else "inventory-objects")
     out.mkdir(parents=True, exist_ok=True)
     write_changed(out / "guest_layout.h", ("#pragma once\n" + placement_defines(PROFILE)).encode())
@@ -148,7 +149,7 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
         ("lift", "prospero-clang", [*genflags]),
     ):
         invocation = shlex.join([str(sdk / "bin" / compiler), *options]).replace("$", "$$")
-        ninja += [f"rule {name}", f"  command = {invocation} -MMD -MF $out.d -c $in -o $out",
+        ninja += [f"rule {name}", f"  command = {invocation} $extra -MMD -MF $out.d -c $in -o $out",
                   "  depfile = $out.d", "  deps = gcc", "  description = compile $in"]
     files = [(source, source.relative_to(ROOT), "cxx" if source.suffix == ".cpp" else "cc")
              for source in source_files()]
@@ -167,6 +168,7 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
     if generated is None:
         # Weak so the game-free placeholder links alone while strong modules.o overrides it cleanly.
         defaults_src += "__attribute__((weak)) const RtGame *rt_game_builtin(void) { return 0; }\n"
+    defaults_src += ext_table(ext or [])   # extensions linked in (--ext, runtime/core/ext)
     write_changed(defaults, defaults_src.encode())
     files.append((defaults, Path("defaults.c"), "cc"))
     # the menu texts (ui_text.c's text_<lang> arrays), generated as build.py does
@@ -187,6 +189,12 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
         for name, _, _ in read_checked(generated, PROFILE):
             files += [(source, Path(lift) / name / source.name, "lift")
                       for source in sorted((generated / name).glob("*.c"))]
+    # extensions (--ext): each folder's entry point renamed by its define (tools/build/ext_glue.py)
+    defines = {}
+    for source, define in ext_sources(ext or []):
+        relative = Path("ext") / define.rsplit("__", 1)[1] / source.name
+        files.append((source, relative, "cxx" if source.suffix == ".cpp" else "cc"))
+        defines[relative] = define
     objects = []
     for source, relative, rule in files:
         obj = out / relative.with_suffix(".o")
@@ -195,6 +203,8 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
         # a new profile in the same file rebuilds the generated code: the profile is an input
         implicit = f" | {ninja_path(pgo_use)}" if rule == "lift" and pgo_use is not None else ""
         ninja.append(f"build {ninja_path(obj)}: {rule} {ninja_path(source)}{implicit}")
+        if relative in defines:
+            ninja.append(f"  extra = {defines[relative]}")
     manifest = out / "build.ninja"
     write_changed(manifest, ("\n".join(ninja) + "\n").encode())
     log = out / "compile.log"
@@ -290,6 +300,8 @@ def main() -> int:
     parser.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 1))
     parser.add_argument("--inventory", action="store_true", help="compile and report unresolved imports without packaging")
     parser.add_argument("--generated", type=Path, help="completed ps5-high144 lift")
+    parser.add_argument("--ext", type=Path, action="append", default=[], metavar="DIR",
+                        help="link the extension in this folder in (docs/project/extensions.md); repeatable")
     parser.add_argument("--exefs", type=Path, help="local extracted ExeFS for the built-in module hashes")
     parser.add_argument("--gen-opt", choices=("O1", "O2"), default="O1",
                         help="optimization level of the generated C (default O1; O2 is meant for --pgo-use)")
@@ -334,7 +346,8 @@ def main() -> int:
     sdk = Path(subprocess.check_output(["bash", str(title / "ps5/tools/setup-sdk.sh")], env=env, text=True).strip())
     with output_lock(generated) if generated else nullcontext():
         objects, complete = compile_objects(sdk, template, includes, env, args.jobs, generated, exefs, pgo_use,
-                                            args.gen_opt, args.gen_frame_pointers)
+                                            args.gen_opt, args.gen_frame_pointers,
+                                            [path.resolve() for path in args.ext])
     out = WORK / ("game-objects" if generated else "inventory-objects")
     aggregate = import_inventory(sdk, objects, env, out, reachable=False)
     loader = import_inventory(sdk, objects, env, out, reachable=True)

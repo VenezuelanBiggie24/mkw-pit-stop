@@ -396,6 +396,7 @@ void rt_boot(void) {
     boot_screen_task(BOOT_TASK_SHADERS, BOOT_TASK_RUNNING);
     PlatThread *warm = plat_thread_new(prewarm_main, NULL, "prewarm");
     boot_screen_task(BOOT_TASK_CODE, BOOT_TASK_RUNNING);
+    rt_ext_start();   // core/ext: extensions register their overrides before the imports are bound
     ldr_load(rt_config()->exefs);
     rt_patches_init();
     seqwatch_init();

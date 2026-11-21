@@ -57,6 +57,8 @@ static Slot slots[MAX_HOSTFN];
 static int nslots;
 static RtHostEntry added[MAX_ADDED];
 static int nadded;
+static RtHostEntry added_obs[MAX_ADDED];
+static int nadded_obs;
 static int sealed;
 
 static GuestFn table_find(const RtHostEntry *start, const RtHostEntry *stop, const char *name) {
@@ -72,7 +74,15 @@ GuestFn hostfn_override(const char *name) {
     return table_find(ovr_start, ovr_stop, name);
 }
 
-GuestFn hostfn_observer(const char *name) { return table_find(obs_start, obs_stop, name); }
+// An override added from outside the table (an extension, runtime/core/ext) replaces the symbol outright, so a linked
+// observer of the same symbol steps aside; an added observer comes before a linked one.
+GuestFn hostfn_observer(const char *name) {
+    for (int i = 0; i < nadded; i++)
+        if (!strcmp(added[i].name, name)) return NULL;
+    for (int i = 0; i < nadded_obs; i++)
+        if (!strcmp(added_obs[i].name, name)) return added_obs[i].fn;
+    return table_find(obs_start, obs_stop, name);
+}
 
 // Linked HOST_OVERRIDE / HOST_OBSERVER entries (the loader reports how many it installed).
 int hostfn_table_size(int observers) {
@@ -95,6 +105,12 @@ void hostfn_add_override(const char *name, GuestFn fn) {
     if (ldr_count()) rt_fatal("hostfn_add_override(%s) after ldr_load", name);
     if (nadded == MAX_ADDED) rt_fatal("hostfn_add_override: more than %d", MAX_ADDED);
     added[nadded++] = (RtHostEntry){name, fn};
+}
+
+void hostfn_add_observer(const char *name, GuestFn fn) {
+    if (ldr_count()) rt_fatal("hostfn_add_observer(%s) after ldr_load", name);
+    if (nadded_obs == MAX_ADDED) rt_fatal("hostfn_add_observer: more than %d", MAX_ADDED);
+    added_obs[nadded_obs++] = (RtHostEntry){name, fn};
 }
 
 static void hostfn_entry(Cpu *c);

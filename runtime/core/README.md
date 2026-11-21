@@ -9,6 +9,7 @@ Boot, modules, kernel, guest memory, settings and diagnostics. Every subfolder w
 | [kernel/](kernel/README.md) | Horizon kernel: handles, waits, threads, virtual cores, fibers, SVCs |
 | [memory/](memory/README.md) | Guest address space, write tracking, read traps (`MKW_EARLY_READ`) |
 | [base/](base/README.md) | `base/host.h`, settings (`cfg`), `MKW_CTL`, system info, SHA-256, UTF-16 |
+| [ext/](ext/README.md) | Extensions: outside code that replaces or watches game functions by name (`mkw_ext.h`, `MKW_EXT`, `build.py --ext`) |
 | [hacks/](hacks/README.md) | Shortcuts the console does not have: turbo, skip movies, development helpers |
 | [presence/](presence/README.md) | Discord Rich Presence: the Discord profile shows the game and what the player does (`MKW_DISCORD`) |
 | [diag/](diag/README.md) | Flight recorder, counters, profiling, RenderDoc, `MKW_SEQ_WATCH`, `MKW_IMPORT_CENSUS` |

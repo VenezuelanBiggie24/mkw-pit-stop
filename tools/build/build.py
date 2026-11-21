@@ -42,6 +42,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "i18n"))
 import catalog  # noqa: E402  (tools/i18n: the text catalogs from i18n/ui/*.po)
+from ext_glue import ext_sources, ext_table  # noqa: E402  (tools/build: extensions linked in, --ext)
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "recomp"))
@@ -218,17 +219,17 @@ def port_version() -> str:
     return r.stdout.strip().removeprefix("v") if r.returncode == 0 and r.stdout.strip() else "dev"
 
 
-def defaults_glue(exefs: Path, romfs: Path, dist: bool) -> str:
+def defaults_glue(exefs: Path, romfs: Path, dist: bool, ext: list[Path] | None = None) -> str:
     """defaults.c: the executable's own defaults, the game copy's paths (none in the player's build: the folders next
     to the executable, main.c portable_paths) and the port's version. The player's build gets rt_game_builtin here:
-    it has no linked game code, gamelib.c loads the library."""
+    it has no linked game code, gamelib.c loads the library. ext: the extension folders linked in (ext_glue.py)."""
     out = ["// Defaults written by tools/build/build.py; do not edit.", '#include "gamelib.h"', '#include "host.h"', ""]
     for name, path in (("exefs", exefs), ("romfs", romfs), ("profile", ROOT / "build/profile")):
         out.append(f"const char rt_default_{name}[] = {c_string('' if dist else str(path.resolve()))};")
     out += [f"const char rt_port_version[] = {c_string(port_version())};", ""]
     if dist:
         out += ["const RtGame *rt_game_builtin(void) { return 0; }", ""]
-    return "\n".join(out)
+    return "\n".join(out) + ext_table(ext or [])
 
 
 # What the game code library calls in the runtime (runtime/cpu/cpu.h): the executable exports them.
@@ -238,7 +239,8 @@ RT_EXPORTS = ("rt_dispatch", "rt_sj_owner", "rt_svc", "rt_udf", "rt_ticks", "rt_
 def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: Path | None,
                runtime_only: bool = False, ld_extra: list[str] | None = None, profile: str = DEFAULT,
                exe: Path | None = None, gen_extra: list[str] | None = None,
-               sys_flags: list[str] | None = None, gen_cc: str | None = None) -> str:  # fmt: skip
+               sys_flags: list[str] | None = None, gen_cc: str | None = None,
+               ext: list[Path] | None = None) -> str:  # fmt: skip
     """dist: the player's build into that folder, the runtime (mkw, mkw.exe) and the game code apart (mkwgame.so,
     mkwgame.dll); else build/mkw with the game code linked in. runtime_only (with dist): the runtime alone, what a
     release ships and the CI builds, without the game's generated C."""
@@ -318,6 +320,10 @@ def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: 
         obj = out / "rt" / rel.with_suffix(".o")
         rt_objs.append(str(obj))
         lines.append(f"build {obj}: {'rtcxx' if src.suffix == '.cpp' else 'rtcc'} {src}")
+    for src, define in ext_sources(ext or []):   # extensions (--ext): each folder's entry point renamed by define
+        obj = out / "ext" / define.rsplit("__", 1)[1] / src.with_suffix(".o").name
+        rt_objs.append(str(obj))
+        lines.append(f"build {obj}: {'rtcxx' if src.suffix == '.cpp' else 'rtcc'} {src}\n  rtflags = $rtflags {define}")
     if target.windres:  # windres writes no depfile: the manifest and the icon it embeds are listed by hand
         rc = RUNTIME / "platform/mkw.rc"
         ico = out / "rt/platform/mkw.ico"  # drawn by tools/build/icon.py, never committed
@@ -397,6 +403,8 @@ def main() -> int:
         help="Linux: compile and link against this sysroot (tools/build/sysroot.py: glibc 2.31, the release)",
     )  # fmt: skip
     ap.add_argument("--dry-run", action="store_true", help="write build.ninja and show what would run")
+    ap.add_argument("--ext", type=Path, action="append", default=[], metavar="DIR",
+                    help="link the extension in this folder into the runtime (docs/project/extensions.md); repeatable")
     ap.add_argument(
         "--frame-pointers",
         action="store_true",
@@ -481,7 +489,7 @@ def build(args: argparse.Namespace, build_root: Path) -> int:
     (args.out / "rt").mkdir(parents=True, exist_ok=True)
     build_root.mkdir(parents=True, exist_ok=True)
     glue = [
-        (args.out / "rt/defaults.c", defaults_glue(args.exefs, args.romfs, dist is not None)),
+        (args.out / "rt/defaults.c", defaults_glue(args.exefs, args.romfs, dist is not None, args.ext)),
         (args.out / "rt/guest_layout.h", "#pragma once\n" + placement_defines(args.guest_layout)),
     ]
     if modules is not None:
@@ -499,7 +507,7 @@ def build(args: argparse.Namespace, build_root: Path) -> int:
         # the lifted code and its library take the sysroot only for another CPU: an x86-64 release's stay as they were
         ninja_file(
             target, args.gen, args.out, fp + sys_flags, dist, args.runtime_only, sys_ld + ld_pgo, args.guest_layout,
-            exe, gen_pgo, sys_flags if cross else None, args.pgo_cc,
+            exe, gen_pgo, sys_flags if cross else None, args.pgo_cc, args.ext,
         )
     )
     (args.out / "build.ninja").write_text(windows_host_ninja(ninja) if HOST_WINDOWS else ninja)

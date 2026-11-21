@@ -120,6 +120,8 @@ GuestFn hostfn_override(const char *name);                 // NULL if none
 GuestFn hostfn_observer(const char *name);                 // NULL if none
 void hostfn_add_override(const char *name, GuestFn fn);    // an override outside the linker table (probes); before
                                                            // ldr_load
+void hostfn_add_observer(const char *name, GuestFn fn);    // an observer outside the linker table (extensions);
+                                                           // before ldr_load. An added override hides any observer
 const char *hostfn_name(uint64_t addr);                    // name registered at a synthetic address, NULL if none
 void hostfn_seal(void);                                    // build the dispatch table (rt_dispatch_init over every
                                                            // linked module); idempotent; registration ends here
@@ -376,6 +378,7 @@ typedef struct { const char *exefs, *romfs, *profile; int boot; double seconds; 
 const RtConfig *rt_config(void);
 void rt_boot_event(const char *what, Cpu *c, const char *detail);   // checkpoint log; "nvn" ends --boot
 void rt_boot(void);                                        // boot.c
+void rt_ext_start(void);                                   // core/ext: start the extensions; before ldr_load, once
 // Modes of mkw. main.c has run mem_init and parsed the paths; each mode calls ldr_load itself if it needs the
 // modules, registers its host functions, then seals (hostfn_seal, or implicitly at the first rt_call). Return the
 // process exit code.
