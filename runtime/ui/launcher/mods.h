@@ -22,6 +22,7 @@ typedef struct {
     char name[MOD_NAME_MAX], title[96];
     int has_romfs, romfs_files, has_exefs, exefs_match, nswitches, enabled;
     int warn_graphics, warn_shaders;   // mod.json's "warnings" (import.py): files the port treats its own way
+    int has_plugin;                    // a plugin/ folder: native code the runtime loads (runtime/plugin)
     int code;                          // changes the game's code ("image" or "patches"): built into the game code
     char exefs_build[17];   // the first .ips build id, short (16 hex) for the "not this build" line
     ModSwitch switches[MOD_SWITCHES_MAX];

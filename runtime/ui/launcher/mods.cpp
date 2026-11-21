@@ -253,6 +253,7 @@ static int list_cb(const char *name, int kind, uint64_t, void *) {
         if (json_value(json, "has_romfs", v, sizeof v)) m->has_romfs = !strcmp(v, "true") || !strcmp(v, "1");
         if (json_value(json, "romfs_files", v, sizeof v)) m->romfs_files = atoi(v);
         if (json_value(json, "has_exefs", v, sizeof v)) m->has_exefs = !strcmp(v, "true") || !strcmp(v, "1");
+        if (json_value(json, "has_plugin", v, sizeof v)) m->has_plugin = !strcmp(v, "true") || !strcmp(v, "1");
         if (json_value(json, "exefs_match", v, sizeof v)) m->exefs_match = !strcmp(v, "true") || !strcmp(v, "1");
         m->code = strstr(json, "\"image\"") || strstr(json, "\"patches\"");
         const char *warn = strstr(json, "\"warnings\"");   // a list of names; ours, so a search is enough
@@ -271,6 +272,11 @@ static int list_cb(const char *name, int kind, uint64_t, void *) {
             m->exefs_build[n] = 0;
         }
         json_switches(json, m);
+    }
+    if (!m->has_plugin) {   // a mod copied in by hand, without the import's mod.json, still shows its plugin
+        char plugin[PLAT_PATH_MAX * 2 + 32];
+        snprintf(plugin, sizeof plugin, "%s/mods/%s/plugin", cfg_game_dir(), name);
+        m->has_plugin = plat_dir_exists(plugin);
     }
     G.n++;
     return 1;

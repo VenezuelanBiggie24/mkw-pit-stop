@@ -27,6 +27,7 @@
 #include "host.h"
 #include "nvn_api.h"
 #include "ui/menu/boot_screen.h"
+#include "plugin.h"
 #include "ui/menu/menu.h"
 #include "vk.h"
 #include "platform/platform.h"
@@ -89,6 +90,7 @@ void gfx_window_focus_changed(int in) {
 // done.
 void gfx_window_closed(void) {
     rt_log("gfx: window closed; exiting");
+    plugins_exit();   // the mods' goodbyes (a seat given back), before the saves finish
     cfg_save_drain();
     fs_save_flush();
     vk_pipeline_save();

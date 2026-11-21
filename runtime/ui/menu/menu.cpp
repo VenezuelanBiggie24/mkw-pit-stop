@@ -32,6 +32,7 @@ extern "C" {
 #include "sysinfo.h"
 #include "ui/menu/menu.h"
 #include "ui_text.h"
+#include "plugin/plugin.h"
 // host.h and vk.h pull in cpu.h, which is C only: the functions the menu needs from them, as declared there.
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void vk_queue_lock(void);
@@ -538,7 +539,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
             g_test.page = 0;
             set_open(1);
             open = true;
-        } else if (!g_perf_mode && !menu_notice_shown()) {
+        } else if (!g_perf_mode && !menu_notice_shown() && !plugins_overlay_wanted()) {
             return 0;
         }
     }
@@ -586,6 +587,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     ImGui_ImplVulkan_NewFrame();
     ui_id_check("in-game menu");
     ImGui::NewFrame();
+    plugins_overlay_draw((float)t->width, (float)t->height, scale);
     if (placeholder) {
         placeholder((float)t->width, (float)t->height, placeholder_ctx);
     } else if (open) {
