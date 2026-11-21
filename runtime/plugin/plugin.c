@@ -10,6 +10,8 @@
 
 #ifndef MKW_PS5_NATIVE
 #include <SDL3/SDL.h>
+#else
+#include <sys/stat.h>
 #endif
 
 #include "cfg.h"
@@ -304,15 +306,35 @@ static int load_one(const char *name, void *ctx) {
     return 1;
 }
 
+// A folder the player may fill by hand (a mod's files, its settings). On the PS5 the FTP server writes as another
+// user than the title, so the title's own 0755 folders would refuse the player's files: these are left open, 0777, as
+// the Pit Stop receiver leaves the folders it makes (platform/ps5_recv.c).
+static void folder_for_player(const char *dir) {
+    plat_file_mkdir_p(dir);
+#ifdef MKW_PS5_NATIVE
+    chmod(dir, 0777);
+#endif
+}
+
 // The plugins linked in: each stands for the mod of its folder's name, whose folder holds its files and logs.
 static void start_linked(void) {
+#ifdef MKW_PS5_NATIVE
+    // How a PS5 player sets a mod without its options page: mod-settings/<mod>.ini, and nickname.txt in the player's
+    // folder (players.c), the name a mod's account may have to match (the PSN online ID otherwise).
+    if (rt_plugins_linked_count) {
+        char dir[PLAT_PATH_MAX * 2];
+        folder_for_player(rt_config()->profile);
+        snprintf(dir, sizeof dir, "%s/mod-settings", rt_config()->profile);
+        folder_for_player(dir);
+    }
+#endif
     for (int i = 0; i < rt_plugins_linked_count && nplugins < MAX_PLUGINS; i++) {
         Plugin *q = &plugins[nplugins];
         memset(q, 0, sizeof *q);
         snprintf(q->mod_name, sizeof q->mod_name, "%s", rt_plugins_linked[i].name);
         snprintf(q->mod_dir, sizeof q->mod_dir, "%s/mods/%s", cfg_game_dir(), q->mod_name);
         snprintf(q->file, sizeof q->file, "(linked in)");
-        plat_file_mkdir_p(q->mod_dir);   // a library mod's folder comes with it; a linked one's may not exist yet
+        folder_for_player(q->mod_dir);   // a library mod's folder comes with it; a linked one's may not exist yet
         start_one(q, rt_plugins_linked[i].init, "started");
     }
 }

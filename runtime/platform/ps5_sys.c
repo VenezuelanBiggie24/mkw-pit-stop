@@ -125,11 +125,15 @@ void plat_local_time(struct tm *out) {
 
 // libSceUserService, as the template's pad code uses it (PS5_VulkanTemplate ps5/src/platform.c): the user who started
 // the title and their online ID (16 characters at most).
+int sceUserServiceInitialize(const void *params);
 int sceUserServiceGetInitialUser(int32_t *user_id);
 int sceUserServiceGetUserName(int32_t user_id, char *name, size_t size);
 
 int plat_user_name(char *out, size_t n) {
     int32_t user = -1;
+    // The service may not be up yet: the pads start it (pad_open), after the plugins have asked for the player's name
+    // (plugin.c) at boot, which then got a random one for the run. A second start only answers "already started".
+    (void)sceUserServiceInitialize(NULL);
     if (!out || n < 2 || sceUserServiceGetInitialUser(&user) < 0 || user < 0) return 0;
     memset(out, 0, n);
     if (sceUserServiceGetUserName(user, out, n - 1) < 0) return 0;
