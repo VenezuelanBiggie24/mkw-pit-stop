@@ -62,6 +62,287 @@ static int64_t ready_slack(uint64_t at, uint64_t value) {
     return ready ? (int64_t)(at - ready) : -1;
 }
 
+// MKW_ODD_CHECK=1 (diagnosis, default 0): the game's presented pictures sampled at 16x9 pixels and checked for a
+// single odd one, with frame generation off too. Why (20/11/2026): the PS5's races flashed for a frame (the lit scene
+// black) and nothing in the log said when. The samples and a 320x180 thumbnail are copied right after the present's
+// blit, in an upload batch of their own, and read OC_SLOTS presents later once their timeline value is done: the
+// present thread never waits for them, and the PNGs of an odd frame and its neighbours are written by a thread of
+// their own (writing them there stalled the PS5's present thread for seconds). A picture is odd when it is mostly dark
+// between two lit ones, or differs from both neighbours in at least OC_ODD of the samples while they agree within
+// OC_CALM; the line gives the frame, the shares and the odd samples' mean colour, and the PNGs go next to the log
+// (<log>.odd<frame>-{b,o,a}.png). It found the released volume textures remade cleared (914a46c). Its copy must keep
+// later writes of the image waiting, as the blit does: without that, the frame the game renders into the same image
+// three presents later could run first, and from 21 to 22/11/2026 the detector reported "giant triangles" and "missing
+// scenery" every 30 frames of the countdown that the screen never showed (ODD_CHECK_WAR below; MKW_RTSIG found the
+// game's own final pass whole in every one of them).
+#define OC_W 16
+#define OC_H 9
+#define OC_N (OC_W * OC_H)
+#define OC_SLOTS 8
+#define OC_DIFF 40
+#define OC_ODD 0.25f
+#define OC_CALM 0.12f
+#define OC_TW 320   // thumbnails of each sampled picture (box-filtered), kept for the odd ones and their neighbours
+#define OC_TH 180
+#define OC_TSZ ((size_t)OC_TW * OC_TH * 4)
+#define OC_EVENTS 24   // odd frames whose thumbnails are written (a thread of their own: nothing on the present thread)
+typedef struct OcEvent { uint64_t frame; uint8_t *px; struct OcEvent *next; } OcEvent;   // px: 3 thumbnails b, o, a
+static struct {
+    PlatMutex lock;
+    PlatCond cv;
+    OcEvent *head, *tail;
+    int started, queued;
+} OW = {PLAT_MUTEX_INIT, PLAT_COND_INIT, NULL, NULL, 0, 0};
+static void oc_writer(void *arg) {
+    (void)arg;
+    plat_thread_priority(PLAT_PRIO_LOWEST);
+    for (;;) {
+        plat_mutex_lock(&OW.lock);
+        while (!OW.head) plat_cond_wait(&OW.cv, &OW.lock);
+        OcEvent *e = OW.head;
+        OW.head = e->next;
+        if (!OW.head) OW.tail = NULL;
+        plat_mutex_unlock(&OW.lock);
+        const char *log = rt_log_path();
+        char path[1100];
+        for (int i = 0; i < 3; i++) {
+            snprintf(path, sizeof path, "%s.odd%llu-%c.png", log ? log : "mkw", (unsigned long long)e->frame, "boa"[i]);
+            rt_write_png(path, e->px + OC_TSZ * (size_t)i, OC_TW, OC_TH);
+        }
+        rt_log("vk: odd frame %llu: thumbnails written to %s.odd%llu-{b,o,a}.png (before, odd, after)",
+               (unsigned long long)e->frame, log ? log : "mkw", (unsigned long long)e->frame);
+        free(e->px);
+        free(e);
+    }
+}
+static struct {
+    int on;   // 0 unknown, 1 on, -1 off
+    VkBuffer buf;
+    VmaAllocation alloc;
+    uint8_t *map;
+    struct { uint64_t frame, value; int bgra, used, thumb; } slot[OC_SLOTS];
+    VkImage th;                 // the thumbnail target, in GENERAL once made
+    VmaAllocation th_alloc;
+    VkFormat th_fmt;
+    int th_fresh, th_off;
+    VkBuffer tb;                // OC_SLOTS thumbnails, read back with the samples
+    VmaAllocation tb_alloc;
+    uint8_t *tmap;
+    uint8_t thist[3][OC_TSZ];   // the thumbnails of hist[] (zero when none)
+    int thave[3];
+    uint64_t next;   // presents sampled
+    uint64_t done;   // presents read back, in order
+    uint8_t hist[3][OC_N * 4];   // the last three read back, oldest first
+    uint64_t hframe[3];
+    int nh;
+    uint64_t odd, dark, checked;
+} OC;
+
+static float oc_dist(const uint8_t *a, const uint8_t *b) {
+    int d = 0;
+    for (int i = 0; i < OC_N; i++)
+        d += abs(a[i * 4] - b[i * 4]) > OC_DIFF || abs(a[i * 4 + 1] - b[i * 4 + 1]) > OC_DIFF ||
+             abs(a[i * 4 + 2] - b[i * 4 + 2]) > OC_DIFF;
+    return (float)d / OC_N;
+}
+static float oc_dark(const uint8_t *a) {
+    int d = 0;
+    for (int i = 0; i < OC_N; i++) d += a[i * 4] <= 12 && a[i * 4 + 1] <= 12 && a[i * 4 + 2] <= 12;
+    return (float)d / OC_N;
+}
+
+// The middle of the three pictures read back last: logged when odd.
+static void oc_check(void) {
+    const uint8_t *b = OC.hist[0], *o = OC.hist[1], *a = OC.hist[2];
+    OC.checked++;
+    float db = oc_dist(o, b), da = oc_dist(o, a), ba = oc_dist(b, a);
+    float dk = oc_dark(o), dkb = oc_dark(b), dka = oc_dark(a);
+    int black = dk >= 0.7f && dkb < 0.3f && dka < 0.3f;
+    int odd = db >= OC_ODD && da >= OC_ODD && ba <= OC_CALM;
+    if (!black && !odd) return;
+    if (black) OC.dark++;
+    OC.odd++;
+    vk_rtsig_odd(OC.hframe[1]);   // MKW_RTSIG: the frames around the next expected ones are sampled
+    uint64_t r = 0, g = 0, bl = 0, n = 0;   // mean colour of the samples that differ from both neighbours
+    for (int i = 0; i < OC_N; i++) {
+        int x = abs(o[i * 4] - b[i * 4]) > OC_DIFF || abs(o[i * 4 + 1] - b[i * 4 + 1]) > OC_DIFF ||
+                abs(o[i * 4 + 2] - b[i * 4 + 2]) > OC_DIFF;
+        if (!x) continue;
+        r += o[i * 4], g += o[i * 4 + 1], bl += o[i * 4 + 2], n++;
+    }
+    if (OC.odd <= 500)
+        rt_log("vk: odd frame %llu (%s): differs from the frames before and after in %.0f%% and %.0f%% of samples, they "
+               "from each other in %.0f%%; dark %.0f%% (before %.0f%%, after %.0f%%); changed samples' mean colour "
+               "%llu,%llu,%llu; odd so far %llu of %llu (MKW_ODD_CHECK)", (unsigned long long)OC.hframe[1],
+               black ? "dark" : "odd", db * 100, da * 100, ba * 100, dk * 100, dkb * 100, dka * 100,
+               (unsigned long long)(n ? r / n : 0), (unsigned long long)(n ? g / n : 0), (unsigned long long)(n ? bl / n : 0),
+               (unsigned long long)OC.odd, (unsigned long long)OC.checked);
+    if (OC.thave[0] && OC.thave[1] && OC.thave[2] && OW.queued < OC_EVENTS) {
+        OcEvent *e = malloc(sizeof *e);
+        uint8_t *px = malloc(OC_TSZ * 3);
+        if (!e || !px) { free(e), free(px); return; }
+        memcpy(px, OC.thist, OC_TSZ * 3);
+        *e = (OcEvent){OC.hframe[1], px, NULL};
+        plat_mutex_lock(&OW.lock);
+        if (!OW.started) OW.started = plat_thread_spawn(oc_writer, NULL, "odd frame png", 0) ? 1 : -1;
+        if (OW.started > 0) {
+            if (OW.tail) OW.tail->next = e;
+            else OW.head = e;
+            OW.tail = e, OW.queued++;
+            plat_cond_signal(&OW.cv);
+            e = NULL;
+        }
+        plat_mutex_unlock(&OW.lock);
+        if (e) free(e->px), free(e);
+    }
+}
+
+// Reads back the slots whose copies are done, in order (present thread).
+static void oc_collect(void) {
+    uint64_t done = vk_sync_fence_done();
+    while (OC.done < OC.next) {
+        __typeof__(OC.slot[0]) *s = &OC.slot[OC.done % OC_SLOTS];
+        if (s->used && s->value > done) break;
+        if (s->used) {
+            vmaInvalidateAllocation(vk_ctx()->vma, OC.alloc, 0, VK_WHOLE_SIZE);
+            if (OC.tmap) vmaInvalidateAllocation(vk_ctx()->vma, OC.tb_alloc, 0, VK_WHOLE_SIZE);
+            memmove(OC.hist[0], OC.hist[1], sizeof OC.hist[0] * 2);
+            memmove(OC.thist[0], OC.thist[1], sizeof OC.thist[0] * 2);
+            OC.thave[0] = OC.thave[1], OC.thave[1] = OC.thave[2];
+            OC.thave[2] = s->thumb && OC.tmap;
+            if (OC.thave[2]) memcpy(OC.thist[2], OC.tmap + OC_TSZ * (size_t)(OC.done % OC_SLOTS), OC_TSZ);
+            OC.hframe[0] = OC.hframe[1], OC.hframe[1] = OC.hframe[2];
+            uint8_t *dst = OC.hist[2];
+            memcpy(dst, OC.map + (size_t)(OC.done % OC_SLOTS) * OC_N * 4, OC_N * 4);
+            if (s->bgra)
+                for (int i = 0; i < OC_N; i++) { uint8_t t = dst[i * 4]; dst[i * 4] = dst[i * 4 + 2]; dst[i * 4 + 2] = t; }
+            OC.hframe[2] = s->frame;
+            if (++OC.nh >= 3) oc_check();
+        }
+        s->used = 0;
+        OC.done++;
+    }
+}
+
+// Before the blit of present `frame` (present thread): its samples copied by the upload batch. 0 when not sampled.
+static int oc_sample(VkImage src, VkFormat fmt, int w, int h, const int crop[4], uint64_t frame) {
+    if (!OC.on) OC.on = cfg_get("MKW_ODD_CHECK") && atoi(cfg_get("MKW_ODD_CHECK")) > 0 ? 1 : -1;
+    if (OC.on < 0 || w < OC_W || h < OC_H) return 0;
+    int bgra = fmt == VK_FORMAT_B8G8R8A8_UNORM || fmt == VK_FORMAT_B8G8R8A8_SRGB;
+    if (!bgra && fmt != VK_FORMAT_R8G8B8A8_UNORM && fmt != VK_FORMAT_R8G8B8A8_SRGB) {
+        static int said;
+        if (!said++) rt_log("vk: odd frame check: present format %d is not 8-bit RGBA: not checked", (int)fmt);
+        return 0;
+    }
+    VkCtx *c = vk_ctx();
+    if (!OC.buf) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)OC_N * 4 * OC_SLOTS,
+                                 .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        if (vmaCreateBuffer(c->vma, &bi, &ai, &OC.buf, &OC.alloc, &info) != VK_SUCCESS) {
+            rt_log("vk: odd frame check off: no memory for its samples");
+            OC.on = -1;
+            return 0;
+        }
+        OC.map = info.pMappedData;
+        rt_log("vk: odd frame check on: each presented game frame sampled at %dx%d pixels, read back %d presents later "
+               "(MKW_ODD_CHECK)", OC_W, OC_H, OC_SLOTS);
+    }
+    oc_collect();
+    __typeof__(OC.slot[0]) *s = &OC.slot[OC.next % OC_SLOTS];
+    if (s->used) return 0;   // its copy not read yet (the GPU is OC_SLOTS presents behind): this present goes unchecked
+    // the game's picture: the crop rectangle {x, y, w, h} the present blits (vk_present_image), else the whole image
+    int cx = 0, cy = 0, cw = w, ch = h;
+    if (crop && crop[2] > 0 && crop[3] > 0 && crop[0] >= 0 && crop[1] >= 0 && crop[0] + crop[2] <= w && crop[1] + crop[3] <= h)
+        cx = crop[0], cy = crop[1], cw = crop[2], ch = crop[3];
+    if (cw < OC_W || ch < OC_H) return 0;
+    VkBufferImageCopy r[OC_N];
+    for (int i = 0; i < OC_N; i++)
+        r[i] = (VkBufferImageCopy){.bufferOffset = (VkDeviceSize)(OC.next % OC_SLOTS) * OC_N * 4 + (VkDeviceSize)i * 4,
+                                   .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                   .imageOffset = {cx + (2 * (i % OC_W) + 1) * cw / (2 * OC_W),
+                                                   cy + (2 * (i / OC_W) + 1) * ch / (2 * OC_H), 0},
+                                   .imageExtent = {1, 1, 1}};
+    // the thumbnail target, made once for the present's format (sRGB stays sRGB: the PNG gets the bytes shown)
+    VkFormat tf = fmt == VK_FORMAT_R8G8B8A8_SRGB || fmt == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_R8G8B8A8_SRGB
+                                                                                    : VK_FORMAT_R8G8B8A8_UNORM;
+    if (!OC.th && !OC.th_off) {
+        VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = tf,
+                                .extent = {OC_TW, OC_TH, 1}, .mipLevels = 1, .arrayLayers = 1,
+                                .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+        VmaAllocationCreateInfo ia = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+        VkBufferCreateInfo tbi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = OC_TSZ * OC_SLOTS,
+                                  .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ta = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo tinfo;
+        if (vmaCreateImage(c->vma, &ci, &ia, &OC.th, &OC.th_alloc, NULL) != VK_SUCCESS) OC.th = VK_NULL_HANDLE;
+        else if (vmaCreateBuffer(c->vma, &tbi, &ta, &OC.tb, &OC.tb_alloc, &tinfo) != VK_SUCCESS) OC.tb = VK_NULL_HANDLE;
+        else OC.tmap = tinfo.pMappedData, OC.th_fmt = tf, OC.th_fresh = 1;
+        if (!OC.tmap) OC.th_off = 1, rt_log("vk: odd frame check: no memory for thumbnails; odd frames are only logged");
+    }
+    int thumb = OC.tmap && OC.th_fmt == tf;
+    VkCommandBuffer cb = vk_upload_begin();
+    if (!cb) return 0;
+    VkMemoryBarrier2 pre = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                            .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                            .dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT};
+    VkDependencyInfo pd = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &pre};
+    vkCmdPipelineBarrier2(cb, &pd);
+    vkCmdCopyImageToBuffer(cb, src, VK_IMAGE_LAYOUT_GENERAL, OC.buf, OC_N, r);
+    if (thumb) {
+        VkImageMemoryBarrier2 ib = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                    .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                                    .srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                    .dstStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT, .dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                                    .oldLayout = OC.th_fresh ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_GENERAL,
+                                    .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                    .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = OC.th,
+                                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+        VkDependencyInfo id = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1,
+                               .pImageMemoryBarriers = &ib};
+        vkCmdPipelineBarrier2(cb, &id);
+        OC.th_fresh = 0;
+        VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                          .srcOffsets = {{cx, cy, 0}, {cx + cw, cy + ch, 1}},
+                          .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {OC_TW, OC_TH, 1}}};
+        vkCmdBlitImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, OC.th, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+        ib.oldLayout = VK_IMAGE_LAYOUT_GENERAL, ib.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        ib.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier2(cb, &id);
+        VkBufferImageCopy tc = {.bufferOffset = OC_TSZ * (VkDeviceSize)(OC.next % OC_SLOTS),
+                                .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {OC_TW, OC_TH, 1}};
+        vkCmdCopyImageToBuffer(cb, OC.th, VK_IMAGE_LAYOUT_GENERAL, OC.tb, 1, &tc);
+    }
+    VkMemoryBarrier2 hb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                           .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+                           .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
+    VkDependencyInfo hd = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &hb};
+    vkCmdPipelineBarrier2(cb, &hd);
+    // Later submissions that write the game's image wait for these reads, as the present's blit makes them wait for
+    // its own (gfx_present.c): the game renders 3 frames later into the same image, and without it that frame's first
+    // passes could run before these copies, which then read a picture half drawn (sky, karts, road, no scenery). The
+    // game's final pass was whole in every frame the detector called odd (rtsigf-3, 22/11/2026); with the barrier, 0, 0
+    // and 6 odd frames in three races (war-1..3, the 6 neighbours of a lighting change) against 20-67 in each before.
+    // MKW_ODD_CHECK_WAR=0 (or "ab") leaves it out.
+    static int war = -1;
+    if (war < 0) war = rt_knob("ODD_CHECK_WAR", "1");
+    if (RT_KNOB_ON(war)) {
+        VkMemoryBarrier2 wb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                               .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT};
+        VkDependencyInfo wd = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &wb};
+        vkCmdPipelineBarrier2(cb, &wd);
+    }
+    vk_upload_end();
+    vk_upload_flush(0);
+    s->frame = frame, s->bgra = bgra, s->used = 1, s->thumb = thumb, s->value = UINT64_MAX;   // its value: the blit's submission below
+    OC.next++;
+    return 1;
+}
+
 static void present_main(void *arg) {
     (void)arg;
     plat_thread_priority(PLAT_PRIO_HIGHEST);
@@ -86,6 +367,11 @@ static void present_main(void *arg) {
         for (int k = 0; k < nf; k++) vk_present_blit_ahead(fo[k], VK_IMAGE_LAYOUT_GENERAL, VK_FORMAT_R8G8B8A8_UNORM, fw, fh, NULL);
         if (!nf) vk_present_blit(j.image, VK_IMAGE_LAYOUT_GENERAL, j.format, j.w, j.h, j.has_crop ? j.crop : NULL);
         uint64_t f = vk_sync_submit(NULL, 0);   // a timeline value after the blit: deferred destruction waits for the blit too
+        // MKW_ODD_CHECK: the game's picture sampled after the blit was sent, so it reads what the screen got (sampled
+        // before, the start's streak frames had no HUD, 21/11/2026); its samples are read once the next present's
+        // value is done, which the queue reaches after them
+        if (oc_sample(j.image, j.format, j.w, j.h, j.has_crop ? j.crop : NULL, j.frame))
+            OC.slot[(OC.next - 1) % OC_SLOTS].value = f + 1;
         if (j.value && f != j.value)
             rt_fatal("vk: the present of frame %llu signalled %llu, queued as %llu", (unsigned long long)j.frame,
                      (unsigned long long)f, (unsigned long long)j.value);
