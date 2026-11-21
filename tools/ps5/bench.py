@@ -41,6 +41,7 @@ ELF_PORT = 9021
 CTL_PORT = 9031  # titlectl.c TITLECTL_PORT
 ELF = ROOT / "build/ps5-titlectl/titlectl.elf"
 SDK = Path(os.environ.get("PS5_PAYLOAD_SDK", Path.home() / "ps5-payload-sdk/ps5-payload-sdk"))
+HUNG = re.compile(r"hang watch: no present for (?:[3-9]\d|\d{3,})\.\d s \(frame \d+\)")
 RESULT = re.compile(r"bench: result (.*)")
 
 
@@ -191,6 +192,12 @@ def run_once(host: str, name: str, mode: str, sets: list[str], timeout: float, s
                 break
             if time.time() - last_growth > stall:
                 ended = f"log silent for {stall:.0f} s"
+                break
+            # A hung title can keep writing (the governor, the hang watch itself): the hang watch's first report of
+            # 30 s or more without a present ends it before the console goes down with it (ucmp, 21/11/2026).
+            hung = HUNG.search(log.decode(errors="replace"))
+            if hung:
+                ended = f"hung: {hung.group(0)}"
                 break
             if time.time() - t0 > timeout:
                 ended = f"timeout {timeout:.0f} s"
