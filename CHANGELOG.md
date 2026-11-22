@@ -29,6 +29,7 @@ Before publishing:
 - Split screen at 30 fps, 2 players, on a base PS5 (an earlier build of the same branch): 33.35 ms, race speed 1.00x.
 - After the 0.1.17 merge, on Linux: `--selftest`, `--probe-cfg`, the plugin probe (loaded and linked in), `tests/test_cfg.py` and `tests/test_mod_settings.py`.
 - The placeholder and both builder packages pass the release's no-game-content check and match `SHA256SUMS`.
+- Both builder packages, unpacked into clean folders, pass `prepare_ps5.py --check-only` on a 1.8.0 console dump (the Windows one through its own Python, on Windows). This check caught two missing files in the first pack, and the release is packed with them.
 
 Not run from these packages: a whole title build through the Windows or Linux builder, the send to the placeholder, and an update over an installed 0.1.0 title.
 
