@@ -266,11 +266,11 @@ void vk_texture_new_submit(void) {
         n_alias_deferred = n_alias_placed = n_alias_dropped = 0;
         tex_zero_tail_recheck(f * 60);
         rt_log("perf: frame %llu: texture re-uploads %llu (%.1f MiB, %.2f ms), after WriteTexels %llu (%.1f MiB, %.2f ms); "
-               "region copies from storage %llu (%.1f MiB, %.2f ms)",
+               "region copies from storage %llu (%.1f MiB, %.2f ms); partial skipped %llu subresources (%.1f MiB)",
                (unsigned long long)f * 60, (unsigned long long)ru_n, ru_bytes / 1048576.0, ru_ns / 1e6,
                (unsigned long long)ru_wt_n, ru_wt_bytes / 1048576.0, ru_wt_ns / 1e6, (unsigned long long)rc_n,
-               rc_bytes / 1048576.0, rc_ns / 1e6);
-        ru_n = ru_bytes = ru_ns = ru_wt_n = ru_wt_bytes = ru_wt_ns = rc_n = rc_bytes = rc_ns = 0;
+               rc_bytes / 1048576.0, rc_ns / 1e6, (unsigned long long)ru_skip_sub, ru_skip_bytes / 1048576.0);
+        ru_n = ru_bytes = ru_ns = ru_wt_n = ru_wt_bytes = ru_wt_ns = rc_n = rc_bytes = rc_ns = ru_skip_sub = ru_skip_bytes = 0;
         uint64_t ars[4], uw[6], ls_n, ls_ns, ls_max;
         vk_astc_record_split(ars);
         vk_upload_wait_stats(uw);

@@ -20,6 +20,7 @@
 #include "astc_decode_spv.h"
 #include "bc1_encode_spv.h"
 #include "bc7_encode_spv.h"
+#include "bl_deswizzle_spv.h"
 #include "cfg.h"
 #include "host.h"
 #include "nvn_api.h"
@@ -94,6 +95,7 @@ enum { TAB_BYTES = 28 * 4, TAB_WUNQ = TAB_BYTES, TAB_CUNQ = TAB_BYTES + 144, TAB
 
 typedef struct {
     uint32_t in_base, out_base, width, height, bw, bh, bx, bslice, srgb, err_slot;
+    uint32_t bl_mode, bl_th, bl_td, bl_y0, bl_z0, bl_gobs_x;
 } Push;
 
 static PlatMutex g_lock = PLAT_MUTEX_INIT;
@@ -106,6 +108,7 @@ static struct {
     VkPipeline pipe;
     VkPipeline enc;               // bc7_encode.comp, same layout (bindings 0 and 1); NULL: no BC7 re-encoding
     VkPipeline enc1;              // bc1_encode.comp, same layout; NULL: no BC1
+    VkPipeline bl_pipe;           // bl_deswizzle.comp, same layout (bindings 0 and 1); generic block-linear deswizzle
     int bc7;                      // vk_astc_bc7's answer on dev; -1 not decided
     PFN_vkCmdPushDescriptorSetKHR push;
     VkBuffer tab;                 // device-local copy of the tables
@@ -540,6 +543,12 @@ static int create_pipeline(VkCtx *c) {
         if (vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &ci, NULL, &G.enc1) != VK_SUCCESS) G.enc1 = VK_NULL_HANDLE;
         vkDestroyShaderModule(c->device, m, NULL);
     }
+    mi.codeSize = sizeof bl_deswizzle_spv, mi.pCode = bl_deswizzle_spv;
+    if (vkCreateShaderModule(c->device, &mi, NULL, &m) == VK_SUCCESS) {
+        ci.stage.module = m;
+        if (vkCreateComputePipelines(c->device, VK_NULL_HANDLE, 1, &ci, NULL, &G.bl_pipe) != VK_SUCCESS) G.bl_pipe = VK_NULL_HANDLE;
+        vkDestroyShaderModule(c->device, m, NULL);
+    }
     return 1;
 }
 
@@ -673,6 +682,7 @@ static uint32_t fx_failures;
 // Scratch per vk_astc_record: texels of at most this many bytes at a time, so a large texture array (169 M texels, 677 MB
 // as RGBA8, on monsters2) or an 8192x8192 level (256 MiB as RGBA8) does not need its whole RGBA8 copy as scratch.
 #define CHUNK_OUT (32ull << 20)
+#define CHUNK_IN (16ull << 20)
 
 static uint32_t lcm_4(uint32_t bh) { return bh % 4 == 0 ? bh : bh % 2 == 0 ? bh * 2 : bh * 4; }   // lcm(bh, 4)
 
@@ -681,7 +691,7 @@ static VkDeviceSize region_bc(const VkAstcRegion *r, VkDeviceSize block) {   // 
     return (VkDeviceSize)((r->w + 3) / 4) * ((r->h + 3) / 4) * r->slices * block;
 }
 static VkDeviceSize region_in(const VkAstcRegion *r, uint32_t bw, uint32_t bh) {
-    return (VkDeviceSize)((r->w + bw - 1) / bw) * ((r->h + bh - 1) / bh) * r->slices * 16;
+    return r->bl_size ? r->bl_size : (VkDeviceSize)((r->w + bw - 1) / bw) * ((r->h + bh - 1) / bh) * r->slices * 16;
 }
 
 // A region over CHUNK_OUT is cut into pieces that each fit one: groups of whole slices (3D), and a slice over a chunk
@@ -737,7 +747,20 @@ static int split_regions(const VkAstcRegion *rg, int n, uint32_t bw, uint32_t bh
             for (uint32_t y = 0; y < rows; y += (uint32_t)per) {
                 uint32_t nb = rows - y < per ? rows - y : (uint32_t)per, y0 = y * bh;
                 p[k] = *r;
-                p[k].src = r->src + z * slice_in + (VkDeviceSize)y * bx * 16;
+                if (r->bl_size) {
+                    // 2D block-linear band (caller keeps 3D > CHUNK_OUT linear): copy only the covering block-rows.
+                    uint32_t gobs_x = (bx + 3u) >> 2u, blk_h = 8u << r->bl_th;
+                    uint64_t row_blk_bytes = (uint64_t)gobs_x * (512ull << r->bl_th);
+                    uint32_t y_blk0 = y >> (3u + r->bl_th);
+                    uint32_t y_blk1 = (y + nb + blk_h - 1u) >> (3u + r->bl_th);
+                    p[k].src = r->src + (VkDeviceSize)y_blk0 * row_blk_bytes;
+                    p[k].bl_size = (VkDeviceSize)(y_blk1 - y_blk0) * row_blk_bytes;
+                    p[k].bl_y0 = y - (y_blk0 << (3u + r->bl_th));
+                    p[k].bl_z0 = 0;
+                    p[k].bl_rows = (y_blk1 - y_blk0) << (3u + r->bl_th);
+                } else {
+                    p[k].src = r->src + z * slice_in + (VkDeviceSize)y * bx * 16;
+                }
                 p[k].h = r->h - y0 < nb * bh ? r->h - y0 : nb * bh, p[k].slices = 1;
                 p[k].offset.y = r->offset.y + (int32_t)y0, p[k++].offset.z = r->offset.z + (int32_t)z;
             }
@@ -752,7 +775,7 @@ static void scratch_caps(const VkAstcRegion *rg, int n, uint32_t bw, uint32_t bh
     *cap_in = *cap_out = *cap_bc = *out_total = 0;
     for (int i = 0; i < n; i++) {
         VkDeviceSize o = region_out(&rg[i]), b = region_in(&rg[i], bw, bh);
-        if (co && co + o > CHUNK_OUT) ci = co = cb7 = 0;
+        if (co && (co + o > CHUNK_OUT || ci + b > CHUNK_IN)) ci = co = cb7 = 0;
         ci += b, co += o, cb7 += region_bc(&rg[i], blk), *out_total += o;
         if (ci > *cap_in) *cap_in = ci;
         if (co > *cap_out) *cap_out = co;
@@ -910,7 +933,7 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     for (int i0 = 0; i0 < n; chunks++) {
         int i1 = i0;
         VkDeviceSize in = 0, out = 0;
-        for (; i1 < n && (i1 == i0 || out + region_out(&rg[i1]) <= CHUNK_OUT); i1++) {
+        for (; i1 < n && (i1 == i0 || (out + region_out(&rg[i1]) <= CHUNK_OUT && in + region_in(&rg[i1], bw, bh) <= CHUNK_IN)); i1++) {
             bcp[i1 - i0] = (VkBufferCopy){rg[i1].src, in, region_in(&rg[i1], bw, bh)};
             in += region_in(&rg[i1], bw, bh), out += region_out(&rg[i1]);
         }
@@ -936,9 +959,14 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
         for (int i = i0; i < i1; i++) {
             const VkAstcRegion *r = &rg[i];
             uint32_t bx = (r->w + bw - 1) / bw, by = (r->h + bh - 1) / bh;
+            uint32_t bl = r->bl_size != 0;
+            uint32_t bl_rows = bl ? (r->bl_rows ? r->bl_rows : by) : by;
+            uint32_t blocks_y = bl ? (bl_rows + (8u << r->bl_th) - 1u) >> (3u + r->bl_th) : 0;
             Push pc = {.in_base = (uint32_t)(ib / 16), .out_base = (uint32_t)(ob / 4), .width = r->w, .height = r->h,
-                       .bw = bw, .bh = bh, .bx = bx, .bslice = bx * by, .srgb = (uint32_t)(srgb != 0),
-                       .err_slot = eslot ? eslot * ERR_LEVELS + (r->level < ERR_LEVELS ? r->level : ERR_LEVELS - 1) : 0};
+                       .bw = bw, .bh = bh, .bx = bx, .bslice = bl ? blocks_y : bx * by, .srgb = (uint32_t)(srgb != 0),
+                       .err_slot = eslot ? eslot * ERR_LEVELS + (r->level < ERR_LEVELS ? r->level : ERR_LEVELS - 1) : 0,
+                       .bl_mode = bl, .bl_th = r->bl_th, .bl_td = r->bl_td, .bl_y0 = r->bl_y0, .bl_z0 = r->bl_z0,
+                       .bl_gobs_x = (bx + 3u) >> 2u};
             vkCmdPushConstants(cb, G.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
             uint32_t bpw = bw * bh <= 64 ? 64 / (bw * bh) : 1;   // blocks per workgroup, as astc_decode.comp main
             vkCmdDispatch(cb, (bx + bpw - 1) / bpw, by, r->slices);
@@ -1012,6 +1040,124 @@ int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, cons
     return 1;
 }
 
+int vk_bl_deswizzle_ready(void) {
+    VkCtx *c = vk_ctx();
+    if (!c) return 0;
+    vk_astc_gpu();   // ensures create_pipeline has run on this device
+    plat_mutex_lock_shared(&g_lock);
+    int ok = G.dev == c->device && G.bl_pipe != VK_NULL_HANDLE;
+    plat_mutex_unlock_shared(&g_lock);
+    return ok;
+}
+
+int vk_bl_deswizzle_record(VkCommandBuffer cb, VkBuffer src, const VkBlDeswRegion *rg, int n, VkImage img,
+                           VkImageAspectFlags aspect) {
+    if (!rg || n <= 0) return 1;
+    VkCtx *c = vk_ctx();
+    if (!c) return 0;
+    plat_mutex_lock_shared(&g_lock);
+    VkPipeline pipe = G.dev == c->device ? G.bl_pipe : VK_NULL_HANDLE;
+    plat_mutex_unlock_shared(&g_lock);
+    if (!pipe) return 0;
+
+    VkDeviceSize al = c->props.limits.minStorageBufferOffsetAlignment;
+    if (al < 16) al = 16;
+    const VkDeviceSize MAX_HALF = 32ull << 20;
+    VkDeviceSize cap_in = 0, cap_out = 0, ci = 0, co = 0;
+    for (int i = 0; i < n; i++) {
+        VkDeviceSize bi = (rg[i].bl_size + 15) & ~15ull;
+        VkDeviceSize bo = ((VkDeviceSize)rg[i].rb * rg[i].rows * rg[i].slices + 15) & ~15ull;
+        if (bi > MAX_HALF || bo > MAX_HALF) return 0;
+        if (co && (ci + bi > MAX_HALF || co + bo > MAX_HALF)) ci = co = 0;
+        ci += bi, co += bo;
+        if (ci > cap_in) cap_in = ci;
+        if (co > cap_out) cap_out = co;
+    }
+    cap_in = (cap_in + al - 1) / al * al;
+    cap_out = (cap_out + al - 1) / al * al;
+    if (!cap_in || !cap_out || cap_in + cap_out > FIXED_SCRATCH) return 0;
+
+    // Reuse FIXED_SCRATCH (caller holds the upload lock, same graphics queue as vk_astc_record).
+    VkBuffer sb = fx_buf;
+    if (!sb) {
+        uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+        if (!fx_tried || fr >= fx_retry_frame) {
+            VkBufferCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = FIXED_SCRATCH,
+                                     .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                                              VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+            VmaAllocationCreateInfo aci = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+            fx_tried = 1;
+            if (vmaCreateBuffer(svma(), &fi, &aci, &fx_buf, &fx_alloc, NULL) != VK_SUCCESS) fx_buf = VK_NULL_HANDLE;
+            if (!fx_buf) fx_retry_frame = fr + FX_RETRY_FRAMES, fx_failures++;
+        }
+        sb = fx_buf;
+    }
+    if (!sb) return 0;
+    mem_barrier(cb, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+
+    VkDescriptorBufferInfo dbi[2] = {{sb, 0, cap_in}, {sb, cap_in, cap_out}};
+    VkWriteDescriptorSet w[2];
+    for (int i = 0; i < 2; i++)
+        w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = (uint32_t)i,
+                                      .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                      .pBufferInfo = &dbi[i]};
+    VkBufferImageCopy *copies = calloc((size_t)n, sizeof *copies);
+    VkBufferCopy *bcp = calloc((size_t)n, sizeof *bcp);
+    if (!copies || !bcp) { free(copies), free(bcp); return 0; }
+
+    int chunks = 0;
+    for (int i0 = 0; i0 < n; chunks++) {
+        int i1 = i0;
+        VkDeviceSize in = 0, out = 0;
+        for (; i1 < n; i1++) {
+            VkDeviceSize bi = (rg[i1].bl_size + 15) & ~15ull;
+            VkDeviceSize bo = ((VkDeviceSize)rg[i1].rb * rg[i1].rows * rg[i1].slices + 15) & ~15ull;
+            if (i1 > i0 && (in + bi > MAX_HALF || out + bo > MAX_HALF)) break;
+            bcp[i1 - i0] = (VkBufferCopy){rg[i1].src, in, rg[i1].bl_size};
+            in += bi, out += bo;
+        }
+        if (chunks)
+            mem_barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+                        VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                        VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+        vkCmdCopyBuffer(cb, src, sb, (uint32_t)(i1 - i0), bcp);
+        mem_barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
+        rec_push(G.push, cb, VK_PIPELINE_BIND_POINT_COMPUTE, G.layout, 0, 2, w);
+        VkDeviceSize ib = 0, ob = 0;
+        for (int i = i0; i < i1; i++) {
+            const VkBlDeswRegion *r = &rg[i];
+            uint32_t row_u32 = r->rb >> 2u;
+            uint32_t gobs_x = (row_u32 + 15u) >> 4u;
+            uint32_t blocks_y = (r->rows + (8u << r->th) - 1u) >> (3u + r->th);
+            Push pc = {.in_base = (uint32_t)(ib >> 2u), .out_base = (uint32_t)(ob >> 2u),
+                       .width = row_u32, .height = r->rows, .bw = gobs_x, .bh = blocks_y,
+                       .bx = r->th, .bslice = r->td};
+            vkCmdPushConstants(cb, G.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+            vkCmdDispatch(cb, (row_u32 + 15u) / 16u, (r->rows + 3u) / 4u, r->slices);
+            copies[i - i0] = (VkBufferImageCopy){
+                .bufferOffset = cap_in + ob,
+                .bufferRowLength = r->rb / r->bpb * r->bw,
+                .bufferImageHeight = r->rows * r->bh,
+                .imageSubresource = {aspect, r->level, r->layer, 1},
+                .imageExtent = {r->w, r->h, r->slices},
+            };
+            ib += (r->bl_size + 15) & ~15ull;
+            ob += ((VkDeviceSize)r->rb * r->rows * r->slices + 15) & ~15ull;
+        }
+        mem_barrier(cb, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        vkCmdCopyBufferToImage(cb, sb, img, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)(i1 - i0), copies);
+        i0 = i1;
+    }
+    free(copies), free(bcp);
+    return 1;
+}
+
 void vk_astc_release(void) {
     VkCtx *c = vk_ctx();
     vk_astc_time_summary();
@@ -1028,6 +1174,7 @@ void vk_astc_release(void) {
         if (G.pipe) vkDestroyPipeline(c->device, G.pipe, NULL);
         if (G.enc) vkDestroyPipeline(c->device, G.enc, NULL);
         if (G.enc1) vkDestroyPipeline(c->device, G.enc1, NULL);
+        if (G.bl_pipe) vkDestroyPipeline(c->device, G.bl_pipe, NULL);
         if (G.layout) vkDestroyPipelineLayout(c->device, G.layout, NULL);
         if (G.dsl) vkDestroyDescriptorSetLayout(c->device, G.dsl, NULL);
         if (G.tab) vmaDestroyBuffer(c->vma, G.tab, G.tab_alloc);

@@ -96,7 +96,7 @@ extern SampSlot *sslots;
 extern int nsslots, nreleased;
 extern uint64_t released_bytes;   // own memory of the released entries (vk_tex_evict.c sweep_released)
 extern Tex *rel_head, *rel_tail;
-extern uint64_t n_uploads, n_reuploads, ru_n, ru_bytes, ru_ns, ru_wt_n, ru_wt_bytes, ru_wt_ns;
+extern uint64_t n_uploads, n_reuploads, ru_n, ru_bytes, ru_ns, ru_wt_n, ru_wt_bytes, ru_wt_ns, ru_skip_sub, ru_skip_bytes;
 // MKW_TRACE=perf: where upload() spends its time (tex_lock), per perf line: the precomputed-texture path (hash and
 // copy), flushing the open batch, getting staging memory (may wait for the GPU), deswizzle/decode on the CPU, recording
 // the copy or ASTC decode; and the slowest single upload with its own split.

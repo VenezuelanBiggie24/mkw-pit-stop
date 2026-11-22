@@ -1,0 +1,36 @@
+// Switch 2 block-linear -> linear deswizzle on the GPU for any 4-byte-aligned texture level (BCn, RGBA8, RG16F, etc.).
+// Matches runtime/gfx/nvn/tex/tex_deswizzle.c nvn_bl_offset (GOB = 64 bytes x 8 rows = 512 bytes, Switch 2 swapped bits 5 & 6).
+// Compiled to runtime/gfx/vk/spv/bl_deswizzle_spv.h by tools/shaders/embed_spv.py; vk_astc.c records the dispatch.
+#version 450
+
+layout(local_size_x = 16, local_size_y = 4, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { uint src[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer Dst { uint dst[]; };
+
+layout(push_constant) uniform Params {
+    uint in_base;    // first uint of the block-linear level in src
+    uint out_base;   // first uint of the linear level in dst
+    uint row_u32;    // bytes per row / 4
+    uint rows;       // block rows per slice
+    uint gobs_x;     // (row_u32 + 15) >> 4
+    uint blocks_y;   // (rows + (8 << th) - 1) >> (3 + th)
+    uint th;         // log2 GOBs per block height
+    uint td;         // log2 GOBs per block depth
+} pc;
+
+void main() {
+    uint ux = gl_GlobalInvocationID.x;
+    uint uy = gl_GlobalInvocationID.y;
+    uint uz = gl_GlobalInvocationID.z;
+    if (ux >= pc.row_u32 || uy >= pc.rows) return;
+
+    uint bh_gobs = 1u << pc.th;
+    uint bd_gobs = 1u << pc.td;
+    uint block_u32 = 128u << (pc.th + pc.td);
+    uint gob_u32 = ((ux & 8u) << 3u) | ((uy & 4u) << 3u) | ((ux & 4u) << 2u) | ((uy & 3u) << 2u) | (ux & 3u);
+    uint bl_u32 = ((uz >> pc.td) * pc.gobs_x * pc.blocks_y + (uy >> (3u + pc.th)) * pc.gobs_x + (ux >> 4u)) * block_u32
+                + (((uz & (bd_gobs - 1u)) << pc.th) + ((uy >> 3u) & (bh_gobs - 1u))) * 128u + gob_u32;
+
+    dst[pc.out_base + (uz * pc.rows + uy) * pc.row_u32 + ux] = src[pc.in_base + bl_u32];
+}

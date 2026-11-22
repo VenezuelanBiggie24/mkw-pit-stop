@@ -45,8 +45,8 @@ int nreleased;
 uint64_t released_bytes;
 Tex *rel_head, *rel_tail;   // released entries in release order (sweep_released drops from the head)
 uint64_t n_uploads, n_reuploads;
-// Re-uploads since the last perf line (tex_lock): all, and those of textures a WriteTexels wrote since their last upload.
-uint64_t ru_n, ru_bytes, ru_ns, ru_wt_n, ru_wt_bytes, ru_wt_ns;
+// Re-uploads since the last perf line (tex_lock): all, those after WriteTexels, and subresources skipped by MKW_TEX_REUP_PARTIAL.
+uint64_t ru_n, ru_bytes, ru_ns, ru_wt_n, ru_wt_bytes, ru_wt_ns, ru_skip_sub, ru_skip_bytes;
 uint64_t tl_n, tl_ns, tl_max;       // lock() waits (MKW_TRACE=perf), vk_tex_internal.h
 volatile int tex_spin_on = 1;        // MKW_TEX_LOCK_SPIN (vk_tex_internal.h)
 void vk_texture_spin_update(void) {   // per present (vk_backend.c), so "ab" follows the blocks

@@ -414,6 +414,10 @@ int vk_mem_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);
 // The same answer from per-epoch write-watch snapshots of 2 MiB regions: no system call once the regions were queried in
 // this epoch (a guest submission). For checks that may see writes made during the epoch one epoch late.
 int vk_mem_changed_snap(uint64_t addr, uint64_t size, uint32_t since, uint32_t epoch, uint32_t *now);
+// After vk_mem_changed / vk_mem_changed_snap reported a texture's storage written, tests each [base+offs[i], +sizes[i])
+// against the page generation table (no OS write-watch query) so re-uploads only deswizzle and copy dirty subresources.
+void vk_mem_ranges_written_since(uint64_t base, const uint64_t *offs, const uint64_t *sizes, uint8_t *dirty, uint32_t n,
+                                 uint32_t since);
 void vk_mem_snap_stats(uint64_t *checks, uint64_t *calls, uint64_t *untracked);   // since the last call
 
 // Upload batch: one command buffer on gfx_queue that texture uploads and texel copies record into. begin/end bracket
@@ -475,9 +479,18 @@ int vk_astc_bc7(void);                  // 1: and encoded again as BC7 (MKW_ASTC
 void vk_astc_tag(uint64_t addr, int path);  // MKW_ASTC_ERRORS: the next vk_astc_record's texture and path (1 upload,
                                             // 2 astc-copy, 3 write-texels) on this thread
 // One image region decoded from raw blocks: tight rows of 16-byte blocks at byte src of the source buffer (slices one
-// after the other), w x h texels and slices deep, written at offset of level / layer; lw x lh, that level's size (for
-// the BC7 copy's extent in whole blocks; 0: the region's own).
-typedef struct { VkDeviceSize src; uint32_t w, h, slices, level, layer; VkOffset3D offset; uint32_t lw, lh; } VkAstcRegion;
+// after the other), or Switch 2 block-linear bytes when bl_size != 0 (deswizzled in astc_decode.comp); w x h texels
+// and slices deep, written at offset of level / layer; lw x lh, that level's size (for the BC7 copy's extent in whole
+// blocks; 0: the region's own).
+typedef struct {
+    VkDeviceSize src;
+    uint32_t w, h, slices, level, layer;
+    VkOffset3D offset;
+    uint32_t lw, lh;
+    VkDeviceSize bl_size;           // 0: linear blocks; >0: raw Switch 2 block-linear byte span at src
+    uint32_t bl_y0, bl_z0, bl_rows; // band-split starting block row/slice and total block rows in the block-linear span
+    uint8_t bl_th, bl_td;           // log2 GOBs per block height/depth (nvn_tex_level_tiles)
+} VkAstcRegion;
 // Records into cb, the open upload batch (between vk_upload_begin and vk_upload_end), or a replay part's command buffer
 // with the upload lock held (vk_upload_lock; src then lives until that submission completes): src (TRANSFER_SRC, src_size
 // bytes of blocks) goes to a device-local scratch buffer, a dispatch per region decodes it, and the texels are copied
@@ -487,6 +500,18 @@ typedef struct { VkDeviceSize src; uint32_t w, h, slices, level, layer; VkOffset
 void vk_astc_record_split(uint64_t out[4]);   // MKW_TRACE=perf: setup, dispatch loop, after (ns), calls; resets
 int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, const VkAstcRegion *rg, int n, uint32_t bw,
                    uint32_t bh, int srgb, VkImage img, VkImageAspectFlags aspect, int bc7, VkBuffer readback);   // bc7: img is BC7
+// Generic Switch 2 block-linear -> linear compute deswizzle for 4-byte-aligned non-ASTC subresources (BCn, RGBA8, etc.).
+typedef struct {
+    VkDeviceSize src;              // byte offset of block-linear bytes in staging buffer
+    VkDeviceSize bl_size;          // block-linear byte span
+    uint32_t rb, rows, slices;     // linear row bytes (multiple of 4), block rows, slices
+    uint32_t w, h, bw, bh, bpb;    // image extent (texels), format block footprint & bytes per block
+    uint32_t level, layer;
+    uint8_t th, td;                // log2 GOBs per block height/depth
+} VkBlDeswRegion;
+int vk_bl_deswizzle_ready(void);
+int vk_bl_deswizzle_record(VkCommandBuffer cb, VkBuffer src, const VkBlDeswRegion *rg, int n, VkImage img,
+                           VkImageAspectFlags aspect);
 // MKW_ASTC_TIME=1: GPU timestamps around each vk_astc_record's dispatches (logged per footprint and the largest one)
 void vk_astc_time_enable(int on);
 int vk_astc_time_get(uint32_t bw, uint32_t bh, uint64_t *texels, uint64_t *calls, double *us);   // totals so far

@@ -27,9 +27,15 @@ layout(push_constant) uniform Params {
     uint width, height;
     uint bw, bh;     // block footprint
     uint bx;         // blocks per row
-    uint bslice;     // blocks per slice
+    uint bslice;     // blocks per slice (linear) or blocks_y (block-linear)
     uint srgb;
     uint err_slot;   // MKW_ASTC_ERRORS' counter of this call, 0 none
+    uint bl_mode;    // 0: linear blocks, 1: Switch 2 block-linear (16-byte ASTC blocks, nvn_bl_offset)
+    uint bl_th;      // log2 GOBs per block height
+    uint bl_td;      // log2 GOBs per block depth
+    uint bl_y0;      // starting block row in the copied block-linear slice (band splits)
+    uint bl_z0;      // starting slice in the copied block-linear volume
+    uint bl_gobs_x;  // (bx + 3) >> 2
 } pc;
 
 uint tab_byte(uint i) { return (tab[i >> 2] >> ((i & 3u) * 8u)) & 0xFFu; }
@@ -358,7 +364,18 @@ void main() {
     int bxi = int(gl_WorkGroupID.x) * bpw + lb, byi = int(gl_WorkGroupID.y);
     live = live && bxi < int(pc.bx);
     lb = min(lb, MAXB - 1);
-    uvec4 b = live ? blk[pc.in_base + gl_WorkGroupID.z * pc.bslice + uint(byi) * pc.bx + uint(bxi)] : uvec4(0u);
+    uint blk_off = gl_WorkGroupID.z * pc.bslice + uint(byi) * pc.bx + uint(bxi);
+    if (pc.bl_mode != 0u) {
+        // Switch 2 block-linear offset in 16-byte ASTC blocks (matches runtime/gfx/nvn/tex/tex_deswizzle.c nvn_bl_offset).
+        uint ux = uint(bxi), uy = uint(byi) + pc.bl_y0, uz = gl_WorkGroupID.z + pc.bl_z0;
+        uint th = pc.bl_th, td = pc.bl_td;
+        uint bh_gobs = 1u << th, bd_gobs = 1u << td;
+        uint block_uvec4 = 32u << (th + td);
+        uint gob_uvec4 = ((ux & 2u) << 3u) | ((uy & 4u) << 1u) | ((ux & 1u) << 2u) | (uy & 3u);
+        blk_off = ((uz >> td) * pc.bl_gobs_x * pc.bslice + (uy >> (3u + th)) * pc.bl_gobs_x + (ux >> 2u)) * block_uvec4
+                + (((uz & (bd_gobs - 1u)) << th) + ((uy >> 3u) & (bh_gobs - 1u))) * 32u + gob_uvec4;
+    }
+    uvec4 b = live ? blk[pc.in_base + blk_off] : uvec4(0u);
     if (live && lane == 0) {   // one lane per block: the header is the same for all
         s_h[lb] = header(b, bw, bh);
         // an error block: magenta and solid (a void extent of exactly that colour is counted too; real data has none)

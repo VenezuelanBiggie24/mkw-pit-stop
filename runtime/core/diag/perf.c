@@ -444,6 +444,25 @@ static void pw_hot_placement(void) {
     applied = on;
 }
 
+// MKW_PW_FAULT_BATCH (default 1 on the PS5, "ab" to compare): sequential write-watch faults inside the same 2 MiB unit
+// unprotect a ramping contiguous run of armed pages (up to 512 KiB) in one mprotect call (prot_watch.c).
+static void pw_fault_batch_placement(void) {
+    static int mode = -1, applied = -1;
+    if (mode < 0) {
+#ifdef __PROSPERO__
+        mode = rt_knob("PW_FAULT_BATCH", "1");
+#else
+        mode = rt_knob("PW_FAULT_BATCH", "0");
+#endif
+        if (plat_pw_fault_batch_mode(RT_KNOB_ON(mode)) < 0) mode = 0, applied = 0;
+        else rt_log("mem: write watch: sequential fault batching %s (MKW_PW_FAULT_BATCH)", mode == 2 ? "in the B blocks" : mode ? "on" : "off");
+    }
+    int on = RT_KNOB_ON(mode);
+    if (on == applied) return;
+    if (applied >= 0) plat_pw_fault_batch_mode(on);
+    applied = on;
+}
+
 void perf_present(uint64_t frame) {
     static uint64_t last, sum, max, n, win_start, ab_b;
     static int64_t win_prev[PERF_CNT_N];
@@ -487,6 +506,7 @@ void perf_present(uint64_t frame) {
     tsc_clock_placement();
     pw_batch_placement();
     pw_hot_placement();
+    pw_fault_batch_placement();
     if (__atomic_load_n(&overlay, __ATOMIC_RELAXED))   // the overlay's only cost while it is off: this branch
         perfmon_frame(now, d, frame_ns, rep, __atomic_load_n(&counts[PERF_CNT_TEX_UP], __ATOMIC_RELAXED));
     kern_core_diag_frame(frame, d);

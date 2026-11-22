@@ -66,6 +66,11 @@ static volatile uint64_t pw_repeat_count;
 static uint64_t pw_hot_skips;   // arms skipped for hot pages (racy count: a diagnostic)   // faults on a page that faulted in its previous arm cycle too
 static volatile int pw_batch_on;
 static volatile int pw_hot_on;   // plat_pw_hot_mode (MKW_PW_HOT, perf.c)
+static volatile int pw_fault_batch_on;   // plat_pw_fault_batch_mode (MKW_PW_FAULT_BATCH, perf.c)
+// Async-signal-safe per-2 MiB-unit sequential-fault tracker: when a thread faults on the page immediately following the
+// previous unprotect run in the same 2 MiB unit, ramp the run size (2 -> 4 -> 8 -> 16 -> 32 pages, up to 512 KiB) so
+// contiguous streaming writes take ~12 mprotect calls per 4 MiB instead of 256 (~54 us each on PS5).
+static struct { uint64_t next_p; uint32_t run; } pw_seq[16];
 static volatile uint64_t pw_protect_calls, pw_protect_pages;
 
 // MKW_PW_HOT: a page written in two arm cycles in a row is "hot": the next queries leave it writable and report it
@@ -75,6 +80,11 @@ static volatile uint64_t pw_protect_calls, pw_protect_pages;
 // so a consumer copies it more often, never less. It is armed again after PW_REP_HOT - 1 queries, to see if it cooled.
 int plat_pw_hot_mode(int on) {
     __atomic_store_n(&pw_hot_on, on ? 1 : 0, __ATOMIC_RELEASE);
+    return on ? 1 : 0;
+}
+
+int plat_pw_fault_batch_mode(int on) {
+    __atomic_store_n(&pw_fault_batch_on, on ? 1 : 0, __ATOMIC_RELEASE);
     return on ? 1 : 0;
 }
 
@@ -319,12 +329,41 @@ int prot_watch_fault(uint64_t addr) {
         if (__atomic_compare_exchange_n(&c[idx], &cur, next, 1, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE))
             break;
     }
-    int ok = pw_protect_fn(p, pw_page_size, 1);
-    cur = __atomic_load_n(&c[idx], __ATOMIC_ACQUIRE);
-    for (;;) {
-        uint32_t next = (cur & PW_FAULT_MASK) ? (cur - PW_FAULT_ONE) : cur;
-        if (__atomic_compare_exchange_n(&c[idx], &cur, next, 1, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE))
-            break;
+    uint32_t run = 1;
+    if (__atomic_load_n(&pw_fault_batch_on, __ATOMIC_ACQUIRE) && (prev & PW_ARMED)) {
+        uint32_t si = (uint32_t)((p >> 21) & 15u);
+        uint64_t prev_next = __atomic_load_n(&pw_seq[si].next_p, __ATOMIC_RELAXED);
+        uint32_t prev_run = __atomic_load_n(&pw_seq[si].run, __ATOMIC_RELAXED);
+        // Cap at 4 pages (64 KiB on PS5): ramping to 32 pages (512 KiB) cut faults 41% but overshot
+        // sequential writes and added +396 MiB (+313 ms) of false-dirty texture re-uploads in a 240 s A/B.
+        uint32_t want = (prev_next == p) ? (prev_run < 4u ? (prev_run ? prev_run * 2u : 2u) : 4u) : 1u;
+        // Stay strictly within the same 2 MiB PS5_MEM_UNIT (whose unit_lock is held by the caller) and 16 MiB PW_CHUNK.
+        uint64_t unit_end = (p & ~0x1fffffull) + 0x200000ull;
+        for (uint32_t k = 1; k < want; k++) {
+            uint64_t q = p + (uint64_t)k * pw_page_size;
+            if (q >= unit_end) break;
+            size_t qidx = idx + k;
+            uint32_t qv = __atomic_load_n(&c[qidx], __ATOMIC_ACQUIRE);
+            if ((qv & (PW_ARMED | PW_EARLY | PW_PROTECTING | PW_HOLD_MASK)) != PW_ARMED) break;
+            if (pw_state_fn(q) != PLAT_PROT_RW) break;
+            uint32_t qrep = (qv & PW_REP_MASK) >> PW_REP_SHIFT;
+            uint32_t qnext = ((qv & ~PW_ARMED) | PW_WRITTEN) + PW_FAULT_ONE;
+            qnext = (qnext & ~PW_REP_MASK) | ((qrep ? PW_REP_HOT : 1u) << PW_REP_SHIFT);
+            if (!__atomic_compare_exchange_n(&c[qidx], &qv, qnext, 0, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE)) break;
+            run++;
+        }
+        __atomic_store_n(&pw_seq[si].next_p, p + (uint64_t)run * pw_page_size, __ATOMIC_RELAXED);
+        __atomic_store_n(&pw_seq[si].run, run, __ATOMIC_RELAXED);
+    }
+    int ok = pw_protect_fn(p, (size_t)run * pw_page_size, 1);
+    for (uint32_t k = 0; k < run; k++) {
+        size_t qidx = idx + k;
+        cur = __atomic_load_n(&c[qidx], __ATOMIC_ACQUIRE);
+        for (;;) {
+            uint32_t next = (cur & PW_FAULT_MASK) ? (cur - PW_FAULT_ONE) : cur;
+            if (__atomic_compare_exchange_n(&c[qidx], &cur, next, 1, __ATOMIC_SEQ_CST, __ATOMIC_ACQUIRE))
+                break;
+        }
     }
     if (!ok) return 0;
     if (prev & PW_ARMED) {

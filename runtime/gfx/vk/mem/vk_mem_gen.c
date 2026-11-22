@@ -265,6 +265,34 @@ int vk_mem_changed_snap(uint64_t addr, uint64_t size, uint32_t since, uint32_t e
     return untracked ? -1 : changed;
 }
 
+// Per-subresource dirty check against the page generation table already populated by vk_mem_changed / vk_mem_changed_snap:
+// takes gen_lock_s() once for all subresources of a re-uploaded texture so unchanged mip levels / array layers are skipped.
+void vk_mem_ranges_written_since(uint64_t base, const uint64_t *offs, const uint64_t *sizes, uint8_t *dirty, uint32_t n,
+                                 uint32_t since) {
+    gen_lock_s();
+    for (uint32_t i = 0; i < n; i++) {
+        if (!sizes[i]) { dirty[i] = 0; continue; }
+        uint64_t lo = (base + offs[i]) & ~0xfffull, hi = (base + offs[i] + sizes[i] + 0xfff) & ~0xfffull;
+        uint64_t r0 = lo >> REG_SHIFT, r1 = (hi - 1) >> REG_SHIFT;
+        int ch = 0;
+        if (r1 >= SNAP_REGIONS) {
+            ch = 1;   // outside the region table: conservative
+        } else {
+            for (uint64_t r = r0; r <= r1 && !ch; r++) {
+                if (reg_max[r] <= since) continue;
+                uint64_t a = (r << REG_SHIFT) > lo ? (r << REG_SHIFT) : lo;
+                uint64_t b = ((r + 1) << REG_SHIFT) < hi ? ((r + 1) << REG_SHIFT) : hi;
+                for (; a < b && !ch; a += 1ull << GEN_PAGE_SHIFT) {
+                    uint32_t *s = gen_slot(a, 0);
+                    if (s && *s > since) ch = 1;
+                }
+            }
+        }
+        dirty[i] = (uint8_t)ch;
+    }
+    plat_mutex_unlock_shared(&gen_lock);
+}
+
 void vk_mem_snap_stats(uint64_t *checks, uint64_t *calls, uint64_t *untracked) {
     *checks = __atomic_exchange_n(&n_snap_checks, 0, __ATOMIC_RELAXED);
     *calls = __atomic_exchange_n(&n_snap_calls, 0, __ATOMIC_RELAXED);
