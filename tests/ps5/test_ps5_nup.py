@@ -216,10 +216,37 @@ def test_nup_rejects_bad_version_toc_hash_and_traversal(tmp_path: Path) -> None:
     with pytest.raises(nup.NupError, match="illegal path character"):
         nup.NupReader(trav)
 
+    # An update-only patch (a few RomFS files) opens, but the check refuses it and says why.
     upd_only = tmp_path / "upd.nup"
     _build_nup(upd_only, [(1, 0x20000, nup.KIND_UPDATE, {"main": _fake_nso("9e244438c3d8ef1c")}, {"x": b"1"})])
-    with pytest.raises(nup.NupError, match="no base game package"):
-        nup.NupReader(upd_only)
+    with pytest.raises(prepare.Failed, match="holds only an update, no base game"):
+        prepare.check(upd_only)
+
+    addon_only = tmp_path / "addon.nup"
+    _build_nup(addon_only, [(1, 0, 2, {"main": _fake_nso("9e244438c3d8ef1c")}, {"x": b"1"})])
+    with pytest.raises(nup.NupError, match="no base game or update package"):
+        nup.NupReader(addon_only)
+
+
+def test_nup_without_base_package_takes_its_updates(tmp_path: Path) -> None:
+    """A "base + 1.8.0" .nup whose one package is marked update (and standalone) holds the whole patched game, as a
+    console dump's updates/917504 does: the PC setup builds from it, so the PS5 builder takes it too, newest update on
+    top (r/PS5_Jailbreak "MKW Pit Stop won't build on PC", 23/11/2026)."""
+    v180 = next(v for v in prepare.PS5_VERSIONS if v.name == "1.8.0")
+    p = tmp_path / "base+180.nup"
+    mkw = 0x0400C3F00006E000
+    _build_nup(
+        p,
+        [
+            (mkw, 0x80000, nup.KIND_UPDATE, {"main": _fake_nso("9e244438c3d8ef1c")}, {"a": b"1", "b": b"2"}),
+            (mkw, 917504, nup.KIND_UPDATE, {"main": _fake_nso(v180.main_build_id)}, {"a": b"new"}),
+        ],
+    )
+    with nup.NupReader(p) as r:
+        assert not r.has_base
+        assert r.check_mkw(prepare.PS5_VERSIONS, 2 / v180.romfs_files) == v180
+        assert r.read_entry(r.romfs["a"]) == b"new"
+        assert r.read_entry(r.romfs["b"]) == b"2"
 
 
 def _dump(top: Path, build_id: str, product: int, files: int) -> None:
