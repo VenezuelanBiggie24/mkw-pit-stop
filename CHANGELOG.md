@@ -5,6 +5,41 @@ Each version's section is that release's notes: `tools/build/notes.py` puts it i
 section has a summary paragraph, `### Changes` (each with its issue, #N), `### Tested` (what was run from the packages
 before publishing) and optionally `### Known issues`.
 
+## ps5-0.2.0
+
+**Mario Kart World: Pit Stop** (`PPSA99193`) 0.2.0, now built on mkw-recomp 0.1.17. Races run at 60 fps by default with no frame generation; split screen is held at 30 fps. Black frames in races are gone, texture streaming is faster (the 1% low in the Grand Prix benchmark went from 37.7 to 42.1 fps) and plugins can be linked into the PS5 title. As before, you build the title on your PC, on Windows or Linux, from your own *Mario Kart World* 1.8.0 or 1.0.0 dump. Nothing of the game is in the release.
+
+### Changes
+
+- Races run at 60 fps by default on the PS5, with no frame generation: 17.1 ms a frame (58.5 fps) on a base PS5 in the Grand Prix benchmark. 30 fps and frame generation are still in **Pit Stop**.
+- Split screen is held at 30 fps (`split_fps = 30`; `same` follows the frame rate setting). At 60 fps, 2 players ran at about three quarters of real speed; at 30 fps, 2 players run at full speed.
+- No more black frames in races. Images the GPU wrote recently are kept when the game releases them (up to 16 MiB each), and the replay makes its alias copies where the frame reaches the target.
+- Faster texture streaming: changed textures are re-uploaded only where they changed (by row band), write-watch faults are handled in batches, block-linear textures are deswizzled on the GPU, and ASTC decodes are batched. The texture lock spins briefly before it sleeps, and the precheck yields it. Together: half as many frames over 33.3 ms in the benchmark (21 instead of 42), 1% low 42.1 fps, 0.1% low 25.8 fps.
+- Less CPU lost to the game's idle threads: 15 of every 16 `YieldThread` calls with nobody waiting become a short pause (`MKW_YIELD_PAUSE`).
+- **Pit Stop** leaves out the settings that do nothing on the console.
+- Plugins: upstream's native plugin API (version 4), and plugins linked into the title at build time (`tools/ps5/build_game.py --plugin DIR`), the only kind the PS5 can run. A linked plugin's mod folder and `mod-settings/` can be written over FTP, and a plugin that declines to start is logged. An extension hook (`--ext`) lets outside projects add their own code.
+- Everything from mkw-recomp 0.1.14 to 0.1.17 (merged from upstream): see those versions' sections below.
+- Diagnostics for odd frames (`MKW_ODD_CHECK`, `MKW_RTSIG`, `MKW_BLACK_CHECK`), and `tools/ps5/bench.py` kills a title the hang watch reports stuck.
+
+### Tested
+
+Before publishing:
+
+- On a base PS5, from `main` at `30b6f62` (the code in this release, apart from the README): a 210-second Grand Prix benchmark at 60 fps with frame generation off. 17.10 ms average, 1% low 42.1 fps, 0.1% low 25.8 fps, race speed 0.97x, no crash.
+- Split screen at 30 fps, 2 players, on a base PS5 (an earlier build of the same branch): 33.35 ms, race speed 1.00x.
+- After the 0.1.17 merge, on Linux: `--selftest`, `--probe-cfg`, the plugin probe (loaded and linked in), `tests/test_cfg.py` and `tests/test_mod_settings.py`.
+- The placeholder and both builder packages pass the release's no-game-content check and match `SHA256SUMS`.
+- Both builder packages, unpacked into clean folders, pass `prepare_ps5.py --check-only` on a 1.8.0 console dump (the Windows one through its own Python, on Windows). This check caught two missing files in the first pack, and the release is packed with them.
+
+Not run from these packages: a whole title build through the Windows or Linux builder, the send to the placeholder, and an update over an installed 0.1.0 title.
+
+### Known issues
+
+- Peak video memory before the first race is about 1 GiB higher than in 0.1.0's code (6.2 instead of 5.2 GiB in the benchmark). Nothing failed from it in the benchmark; long sessions may run short of memory sooner.
+- Races at 60 fps run slightly slower than real time (0.97x in the benchmark), because a few frames take longer than 16.7 ms where the course streams in new textures.
+- Split screen with 3 or 4 players has not been measured at 30 fps. At about 42 ms a frame, it would run at about 0.8x speed.
+- Still open from 0.1.0: free memory falls race after race in long sessions; a few sparse texture tiles stay unloaded from boot; the first multiplayer race on a course can drop a player whose shaders are still compiling. There is no Nintendo online play.
+
 ## ps5-0.1.0
 
 First release of **Mario Kart World: Pit Stop** (`PPSA99193`), a native PlayStation 5 port of [mkw-recomp](https://github.com/adriadam10/mkw-recomp), built on mkw-recomp 0.1.13. You build the title on your PC, on Windows or Linux, from your own *Mario Kart World* 1.8.0 or 1.0.0 dump; nothing of the game is in the release.
