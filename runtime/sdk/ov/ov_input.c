@@ -38,6 +38,12 @@ static PlatMutex lock = PLAT_MUTEX_INIT;
 static uint32_t styles = STYLE_FULL_KEY;
 static uint32_t supported = ~0u, disconnected;   // id bits: SetSupportedNpadIdType, DisconnectNpad
 static int enabled, multi;                      // multi: the applet handed out two or more players
+// The players the applet handed out since the title menu last started (ov_split_players). One player never opens the
+// applet (the 1P bench: no applet line), so multi alone would stay set after a split session; the title menu, where
+// Multiplayer is chosen and the applet then opens (split3p-bench 22/11/2026), starts the count over.
+static volatile int local_players;
+int ov_split_players(void) { return __atomic_load_n(&local_players, __ATOMIC_RELAXED); }
+void ov_title_menu(void) { __atomic_store_n(&local_players, 0, __ATOMIC_RELAXED); }
 static int8_t assigned[8] = {0, 1, 2, 3, 4, 5, 6, 7};   // the player whose controller each id reads (SwapNpadAssignment)
 static int64_t sample;
 // The input player (input_poll_player) on controller id 0-7, -1 none; the applet sets it (assign_ids). Under lock.
@@ -182,6 +188,7 @@ static void ov_controller_support(Cpu *c) {
     plat_mutex_lock(&lock);
     if (players) {
         multi = players > 1, disconnected = 0;
+        __atomic_store_n(&local_players, players, __ATOMIC_RELAXED);
         memcpy(id_to_player, map, sizeof map);
     }
     uint32_t selected = pad_id();

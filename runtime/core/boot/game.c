@@ -145,6 +145,16 @@ static void host_frame_update(Cpu *c) {
              : movie || !strcmp(fps, "game") ? 0
              : !strcmp(fps, "auto")          ? auto_want(c->x[0])
                                              : fixed_interval(fps);
+    // MKW_SPLIT_FPS=30 (the PS5 profile): split screen at 30 at most, whatever MKW_FPS says, outside the movies above.
+    // At 60 the game counts each frame as 1/60 s, and on a base PS5 split frames take longer (22/11/2026, Grand Prix
+    // benchmark at 60, one build): 1 player 17.1 ms (0.98x), 2 players 21.7 ms (0.77x), 3 and 4 41.9 ms (0.40x); at 30
+    // a frame has 33.3 ms at full speed.
+    static int was_split;
+    int split = !opening && !movie && ov_split_players() > 1 && !strcmp(cfg_value("MKW_SPLIT_FPS"), "30");
+    if (split != was_split)
+        rt_log("game: %s", split ? "split screen: 30 fps at most (MKW_SPLIT_FPS)" : "split screen 30 fps cap off");
+    was_split = split;
+    if (split && want < 2) want = 2;
     // 20 and 15 only in a race (race_scene.c): menus and loads go at 30 at most, as on the console (Adrià 15/11/2026);
     // a menu counting in 1/60 s steps risks at 3 or 4 what the cup opening showed
     static int was_capped;

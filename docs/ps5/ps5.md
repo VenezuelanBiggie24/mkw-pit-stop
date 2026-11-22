@@ -230,7 +230,9 @@ Measured at 30 on a busier course (16/11/2026,
 236 ms, some blocked on texture uploads), replay 15-18 ms a frame against ~14 on the first course. The slack under
 33.3 ms is not in that log: `FRAME_TRACE = 1` logs the game's own frame time. Local split screen multiplies the draws:
 at 60 (22/11/2026, the same benchmark with every player scripted) 2 players average 21.7 ms (0.77x), 3 and 4 players
-41.9 ms (0.40x), against 17.1 ms for 1 player on the same build (docs/project/performance.md#ps5-split-screen).
+41.9 ms (0.40x), against 17.1 ms for 1 player on the same build (docs/project/performance.md#ps5-split-screen). So the
+profile sets `MKW_SPLIT_FPS=30`: two or more players on the console (the controller applet's count, reset when the
+title menu starts) go at 30 at most, outside the movies; 2 players then hold 33.3 ms at 1.00x.
 
 ### Multiplayer
 

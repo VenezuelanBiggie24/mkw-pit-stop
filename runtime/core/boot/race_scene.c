@@ -9,6 +9,8 @@
 //
 // The nodes and their roles: RACE_EVENTS in version.c. The map, the course intro and the opening arm it (out of the
 // race), the first IsSequenceFlag after them is the countdown (in), and a finish, a GP's end or a menu ends it.
+#include <string.h>
+
 #include "host.h"
 #include "version.h"
 
@@ -30,6 +32,7 @@ static void node_start(Cpu *c, int k) {
     // ChatUIReady starts at a race's finish (the standings over the course, vf1) and when free roam begins, right
     // after ReadyFreeRun (fl124a/b/f): free roam is driving, so it counts as a race
     else if (e->role == RT_RACE_CHAT) in_race = free_armed, free_armed = armed = 0;
+    if (!strcmp(e->name, "TitleMenuMain")) ov_title_menu();   // split screen's player count starts over (game.c)
     if (in_race != was) rt_log("race: %s at the start of %s", in_race ? "in a race" : "out of the race", e->name);
     rt_call(c, orig[k], 8, c->x[0], c->x[1], c->x[2], c->x[3], c->x[4], c->x[5], c->x[6], c->x[7]);
 }
