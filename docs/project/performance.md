@@ -32,3 +32,23 @@ Players' rows come from the log attached to each report, not from the times writ
 than the log): the median of its 60-second frame-time windows, or of its race windows where the run had
 `MKW_TRACE=perf`. Left out: reports without a log, runs with frame generation on, and crash reports (those through
 RecompLauncher carry only the end of the log).
+
+## PS5 split screen
+
+Measured on a base PS5 (22/11/2026, Mario Kart World 1.8.0, 1080p, `ps5-0.1.0-12-g77aae4a`, the same build for every
+run): the Grand Prix benchmark (`tools/ps5/bench.py`, `MKW_BENCH=gp`, 210 s from the first race's start, the 60 fps
+default, frame generation off, `MKW_TRACE=perf`). For 2-4 players an input script takes the place of the benchmark's
+own menu presses: it picks Multiplayer, raises the player count with RIGHT on that entry, and holds A for every player
+(the extra players are `MKW_VIRTUAL_PADS`). The controller applet's log line confirms the count of each run.
+
+| Players | Average frame time | Typical frame (window median) | 1% low | 0.1% low | Worst frame | Frames over 33.3 ms | Race speed |
+|---|---|---|---|---|---|---|---|
+| 1 | 17.06 ms (58.6 fps) | 16.7 ms | 39.8 fps | 20.5 fps | 74.0 ms | 34 of 12,312 | 0.98x |
+| 2 | 21.66 ms (46.2 fps) | 21.3 ms | 32.2 fps | 18.6 fps | 70.1 ms | 64 of 9,697 | 0.77x |
+| 3 | 41.92 ms (23.9 fps) | 42.2 ms | 19.5 fps | 14.3 fps | 99.1 ms | 4,983 of 5,009 | 0.40x |
+| 4 | 41.92 ms (23.9 fps) | 42.7 ms | 19.2 fps | 14.2 fps | 99.0 ms | 4,890 of 5,009 | 0.40x |
+
+The game kept its 60 Hz present interval in every run (no switch to 30), so it counted each frame as 1/60 s and the
+race slowed by the ratio: 46 fps gives 0.77x, 24 fps gives 0.40x. Three players cost the same as four. Not measured
+yet: the 30 fps setting, where a frame has 33.3 ms at full speed (by these frame times, 2 players would hold it and 3 or
+4 would not), and courses other than the benchmark's first.

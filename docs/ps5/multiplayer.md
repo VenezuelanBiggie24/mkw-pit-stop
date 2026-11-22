@@ -4,7 +4,7 @@ Mario Kart World has its own multiplayer; this port carries it, it invents no ga
 
 | Way | Status | Setting |
 |---|---|---|
-| Split screen, 2-4 players on one machine | The game's own; controllers mapped as the console's applet does. 2 players race split on the PS5 (17/11/2026), slow on a first run; not measured | none |
+| Split screen, 2-4 players on one machine | The game's own; controllers mapped as the console's applet does. 2-4 players race split on the PS5; at 60 fps 2 players ~46 fps, 3-4 players ~24 fps, in slow motion (22/11/2026, [performance.md](../project/performance.md#ps5-split-screen)) | none |
 | Local wireless over the LAN (PS5 with PS5, PS5 with the desktop build) | Works: a PS5 hosting and a Windows PC joining over Wi-Fi raced whole races (17/11/2026) | `local_wireless = lan` (default) |
 | Local wireless over the internet: public rooms, invite codes, relay | Implemented with the lobby (`server/lobby`), tested on loopback | `local_wireless = online`, `lobby = address:port` |
 

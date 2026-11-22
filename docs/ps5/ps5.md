@@ -228,8 +228,9 @@ ms, and with `auto` the game then swapped its 60 and 30 Hz present interval ~1,4
 Measured at 30 on a busier course (16/11/2026,
 `fps30-20261116-063832`): every 600-frame window at 33.3 ms, speed 1.00x, 27 slow frames in 5,300 (single hitches up to
 236 ms, some blocked on texture uploads), replay 15-18 ms a frame against ~14 on the first course. The slack under
-33.3 ms is not in that log: `FRAME_TRACE = 1` logs the game's own frame time. Local split screen multiplies the draws
-and is not measured yet: `build/run/ps5/mkw.ini.task44-split` runs 1, 2 and 4 players on one course (docs/ps5/multiplayer.md).
+33.3 ms is not in that log: `FRAME_TRACE = 1` logs the game's own frame time. Local split screen multiplies the draws:
+at 60 (22/11/2026, the same benchmark with every player scripted) 2 players average 21.7 ms (0.77x), 3 and 4 players
+41.9 ms (0.40x), against 17.1 ms for 1 player on the same build (docs/project/performance.md#ps5-split-screen).
 
 ### Multiplayer
 
