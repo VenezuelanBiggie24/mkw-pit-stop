@@ -48,6 +48,7 @@ typedef struct Tex {
     uint8_t up_pending;           // an upload deferred for want of staging memory: the storage counts as changed
     uint64_t up_fail_frame;       // the frame of that failure: tried again from the next frame on
     struct Tex *rel_prev, *rel_next;   // while released: the list of released entries, oldest first
+    uint64_t gpu_frame;           // the frame the GPU last wrote it (vk_tex_evict.c rel_keep)
     uint64_t rel_bytes;           // while released: its own memory, counted in released_bytes
     uint64_t shash;               // XXH3 of the storage at the last upload (same_storage: no write watch)
     uint32_t shash_epoch;         // submit_epoch of the last hash check

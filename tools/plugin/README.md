@@ -2,6 +2,10 @@
 
 The native plugin API's test and example (`runtime/plugin/`).
 
+Linked in (`build.py --plugin DIR`, `tools/ps5/build_game.py --plugin DIR`): copy `probe_plugin.c` alone into a folder
+and build with `--plugin` that folder; `build/mkw --probe-plugin` then runs the same checks with no `MKW_MODS`. A file
+beside it that defines `rt_log` or `plat_now_ms` still links: the plugin's names stay its own (tested 21/11/2026).
+
 | File | What it is |
 |---|---|
 | `probe.sh` | Builds `probe_plugin.c` as the mod `plugin-probe` (`build/mods/plugin-probe/plugin/`) and runs `build/mkw --probe-plugin` with it on: a call through main's PLT reaches the plugin's override by name, an indirect call to the game's definition its override by address |

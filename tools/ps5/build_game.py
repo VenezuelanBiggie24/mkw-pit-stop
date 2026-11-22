@@ -30,6 +30,7 @@ from build_smoke import (APP_SDK, GLM, MESA, ROOT, TEMPLATE, VULKAN, png, requir
 from build import game_id, module_glue, port_version
 import hud_layouts  # noqa: E402  (recomp/, on the path through build: patches.c's screen-edge HUD table)
 from ext_glue import ext_sources, ext_table
+from plugin_glue import plugin_ninja, plugin_table
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "i18n"))
 import catalog  # noqa: E402  (tools/i18n: the menu texts of every language, from i18n/*.po)
@@ -122,7 +123,8 @@ def ninja_path(path: Path) -> str:
 def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[str, str],
                     jobs: int, generated: Path | None, exefs: Path | None,
                     pgo_use: Path | None = None, gen_opt: str = "O1",
-                    gen_frame_pointers: bool = False, ext: list[Path] | None = None) -> tuple[list[Path], bool]:
+                    gen_frame_pointers: bool = False, ext: list[Path] | None = None,
+                    plugins: list[Path] | None = None) -> tuple[list[Path], bool]:
     out = WORK / ("game-objects" if generated else "inventory-objects")
     out.mkdir(parents=True, exist_ok=True)
     write_changed(out / "guest_layout.h", ("#pragma once\n" + placement_defines(PROFILE)).encode())
@@ -171,6 +173,7 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
         # Weak so the game-free placeholder links alone while strong modules.o overrides it cleanly.
         defaults_src += "__attribute__((weak)) const RtGame *rt_game_builtin(void) { return 0; }\n"
     defaults_src += ext_table(ext or [])   # extensions linked in (--ext, runtime/core/ext)
+    defaults_src += plugin_table(plugins or [])   # plugins linked in (--plugin; the table is there, empty, without)
     write_changed(defaults, defaults_src.encode())
     files.append((defaults, Path("defaults.c"), "cc"))
     # the menu texts (ui_text.c's text_<lang> arrays), generated as build.py does
@@ -207,6 +210,14 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
         ninja.append(f"build {ninja_path(obj)}: {rule} {ninja_path(source)}{implicit}")
         if relative in defines:
             ninja.append(f"  extra = {defines[relative]}")
+    # plugins (--plugin): each folder compiled as its own library would be and sealed into one object, so its names
+    # never meet the runtime's (tools/build/plugin_glue.py). MKW_PS5_NATIVE tells a plugin it is on the console.
+    tool = lambda name: str(sdk / "bin" / name) if (sdk / "bin" / name).is_file() else name  # noqa: E731
+    plug_lines, plug_objs = plugin_ninja(
+        plugins or [], out, tool("prospero-clang"), tool("prospero-clang++"),
+        [*common, "-O2", "-DMKW_PS5_NATIVE"], tool("ld.lld"), tool("llvm-objcopy"))  # fmt: skip
+    ninja += plug_lines
+    objects += [Path(obj) for obj in plug_objs]
     manifest = out / "build.ninja"
     write_changed(manifest, ("\n".join(ninja) + "\n").encode())
     log = out / "compile.log"
@@ -305,6 +316,8 @@ def main() -> int:
     parser.add_argument("--ext", type=Path, action="append", default=[], metavar="DIR",
                         help="link the extension in this folder in (docs/project/extensions.md); repeatable")
     parser.add_argument("--exefs", type=Path, help="local extracted ExeFS for the built-in module hashes")
+    parser.add_argument("--plugin", type=Path, action="append", default=[], metavar="DIR",
+                        help="link the plugin in this folder in (runtime/plugin, tools/plugin/README.md); repeatable")
     parser.add_argument("--gen-opt", choices=("O1", "O2"), default="O1",
                         help="optimization level of the generated C (default O1; O2 is meant for --pgo-use)")
     parser.add_argument("--gen-frame-pointers", action="store_true",
@@ -349,7 +362,8 @@ def main() -> int:
     with output_lock(generated) if generated else nullcontext():
         objects, complete = compile_objects(sdk, template, includes, env, args.jobs, generated, exefs, pgo_use,
                                             args.gen_opt, args.gen_frame_pointers,
-                                            [path.resolve() for path in args.ext])
+                                            [path.resolve() for path in args.ext],
+                                            [path.resolve() for path in args.plugin])
     out = WORK / ("game-objects" if generated else "inventory-objects")
     aggregate = import_inventory(sdk, objects, env, out, reachable=False)
     loader = import_inventory(sdk, objects, env, out, reachable=True)

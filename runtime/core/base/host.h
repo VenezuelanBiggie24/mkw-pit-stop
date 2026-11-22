@@ -228,6 +228,8 @@ void mem_early_wb_check(uint64_t a, uint64_t n, uint64_t f);            // fence
 void mem_early_watch(uint64_t a, uint64_t n, uint64_t fence, int kind);   // kind: 0 counter, 1 copy, 2 texture to
                                                                           // buffer, 3 clear, 4 storage buffer, 5 uniform
 void mem_copy_out(void *dst, uint64_t a, uint64_t n);                    // memcpy from guest memory, watched pages kept
+int mem_copy_out_try(void *dst, uint64_t a, uint64_t n);                 // the same, never waiting: 0 when a watched
+                                                                          // page was left out
 void mem_early_log(uint64_t frame);                                       // every frame; a line every 600
 void mem_early_gpu_wrote(uint64_t a, uint64_t n, uint64_t fence);         // the replay: submission fence writes [a, a+n)
 void mem_early_invalidate(uint64_t a, uint64_t n);                        // the game reads [a, a+n) of a cached pool next

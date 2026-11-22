@@ -1,13 +1,19 @@
 // Native plugins (mkw_plugin.h): shared libraries in mods/<mod>/plugin/ of the enabled mods, loaded at start before the
 // game code, each handed the API table. The runtime knows nothing of what a plugin does: it gives generic hooks (an
 // override by symbol or by guest address, the game-loaded callback, calls into guest code) and the plugin decides.
+// Plugins linked into the executable (--plugin DIR at build time: RtLinkedPlugin, plugin.h) get the same table and
+// start first, whatever the Mods page says: the build chose them. They are the only kind on PS5.
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef MKW_PS5_NATIVE
 #include <SDL3/SDL.h>
+#else
+#include <sys/stat.h>
+#endif
 
 #include "cfg.h"
 #include "dispatch.h"
@@ -335,30 +341,15 @@ static void plugin_problem(const Plugin *p, const char *what) {
     char msg[512];
     snprintf(msg, sizeof msg, "The mod \"%s\" did not start (%s): %s.\nThe game goes on without it.", p->mod_name,
              p->file, what);
-#ifndef MKW_PS5_NATIVE   // no SDL on the console: the log line above is what it gets
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "mkw-recomp", msg, NULL);
+#ifdef MKW_PS5_NATIVE
+    rt_log("plugin: %s", msg);   // no message box on the console: the log only
 #else
-    (void)msg;
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "mkw-recomp", msg, NULL);
 #endif
 }
 
-static int load_one(const char *name, void *ctx) {
-    Plugin *p = ctx;
-    if (nplugins == MAX_PLUGINS) {
-        rt_log("plugin: more than %d plugins: %s/plugin/%s not loaded", MAX_PLUGINS, p->mod_name, name);
-        return 0;
-    }
-    Plugin *q = &plugins[nplugins];
-    *q = *p;
-    snprintf(q->file, sizeof q->file, "%s", name);
-    char path[sizeof q->mod_dir + 300];
-    snprintf(path, sizeof path, "%s/plugin/%s", q->mod_dir, name);
-    void *lib = plat_lib_open(path);
-    MkwPluginInit init = lib ? (MkwPluginInit)plat_lib_sym(lib, "mkw_plugin_init") : NULL;
-    if (!init) {
-        plugin_problem(q, lib ? "it has no mkw_plugin_init" : "the library does not load");
-        return 1;
-    }
+// Hands the table to init and keeps the plugin when it starts; q is plugins[nplugins] with its folder and file set.
+static void start_one(Plugin *q, MkwPluginInit init, const char *how) {
     q->api = api_template;
     q->api.port_version = rt_port_version;
     q->api.game_version = rt_version()->display;
@@ -380,14 +371,68 @@ static int load_one(const char *name, void *ctx) {
         char why[300];
         snprintf(why, sizeof why, "%s (code %d)", message && *message ? message : "it declined to start", r);
         plugin_problem(q, why);
-        return 1;   // its overrides stay: a plugin declines before it installs any
+        return;   // its overrides stay: a plugin declines before it installs any
     }
-    rt_log("plugin: %s/plugin/%s loaded (API %d)", q->mod_name, name, MKW_PLUGIN_API_VERSION);
+    rt_log("plugin: %s/plugin/%s %s (API %d)", q->mod_name, q->file, how, MKW_PLUGIN_API_VERSION);
     nplugins++;
+}
+
+static int load_one(const char *name, void *ctx) {
+    Plugin *p = ctx;
+    if (nplugins == MAX_PLUGINS) {
+        rt_log("plugin: more than %d plugins: %s/plugin/%s not loaded", MAX_PLUGINS, p->mod_name, name);
+        return 0;
+    }
+    Plugin *q = &plugins[nplugins];
+    *q = *p;
+    snprintf(q->file, sizeof q->file, "%s", name);
+    char path[sizeof q->mod_dir + 300];
+    snprintf(path, sizeof path, "%s/plugin/%s", q->mod_dir, name);
+    void *lib = plat_lib_open(path);
+    MkwPluginInit init = lib ? (MkwPluginInit)plat_lib_sym(lib, "mkw_plugin_init") : NULL;
+    if (!init) {
+        plugin_problem(q, lib ? "it has no mkw_plugin_init" : "the library does not load");
+        return 1;
+    }
+    start_one(q, init, "loaded");
     return 1;
 }
 
+// A folder the player may fill by hand (a mod's files, its settings). On the PS5 the FTP server writes as another
+// user than the title, so the title's own 0755 folders would refuse the player's files: these are left open, 0777, as
+// the Pit Stop receiver leaves the folders it makes (platform/ps5_recv.c).
+static void folder_for_player(const char *dir) {
+    plat_file_mkdir_p(dir);
+#ifdef MKW_PS5_NATIVE
+    chmod(dir, 0777);
+#endif
+}
+
+// The plugins linked in: each stands for the mod of its folder's name, whose folder holds its files and logs.
+static void start_linked(void) {
+#ifdef MKW_PS5_NATIVE
+    // How a PS5 player sets a mod without its options page: mod-settings/<mod>.ini, and nickname.txt in the player's
+    // folder (players.c), the name a mod's account may have to match (the PSN online ID otherwise).
+    if (rt_plugins_linked_count) {
+        char dir[PLAT_PATH_MAX * 2];
+        folder_for_player(rt_config()->profile);
+        snprintf(dir, sizeof dir, "%s/mod-settings", rt_config()->profile);
+        folder_for_player(dir);
+    }
+#endif
+    for (int i = 0; i < rt_plugins_linked_count && nplugins < MAX_PLUGINS; i++) {
+        Plugin *q = &plugins[nplugins];
+        memset(q, 0, sizeof *q);
+        snprintf(q->mod_name, sizeof q->mod_name, "%s", rt_plugins_linked[i].name);
+        snprintf(q->mod_dir, sizeof q->mod_dir, "%s/mods/%s", cfg_game_dir(), q->mod_name);
+        snprintf(q->file, sizeof q->file, "(linked in)");
+        folder_for_player(q->mod_dir);   // a library mod's folder comes with it; a linked one's may not exist yet
+        start_one(q, rt_plugins_linked[i].init, "started");
+    }
+}
+
 void plugins_load(void) {
+    start_linked();
     const char *list = cfg_get("MKW_MODS");
     if (!list || !*list) return;
     // by hand, not strtok: its state is the C library's, which a plugin's init may use too
@@ -402,10 +447,10 @@ void plugins_load(void) {
         if (fits) memcpy(t, s, n), t[n] = 0;
         s = next;
         if (!fits) continue;
-        int seen = 0;   // a mod listed twice (MKW_MODS set by hand) loads once
+        int seen = 0;   // a mod listed twice (MKW_MODS set by hand), or linked in already, loads once
         for (int i = 0; i < nplugins; i++) seen |= !strcmp(plugins[i].mod_name, t);
         if (seen) {
-            rt_log("plugin: %s is listed twice in MKW_MODS: loaded once", t);
+            rt_log("plugin: %s is listed twice in MKW_MODS or linked in: started once", t);
             continue;
         }
         Plugin p = {0};

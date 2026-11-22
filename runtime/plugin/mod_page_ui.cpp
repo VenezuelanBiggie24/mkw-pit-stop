@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef MKW_PS5_NATIVE
 #include <SDL3/SDL.h>
+#endif
 
 #include "imgui.h"
 
@@ -55,8 +57,9 @@ static int page_setting_set(const char *key, const char *value) {
 }
 
 static void page_redraw(void) {
-    // the start screen and the menu draw every frame already; an event wakes them in case they ever wait for input
-#ifndef MKW_PS5_NATIVE   // the PS5's overlay draws every frame and has no SDL event queue
+    // the start screen and the menu draw every frame already; an event wakes them in case they ever wait for input.
+    // The PS5's menu has no SDL and draws every frame: nothing to wake.
+#ifndef MKW_PS5_NATIVE
     SDL_Event e;
     SDL_zero(e);
     e.type = SDL_EVENT_USER;

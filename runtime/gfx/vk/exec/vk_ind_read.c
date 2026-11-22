@@ -69,13 +69,49 @@ static uint64_t check_addr;                         // MKW_IND_CHECK
 static int check_sets;                              // MKW_IND_CHECK_SETS=1: an "indk:" line per draw with its records
 static uint64_t c_draws, c_mixed, c_lines, c_frame; // completion thread: MKW_IND_CHECK's counts in frame c_frame
 int cap_busy(void);                                 // cap.h
-static HRes *hres;                                  // replay thread: the open pass's hashed buffers
-static int nhres, chres;
+// The open pass's draws and hashed buffers are per recording thread: with MKW_REPLAY_PAR each chunk thread records
+// passes of its own, and one shared list mixed their draws (Sol's review, 21/11/2026).
+static _Thread_local HRes *hres;                    // the open pass's hashed buffers
+static _Thread_local int nhres, chres;
 static uint32_t want[16], wmask[16];
 static int nwant;
-static IndDraw *cur;   // replay thread: the draws of the open pass
-static int ncur, ccur;
-static uint32_t bytes;
+static _Thread_local IndDraw *cur;   // the draws of this thread's open pass
+static _Thread_local int ncur, ccur;
+static _Thread_local uint32_t bytes;
+// MKW_IND_READ_FRAMES=<from>-<to>: draws are noted in those frames only, and instead of an "indr:" line per pass and
+// VS, one "indf:" summary per frame (completion thread): indirect draws, those that drew something, instances, then
+// per VS (sorted) drew/draws/instances. For the PS5's odd frames (21/11/2026): whether the culling's output
+// collapsed in the frame where the course's scenery is missing, against the frames around it.
+static uint64_t fr_from, fr_to = UINT64_MAX;
+static int fr_on;
+enum { FR_V = 96 };
+static struct { uint32_t vs, draws, drew; uint64_t inst; } fr_v[FR_V];
+static int fr_nv;
+static uint64_t fr_frame, fr_passes, fr_draws, fr_drew, fr_inst;
+
+static int fr_cmp(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void fr_flush(void) {   // completion thread
+    if (!fr_passes) return;
+    qsort(fr_v, (size_t)fr_nv, sizeof fr_v[0], fr_cmp);
+    char b[1400];
+    int o = snprintf(b, sizeof b, "indf: f%llu passes %llu draws %llu drew %llu inst %llu |", (unsigned long long)fr_frame,
+                     (unsigned long long)fr_passes, (unsigned long long)fr_draws, (unsigned long long)fr_drew,
+                     (unsigned long long)fr_inst);
+    for (int j = 0; j < fr_nv; j++) {
+        if (o > (int)sizeof b - 48) {   // the rest on a line of its own
+            rt_log("%s", b);
+            o = snprintf(b, sizeof b, "indf: f%llu +", (unsigned long long)fr_frame);
+        }
+        o += snprintf(b + o, sizeof b - (size_t)o, " %08x:%u/%u/%llu", fr_v[j].vs, fr_v[j].drew, fr_v[j].draws,
+                      (unsigned long long)fr_v[j].inst);
+    }
+    rt_log("%s", b);
+    fr_nv = 0, fr_passes = fr_draws = fr_drew = fr_inst = 0;
+}
 
 static int enabled(uint32_t vs) {
     if (on < 0) {
@@ -99,10 +135,13 @@ static int enabled(uint32_t vs) {
         hash_on = on && h && strcmp(h, "0");
         if (hash_on && strchr(h, '-')) hash_from = strtoull(h, NULL, 10), hash_to = strtoull(strchr(h, '-') + 1, NULL, 10);
         hash_cap = hash_on && !strcmp(h, "cap");
+        const char *fr = cfg_get("MKW_IND_READ_FRAMES");
+        if (on && fr && strchr(fr, '-')) fr_on = 1, fr_from = strtoull(fr, NULL, 10), fr_to = strtoull(strchr(fr, '-') + 1, NULL, 10);
         if (on) rt_log("vk: indirect arguments read back at each pass end (MKW_IND_READ=%s)%s", e,
                        hash_on ? ", hashed with the VS's and FS's buffers (MKW_IND_HASH)" : "");
     }
     if (!on) return 0;
+    if (fr_on && (vk_exec_presented < fr_from || vk_exec_presented > fr_to)) return 0;
     if (hash_on && (vk_exec_presented < hash_from || vk_exec_presented > hash_to || (hash_cap && !cap_busy()))) return 0;
     if (!nwant) return 1;
     for (int i = 0; i < nwant; i++)
@@ -272,6 +311,15 @@ static void pass_done(void *arg) {   // completion thread
                    (unsigned long long)p->frame, d->vs, d->cpu_ic, d->cpu_fi, ic, fi, (unsigned long long)d->ahead,
                    (unsigned long long)d->ssbo, d->ssbo_state);
         }
+        if (fr_on) {
+            if (p->frame != fr_frame) fr_flush(), fr_frame = p->frame;
+            fr_draws++, fr_drew += inst != 0, fr_inst += inst;
+            int k = 0;
+            while (k < fr_nv && fr_v[k].vs != d->vs) k++;
+            if (k == fr_nv && fr_nv < FR_V) fr_v[fr_nv++] = (typeof(fr_v[0])){d->vs, 0, 0, 0};
+            if (k < fr_nv) fr_v[k].draws++, fr_v[k].drew += inst != 0, fr_v[k].inst += inst;
+            continue;
+        }
         int j = 0;
         while (j < nv && v[j].vs != d->vs) j++;
         if (j == nv) {
@@ -280,6 +328,8 @@ static void pass_done(void *arg) {   // completion thread
         }
         v[j].draws++, v[j].drew += inst != 0, v[j].inst += inst, v[j].first += first;
     }
+    if (fr_on) fr_passes++;
+    if (fr_on && p->frame >= fr_to) fr_flush();
     for (int j = 0; j < nv; j++)
         rt_log("indr: f%llu vs %08x draws %u drew %u inst %llu first %llu", (unsigned long long)p->frame, v[j].vs,
                v[j].draws, v[j].drew, (unsigned long long)v[j].inst, (unsigned long long)v[j].first);

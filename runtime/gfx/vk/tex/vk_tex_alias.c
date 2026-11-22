@@ -242,6 +242,7 @@ int vk_texture_capture_state(const tex_t *t, uint32_t recent) {
 static void gpu_written_locked(Tex *e, int fresh) {
     if (fresh) make_fresh(e);
     e->pub.gpu_owned = 1;
+    e->gpu_frame = vk_exec_presented + 1;   // (rel_keep)
     uint64_t f = vk_exec_recording_fence();
     if (f > e->wr_fence) e->wr_fence = f;
     e->rb_fence = 0, e->rb_other = f;   // any write but a dispatch's: the readback no longer follows the image's last one
