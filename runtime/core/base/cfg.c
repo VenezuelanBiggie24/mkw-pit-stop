@@ -471,6 +471,7 @@ static const CfgRow rows[] = {
     K("VS_OUTS"),
     K("WB_PAR"),
     K("YIELD_NOLOCK"),
+    K("YIELD_PAUSE"),
     K("ZERO_SCAN_CACHE"),
 };
 #define N_ROWS (sizeof rows / sizeof *rows)

@@ -154,11 +154,17 @@ static int kern_svc_impl(Cpu *c, uint32_t imm) {
         // in g_core_wait_mask, kept atomically), there is nothing to hand off and G is not taken. A race of 15/11/2026
         // made ~590 yields a frame (nn::os::YieldThread in the job system's spin loops) at 8.3 us each, 4.9 ms a frame;
         // a waiter that comes after the check is the same race as one after the locked scan below.
-        static int nolock = -1;
+        static int nolock = -1, ypause = -1;
         if (nolock < 0) nolock = rt_knob("YIELD_NOLOCK", "1");
+        if (ypause < 0) ypause = rt_knob("YIELD_PAUSE", "1");
         if (RT_KNOB_ON(nolock) && t->cur_core >= 0 &&
             !((__atomic_load_n(&g_core_wait_mask, __ATOMIC_ACQUIRE) >> t->cur_core) & 1u)) {
-            plat_yield();
+            // MKW_YIELD_PAUSE (default 1, "ab"): when no guest thread waits for this virtual core, sched_yield()
+            // still cost 4.22 ms/f across guest + main in prof-seg2-240 (~590 yields/f). Pause 15 of 16 times and
+            // yield to the OS on every 16th so host threads cannot starve on long spins.
+            static _Thread_local uint32_t y_cnt;
+            if (RT_KNOB_ON(ypause) && (++y_cnt & 15u) != 0) plat_pause();
+            else plat_yield();
             return 1;
         }
         lock();
