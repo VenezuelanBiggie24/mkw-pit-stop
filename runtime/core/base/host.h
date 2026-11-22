@@ -325,6 +325,8 @@ void ctl_init(void);                                       // MKW_CTL=<fifo>: co
 void ctl_run(char *line);                                  // one ctl command now (MKW_SEQ_CTL, seqwatch.c)
 void rt_shot_request(const char *path);                    // the next presented frame to path, full size (boot.c)
 void gfx_aspect_set(float a);  // gfx_present.c, from patches.c: MKW_ASPECT's width / height when wider than 16:9, else 0
+int ov_split_players(void);  // ov_input.c: players on this machine since the title menu (2-4: split screen), 0 before
+void ov_title_menu(void);    // ov_input.c: the title menu started (race_scene.c): the count starts over
 int ov_movie_playing(void);  // ov_codec.c: a full-screen movie (1280 wide or more) gave a frame in the last half second
 uint64_t frame_step_ticks(void);                           // game time since the first present in 60 Hz ticks (input scripts)
 // In-launch A/B measurement: MKW_AB=<seconds> splits the world clock (frame_step_world_us) into blocks of that much

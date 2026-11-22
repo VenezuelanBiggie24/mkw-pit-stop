@@ -49,6 +49,10 @@ own menu presses: it picks Multiplayer, raises the player count with RIGHT on th
 | 4 | 41.92 ms (23.9 fps) | 42.7 ms | 19.2 fps | 14.2 fps | 99.0 ms | 4,890 of 5,009 | 0.40x |
 
 The game kept its 60 Hz present interval in every run (no switch to 30), so it counted each frame as 1/60 s and the
-race slowed by the ratio: 46 fps gives 0.77x, 24 fps gives 0.40x. Three players cost the same as four. Not measured
-yet: the 30 fps setting, where a frame has 33.3 ms at full speed (by these frame times, 2 players would hold it and 3 or
-4 would not), and courses other than the benchmark's first.
+race slowed by the ratio: 46 fps gives 0.77x, 24 fps gives 0.40x. Three players cost the same as four.
+
+Since then the PS5 profile holds split screen at 30 fps (`MKW_SPLIT_FPS=30`, runtime/core/boot/game.c; `same` follows
+`MKW_FPS`), where a frame has 33.3 ms at full speed. 2 players with it, same benchmark (22/11/2026,
+`split2p-cap30`): 33.35 ms (30.0 fps), window medians 33.3 ms, 1% low 27.3 fps, 0.1% low 17.4 fps, worst 75.4 ms, race
+speed 1.00x. Not measured with it yet: 3 and 4 players (at ~42 ms a frame, about 0.8x expected) and courses other than
+the benchmark's first.
