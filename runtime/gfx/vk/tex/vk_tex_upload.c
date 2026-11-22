@@ -343,44 +343,205 @@ void tex_zero_tail_recheck(uint64_t frame) {
     plat_mutex_unlock(&zt_lock);
 }
 
-// The deswizzle of an upload, over the texture workers (tex_par.c): each level and layer in bands of block rows, so the
-// first level (three quarters of the bytes) spreads too. It ran serially on the replay thread, ~44 ms of the course
-// load's 1.5 s peak (tl-fp1, 16/11/2026), at memcpy speed (16-25 GB/s on an i7-14700F, tex_bl_copy); the bands write
-// apart, so the staging bytes are the same. Storage that has no row split (linear, or no CPU layout) is one item.
-// Measured on replays of four captures (RX 6700 XT, i7-14700F, 17/11/2026; MKW_TEX_PAR=0 against 1, same images):
-// textures of 512 KiB or more 16.0-17.0 -> 7.9-8.4 ms per capture (title, tt8, photo: 2x with 8 threads), the
-// smaller ones left on the caller (5-11 ms over 400-900 uploads of ~140 KiB: waking the workers for each would cost
-// what it saves). gp397's whole deswizzle: 19.7 -> 15.4 ms with this threshold, 19.5 -> 16.0 with 1 MiB.
-#define UP_BAND (128u << 10)        // bytes of a band
-#define UP_PAR_MIN (512ull << 10)   // a smaller texture deswizzles on the caller
-typedef struct {
-    uint8_t *dst, *tmp;            // where its rows go (tmp: the CPU decodes' input, freed by upload)
-    size_t pitch;
-    uint32_t level, layer;
-    uint32_t band, first;          // block rows per item (0: one nvn_deswizzle), its first item
-    int bad;                       // no CPU layout: uploaded as zeros
-} UpPart;
-typedef struct {
-    const nvn_texdesc *d;
-    const void *mem;
-    UpPart *pt;
-    uint32_t n;
-} UpJob;
+// Row-band partial re-upload for large single-level 2D color textures (MKW_TEX_REUP_BANDS, default 1, supports "ab").
+// Targets dynamic atlases (e.g. MKW's 1024x8192 R8 font/atlas at 8 MiB, re-uploaded 25+ times per 240 s race at
+// 12.5-18.5 ms each) by querying per-page write generations per contiguous row-band (linear) or block-row (block-linear)
+// and uploading only the dirty strips. Returns 1 handled, 0 staging OOM (deferred), -1 fall back to full upload().
+static int upload_bands(Tex *e, uint32_t partial_since, int bw, int bh, int bpb, int linear, uint64_t p0, uint64_t u0,
+                        uint64_t frame_now) {
+    const tex_t *t = &e->t;
+    const nvn_texdesc *d = &t->d;
+    uint32_t drop = e->pub.drop;
+    uint32_t w = mip(d->width, drop), h = mip(d->height, drop);
+    uint32_t rb = (w + bw - 1) / bw * (uint32_t)bpb, rows = (h + bh - 1) / bh;
+    if (w == 1024 && h == 1024 && (d->format == 0x25 || d->format == 0x38)) return -1;   // button glyph sheet
 
-static void up_deswizzle(void *ctx, uint32_t i) {
-    const UpJob *J = ctx;
-    uint32_t lo = 0, hi = J->n - 1;   // the last part whose first item is at most i
-    while (lo < hi) {
-        uint32_t mid = (lo + hi + 1) / 2;
-        if (J->pt[mid].first <= i) lo = mid; else hi = mid - 1;
+    uint64_t offs_stk[256], spans_stk[256];
+    uint8_t dirty_stk[256];
+    uint32_t nb = 0, band_rows = 0;
+    unsigned th = 0, td = 0;
+    uint64_t lv_off = 0, row_blk_bytes = 0;
+    uint32_t stride = 0;
+
+    if (linear) {
+        if (drop || (d->target != 1 && d->target != 7)) return -1;
+        stride = nvn_tex_linear_stride(d);
+        if (stride < rb || (uint64_t)rows * stride > t->L.size) return -1;
+        band_rows = (uint32_t)((65536u + stride - 1u) / stride);
+        if (band_rows < 1) band_rows = 1;
+        nb = (rows + band_rows - 1u) / band_rows;
+        if (nb < 2) return -1;
+    } else {
+        if ((rb & 3u) || !vk_bl_deswizzle_ready()) return -1;
+        nvn_tex_level_tiles(d, drop, &th, &td);
+        if (td != 0) return -1;
+        lv_off = nvn_tex_level_offset(d, drop);
+        band_rows = 8u << th;
+        uint64_t gobs_x = (rb + 63) / 64;
+        nb = (rows + band_rows - 1u) / band_rows;
+        row_blk_bytes = gobs_x * (512ull << th);
+        if (nb < 2 || lv_off + (uint64_t)nb * row_blk_bytes > t->L.size) return -1;
     }
-    UpPart *q = &J->pt[lo];
-    if (!q->band) {
-        q->bad = nvn_deswizzle(J->d, q->level, q->layer, J->mem, q->dst, q->pitch) != 0;
-        return;
+
+    uint64_t *offs = nb <= 256 ? offs_stk : malloc((size_t)nb * sizeof *offs);
+    uint64_t *spans = nb <= 256 ? spans_stk : malloc((size_t)nb * sizeof *spans);
+    uint8_t *dirty = nb <= 256 ? dirty_stk : malloc((size_t)nb);
+    if (!offs || !spans || !dirty) {
+        if (offs != offs_stk) free(offs);
+        if (spans != spans_stk) free(spans);
+        if (dirty != dirty_stk) free(dirty);
+        return -1;
     }
-    uint32_t r0 = (i - q->first) * q->band;
-    nvn_deswizzle_rows(J->d, q->level, q->layer, J->mem, q->dst, q->pitch, r0, r0 + q->band, NULL);
+    if (linear) {
+        for (uint32_t b = 0; b < nb; b++) {
+            uint32_t y0 = b * band_rows, ny = rows - y0 < band_rows ? rows - y0 : band_rows;
+            offs[b] = (uint64_t)y0 * stride;
+            spans[b] = (uint64_t)ny * stride;
+        }
+    } else {
+        for (uint32_t b = 0; b < nb; b++) {
+            offs[b] = lv_off + (uint64_t)b * row_blk_bytes;
+            spans[b] = row_blk_bytes;
+        }
+    }
+    vk_mem_ranges_written_since(e->pub.addr, offs, spans, dirty, nb, partial_since);
+    if (offs != offs_stk) free(offs);
+    if (spans != spans_stk) free(spans);
+
+    uint32_t nd = 0, nruns = 0;
+    for (uint32_t b = 0; b < nb; b++) {
+        if (dirty[b]) {
+            nd++;
+            if (b == 0 || !dirty[b - 1]) nruns++;
+        }
+    }
+    if (!nd) {
+        if (dirty != dirty_stk) free(dirty);
+        ru_skip_sub++, ru_skip_bytes += t->L.size;
+        e->wt_n = 0, e->up_pending = 0;
+        perf_end(PERF_TEX, p0);
+        return 1;
+    }
+    if (nd == nb) {
+        if (dirty != dirty_stk) free(dirty);
+        return -1;   // everything dirty: let normal upload() handle it
+    }
+
+    uint64_t ph[UPH_N] = {0}, pt = u0;
+#define UB_PHASE(i) do { uint64_t now_ = kern_now_ns(); ph[i] += now_ - pt; pt = now_; } while (0)
+    UB_PHASE(UPH_TEXPRE);
+    vk_upload_flush_over(64ull << 20);
+    UB_PHASE(UPH_FLUSH);
+
+    VkBufferImageCopy *rg = linear ? calloc(nruns, sizeof *rg) : NULL;
+    VkBlDeswRegion *br = linear ? NULL : calloc(nruns, sizeof *br);
+    VkDeviceSize total = 0;
+    uint64_t up_bytes = 0;
+    uint32_t ri = 0;
+    for (uint32_t b = 0; b < nb; ) {
+        if (!dirty[b]) { b++; continue; }
+        uint32_t b0 = b;
+        while (b < nb && dirty[b]) b++;
+        uint32_t y0 = b0 * band_rows;
+        uint32_t ny = (b * band_rows > rows ? rows : b * band_rows) - y0;
+        uint32_t oy = y0 * (uint32_t)bh;
+        uint32_t eh = h - oy < ny * (uint32_t)bh ? h - oy : ny * (uint32_t)bh;
+        if (linear) {
+            uint64_t sz = (uint64_t)ny * rb;
+            rg[ri++] = (VkBufferImageCopy){
+                .bufferOffset = total,
+                .bufferRowLength = rb / (uint32_t)bpb * (uint32_t)bw,
+                .bufferImageHeight = ny * (uint32_t)bh,
+                .imageSubresource = {e->pub.aspect, 0, 0, 1},
+                .imageOffset = {0, (int32_t)oy, 0},
+                .imageExtent = {w, eh, 1},
+            };
+            up_bytes += sz;
+            total += (sz + 15) & ~15ull;
+        } else {
+            uint64_t bl_sz = (uint64_t)(b - b0) * row_blk_bytes;
+            if (bl_sz > (32ull << 20) || (uint64_t)ny * rb > (32ull << 20)) {
+                free(rg), free(br);
+                if (dirty != dirty_stk) free(dirty);
+                return -1;
+            }
+            br[ri++] = (VkBlDeswRegion){
+                .src = total, .bl_size = bl_sz, .rb = rb, .rows = ny, .slices = 1,
+                .w = w, .h = eh, .bw = (uint32_t)bw, .bh = (uint32_t)bh, .bpb = (uint32_t)bpb,
+                .level = 0, .layer = 0, .offset_y = (int32_t)oy, .th = (uint8_t)th, .td = 0,
+            };
+            up_bytes += (uint64_t)ny * rb;
+            total += (bl_sz + 15) & ~15ull;
+        }
+    }
+
+    VkBuffer sb;
+    uint8_t *stg;
+    VkCommandBuffer cb = vk_upload_begin_staging(total, &sb, (void **)&stg);
+    UB_PHASE(UPH_STAGING);
+    if (!cb) {
+        free(rg), free(br);
+        if (dirty != dirty_stk) free(dirty);
+        e->up_pending = 1, e->up_fail_frame = frame_now;
+        perf_end(PERF_TEX, p0);
+        return 0;
+    }
+
+    ri = 0;
+    for (uint32_t b = 0; b < nb; ) {
+        if (!dirty[b]) { b++; continue; }
+        uint32_t b0 = b;
+        while (b < nb && dirty[b]) b++;
+        uint32_t y0 = b0 * band_rows;
+        uint32_t ny = (b * band_rows > rows ? rows : b * band_rows) - y0;
+        if (linear) {
+            uint8_t *dst = stg + rg[ri].bufferOffset;
+            const uint8_t *src = (const uint8_t *)t->mem + (uint64_t)y0 * stride;
+            if (stride == rb) memcpy(dst, src, (size_t)ny * rb);
+            else for (uint32_t r = 0; r < ny; r++) memcpy(dst + (size_t)r * rb, src + (size_t)r * stride, rb);
+        } else {
+            uint8_t *dst = stg + br[ri].src;
+            const uint8_t *src = (const uint8_t *)t->mem + lv_off + (uint64_t)b0 * row_blk_bytes;
+            memcpy(dst, src, (size_t)br[ri].bl_size);
+        }
+        ri++;
+    }
+    if (dirty != dirty_stk) free(dirty);
+    UB_PHASE(UPH_DESWIZZLE);
+
+    barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    int checked = 1;
+    if (linear) vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, nruns, rg);
+    else checked = vk_bl_deswizzle_record(cb, sb, br, (int)nruns, e->pub.image, e->pub.aspect);
+    UB_PHASE(UPH_RECORD);
+    barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+    vk_upload_end();
+    UB_PHASE(UPH_END);
+    free(rg), free(br);
+    if (!checked) {
+        e->up_pending = 1, e->up_fail_frame = frame_now;
+        perf_end(PERF_TEX, p0);
+        return 0;
+    }
+
+    uint64_t dt = kern_now_ns() - u0;
+    if (rt_trace & RT_TRACE_PERF) {
+        up_ph_n++;
+        for (int i = 0; i < UPH_N; i++) up_ph_ns[i] += ph[i];
+        if (dt > up_slow.total_ns) {
+            up_slow = (UpSlow){.addr = e->pub.addr, .bytes = up_bytes, .total_ns = dt, .w = d->width, .h = d->height,
+                               .levels = 1, .layers = 1, .fmt = (uint32_t)d->format, .again = 1};
+            memcpy(up_slow.ph, ph, sizeof ph);
+        }
+    }
+    n_reuploads++, perf_count(PERF_CNT_TEX_REUP);
+    ru_n++, ru_bytes += up_bytes, ru_ns += dt;
+    uint64_t full_raw = (uint64_t)rb * rows;
+    if (full_raw > up_bytes) ru_skip_sub += nb - nd, ru_skip_bytes += full_raw - up_bytes;
+    e->wt_n = 0, e->up_pending = 0, e->n_up++;
+    perf_end(PERF_TEX, p0);
+#undef UB_PHASE
+    return 1;
 }
 
 // 1 uploaded (or nothing to upload); 0 deferred for want of staging memory (e->up_pending: tried again next frame).
@@ -410,6 +571,14 @@ static int upload(Tex *e, uint32_t partial_since) {
     static int bcc = -1;   // MKW_ASTC_BC_CHECK (bc_check)
     if (bcc < 0) bcc = cfg_get("MKW_ASTC_BC_CHECK") ? atoi(cfg_get("MKW_ASTC_BC_CHECK")) : 0;
     int bcheck = bcc > 0 && agpu && e->f.astc_bc7 && !acheck && !linear;
+    static int reup_bands = -1;     // MKW_TEX_REUP_BANDS (default 1; "ab"): partial row-band re-upload on large 2D single-level textures
+    if (reup_bands < 0) reup_bands = rt_knob("TEX_REUP_BANDS", "1");
+    if (partial_since && e->uploaded && levels == 1 && layers == 1 && !is3d && !one_d && !astc && !rgb && !acheck &&
+        !bcheck && e->pub.aspect == VK_IMAGE_ASPECT_COLOR_BIT && d->target != 5 && d->target != 6 && d->target != 10 &&
+        d->samples <= 1 && t->L.size >= (256u << 10) && RT_KNOB_ON(reup_bands)) {
+        int br_res = upload_bands(e, partial_since, bw, bh, bpb, linear, p0, u0, frame_now);
+        if (br_res >= 0) return br_res;
+    }
     static int reup_partial = -1;   // MKW_TEX_REUP_PARTIAL (default 1; "ab"): skip unchanged mip/layer subresources on re-upload
     if (reup_partial < 0) reup_partial = rt_knob("TEX_REUP_PARTIAL", "1");
     uint32_t n = levels * layers, nd = n, k = 0;
@@ -605,7 +774,8 @@ static int upload(Tex *e, uint32_t partial_since) {
     UP_PHASE(UPH_DESWIZZLE);
     uint8_t *raw_copy = acheck || bcheck ? malloc(total) : NULL;
     if (raw_copy) memcpy(raw_copy, stg, total);
-    barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    int astc_batched = agpu && !acheck && !bcheck && vk_astc_batch_active();
+    if (!astc_batched) barrier(cb, ALL_RW, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     int checked = 1;
     if (agpu) {
         uint64_t a0 = perf_begin();
@@ -622,7 +792,7 @@ static int upload(Tex *e, uint32_t partial_since) {
         if (nc) vkCmdCopyBufferToImage(cb, sb, e->pub.image, VK_IMAGE_LAYOUT_GENERAL, nc, rg);
     }
     UP_PHASE(UPH_RECORD);
-    barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
+    if (!astc_batched) barrier(cb, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, ALL_RW);
     vk_upload_end();
     UP_PHASE(UPH_END);
     if (acheck) {   // waits for the GPU

@@ -500,6 +500,10 @@ typedef struct {
 void vk_astc_record_split(uint64_t out[4]);   // MKW_TRACE=perf: setup, dispatch loop, after (ns), calls; resets
 int vk_astc_record(VkCommandBuffer cb, VkBuffer src, VkDeviceSize src_size, const VkAstcRegion *rg, int n, uint32_t bw,
                    uint32_t bh, int srgb, VkImage img, VkImageAspectFlags aspect, int bc7, VkBuffer readback);   // bc7: img is BC7
+void vk_astc_batch_begin(void);   // batch multiple vk_astc_record calls into one FIXED_SCRATCH pass (MKW_ASTC_BATCH)
+void vk_astc_batch_flush(void);   // record all queued ASTC decodes now (safe if empty or not open)
+void vk_astc_batch_end(void);     // flush and close the batch
+int vk_astc_batch_active(void);   // 1 while a batch is open on the current thread
 // Generic Switch 2 block-linear -> linear compute deswizzle for 4-byte-aligned non-ASTC subresources (BCn, RGBA8, etc.).
 typedef struct {
     VkDeviceSize src;              // byte offset of block-linear bytes in staging buffer
@@ -507,6 +511,7 @@ typedef struct {
     uint32_t rb, rows, slices;     // linear row bytes (multiple of 4), block rows, slices
     uint32_t w, h, bw, bh, bpb;    // image extent (texels), format block footprint & bytes per block
     uint32_t level, layer;
+    int32_t offset_y;              // destination texel Y offset (0 for full level, multiple of (8<<th)*bh for bands)
     uint8_t th, td;                // log2 GOBs per block height/depth
 } VkBlDeswRegion;
 int vk_bl_deswizzle_ready(void);

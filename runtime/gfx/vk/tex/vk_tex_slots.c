@@ -285,7 +285,7 @@ void vk_texture_new_submit(void) {
                (unsigned long long)ars[3], ars[0] / 1e6, ars[1] / 1e6, ars[2] / 1e6, (unsigned long long)uw[0],
                uw[1] / 1e6, uw[2] / 1e6, (unsigned long long)uw[3], uw[4] / 1e6, uw[5] / 1e6,
                (unsigned long long)ls_n, ls_ns / 1e6, ls_max / 1e6);
-        if (up_slow.total_ns > 20000000ull)   // the slowest upload, when over 20 ms
+        if (up_slow.total_ns > 10000000ull)   // the slowest upload, when over 10 ms
             rt_log("perf: frame %llu: slowest upload %.2f ms%s: %#llx %ux%u fmt %#x levels %u layers %u, %.1f KiB; "
                    "precomputed %.2f flush %.2f staging %.2f deswizzle %.2f record %.2f end %.2f",
                    (unsigned long long)f * 60, up_slow.total_ns / 1e6, up_slow.again ? " (again)" : "",

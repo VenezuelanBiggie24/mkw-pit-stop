@@ -214,14 +214,37 @@ extern uint64_t vk_pc_snap_ns, vk_pc_up_n, vk_pc_up_ns, vk_snap_q_ns, vk_snap_lo
 
 static void precheck(void) {
     if (P.pre_from >= P.ntid) return;
+    static int yield_k = -1;   // MKW_PRECHECK_YIELD (default 1; "ab"): release tex_lock periodically during upload bursts
+    if (yield_k < 0) yield_k = rt_knob("PRECHECK_YIELD", "1");
+    int do_yield = RT_KNOB_ON(yield_k);
     uint64_t t0 = kern_now_ns();
     uint64_t s0 = vk_pc_snap_ns, u0 = vk_pc_up_n, un0 = vk_pc_up_ns, q0 = vk_snap_q_ns, l0 = vk_snap_lock_ns;
     uint64_t tl0 = kern_now_ns();
     uint32_t ep = vk_texture_epoch();
     vk_texture_lock();
-    P.pre_texlock_ns += kern_now_ns() - tl0;
-    for (int i = P.pre_from; i < P.ntid; i++)
-        if (!vk_texture_checked((int)P.tids[i], ep)) vk_texture_by_id_locked((int)P.tids[i], NULL, NULL), P.n_pre++;
+    uint64_t hold_t0 = kern_now_ns();
+    P.pre_texlock_ns += hold_t0 - tl0;
+    vk_astc_batch_begin();
+    uint64_t last_up = vk_pc_up_n;
+    int checked_since = 0;
+    for (int i = P.pre_from; i < P.ntid; i++) {
+        if (!vk_texture_checked((int)P.tids[i], ep)) {
+            vk_texture_by_id_locked((int)P.tids[i], NULL, NULL);
+            P.n_pre++;
+            checked_since++;
+            if (do_yield && (vk_pc_up_n - last_up >= 16 || (checked_since >= 64 && kern_now_ns() - hold_t0 > 1000000ull))) {
+                vk_astc_batch_flush();
+                vk_texture_unlock();
+                uint64_t rt0 = kern_now_ns();
+                vk_texture_lock();
+                hold_t0 = kern_now_ns();
+                P.pre_texlock_ns += hold_t0 - rt0;
+                last_up = vk_pc_up_n;
+                checked_since = 0;
+            }
+        }
+    }
+    vk_astc_batch_end();
     vk_texture_unlock();
     P.pre_from = P.ntid;
     P.pre_ns += kern_now_ns() - t0;

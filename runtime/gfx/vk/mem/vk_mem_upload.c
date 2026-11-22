@@ -547,6 +547,7 @@ static void binds_before_flush(void) {
 
 uint64_t vk_upload_flush(int wait) {
     plat_once(&cmd_once, cmd_init, NULL);
+    vk_astc_batch_flush();
     binds_before_flush();
     cmd_take();
     VkCtx *c = vk_ctx();
