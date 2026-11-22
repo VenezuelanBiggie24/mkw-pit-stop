@@ -9,7 +9,7 @@ build with `tools/build/build.py --pgo-gen`, same generated tree): objects in `g
 build without it keeps its own, and the clang warnings about functions whose profile is missing or out of date
 are summed up at the end (a generator change since the profile shows there).
 `--gen-opt O2` compiles the generated C at -O2 instead of -O1 (objects in `lift-O2` / `lift-pgo-O2`): plain -O2 lost
-to -O1 (more instructions and memory operands in the hottest functions, docs/project/roadmap.md), but with a profile clang
+to -O1 (more instructions and memory operands in the hottest functions, docs/ps5/roadmap.md), but with a profile clang
 optimizes only the hot code and keeps the cold paths small, so -O2 is meant to be measured together with --pgo-use.
 """
 
@@ -28,6 +28,8 @@ from pathlib import Path
 from build_smoke import (APP_SDK, GLM, MESA, ROOT, TEMPLATE, VULKAN, png, require_checkout,
                          require_radv, write_changed)
 from build import game_id, module_glue, port_version
+import hud_layouts  # noqa: E402  (recomp/, on the path through build: patches.c's screen-edge HUD table)
+from ext_glue import ext_sources, ext_table
 from plugin_glue import plugin_ninja, plugin_table
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "i18n"))
@@ -40,7 +42,7 @@ TITLE_ID = "PPSA99193"
 TITLE_NAME = "Mario Kart World: Pit Stop"
 ICON = ROOT / "docs/images/icon0.png"
 # param.json flexibleMemorySize, MiB. Flexible and direct memory share the app's budget on the PS5: 1024 left 11,712
-# MiB of direct memory, which long sessions ran out of (docs/project/roadmap.md section 4), while flexible memory peaked at
+# MiB of direct memory, which long sessions ran out of (docs/ps5/roadmap.md section 4), while flexible memory peaked at
 # ~460-490 MiB in use ("flex free 562 MiB" in run pack1, 16/11/2026; task 38's report). 640 keeps ~150 MiB of that
 # spare and should give the direct memory ~384 MiB more; the census line's "dmem free N of M MiB" shows M.
 FLEXIBLE_MIB = 640
@@ -121,11 +123,12 @@ def ninja_path(path: Path) -> str:
 def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[str, str],
                     jobs: int, generated: Path | None, exefs: Path | None,
                     pgo_use: Path | None = None, gen_opt: str = "O1",
-                    gen_frame_pointers: bool = False,
+                    gen_frame_pointers: bool = False, ext: list[Path] | None = None,
                     plugins: list[Path] | None = None) -> tuple[list[Path], bool]:
     out = WORK / ("game-objects" if generated else "inventory-objects")
     out.mkdir(parents=True, exist_ok=True)
     write_changed(out / "guest_layout.h", ("#pragma once\n" + placement_defines(PROFILE)).encode())
+    write_changed(out / "hud_layouts.h", hud_layouts.header_text().encode())   # as build.py writes it in rt/
     ident = game_id(PROFILE)
     common = ["-march=znver2", "-fPIC", "-fno-strict-aliasing", "-ffunction-sections", "-fdata-sections"]
     include_dirs = sorted({RUNTIME, *(p.parent for p in RUNTIME.rglob("*.h"))})
@@ -150,7 +153,7 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
         ("lift", "prospero-clang", [*genflags]),
     ):
         invocation = shlex.join([str(sdk / "bin" / compiler), *options]).replace("$", "$$")
-        ninja += [f"rule {name}", f"  command = {invocation} -MMD -MF $out.d -c $in -o $out",
+        ninja += [f"rule {name}", f"  command = {invocation} $extra -MMD -MF $out.d -c $in -o $out",
                   "  depfile = $out.d", "  deps = gcc", "  description = compile $in"]
     files = [(source, source.relative_to(ROOT), "cxx" if source.suffix == ".cpp" else "cc")
              for source in source_files()]
@@ -169,6 +172,7 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
     if generated is None:
         # Weak so the game-free placeholder links alone while strong modules.o overrides it cleanly.
         defaults_src += "__attribute__((weak)) const RtGame *rt_game_builtin(void) { return 0; }\n"
+    defaults_src += ext_table(ext or [])   # extensions linked in (--ext, runtime/core/ext)
     defaults_src += plugin_table(plugins or [])   # plugins linked in (--plugin; the table is there, empty, without)
     write_changed(defaults, defaults_src.encode())
     files.append((defaults, Path("defaults.c"), "cc"))
@@ -190,6 +194,12 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
         for name, _, _ in read_checked(generated, PROFILE):
             files += [(source, Path(lift) / name / source.name, "lift")
                       for source in sorted((generated / name).glob("*.c"))]
+    # extensions (--ext): each folder's entry point renamed by its define (tools/build/ext_glue.py)
+    defines = {}
+    for source, define in ext_sources(ext or []):
+        relative = Path("ext") / define.rsplit("__", 1)[1] / source.name
+        files.append((source, relative, "cxx" if source.suffix == ".cpp" else "cc"))
+        defines[relative] = define
     objects = []
     for source, relative, rule in files:
         obj = out / relative.with_suffix(".o")
@@ -198,6 +208,8 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
         # a new profile in the same file rebuilds the generated code: the profile is an input
         implicit = f" | {ninja_path(pgo_use)}" if rule == "lift" and pgo_use is not None else ""
         ninja.append(f"build {ninja_path(obj)}: {rule} {ninja_path(source)}{implicit}")
+        if relative in defines:
+            ninja.append(f"  extra = {defines[relative]}")
     # plugins (--plugin): each folder compiled as its own library would be and sealed into one object, so its names
     # never meet the runtime's (tools/build/plugin_glue.py). MKW_PS5_NATIVE tells a plugin it is on the console.
     tool = lambda name: str(sdk / "bin" / name) if (sdk / "bin" / name).is_file() else name  # noqa: E731
@@ -301,6 +313,8 @@ def main() -> int:
     parser.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 1))
     parser.add_argument("--inventory", action="store_true", help="compile and report unresolved imports without packaging")
     parser.add_argument("--generated", type=Path, help="completed ps5-high144 lift")
+    parser.add_argument("--ext", type=Path, action="append", default=[], metavar="DIR",
+                        help="link the extension in this folder in (docs/project/extensions.md); repeatable")
     parser.add_argument("--exefs", type=Path, help="local extracted ExeFS for the built-in module hashes")
     parser.add_argument("--plugin", type=Path, action="append", default=[], metavar="DIR",
                         help="link the plugin in this folder in (runtime/plugin, tools/plugin/README.md); repeatable")
@@ -348,6 +362,7 @@ def main() -> int:
     with output_lock(generated) if generated else nullcontext():
         objects, complete = compile_objects(sdk, template, includes, env, args.jobs, generated, exefs, pgo_use,
                                             args.gen_opt, args.gen_frame_pointers,
+                                            [path.resolve() for path in args.ext],
                                             [path.resolve() for path in args.plugin])
     out = WORK / ("game-objects" if generated else "inventory-objects")
     aggregate = import_inventory(sdk, objects, env, out, reachable=False)

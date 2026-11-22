@@ -23,6 +23,10 @@
 //   them meanwhile, or merge them by bytes where the range has a base (vk_mem_merge.c).
 // MKW_SHADOW=1/0 forces the mode on or off; the default is on for Linux, off on the PS5 (its device profile, cfg.c).
 int shadow_on;                                    // shadow mode: imported pools get shadow storage (vk_mem_class_log)
+// The syncs, write-backs and touches run for shadowed pools: on with shadow_on, and set once a pool in import mode
+// (Windows) takes a shadow because its import failed (import_pool). Read without a lock: a pool's first shadow is
+// made under pool_lock before any address in it resolves, so the replay sees it set before recording a use.
+int shadow_live;
 PlatMutex shadow_lock = PLAT_MUTEX_INIT;          // after pool_lock; before gen_lock
 // Pools resolved since the last sync, under a lock of their own: the recording threads add to it while the early
 // syncs below hold shadow_lock. stouch: touched while recording a submission (the early thread takes them);
@@ -87,6 +91,7 @@ int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     plat_mutex_unlock(&gen_lock);
     hang_mark_val("shadow_pool: copying guest memory", addr);
     vk_mem_cna_copy(r->smap, r->import_lo, r->import_hi);   // MKW_GPU_ONLY_RELEASE's released ranges as zeros
+    vk_pool_diag_note(r->flags, 0, n);
     shadow_flush(r, r->import_lo, r->import_hi);
     hang_mark_val("shadow_pool: shadow_lock", addr);
     plat_mutex_lock(&shadow_lock);
@@ -462,7 +467,7 @@ static void early_main(void *arg) {
 }
 
 void vk_mem_shadow_sync(uint64_t fence) {
-    if (!shadow_on) return;
+    if (!__atomic_load_n(&shadow_live, __ATOMIC_ACQUIRE)) return;
     uint64_t t0 = qpc();
     __atomic_add_fetch(&sync_wants, 1, __ATOMIC_ACQ_REL);
     plat_mutex_lock(&shadow_lock);
@@ -534,7 +539,7 @@ void vk_mem_shadow_sync(uint64_t fence) {
 int vk_mem_shadow_on(void) { return shadow_on; }
 
 void shadow_log(uint64_t frame) {
-    if (!shadow_on) return;
+    if (!shadow_live) return;
     uint64_t tn, tp, tf, to;
     mem_trap_stats(&tn, &tp, &tf, &to);
     plat_mutex_lock(&shadow_lock);

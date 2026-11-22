@@ -1,0 +1,102 @@
+{
+  "$schema": "https://recomplauncher.com/schema/recomplauncher.json",
+  "format": 1,
+  "name": "Mario Kart World Recompiled",
+  "repo": "adriadam10/mkw-recomp",
+  "start": {
+    "program": ["mkw.exe", "mkw"]
+  },
+  "config": [
+    {
+      "id": "main",
+      "format": "ini",
+      "file": [{ "path": "{install}/mkw.ini" }]
+    }
+  ],
+  "saves": ["{install}/profile/save", "{install}/profile/players"],
+  "folders": {
+    "logs": [{ "path": "{install}/logs" }]
+  },
+  "settings": [
+    {
+      "id": "resolution",
+      "label": "Resolution",
+      "help": "What the game draws at. Original is the console's own.",
+      "choices": [
+        { "label": "Original", "set": { "resolution": "original" } },
+        { "label": "540p", "set": { "resolution": "540" } },
+        { "label": "720p", "set": { "resolution": "720" } },
+        { "label": "900p", "set": { "resolution": "900" } },
+        { "label": "1080p", "set": { "resolution": "1080" } },
+        { "label": "1440p", "set": { "resolution": "1440" } },
+        { "label": "2160p", "set": { "resolution": "2160" } }
+      ],
+      "defaults": { "resolution": "original" }
+    },
+    {
+      "id": "fullscreen",
+      "label": "Window mode",
+      "choices": [
+        { "label": "Windowed", "set": { "fullscreen": "0" } },
+        { "label": "Fullscreen", "set": { "fullscreen": "1" } }
+      ],
+      "defaults": { "fullscreen": "0" }
+    },
+    {
+      "id": "aspect",
+      "label": "Aspect ratio",
+      "help": "Wider than 16:9 shows more of the 3D scene instead of stretching it.",
+      "choices": [
+        { "label": "16:9", "set": { "aspect": "16:9" } },
+        { "label": "Match window", "set": { "aspect": "window" } },
+        { "label": "21:9", "set": { "aspect": "21:9" } },
+        { "label": "32:9", "set": { "aspect": "32:9" } },
+        { "label": "48:9", "set": { "aspect": "48:9" } }
+      ],
+      "defaults": { "aspect": "16:9" }
+    },
+    {
+      "id": "fps",
+      "label": "Frame rate",
+      "help": "Automatic follows what each scene asks for, as on the console. Lower caps help weaker GPUs.",
+      "choices": [
+        { "label": "Automatic", "set": { "fps": "auto" } },
+        { "label": "Game's own", "set": { "fps": "game" } },
+        { "label": "60", "set": { "fps": "60" } },
+        { "label": "30", "set": { "fps": "30" } }
+      ],
+      "defaults": { "fps": "auto" }
+    },
+    {
+      "id": "vsync",
+      "label": "Presentation",
+      "help": "Mailbox is low latency without tearing, Fifo is classic V-Sync, Immediate may tear.",
+      "choices": [
+        { "label": "Mailbox", "set": { "vk_present": "mailbox" } },
+        { "label": "V-Sync", "set": { "vk_present": "fifo" } },
+        { "label": "Immediate", "set": { "vk_present": "immediate" } }
+      ],
+      "defaults": { "vk_present": "mailbox" }
+    },
+    {
+      "id": "upscaler",
+      "label": "Upscaling",
+      "help": "FSR 1 sharpens the picture when it is drawn below the window's size.",
+      "choices": [
+        { "label": "Bilinear", "set": { "upscaler": "bilinear" } },
+        { "label": "FSR", "set": { "upscaler": "fsr" } }
+      ],
+      "defaults": { "upscaler": "bilinear" }
+    },
+    {
+      "id": "hdr",
+      "label": "HDR",
+      "help": "Automatic turns HDR on when the display is in HDR mode.",
+      "choices": [
+        { "label": "Automatic", "set": { "hdr": "auto" } },
+        { "label": "Off", "set": { "hdr": "off" } }
+      ],
+      "defaults": { "hdr": "auto" }
+    }
+  ]
+}

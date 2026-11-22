@@ -248,6 +248,7 @@ int watched(uint64_t addr, uint64_t size) {
     return addr == test_watch_addr && size == 3 * PS5_KERNEL_PAGE_SIZE;
 }
 void mem_base_fill_locked(uint64_t addr) { (void)addr; abort(); }
+void mem_spill_fill_locked(uint64_t p, int why) { (void)p, (void)why; abort(); }   // no spill on the PS5
 void rt_fatal(const char *fmt, ...) {
     assert(expect_rollback_fatal && strstr(fmt, "rollback failed") && early_protect_calls == 4);
     const uint64_t addr = test_watch_addr;

@@ -12,7 +12,13 @@ Issue moderation (`moderate.py`, `classify.py`), run by `.github/workflows/issue
 | `topics.toml` | The questions the Discussions keep getting: title patterns, the answer, its section in the [wiki's FAQ](https://github.com/adriadam10/mkw-recomp/wiki/FAQ) and the discussion that asked it first |
 | `signatures.toml` | Known error strings and the issue that tracks each; `fixed` keeps reports on that release or later open as possible regressions; `wiki` is its section in the [wiki's Troubleshooting](https://github.com/adriadam10/mkw-recomp/wiki/Troubleshooting) page, which the bot's reply links |
 
-A known error closes the new issue at once as its duplicate (its author's reply reopens it). A report on a release
+Since 20/11/2026: a performance form without its log is asked for it, and one that only measures (typical frame time up
+to 20 ms, no complaint in its notes) is closed as `perf-data` once its log is attached; `needs-retry` waits for a
+report to be four releases behind (it was two: a release a day made 63 reports "old"); an issue whose last word is
+our answer, 14 days old, is closed as `no-reply` (its author's reply reopens it).
+
+A known error closes the new issue at once as its duplicate (its author's reply reopens it); with several recent logs
+attached, every one must carry it. A report on a release
 older than the newest two, quiet for 3 days, is asked to try the latest (`needs-retry`) and closed after 7 days without
 its author's reply. The sweep runs every 6 hours.
 

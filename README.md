@@ -42,7 +42,7 @@ Early, and moving fast. On 18/11/2026 on a base PS5:
 - **Pit Stop in-game overlay.** Press **Options + touchpad click** at any time to open **Pit Stop**, a controller-first
   settings menu with quick rows (**Master volume**, **Vibration strength**, **Performance HUD**), every settings
   category and live DualSense button remapping, saved to `/app0/mkw.ini`.
-- **Known issues ([docs/project/roadmap.md](docs/project/roadmap.md)):**
+- **Known issues ([docs/ps5/roadmap.md](docs/ps5/roadmap.md)):**
   - *Long sessions:* free memory falls race after race as the game keeps earlier courses' data; when it runs low,
     textures can come out corrupted or missing. Restart the title after a few races if that happens.
   - *Sparse tiles:* from boot a few sparse texture tiles stay unloaded: minor texture corruption near the start line
@@ -211,8 +211,9 @@ build/mkw
 | `.github/` | CI, issue and pull request templates |
 
 At the root: `pyproject.toml` and `uv.lock` (the Python environment of the tools), `Makefile` (shortcuts for the
-release and CI flows), `.gitignore`, `LICENSE`,
-`CONTRIBUTING.md`, `CHANGELOG.md` (each release's changes, its notes), `AGENTS.md` (a guide for coding agents).
+release and CI flows), `.gitignore`, `.gitattributes` (the lists every pull request appends to merge as a
+union), `LICENSE`, `CONTRIBUTING.md`, `CHANGELOG.md` (each release's changes, its notes), `AGENTS.md` (a guide for
+coding agents).
 
 ## Performance
 
@@ -246,7 +247,7 @@ frame has 33.3 ms at full speed. Measured with the cap: 2 players 33.35 ms (30.0
 
 About 2% of race frames take over 20 ms: they are where a course streams in new textures, and they set the 1% lows
 and the slight slow motion. What was measured and what is left is in
-[docs/project/roadmap.md](docs/project/roadmap.md) and [docs/ps5/ps5.md](docs/ps5/ps5.md#frame-rate); PC numbers are in
+[docs/ps5/roadmap.md](docs/ps5/roadmap.md) and [docs/ps5/ps5.md](docs/ps5/ps5.md#frame-rate); PC numbers are in
 [docs/project/performance.md](docs/project/performance.md).
 
 ## Reporting bugs

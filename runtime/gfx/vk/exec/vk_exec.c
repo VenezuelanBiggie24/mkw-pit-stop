@@ -24,6 +24,7 @@
 #include "nvn_api.h"
 #include "nvn_tex.h"
 #include "tex.h"
+#include "vk_temporal.h"
 #include "vk.h"
 #include "vk_exec.h"
 #include "platform/platform.h"
@@ -98,7 +99,8 @@ void vk_exec_frame_log(const tex_t *p, uint64_t frame) {
     }
     rt_log("frame %llu: submits %llu passes %llu draws %llu/%llu clears %llu copies %llu dispatches %llu; present %p "
            "%ux%u/%#x written %d; feedback draws %llu barriers %llu restarts %llu layouts %llu; skips off %llu scissor %llu "
-           "program %llu no-vs %llu shader-missing %llu pipe-wait %llu pipe-failed %llu mesh %llu; targets%s",
+           "program %llu no-vs %llu shader-missing %llu pipe-wait %llu pipe-failed %llu mesh %llu; CPU-built indices: "
+           "byte %llu quads %llu line loops %llu, %llu bytes; block-linear texel boxes %llu bytes; targets%s",
            (unsigned long long)frame, (unsigned long long)f->submits,
            (unsigned long long)f->passes, (unsigned long long)f->draws, (unsigned long long)f->draws_seen,
            (unsigned long long)f->clears, (unsigned long long)f->copies, (unsigned long long)f->dispatches,
@@ -106,7 +108,10 @@ void vk_exec_frame_log(const tex_t *p, uint64_t frame) {
            hit, (unsigned long long)f->fb_draws, (unsigned long long)f->fb_barriers, (unsigned long long)f->fb_restarts,
            (unsigned long long)f->fb_layouts, (unsigned long long)f->skip[0], (unsigned long long)f->skip[1],
            (unsigned long long)f->skip[2], (unsigned long long)f->skip[3], (unsigned long long)f->skip[4],
-           (unsigned long long)f->skip[5], (unsigned long long)f->skip[6], (unsigned long long)f->skip[7], list);
+           (unsigned long long)f->skip[5], (unsigned long long)f->skip[6], (unsigned long long)f->skip[7],
+           (unsigned long long)f->cpu_idx[0], (unsigned long long)f->cpu_idx[1], (unsigned long long)f->cpu_idx[2],
+           (unsigned long long)f->cpu_idx_bytes,
+           (unsigned long long)__atomic_exchange_n(&nvn_texels_box_bl, 0, __ATOMIC_RELAXED), list);
     memset(f, 0, sizeof *f);
     nfw = 0;
 }
@@ -334,6 +339,11 @@ VkRect2D vk_exec_scissor(const VkExec *ex) {
     if (!ex->has_scissor) return (VkRect2D){{0, 0}, {(uint32_t)w, (uint32_t)h}};
     int64_t x0 = ex->scissor.x, y0 = ex->scissor.y;
     int64_t x1 = x0 + ex->scissor.w, y1 = y0 + ex->scissor.h;
+    {   // a pass moved to the output's size (vk_temporal.c): the game's scissor scaled with it
+        float fx = (float)x0, fy = (float)y0, fw = (float)(x1 - x0), fh = (float)(y1 - y0);
+        vk_tmp_scale_rect(ex, &fx, &fy, &fw, &fh);
+        x0 = (int64_t)floorf(fx), y0 = (int64_t)floorf(fy), x1 = (int64_t)ceilf(fx + fw), y1 = (int64_t)ceilf(fy + fh);
+    }
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 > w) x1 = w;

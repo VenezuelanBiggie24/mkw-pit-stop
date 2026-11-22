@@ -17,7 +17,8 @@
 
 // ---- logging and results
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));   // "[host] <msg>\n" to the log, one write
-// The log is stderr plus, in a game run whose stderr is not a file, logs\mkw.log in the game folder (main.c log_open).
+// The log is stderr plus, in a game run whose stderr is not a file, logs\mkw.log in the game folder (main.c log_open);
+// the start screen writes logs\launcher.log there.
 // rt_logf and rt_log_raw write to both without the prefix and the newline: crash reports, fatal errors, guest output.
 void rt_logf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void rt_vlogf(const char *fmt, va_list ap);
@@ -121,6 +122,8 @@ GuestFn hostfn_observer(const char *name);                 // NULL if none
 GuestFn hostfn_stock(const char *name);                    // the runtime's own handler (linked override/observer)
 void hostfn_add_override(const char *name, GuestFn fn);    // an override outside the linker table (probes); before
                                                            // ldr_load
+void hostfn_add_observer(const char *name, GuestFn fn);    // an observer outside the linker table (extensions);
+                                                           // before ldr_load. An added override hides any observer
 const char *hostfn_name(uint64_t addr);                    // name registered at a synthetic address, NULL if none
 void hostfn_seal(void);                                    // build the dispatch table (rt_dispatch_init over every
                                                            // linked module); idempotent; registration ends here
@@ -201,6 +204,13 @@ int mem_base_trap(uint64_t lo, uint64_t hi, uint64_t *bits);   // whole pages of
                                                            // bit per page trapped; 0: no trap map (Windows)
 void mem_base_release(uint64_t lo, uint64_t hi);           // the pages still trapped back to read-write, no copy
 int64_t mem_base_pages(void);                              // pages base-trapped now
+// Spilled pages (memory_spill.c, MKW_MEM_SPILL): the read-write pages of [lo, hi) with no other trap go to a file and
+// leave RAM until something touches them. Bytes spilled; 0 when off or unavailable (Windows).
+int mem_spill_on(void);
+uint64_t mem_spill(uint64_t lo, uint64_t hi);
+int64_t mem_spill_pages(void);                             // pages spilled now
+void mem_spill_stats(int64_t out[5]);                      // spilled now; totals: spilled, of them zero, filled by an
+                                                           // access, filled by a thaw
 // MKW_EARLY_READ=1 (memory_early.c, a diagnosis): the pages a submit's GPU work writes are watched from the submit
 // (fence: its value) until first touched, counting the game's touches before the GPU finished it.
 int mem_early_on(void);
@@ -289,6 +299,7 @@ void kern_host_left(void *thread);                         // back at depth 0 wi
 void kern_core_diag_frame(uint64_t frame, uint64_t interval_ns);   // perf_present, every present (also logs the
                                                            // asynchronous preemption counters)
 void kern_sched_report(uint64_t frame);                    // MKW_TRACE=sched: per-thread time split, on present
+void kern_dump_threads(void);                              // ctl threads: each guest thread's wait and return addresses
 uint32_t kern_handle_new(int kind, void *obj);             // kind: KERN_TMEM (svc.c)
 void *kern_handle_get(uint32_t h, int kind);
 void kern_handle_close(uint32_t h);                        // CloseHandle from the host side, any thread; fatal on a
@@ -329,6 +340,8 @@ int ov_split_players(void);  // ov_input.c: players on this machine since the ti
 void ov_title_menu(void);    // ov_input.c: the title menu started (race_scene.c): the count starts over
 int ov_movie_playing(void);  // ov_codec.c: a full-screen movie (1280 wide or more) gave a frame in the last half second
 uint64_t frame_step_ticks(void);                           // game time since the first present in 60 Hz ticks (input scripts)
+int frame_logic_hz(void);                                  // game.c MKW_LOGIC_HZ: game steps and vsync ticks a second (60)
+void frame_logic_hz_60(void);                              // patches.c: the version has no logichz set, 60 whatever it says
 // In-launch A/B measurement: MKW_AB=<seconds> splits the world clock (frame_step_world_us) into blocks of that much
 // game time in the order A B B A (repeated; B A A B with MKW_AB_INVERT=1); rt_ab() is 1 in the B blocks, 0 in A
 // blocks, before the world clock and without MKW_AB. rt_knob(name, def) reads the switch MKW_<name> once per call
@@ -340,9 +353,10 @@ int rt_knob(const char *name, const char *def);
 #define RT_KNOB_ON(mode) ((mode) == 2 ? rt_ab() : (mode))
 extern volatile uint64_t nvn_timestamp_last; // nvn_ext.c: the counter timestamp the game read last (ticks)
 void frame_step_present(uint64_t display_ns, int interval); // nvnQueuePresentTexture: the frame's display time and
-                                                           // present interval (60 Hz ticks)
-int frame_present_interval(void);   // the interval of the game's last present (1-4), any thread: frame generation's rate
-// MKW_FPS=auto (fps_auto.c): the present interval 1-4 from each frame's measured time, with hysteresis
+                                                           // present interval (vsync ticks of MKW_LOGIC_HZ)
+int frame_present_interval(void);   // the interval of the game's last present (1-8), any thread: frame generation's rate
+// MKW_FPS=auto (fps_auto.c): the present interval from each frame's measured time, with hysteresis: in vsync ticks of
+// hz (MKW_LOGIC_HZ; 0 is 60), 1 to FPS_AUTO_MAX * hz / 60 (15 fps at any rate)
 #define FPS_AUTO_MAX 4
 #define FPS_AUTO_HIST 120
 typedef struct {
@@ -351,6 +365,12 @@ typedef struct {
     int iv, downed;
     double stall_ms;   // how long the frames have been slower than any interval holds (fps_auto.c)
     int fits;          // the last frames before it fitted the interval
+    int hz;            // the vsync rate the interval counts in, 0: 60 (set after fps_auto_reset)
+    // trials toward a faster interval below 30 fps (fps_auto.c): the intervals that held HELD_S, frames left of the
+    // trial under way (from: the interval it left), frames until the next one and its wait in seconds
+    unsigned held, trial, trial_wait;
+    int trial_from;
+    double trial_s;
 } FpsAuto;
 void fps_auto_reset(FpsAuto *a);                           // interval 1, no history
 int fps_auto_step(FpsAuto *a, double measured_ms, double real_ms);   // a frame's game measure and real period in,
@@ -358,6 +378,8 @@ int fps_auto_step(FpsAuto *a, double measured_ms, double real_ms);   // a frame'
 int probe_discord(void);                                   // discord_probe.c: Rich Presence against the local Discord
 int probe_dsu(void);                                       // dsu_probe.c: the DSU motion client against a fake server
 int probe_fps(void);                                       // fps_probe.c: the controller on synthetic frame times
+int probe_merge(void);                                     // merge_probe.c: the shadow write-back's two implementations
+int probe_spill(void);                                     // spill_probe.c: spilled pages back byte for byte
 void lat_input_read(void);                                 // vk_latency.c MKW_LATENCY: the game read the controller
 void lat_game_present(uint64_t slot);                      // ... and presented the frame shown at slot (pacer, ns)
 void lat_mark(const char *what);                           // ... a frame event, logged in MKW_PROBE's window
@@ -370,6 +392,7 @@ void frame_rate_init(uint64_t patch_page);                 // and point the fram
 void race_scene_host(uint64_t patch_page);                 // race_scene.c: register its host function (patches.c)
 void race_scene_init(uint64_t patch_page);                 // point the race nodes' start slots at it (after seqwatch)
 int race_scene_on(void);                                   // the game is in a race (game.c: 20 and 15 fps only there)
+int race_scene_time_trial(void);                           // in time trial (game.c: MKW_LOGIC_HZ back to 60 there)
 // ---- boot (boot.c, main.c)
 typedef struct { const char *exefs, *romfs, *profile; int boot; double seconds; const char *shot, *gpu, *profile_base; } RtConfig;
                                                            // profile: the player's folder (core/base/players.h);
@@ -381,6 +404,7 @@ typedef struct { const char *exefs, *romfs, *profile; int boot; double seconds; 
 const RtConfig *rt_config(void);
 void rt_boot_event(const char *what, Cpu *c, const char *detail);   // checkpoint log; "nvn" ends --boot
 void rt_boot(void);                                        // boot.c
+void rt_ext_start(void);                                   // core/ext: start the extensions; before ldr_load, once
 // Modes of mkw. main.c has run mem_init and parsed the paths; each mode calls ldr_load itself if it needs the
 // modules, registers its host functions, then seals (hostfn_seal, or implicitly at the first rt_call). Return the
 // process exit code.
@@ -394,6 +418,8 @@ int probe_window(void);                                    // gfx_window_probe.c
 int probe_vkmem(void), probe_vkexec(void), probe_astc(void);                 // tex_probe.c, vk_exec_probe.c, astc_probe.c
 int probe_texpre(void);                                    // texpre_probe.c: GPU BC7 against bc7enc on game textures
 int probe_framegen(void);                                  // fg_probe.c: frame generation on two pictures
+int probe_oflow(void);                                     // oflow_probe.c: hardware flow with a known translation
+int probe_fsr_fg(void);                                    // fsr_fg_probe.c: analytical geometry/shading motion
 int probe_gpu_clocks(void);                                // clk_probe.c: the GPU clock after idle gaps (MKW_GPU_CLOCKS)
 
 int vk_texpre_encode(void);                                  // vk_texpre.c: --texpre (BC7 of the recorded ASTC textures)

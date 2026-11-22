@@ -235,6 +235,17 @@ VkPipeline lib_build(Lib *b, int kind, const VkPipeState *s, const GKey *k, Layo
     return pipe;
 }
 
+// Removes b (building, no job queued) and wakes whoever waited on it. Caller holds P.lock.
+void lib_drop(Lib *b) {
+    for (Lib **pp = &libs[b->hash % LIB_BUCKETS]; *pp; pp = &(*pp)->next)
+        if (*pp == b) {
+            *pp = b->next;
+            break;
+        }
+    free(b);
+    plat_cond_broadcast(&done_cv);
+}
+
 // Takes b's queued job out of the queue: b stays building, for whoever builds the job. Caller holds P.lock.
 LibJob *lib_take(Lib *b) {
     LibJob *j = b->job, **pp = &U.head, *prev = NULL;

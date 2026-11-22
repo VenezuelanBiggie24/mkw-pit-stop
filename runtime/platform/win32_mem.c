@@ -47,6 +47,7 @@ int plat_mem_protect(uint64_t addr, uint64_t n, int prot) {
     return VirtualProtect((void *)(uintptr_t)addr, n, p, &old) != 0;
 }
 
+int plat_mem_drop(uint64_t addr, uint64_t n) { return (void)addr, (void)n, 0; }   // memory_spill.c: Linux only for now
 int plat_mem_poke(uint64_t addr, const void *src, size_t n) { return (void)addr, (void)src, (void)n, 0; }
 int plat_mem_peek(void *dst, uint64_t addr, size_t n) { return memcpy(dst, (const void *)(uintptr_t)addr, n), 1; }   // no read traps here
 
@@ -194,6 +195,17 @@ void plat_crash_hook(void (*fn)(const PlatCrash *c)) {
     crash_fn = fn;
     AddVectoredExceptionHandler(0, crash_veh);
     _set_invalid_parameter_handler(crt_invalid_parameter);
+}
+
+// Exit 0xC0000409 with data 0xD (FAST_FAIL_INVALID_SET_OF_CONTEXT) after "fs mount save" on several Windows machines
+// leaves no FATAL line (a fast fail skips every handler). Whether hardware stack protection is on for this process
+// (PROCESS_MITIGATION_USER_SHADOW_STACK_POLICY, class 19, first flag = enabled) goes in the log so a report says it.
+int plat_shadow_stack(void) {
+    typedef BOOL(WINAPI * GetPol)(HANDLE, int, PVOID, SIZE_T);
+    GetPol get = (GetPol)(void *)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetProcessMitigationPolicy");
+    DWORD flags[2] = {0, 0};
+    if (!get || !get(GetCurrentProcess(), 19, flags, sizeof flags)) return -1;
+    return flags[0] & 1;
 }
 
 // A fresh process gets a fresh layout: Windows places DLLs, heaps and thread stacks at random addresses. The parent

@@ -10,5 +10,6 @@
 - [ ] Recompilation, not emulation: no CPU interpreter or JIT, no GPU emulation below NVN2
 - [ ] Code taken from another project names it with its license (MIT-compatible only), in the code and in [docs/project/research.md](https://github.com/adriadam10/mkw-recomp/blob/main/docs/project/research.md#sources)
 - [ ] Performance changes measured before and after (A/B inside a run, `tools/run/ab.py`)
+- [ ] New or changed texts: English only (`i18n/ui/mkw.pot`, `ui_text.h`); the `<lang>.po` files are updated by the maintainers
 - [ ] Every folder's README updated (`uv run tools/docs/check.py` passes)
 - [ ] AI-assisted: <!-- yes / no -->

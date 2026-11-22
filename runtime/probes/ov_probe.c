@@ -287,7 +287,8 @@ static void probe_oe(void) {
         {NULL, "en-US", "en-US"}, {NULL, "be-BY", "en-US"}, {NULL, "xx", "en-US"},     {NULL, "ja-JP", "ja"},
         {NULL, "fr-CA", "fr-CA"}, {NULL, "es-MX", "es-419"}, {NULL, "es_ES", "es"},     {NULL, "zh-Hant-TW", "zh-Hant"},
         {NULL, "zh-CN", "zh-Hans"}, {NULL, "en-GB", "en-GB"}, {NULL, "ru", "ru"},       {"ja", "fr-FR", "ja"},
-        {"en-US", NULL, "en-US"}, {NULL, "ca-ES", "es"}, {NULL, "eu", "es"},       {NULL, "pl-PL", "en-US"}, {"ca", NULL, "es"}};
+        {"en-US", NULL, "en-US"}, {NULL, "ca-ES", "es"}, {NULL, "eu", "es"},       {NULL, "pl-PL", "en-US"}, {"ca", NULL, "es"},
+        {NULL, "tr-TR", "en-GB"}, {"tr", NULL, "en-GB"}};
     int bad = 0;
     for (size_t i = 0; i < sizeof cases / sizeof *cases; i++) {
         set_env("MKW_LANG", cases[i].lang);
@@ -299,9 +300,9 @@ static void probe_oe(void) {
                    cases[i].locale ? cases[i].locale : "", got, cases[i].want);
         }
     }
-    // Automatic follows a menu language the game ships; the menu's "en" keeps the locale's English
+    // Automatic follows a menu language the game ships or we rebuild (ca, tr); the menu's "en" keeps the locale's English
     static const struct { const char *menu, *locale, *want; } menus[] = {
-        {"ja", "en-US", "ja"}, {"en", "en-GB", "en-GB"}, {"en", "de-DE", "en-US"}, {"tr", "de-DE", "de"},
+        {"ja", "en-US", "ja"}, {"en", "en-GB", "en-GB"}, {"en", "de-DE", "en-US"}, {"uk", "de-DE", "de"}, {"tr", "de-DE", "en-GB"},
         {"zh-Hant", "en-US", "zh-Hant"}, {"pt-BR", "pt-PT", "pt-BR"}, {"ca", "en-US", "es"}};
     set_env("MKW_LANG", NULL);
     for (size_t i = 0; i < sizeof menus / sizeof *menus; i++) {

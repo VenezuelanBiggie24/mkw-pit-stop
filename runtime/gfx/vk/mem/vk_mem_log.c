@@ -216,7 +216,8 @@ static void log_mem_census(uint64_t frame, int force) {
     rt_log("mem: census at frame %llu: import %llu pools %.1f MiB (%d without a GPU buffer), physical %llu pools %.1f MiB, "
            "virtual %llu pools %.1f MiB of address space",
            (unsigned long long)frame, (unsigned long long)count[POOL_IMPORT], total[POOL_IMPORT] / 1048576.0,
-           n_import_failures, (unsigned long long)count[POOL_PHYS], total[POOL_PHYS] / 1048576.0,
+           __atomic_load_n(&n_import_failures, __ATOMIC_RELAXED), (unsigned long long)count[POOL_PHYS],
+           total[POOL_PHYS] / 1048576.0,
            (unsigned long long)count[POOL_VIRT], total[POOL_VIRT] / 1048576.0);
     static const char *const kinds[] = {"", "import", "physical", "virtual"};
     for (int j = 0; j < ng; j++) {
@@ -286,6 +287,7 @@ void vk_oom_census(const char *what) {
 void vk_mem_census(uint64_t frame) {
     if (frame == 1 || frame % 15 == 0) ps5_vk_snap_refresh();
     mem_early_log(frame);   // MKW_EARLY_READ
+    if (frame % 300 == 0) vk_pool_diag_log(frame);   // MKW_MEM_POOL_LABELS
     uint64_t every = vram_every();
     if (((rt_trace & RT_TRACE_PERF) && frame % 150 == 0) || (every && frame % every == 0)) vram_log(frame);
     if (vk_dirty_census && !vk_mirror_on) dirty_frame(frame);
@@ -408,6 +410,26 @@ void vram_log(uint64_t frame) {
            (unsigned long long)t.dup_other_n, t.dup_other_bytes / M,
            (unsigned long long)t.idle_evict_n, t.idle_evict_bytes / M);
     vk_sparse_vram_log(frame);
+    // A second line, so the first keeps its shape for what parses it: sampled images by format class and the share not
+    // looked up for 64 / 512 / 4096 submits (epoch = submits so far; the frame above gives submits per frame).
+    uint64_t pool_blocks, pool_allocs;
+    vk_tex_pool_stats(&pool_blocks, &pool_allocs);
+    rt_log("mem: vram texture pool: blocks %.0f MiB, allocated %.0f MiB, empty %.0f MiB", pool_blocks / M, pool_allocs / M,
+           (pool_blocks - pool_allocs) / M);
+    // The OS's count for this process (Windows) against VMA's blocks: the difference is memory the runtime does not
+    // see (driver pipelines, swapchain, its own overhead). 0 where the OS gives no per-process figure.
+    uint64_t os_mib = plat_gpu_process_vram_mib();
+    rt_log("mem: vram os: process dedicated %llu MiB, vma device-local blocks %.0f MiB, not in VMA %.0f MiB; sampled "
+           "images by longest side: <512 %llu %.0f MiB, 512-1023 %llu %.0f MiB, >=1024 %llu %.0f MiB",
+           (unsigned long long)os_mib, block_bytes / M, os_mib ? os_mib - block_bytes / M : 0.0,
+           (unsigned long long)t.size_n[0], t.size_bytes[0] / M, (unsigned long long)t.size_n[1], t.size_bytes[1] / M,
+           (unsigned long long)t.size_n[2], t.size_bytes[2] / M);
+    rt_log("mem: vram textures frame %llu epoch %u: BC1 %llu %.0f MiB, BC7 %llu %.0f MiB, other block %llu %.0f MiB, "
+           "uncompressed %llu %.0f MiB; not looked up for >64 submits %llu %.0f MiB, >512 %llu %.0f MiB, >4096 %llu %.0f MiB",
+           (unsigned long long)frame, t.epoch, (unsigned long long)t.cls_n[0], t.cls_bytes[0] / M,
+           (unsigned long long)t.cls_n[1], t.cls_bytes[1] / M, (unsigned long long)t.cls_n[2], t.cls_bytes[2] / M,
+           (unsigned long long)t.cls_n[3], t.cls_bytes[3] / M, (unsigned long long)t.idle_n[0], t.idle_bytes[0] / M,
+           (unsigned long long)t.idle_n[1], t.idle_bytes[1] / M, (unsigned long long)t.idle_n[2], t.idle_bytes[2] / M);
 }
 
 // MKW_MEMORY and the knobs of every part of the memory layer, once the device class is known.
@@ -439,6 +461,7 @@ static void mirror_mode(int discrete) {
 #else
     shadow_on = !sh || !*sh || strcmp(sh, "0");
 #endif
+    shadow_live = shadow_on;
     if (shadow_on) rt_log("mem: shadow storage: CPU-visible pools are host-visible copies of guest memory, not imports%s",
                           sh && *sh ? " (MKW_SHADOW)" : "");
     const char *dc = cfg_get("MKW_DIRTY_CENSUS");

@@ -1,0 +1,8 @@
+# Lists that every PR appends to: a rebase or merge keeps both sides' lines instead of stopping at a conflict.
+# Local git honours this (rebase, merge, cherry-pick); GitHub's web merge button does not. The docs check and
+# `tools/i18n/catalog.py status` catch a union that does not hold together.
+README.md                      merge=union
+CHANGELOG.md                   merge=union
+tools/github/signatures.toml   merge=union
+i18n/ui/*.po                   merge=union
+i18n/ui/mkw.pot                merge=union

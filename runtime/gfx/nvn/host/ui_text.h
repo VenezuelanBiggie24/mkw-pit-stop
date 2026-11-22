@@ -5,6 +5,8 @@
 typedef enum {
     // Software keyboard
     UI_SWKBD_DEFAULT_NAME,   // text the entry starts with when the game gives none, so a controller can confirm it
+    // The on-screen number pad of a digits-only request (ui/menu/text_entry.cpp), in the menu language
+    UI_KEYPAD_OK, UI_KEYPAD_CANCEL, UI_KEYPAD_DELETE,
 
     // Menu: window, tabs, bottom row. UI_MENU_FIRST..UI_MENU_LAST_ID carry English and Russian texts.
     UI_MENU_FIRST,
@@ -23,6 +25,7 @@ typedef enum {
     UI_MENU_WINDOW_SIZE, UI_MENU_WINDOW_SIZE_DESC,
     UI_MENU_RESOLUTION, UI_MENU_RESOLUTION_DESC, UI_MENU_RESOLUTION_ORIGINAL,
     UI_MENU_ASPECT, UI_MENU_ASPECT_DESC, UI_MENU_ASPECT_WINDOW,
+    UI_MENU_HUD_POSITION, UI_MENU_HUD_POSITION_DESC, UI_MENU_HUD_POSITION_16X9, UI_MENU_HUD_POSITION_EDGES,
     UI_MENU_QUALITY, UI_MENU_QUALITY_DESC, UI_MENU_QUALITY_CUSTOM,
     UI_MENU_PRESENT, UI_MENU_PRESENT_DESC, UI_MENU_PRESENT_MAILBOX, UI_MENU_PRESENT_VSYNC, UI_MENU_PRESENT_IMMEDIATE,
     UI_MENU_PRESENT_IN_USE,   // "in use: %s" under the value when the swapchain got another mode than the setting
@@ -31,13 +34,29 @@ typedef enum {
     UI_PERF_LINE_FPS,
     UI_PERF_LINE_FPS_FG,   // the same with frame generation on: game frames / frames shown
     UI_MENU_FPS, UI_MENU_FPS_DESC, UI_MENU_FPS_AUTO,
+    UI_MENU_LOGIC_HZ, UI_MENU_LOGIC_HZ_DESC,   // values: 60 Hz..240 Hz
     UI_MENU_FRAMEGEN, UI_MENU_FRAMEGEN_DESC,   // values: UI_MENU_PERF_OFF, UI_MENU_FPS_AUTO, 2x..4x
     UI_MENU_FRAMEGEN_UNEVEN, UI_MENU_VRR, UI_MENU_VRR_DESC,
     UI_MENU_LOW_LATENCY, UI_MENU_LOW_LATENCY_DESC,
+    UI_MENU_FG_ENGINE, UI_MENU_FG_ENGINE_DESC,   // values: the port's own, DLSS Frame Generation, FSR 3.1
+    UI_MENU_REFLEX, UI_MENU_REFLEX_DESC,         // values: off, on, on + boost
+    UI_MENU_REFLEX_BOOST,
+    UI_MENU_TEMPORAL, UI_MENU_TEMPORAL_DESC,     // values: off (the game's own), DLSS, FSR 3.1
+    UI_MENU_NOT_AVAILABLE,                       // note under the upscaler, frame generation engine and Reflex rows
+    UI_MENU_TEMPORAL_QUALITY, UI_MENU_TEMPORAL_QUALITY_DESC,
+    UI_MENU_TQ_NATIVE, UI_MENU_TQ_QUALITY, UI_MENU_TQ_BALANCED, UI_MENU_TQ_PERFORMANCE, UI_MENU_TQ_ULTRA,
+    UI_MENU_DLSS_PRESET, UI_MENU_DLSS_PRESET_DESC, UI_MENU_DLSS_PRESET_DEFAULT,
+    UI_MENU_CAS, UI_MENU_CAS_DESC,               // values: off, on
+    UI_MENU_CAS_SHARPNESS, UI_MENU_CAS_SHARPNESS_DESC,
     UI_MENU_GRAPHICS,         // group heading over the picture rows
     UI_MENU_UPSCALER, UI_MENU_UPSCALER_DESC, UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR,
     UI_MENU_PICTURE_FIT, UI_MENU_PICTURE_FIT_DESC, UI_MENU_PICTURE_FIT_KEEP, UI_MENU_PICTURE_FIT_STRETCH,
     UI_MENU_HDR, UI_MENU_HDR_DESC,   // values: UI_MENU_FPS_AUTO, UI_MENU_PERF_OFF
+    UI_MENU_HDR_TONEMAP, UI_MENU_HDR_TONEMAP_DESC, UI_MENU_HDR_TONEMAP_VANILLA, UI_MENU_HDR_TONEMAP_PSYCHOV,
+    UI_MENU_HDR_TONEMAP_MISSING,   // under it when renodx.py has not run
+    UI_MENU_HDR_NEEDS_PSYCHOV,     // under peak and paper white while the tone mapper is the game's
+    UI_MENU_HDR_PEAK, UI_MENU_HDR_PEAK_DESC, UI_MENU_HDR_WHITE, UI_MENU_HDR_WHITE_DESC,
+    UI_MENU_HDR_NITS,   // a value of the two rows above: "%s nits"
     UI_MENU_SHARPNESS, UI_MENU_SHARPNESS_DESC,
     UI_MENU_SHARPNESS_FSR_ONLY,   // under Sharpness when the upscaler is not AMD FSR 1
     UI_MENU_GROUP_RESOLUTION, UI_MENU_GROUP_PERFORMANCE,   // the Graphics tab's group headings
@@ -63,7 +82,7 @@ typedef enum {
     // Game
     UI_MENU_GAME_LANG, UI_MENU_GAME_LANG_DESC, UI_MENU_GAME_LANG_AUTO,
     UI_MENU_OPERATION_MODE, UI_MENU_OPERATION_MODE_DESC, UI_MENU_MODE_DOCKED, UI_MENU_MODE_HANDHELD,
-    UI_MENU_LAN, UI_MENU_LAN_DESC,
+    UI_MENU_LAN, UI_MENU_LAN_DESC, UI_MENU_LAN_NET, UI_MENU_LAN_NET_DESC,
 
     // Sound
     UI_MENU_VOLUME, UI_MENU_VOLUME_DESC,
@@ -78,12 +97,15 @@ typedef enum {
     UI_MENU_KEYBOARD_PLAYER, UI_MENU_KEYBOARD_PLAYER_DESC, UI_MENU_KEYBOARD_SHARED, UI_MENU_KEYBOARD_OWN,
     UI_MENU_PAD_LAYOUT, UI_MENU_PAD_LAYOUT_DESC, UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO,
     UI_MENU_PAD_LAYOUT_XBOX, UI_MENU_PAD_LAYOUT_IN_USE,
+    UI_MENU_KEYBOARD_MOUSE, UI_MENU_KEYBOARD_MOUSE_DESC,
     UI_MENU_MOUSE_SENS, UI_MENU_MOUSE_SENS_DESC,
     UI_MENU_STICK_DEADZONE, UI_MENU_STICK_DEADZONE_DESC,
     UI_MENU_SWITCH2, UI_MENU_SWITCH2_DESC,
     UI_MENU_DSU, UI_MENU_DSU_DESC,   // Cemuhook / DSU motion (input/dsu.c)
     UI_MENU_BUTTON_ICONS, UI_MENU_BUTTON_ICONS_DESC, UI_MENU_ICONS_NINTENDO, UI_MENU_ICONS_XBOX,
     UI_MENU_ICONS_PLAYSTATION, UI_MENU_ICONS_KEYBOARD, UI_MENU_ICONS_IN_USE,   // "in use: %s"
+    UI_MENU_MENU_SHORTCUT, UI_MENU_MENU_SHORTCUT_DESC, UI_MENU_SHORTCUT_MINUS_PLUS, UI_MENU_SHORTCUT_GUIDE,
+    UI_MENU_SHORTCUT_STEAM_NOTE,
 
     // Controls tab: the remapping rows (ui/menu/binds_page.cpp)
     UI_BINDS_HELP, UI_BINDS_COL_KEY1, UI_BINDS_COL_KEY2, UI_BINDS_COL_PAD,
@@ -98,7 +120,7 @@ typedef enum {
     UI_MENU_PADS,             // group heading over the players' rows
     UI_MENU_PAD_PLAYER,       // "Player %d: %s": the player and the controller's name
     UI_MENU_PAD_BATTERY_DESC, UI_MENU_PADS_NONE,
-    UI_POWER_LOW, UI_POWER_MEDIUM, UI_POWER_HIGH,   // a Switch 2 controller's band over Bluetooth
+    UI_POWER_LOW, UI_POWER_MEDIUM, UI_POWER_HIGH,   // a coarse band: a Switch 2 controller's voltage over Bluetooth, an Xbox pad's sysfs level on xone
     UI_POWER_CHARGING, UI_POWER_CHARGED, UI_POWER_WIRED, UI_POWER_UNKNOWN,
     UI_NOTICE_BATTERY_LOW,    // "Player %d's controller is running out of battery (%s)"
     UI_BINDS_RESET, UI_BINDS_RESET_DESC,
@@ -130,7 +152,7 @@ typedef enum {
     UI_MENU_LANGNAME_EN, UI_MENU_LANGNAME_JA, UI_MENU_LANGNAME_FR, UI_MENU_LANGNAME_DE, UI_MENU_LANGNAME_IT,
     UI_MENU_LANGNAME_ES, UI_MENU_LANGNAME_NL, UI_MENU_LANGNAME_PT, UI_MENU_LANGNAME_PT_BR, UI_MENU_LANGNAME_RU,
     UI_MENU_LANGNAME_ZH_HANS, UI_MENU_LANGNAME_ZH_HANT, UI_MENU_LANGNAME_KO,
-    // menu languages the game does not ship (its texts then in es for ca, gl, eu; in English for pl, tr, uk)
+    // menu languages the game does not ship (its texts then in es for ca, gl, eu; rebuilt in tr; in English for pl, uk)
     UI_MENU_LANGNAME_ES_419, UI_MENU_LANGNAME_CA, UI_MENU_LANGNAME_GL, UI_MENU_LANGNAME_EU, UI_MENU_LANGNAME_PL,
     UI_MENU_LANGNAME_TR, UI_MENU_LANGNAME_UK,
     // game language added by update 1.7.0 (Polish came in 1.5.0): offered when the RomFS ships its Mals folder
@@ -218,15 +240,20 @@ typedef enum {
     UI_MOD_ERR_LAYOUT, UI_MOD_ERR_NAME, UI_MOD_ERR_IO, UI_MOD_ERR_NOPORT, UI_MOD_ERR_NOGAME,
     UI_MOD_VARIANTS, UI_MOD_ERR_BIG, UI_MOD_ERR_UNPACK,
     // the GameBanana tab (ui/launcher/mods_browse.cpp): BY "%s" (author), LICENSE "%s", INSTALL "%s" (file name),
-    // CONFIRM "%s ... %s" (file, author), PAGE "%d ... %d", ERROR "%s" (what failed)
+    // CONFIRM "%s ... %s" (file, author), PAGE "%d ... %d", ERROR "%s" (what failed), RATED "%s" (content ratings)
     UI_MOD_TAB_INSTALLED, UI_MOD_TAB_FIND, UI_GB_NOTE, UI_GB_SEARCH, UI_GB_SORT_DOWNLOADS, UI_GB_SORT_NEW,
     UI_GB_SORT_LIKES, UI_GB_LOADING, UI_GB_NONE, UI_GB_BY, UI_GB_LICENSE, UI_GB_OPEN, UI_GB_INSTALL, UI_GB_CONFIRM,
-    UI_GB_UNSAFE, UI_GB_PAGE, UI_GB_ERROR, UI_MOD_WARN_GRAPHICS, UI_MOD_WARN_SHADERS, UI_MOD_PLUGIN, UI_MOD_OPTIONS, UI_MOD_NO_OPTIONS, UI_MOD_CODE_REBUILD, UI_MOD_RISK, UI_MOD_RISK_ACK,
+    UI_GB_UNSAFE, UI_GB_PAGE, UI_GB_ERROR, UI_GB_RATED, UI_GB_MATURE, UI_GB_MATURE_OBFUSCATE,
+    UI_GB_MATURE_SHOW, UI_MOD_WARN_GRAPHICS, UI_MOD_WARN_SHADERS, UI_MOD_PLUGIN, UI_MOD_OPTIONS, UI_MOD_NO_OPTIONS,
+    UI_MOD_CODE_REBUILD, UI_MOD_RISK, UI_MOD_RISK_ACK,
     // the update (ui/launcher/launcher_update.cpp): UPDATE "... %s ... %d MB" (tag, size), FETCHING "... %s" (tag),
     // FAILED "... %s" (why), UPDATED "... %s" (tag); the Menu tab's switch
     UI_LAUNCH_UPDATE_FETCHING, UI_LAUNCH_UPDATE_FAILED, UI_LAUNCH_UPDATED,
     // the update card (TITLE: the release; DETAIL: the version in use and the download's MB) and the main page's rows
     UI_LAUNCH_UPDATE_TITLE, UI_LAUNCH_UPDATE_DETAIL, UI_LAUNCH_UPDATE_NOW, UI_LAUNCH_WHATS_NEW, UI_LAUNCH_RETRY,
+    // the update set up beside the version played: PREPARING "... %s ..." (tag), PREPARED "%s ..." (tag), RESTART the
+    // button, PREPARE_FAILED "... %s ..." (why; the new version's start sets it up instead)
+    UI_LAUNCH_UPDATE_PREPARING, UI_LAUNCH_UPDATE_PREPARED, UI_LAUNCH_UPDATE_RESTART, UI_LAUNCH_UPDATE_PREPARE_FAILED,
     UI_LAUNCH_FILES_READY_AS, UI_LAUNCH_PAD, UI_LAUNCH_PAD_NONE, UI_LAUNCH_CONFIGURE, UI_LAUNCH_SHORTCUT_ASK,
     UI_LAUNCH_SHORTCUT_MAKE, UI_LAUNCH_NOT_NOW, UI_LAUNCH_KEYS,
     UI_LAUNCH_SETTINGS_NOTE,   // beside the Settings title: changes save at once and apply when the game starts
@@ -238,8 +265,10 @@ typedef enum {
     // FAILED: why)
     UI_LAUNCH_TOOLS, UI_TOOLS_SAVES, UI_TOOLS_BACKUP, UI_TOOLS_BACKUP_NOTE, UI_TOOLS_BACKUP_DONE, UI_TOOLS_BACKUP_BUTTON,
     UI_TOOLS_SAVES_FOLDERS, UI_TOOLS_OPEN_SAVES, UI_TOOLS_OPEN_BACKUPS, UI_TOOLS_SHORTCUTS, UI_TOOLS_STEAM,
-    UI_TOOLS_STEAM_NOTE, UI_TOOLS_ADD, UI_TOOLS_STEAM_DONE, UI_TOOLS_STEAM_RESTART, UI_TOOLS_STEAM_NONE, UI_TOOLS_UPDATES,
-    UI_TOOLS_VERSION, UI_TOOLS_CHECK, UI_TOOLS_CHECKING, UI_TOOLS_UNDO_ROW, UI_TOOLS_UNDO_NOTE, UI_TOOLS_UNDO,
+    UI_TOOLS_STEAM_NOTE, UI_TOOLS_ADD, UI_TOOLS_STEAM_DONE, UI_TOOLS_STEAM_RESTART,
+    UI_TOOLS_STEAM_PARTIAL, UI_TOOLS_STEAM_PARTIAL_RESTART, UI_TOOLS_STEAM_NONE, UI_TOOLS_UPDATES,
+    UI_TOOLS_VERSION, UI_TOOLS_CHECK, UI_TOOLS_CHECKING, UI_TOOLS_UPDATE_CURRENT, UI_TOOLS_UNDO_ROW, UI_TOOLS_UNDO_NOTE,
+    UI_TOOLS_UNDO,
     UI_TOOLS_UNDO_ASK, UI_TOOLS_PROBLEMS, UI_TOOLS_REPORT, UI_TOOLS_REPORT_NOTE, UI_TOOLS_REPORT_BUTTON,
     UI_TOOLS_REPORT_COPIED, UI_TOOLS_LOGS, UI_TOOLS_FAILED,
     UI_LAUNCH_NO_GAME_DATA,   // the start screen's lower right: the player brings the game, the port ships none
@@ -313,7 +342,13 @@ typedef enum {
     // the setup's copies found in the usual places (launcher.cpp found_copies): the list's title, the line while it
     // looks, and the kind of a loose copy
     UI_LAUNCH_FOUND, UI_LAUNCH_FOUND_SEARCHING, UI_LAUNCH_FOUND_FOLDER,
-    UI_MENU_LAST_ID = UI_LAUNCH_FOUND_FOLDER,
+    // no GPU here can run the game (launcher.cpp gpu_bad, vk_gpu_check.h): the warning, then one line per GPU: OLD "%s:
+    // ... %s ..." (name, what its driver offers), EXT "%s ... %s ... %s" (name, what it offers, the missing extension),
+    // QUEUE and SKIPPED "%s" (name), SOFTWARE "... %s ..." (the CPU renderer's name); NO_DRIVER with no Vulkan at all;
+    // HELP what to install (HELP_WIN on Windows, where Mesa and the Linux releases mean nothing)
+    UI_LAUNCH_GPU_NONE, UI_LAUNCH_GPU_OLD, UI_LAUNCH_GPU_EXT, UI_LAUNCH_GPU_QUEUE, UI_LAUNCH_GPU_SKIPPED,
+    UI_LAUNCH_GPU_SOFTWARE, UI_LAUNCH_GPU_NO_DRIVER, UI_LAUNCH_GPU_HELP, UI_LAUNCH_GPU_HELP_WIN,
+    UI_MENU_LAST_ID = UI_LAUNCH_GPU_HELP_WIN,
     UI_TEXT_COUNT
 } UiTextId;
 

@@ -26,7 +26,8 @@
 // MKW_LAUNCHER_EXIT_AFTER_SETUP=1 quits when that setup ends, after saving the page as <shot out>-end.png (its result
 // is in the log); MKW_LAUNCHER_SHOT then takes its shot without quitting. During a shot the update check runs only
 // with MKW_UPDATE_AS (tools/prepare/update.py: compare as that version). MKW_LAUNCHER_UPDATE=1 takes the update offered
-// at once, as its button does; MKW_LAUNCHER_BACKUP=1 and MKW_LAUNCHER_UNDO=1 press the Tools page's Back up and Undo
+// at once, as its button does, and MKW_LAUNCHER_RESTART=1 its Restart with it once it is set up beside;
+// MKW_LAUNCHER_BACKUP=1 and MKW_LAUNCHER_UNDO=1 press the Tools page's Back up and Undo
 // update once (Undo confirmed too; MKW_LAUNCHER_UNDO=ask leaves its dialog open, for a shot). The last run's notice (launcher_lastrun.h) is read during a shot only with
 // MKW_LAUNCHER_LASTRUN=1.
 #include <SDL3/SDL.h>
@@ -63,9 +64,13 @@ extern "C" {
 #include "cfg.h"
 #include "gamelib.h"
 #include "input.h"
+#ifdef __linux__
+#include "linux_power.h"
+#endif
 #include "platform/platform.h"
 #include "sysinfo.h"
 #include "ui_text.h"
+#include "vk_gpu_check.h"
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 extern const char rt_port_version[];
 void app_icon_set(SDL_Window *w);   // build/obj/rt/app_icon.c, drawn by tools/build/icon.py
@@ -208,7 +213,16 @@ static bool pad_power(int i, InputPower *w, char *text, int size) {
     snprintf(w->name, sizeof w->name, "%s", n ? n : "");
     int pct = -1;
     SDL_PowerState st = SDL_GetGamepadPowerInfo(g, &pct);
-    input_power_from_sdl(st, pct, SDL_GetGamepadID(g), w);
+#ifdef __linux__
+    int xi = 0;   // this pad's order among Xbox-named pads: other makes in earlier slots shift no index
+    for (int j = 0; j < i; j++) {
+        const char *m = L.pad_open[j] ? SDL_GetGamepadName(L.pad_open[j]) : nullptr;
+        if (linux_power_is_xbox(m)) xi++;
+    }
+#else
+    int xi = i;
+#endif
+    input_power_from_sdl(st, pct, SDL_GetGamepadID(g), xi, w);
     input_power_text(w, text, size);
     return true;
 }
@@ -219,17 +233,57 @@ static const char *repo(void) {
     return r && *r ? r : "adriadam10/mkw-recomp";
 }
 
-// The Vulkan devices for the Screen tab's GPU row: an instance only to list them.
+// Whether a GPU here can run the game (vk_gpu_check.h): the setup takes many minutes and the game's window used to
+// close at its first frame with "no usable Vulkan device" in the log only. Debian 11's and Ubuntu 20.04's own Mesa
+// (20.3, 21.2) offer Vulkan 1.2 on AMD and Intel (containers of both, 18/11/2026); Mesa's RADV and ANV have 1.3 since
+// 22.0, NVIDIA's driver since 510. Checked again when the Screen tab's GPU (MKW_GPU_INDEX, MKW_GPU_NAME) changes.
+static VkGpuReport g_gpu;
+static char g_gpu_key[96] = "\x01";   // the GPU settings the report was made with ("\x01": not made yet)
 
+// The GPU settings as pick_device reads them (cfg_get: MKW_GPU_NAME has no settings row).
+static void gpu_key(char *out, size_t cap) {
+    const char *i = cfg_get("MKW_GPU_INDEX"), *n = cfg_get("MKW_GPU_NAME");
+    snprintf(out, cap, "%s|%s", i ? i : "", n ? n : "");
+}
+
+// The Vulkan devices for the Screen tab's GPU row and the check above: an instance only to list them. No instance at
+// all (no Vulkan driver): a report of no devices.
 static void list_gpus(void) {
+    gpu_key(g_gpu_key, sizeof g_gpu_key);
     VkApplicationInfo ai = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
     ai.apiVersion = VK_API_VERSION_1_3;
     VkInstanceCreateInfo ci = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     ci.pApplicationInfo = &ai;
     VkInstance inst;
-    if (vkCreateInstance(&ci, nullptr, &inst) != VK_SUCCESS) return;
-    settings_list_gpus(inst);
-    vkDestroyInstance(inst, nullptr);
+    memset(&g_gpu, 0, sizeof g_gpu);
+    g_gpu.best = -1;
+    if (vkCreateInstance(&ci, nullptr, &inst) == VK_SUCCESS) {
+        settings_list_gpus(inst);
+        vk_gpu_report(inst, &g_gpu);
+        vkDestroyInstance(inst, nullptr);
+    }
+    if (g_gpu.best >= 0 && g_gpu.gpu[g_gpu.best].type != VK_PHYSICAL_DEVICE_TYPE_CPU)
+        rt_log("launcher: the game would run on %s", g_gpu.gpu[g_gpu.best].name);
+    else if (g_gpu.best >= 0) rt_log("launcher: only a software renderer can run the game: %s", g_gpu.gpu[g_gpu.best].name);
+    else rt_log("launcher: no GPU here can run the game (%d listed)", g_gpu.n);
+    for (int i = 0; i < g_gpu.n; i++)
+        if (g_gpu.gpu[i].why != VK_GPU_OK)
+            rt_log("launcher:   %s (Vulkan %u.%u, %s): %s%s", g_gpu.gpu[i].name, VK_API_VERSION_MAJOR(g_gpu.gpu[i].api),
+                   VK_API_VERSION_MINOR(g_gpu.gpu[i].api), g_gpu.gpu[i].driver[0] ? g_gpu.gpu[i].driver : "driver unknown",
+                   g_gpu.gpu[i].why == VK_GPU_OLD   ? "Vulkan below 1.3"
+                   : g_gpu.gpu[i].why == VK_GPU_EXT ? "missing extension "
+                   : g_gpu.gpu[i].why == VK_GPU_QUEUE ? "no graphics and compute queue"
+                                                      : "not the one MKW_GPU_INDEX or MKW_GPU_NAME names",
+                   g_gpu.gpu[i].why == VK_GPU_EXT ? g_gpu.gpu[i].ext : "");
+}
+
+// The GPU the game would use cannot run it (none, or only a CPU renderer): the main page's warning and the files
+// page's card. The report is made again when the GPU settings change.
+static bool gpu_bad(void) {
+    char key[sizeof g_gpu_key];
+    gpu_key(key, sizeof key);
+    if (strcmp(key, g_gpu_key)) list_gpus();
+    return g_gpu.best < 0 || g_gpu.gpu[g_gpu.best].type == VK_PHYSICAL_DEVICE_TYPE_CPU;
 }
 
 static void parse_test(void) {
@@ -393,7 +447,8 @@ static bool pad_row(float w, float hgt) {
         if (ImGui::IsItemHovered()) {
             ImGui::BeginTooltip();
             for (int i = 0; pad_power(i, &w, power, sizeof power); i++)
-                ImGui::Text(menu_text(UI_MENU_PAD_PLAYER), i + 1, w.name), ImGui::SameLine(), ImGui::TextDisabled("%s", power);
+                ImGui::Text(menu_text(UI_MENU_PAD_PLAYER), i + 1, w.name), ImGui::SameLine(0, 8 * s),
+                    ImGui::TextDisabled("%s", power);
             ImGui::EndTooltip();
         }
     } else {
@@ -492,17 +547,21 @@ static void make_shortcut(void) {
     rt_log("launcher: desktop shortcut %s %s", ok ? "made:" : "failed", ok ? made : "");
 }
 
+static const UiTextId kStepText[SETUP_STEPS] = {UI_LAUNCH_STEP_CHECK, UI_LAUNCH_STEP_EXEFS, UI_LAUNCH_STEP_ROMFS,
+                                                UI_LAUNCH_STEP_GENERATE, UI_LAUNCH_STEP_COMPILE, UI_LAUNCH_STEP_SHADERS,
+                                                UI_LAUNCH_STEP_WARM, UI_LAUNCH_STEP_CLEANUP};
+
 // The update offered (launcher_update.h) as a card in the accent: the release, the version in use and the download's
-// size, with Update and a link to the release's notes; then the download's progress; a failed download in red with its
-// reason and Try again. Once downloaded it is installed and the program starts again. A failed check shows nothing.
+// size, with Update and a link to the release's notes; then the download's progress, and its setup beside the version
+// played (Play stays the first button and works all along, #429); once set up, Restart with it. A failed download in
+// red with its reason and Try again. A failed check shows nothing.
 static void update_card(float w) {
     UpdateState u = update_state();
-    if (u.phase == UPDATE_READY) {
-        if (update_apply(L.exe_dir)) L.relaunch = 1, L.result = LAUNCHER_QUIT;
-        return;
-    }
     bool failed = u.phase == UPDATE_FAILED && u.tag[0];
-    if (u.phase != UPDATE_OFFER && u.phase != UPDATE_FETCHING && !failed) return;
+    if (u.phase == UPDATE_READY || u.phase == UPDATE_PREPARING) u.phase = UPDATE_PREPARING;   // READY: starting it
+    if (u.phase != UPDATE_OFFER && u.phase != UPDATE_FETCHING && u.phase != UPDATE_PREPARING &&
+        u.phase != UPDATE_PREPARED && !failed)
+        return;
     char text[700];
     ImGui::PushID("update");   // its Try again and the failed setup's share a page (files) and a label
     card_begin(w);
@@ -516,12 +575,27 @@ static void update_card(float w) {
         snprintf(text, sizeof text, menu_text(UI_LAUNCH_UPDATE_DETAIL), rt_port_version,
                  (int)((u.bytes + (1 << 19)) >> 20));
         ImGui::TextColored(col4(LOOK_HEADING), "%s", text);
-        if (accent_button(menu_text(UI_LAUNCH_UPDATE_NOW)) || getenv("MKW_LAUNCHER_UPDATE")) update_fetch_start(L.exe_dir);
+        if (ImGui::Button(menu_text(UI_LAUNCH_UPDATE_NOW)) || getenv("MKW_LAUNCHER_UPDATE")) update_fetch_start(L.exe_dir);
         ImGui::SameLine();
         if (ImGui::Button(menu_text(UI_LAUNCH_WHATS_NEW))) {
             snprintf(text, sizeof text, "https://github.com/%s/releases/tag/%s", repo(), u.tag);
             SDL_OpenURL(text);
         }
+    } else if (u.phase == UPDATE_PREPARING) {
+        snprintf(text, sizeof text, menu_text(UI_LAUNCH_UPDATE_PREPARING), u.tag);
+        ImGui::TextWrapped("%s", text);
+        snprintf(text, sizeof text, "%s", u.step >= 0 ? menu_text(kStepText[u.step]) : "");
+        ImGui::ProgressBar(u.total > 0 ? (float)u.done / (float)u.total : 0, ImVec2(w - 2 * card_pad(), 0), text);
+    } else if (u.phase == UPDATE_PREPARED) {
+        snprintf(text, sizeof text, menu_text(UI_LAUNCH_UPDATE_PREPARED), u.tag);
+        ImGui::TextUnformatted(text);
+        if (u.error[0]) {
+            snprintf(text, sizeof text, menu_text(UI_LAUNCH_UPDATE_PREPARE_FAILED), u.error);
+            ImGui::TextColored(col4(LOOK_HEADING), "%s", text);
+        }
+        bool press = ImGui::Button(menu_text(UI_LAUNCH_UPDATE_RESTART)) || getenv("MKW_LAUNCHER_RESTART");
+        if (press && update_apply(L.exe_dir))
+            L.relaunch = 1, L.result = LAUNCHER_QUIT;
     } else {
         snprintf(text, sizeof text, menu_text(UI_LAUNCH_UPDATE_FETCHING), u.tag);
         ImGui::TextUnformatted(text);
@@ -647,14 +721,21 @@ static void steam_art_draw(void) {
 
 // Add to Steam's result in words ("" while it has none): added, added with Steam to restart, or why it failed.
 static void steam_note(const ToolState &job, char *note, size_t cap, bool *failed) {
-    int users = 0, running = 0;
+    int users = 0, running = 0, skipped = 0;
     *failed = job.job == JOB_STEAM && job.phase == TOOL_FAILED;
     note[0] = 0;
-    if (job.job == JOB_STEAM && job.phase == TOOL_DONE && sscanf(job.line, "%d %d", &users, &running) == 2)
-        snprintf(note, cap, "%s", menu_text(running ? UI_TOOLS_STEAM_RESTART : UI_TOOLS_STEAM_DONE));
-    else if (*failed)
+    if (job.job == JOB_STEAM && job.phase == TOOL_DONE && sscanf(job.line, "%d %d %d", &users, &running, &skipped) >= 2) {
+        if (skipped) {
+            *failed = true;
+            snprintf(note, cap, menu_text(running ? UI_TOOLS_STEAM_PARTIAL_RESTART : UI_TOOLS_STEAM_PARTIAL),
+                     users, users + skipped);
+        } else {
+            snprintf(note, cap, "%s", menu_text(running ? UI_TOOLS_STEAM_RESTART : UI_TOOLS_STEAM_DONE));
+        }
+    } else if (*failed) {
         snprintf(note, cap, menu_text(UI_TOOLS_FAILED),
                  !strncmp(job.line, "nosteam", 7) ? menu_text(UI_TOOLS_STEAM_NONE) : job.line);
+    }
 }
 
 // The card's Add to Steam was pressed this start: the card stays, with its result, until the start screen closes.
@@ -737,6 +818,38 @@ static void state_line(bool ok, const char *text) {
     ImGui::TextColored(col4(ok ? LOOK_OK : LOOK_WARN), "%s", text);
 }
 
+// gpu_bad's card on the files page: why each GPU cannot run the game, what to install, and that the setup can go on
+// (what it prepares does not depend on the driver).
+static void gpu_card(float w) {
+    card_begin(w);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w - 32 * L.scale);
+    ImGui::TextColored(col4(LOOK_WARN), "%s", menu_text(UI_LAUNCH_GPU_NONE));
+    if (!g_gpu.n) ImGui::TextWrapped("%s", menu_text(UI_LAUNCH_GPU_NO_DRIVER));
+    bool driver = !g_gpu.n || g_gpu.best >= 0;   // what to install: a driver's fault, not only the GPU setting's
+    for (int i = 0; i < g_gpu.n; i++) {
+        const VkGpuInfo &g = g_gpu.gpu[i];
+        char line[600], have[200];
+        snprintf(have, sizeof have, "Vulkan %u.%u%s%s", VK_API_VERSION_MAJOR(g.api), VK_API_VERSION_MINOR(g.api),
+                 g.driver[0] ? ", " : "", g.driver);
+        if (i == g_gpu.best) snprintf(line, sizeof line, menu_text(UI_LAUNCH_GPU_SOFTWARE), g.name);
+        else if (g.why == VK_GPU_OLD) snprintf(line, sizeof line, menu_text(UI_LAUNCH_GPU_OLD), g.name, have);
+        else if (g.why == VK_GPU_EXT) snprintf(line, sizeof line, menu_text(UI_LAUNCH_GPU_EXT), g.name, have, g.ext);
+        else if (g.why == VK_GPU_QUEUE) snprintf(line, sizeof line, menu_text(UI_LAUNCH_GPU_QUEUE), g.name);
+        else if (g.why == VK_GPU_SKIPPED) snprintf(line, sizeof line, menu_text(UI_LAUNCH_GPU_SKIPPED), g.name);
+        else continue;   // a usable one other than best: not the case gpu_bad shows
+        driver |= g.why == VK_GPU_OLD || g.why == VK_GPU_EXT;
+        ImGui::Bullet();
+        ImGui::TextWrapped("%s", line);
+    }
+#ifdef _WIN32
+    if (driver) ImGui::TextWrapped("%s", menu_text(UI_LAUNCH_GPU_HELP_WIN));
+#else
+    if (driver) ImGui::TextWrapped("%s", menu_text(UI_LAUNCH_GPU_HELP));
+#endif
+    ImGui::PopTextWrapPos();
+    card_end(LOOK_WARN, with_alpha(LOOK_WARN, 22));
+}
+
 // Where the game will read its files (main.c portable_paths, handed over by launcher_set_romfs and _exefs).
 static char g_romfs[PLAT_PATH_MAX * 2], g_exefs[PLAT_PATH_MAX * 2];
 
@@ -773,14 +886,12 @@ static void files_state_text(bool ready, char *out, size_t cap) {
     else snprintf(out, cap, "%s", menu_text(ready ? UI_LAUNCH_FILES_READY : UI_LAUNCH_FILES_MISSING));
 }
 
-// The game files' state at the lower left, a dot in its colour; it opens the Game files page.
-static bool status_link(bool ready) {
+// A state at the lower left, a dot in its colour (ready: the good one, else the warning's); a link to the Game files page.
+static bool state_link(const char *id, const char *text, bool ready) {
     float s = L.scale, lh = ImGui::GetTextLineHeight(), r = lh * 0.24f, chev = 4 * s;
-    char text[160];
-    files_state_text(ready, text, sizeof text);
     float tw = ImGui::CalcTextSize(text).x;
     ImVec2 a = ImGui::GetCursorScreenPos(), size(r * 2 + 10 * s + tw + 12 * s + chev, lh);
-    Hot h = hot_button("##status", size);
+    Hot h = hot_button(id, size);
     if (h.cursor) focus_ring(a, ImVec2(a.x + size.x, a.y + size.y));
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImU32 c = ready ? mix(LOOK_HEADING, LOOK_TEXT, h.t) : LOOK_WARN;
@@ -801,7 +912,7 @@ static bool status_link(bool ready) {
 // (launcher_backdrop.cpp): the player's splash.png, or the logo's flag.
 static void page_main(float w, float h) {
     float s = L.scale, left = 96 * s, cw = 440 * s, edge = 56 * s, lh = ImGui::GetTextLineHeight();
-    bool files = rt_game_present() && !files_gone(), ready = files && update_state().phase != UPDATE_FETCHING;
+    bool files = rt_game_present() && !files_gone(), ready = files;   // the update never touches the files played
     // the column's height, to centre it: logo and title, the gap, Play, the controllers, the menu, the gap and Quit
     float mark = 84 * s, items = item_height(), gap = 12 * s;
     float play_h = fmaxf(52.0f, 76 * s), pad_h = fmaxf(36.0f, 48 * s);
@@ -898,7 +1009,13 @@ static void page_main(float w, float h) {
         update_card(uw);
     }
     ImGui::SetCursorScreenPos(ImVec2(left, h - 48 * s - lh));
-    if (status_link(files)) L.page = PAGE_FILES;
+    char state[160];
+    files_state_text(files, state, sizeof state);
+    if (state_link("##status", state, files)) L.page = PAGE_FILES;
+    if (gpu_bad()) {   // above it: the files page says why and what to install
+        ImGui::SetCursorScreenPos(ImVec2(left, h - 48 * s - lh * 2 - 10 * s));
+        if (state_link("##gpu", menu_text(UI_LAUNCH_GPU_NONE), false)) L.page = PAGE_FILES;
+    }
     // the project's GitHub page and Discord server above the version, as their marks (brand names: nothing to
     // translate), GitHub on the right as the text link was
     {
@@ -1012,10 +1129,6 @@ static void page_settings(float w, float h) {
 }
 
 // ---- the game files page: the player's copy, how the RomFS is kept, the setup and its progress
-static const UiTextId kStepText[SETUP_STEPS] = {UI_LAUNCH_STEP_CHECK, UI_LAUNCH_STEP_EXEFS, UI_LAUNCH_STEP_ROMFS,
-                                                UI_LAUNCH_STEP_GENERATE, UI_LAUNCH_STEP_COMPILE, UI_LAUNCH_STEP_SHADERS,
-                                                UI_LAUNCH_STEP_WARM, UI_LAUNCH_STEP_CLEANUP};
-
 static const UiTextId kPs5StepText[SETUP_PS5_STEPS] = {
     UI_LAUNCH_STEP_CHECK,    UI_LAUNCH_STEP_NUP,     UI_LAUNCH_STEP_EXEFS, UI_LAUNCH_STEP_ROMFS, UI_LAUNCH_STEP_GENERATE,
     UI_LAUNCH_STEP_COMPILE, UI_LAUNCH_STEP_LINK, UI_LAUNCH_STEP_SHADERS, UI_LAUNCH_STEP_DEPLOY};
@@ -1226,7 +1339,9 @@ static bool romfs_card(const char *id, bool on, UiTextId title, UiTextId note, f
 // Where the game is installed: Choose game folder (the launcher reopens with it), then under the buttons why the folder
 // chosen cannot be used and that the environment fixes it.
 static void game_dir_button(const SetupState &st, float act_h) {
-    ImGui::BeginDisabled(st.running || update_state().phase == UPDATE_FETCHING || cfg_from_env("MKW_GAME_DIR"));
+    int up = update_state().phase;   // the update's tools are writing beside the game folder
+    ImGui::BeginDisabled(st.running || up == UPDATE_FETCHING || up == UPDATE_READY || up == UPDATE_PREPARING ||
+                         cfg_from_env("MKW_GAME_DIR"));
     if (ImGui::Button(menu_text(UI_LAUNCH_PICK_GAME_DIR), ImVec2(0, act_h))) {
         L.picking = 1;
         SDL_ShowOpenFolderDialog(picked, &L.directory_restart, L.win, cfg_game_dir(), false);
@@ -1459,6 +1574,7 @@ static void page_files(float w, float h) {
         ImGui::TextWrapped("%s", help);
         ImGui::PopTextWrapPos();
     }
+    if (gpu_bad()) gpu_card(fminf(ImGui::GetContentRegionAvail().x, 760 * L.scale));
     update_card(fminf(ImGui::GetContentRegionAvail().x, 620 * L.scale));   // a folder not set up starts on this page
     if (L.updated[0]) {
         char note[300];
@@ -1828,7 +1944,7 @@ static void page_mods(float w, float h) {
             ImGui::TextUnformatted(c->inner);
             ImGui::PopTextWrapPos();
             ImGui::Indent(16.0f);
-            for (int k = 0; k <= c->nmods; k++) {
+            for (int k = 0; k < c->nmods + c->has_original; k++) {
                 const char *name = k < c->nmods ? c->mods[k] : "vanilla";
                 if (k) ImGui::SameLine();
                 bool sel = !strcmp(c->winner, name);
@@ -1952,16 +2068,20 @@ static void page_tools(float w, float h) {
         tools_group(UI_TOOLS_UPDATES);
         UpdateState u = update_state();
         snprintf(text, sizeof text, menu_text(UI_TOOLS_VERSION), rt_port_version);
-        if (u.phase == UPDATE_OFFER || u.phase == UPDATE_FETCHING) snprintf(note, sizeof note, menu_text(UI_LAUNCH_UPDATE_TITLE), u.tag);
-        else snprintf(note, sizeof note, "%s", u.phase == UPDATE_CHECKING ? menu_text(UI_TOOLS_CHECKING) : "");
-        tools_row(text, note);
+        if (u.phase == UPDATE_FAILED) snprintf(note, sizeof note, menu_text(UI_TOOLS_FAILED), u.error);
+        else if (u.phase == UPDATE_CHECKING) snprintf(note, sizeof note, "%s", menu_text(UI_TOOLS_CHECKING));
+        else if (u.phase == UPDATE_CURRENT) snprintf(note, sizeof note, "%s", menu_text(UI_TOOLS_UPDATE_CURRENT));
+        else if (u.tag[0]) snprintf(note, sizeof note, menu_text(UI_LAUNCH_UPDATE_TITLE), u.tag);
+        else note[0] = 0;
+        tools_row(text, note, u.phase == UPDATE_FAILED);
         if (ImGui::Button(menu_text(UI_LAUNCH_WHATS_NEW), ImVec2(0, act_h))) {
             snprintf(note, sizeof note, "https://github.com/%s/releases", repo());
             SDL_OpenURL(note);
         }
         ImGui::SameLine();
-        ImGui::BeginDisabled(u.phase == UPDATE_CHECKING || u.phase == UPDATE_FETCHING);
-        if (ImGui::Button(menu_text(UI_TOOLS_CHECK), ImVec2(0, act_h))) update_check_start(L.exe_dir);
+        bool busy = u.phase == UPDATE_FETCHING || u.phase == UPDATE_READY || u.phase == UPDATE_PREPARING;
+        ImGui::BeginDisabled(u.phase == UPDATE_CHECKING || u.phase == UPDATE_PREPARED || busy);
+        if (ImGui::Button(menu_text(UI_TOOLS_CHECK), ImVec2(0, act_h))) update_check_start(L.exe_dir, true);
         ImGui::EndDisabled();
         char kept[96];
         if (update_previous(L.exe_dir, kept, sizeof kept)) {
@@ -1969,7 +2089,7 @@ static void page_tools(float w, float h) {
             if (undo_why[0]) snprintf(note, sizeof note, menu_text(UI_TOOLS_FAILED), undo_why);
             else snprintf(note, sizeof note, "%s", menu_text(UI_TOOLS_UNDO_NOTE));
             tools_row(text, note, undo_why[0] != 0);
-            ImGui::BeginDisabled(u.phase == UPDATE_FETCHING || setup_state().running);
+            ImGui::BeginDisabled(busy || setup_state().running);
             if (ImGui::Button(menu_text(UI_TOOLS_UNDO), ImVec2(0, act_h)) || undo_test)
                 snprintf(undo_tag, sizeof undo_tag, "%s", kept);   // the dialog opens after the table (below)
             ImGui::EndDisabled();
@@ -2034,7 +2154,15 @@ static bool open_window(void) {
     // Hidden until its first frame is drawn (launcher_run): shown at once, it is black while the first frame is made.
     SDL_WindowFlags f = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN |
                         (background ? SDL_WINDOW_NOT_FOCUSABLE : 0) | (cfg_steam_console() && !L.shot_at ? SDL_WINDOW_FULLSCREEN : 0);
-    L.win = SDL_CreateWindow("Mario Kart World", (int)(1280 * ds), (int)(720 * ds), f);
+    // 1280 x 720 at the display's scale, but never past its usable area (#633: a 4K TV at Windows' 300 % made it
+    // 3840 x 2160 plus the title bar, cut at the screen's edges): at most 90 % of it, still 16:9.
+    int w = (int)(1280 * ds), h = (int)(720 * ds);
+    SDL_Rect usable;
+    if (SDL_GetDisplayUsableBounds(SDL_GetPrimaryDisplay(), &usable) && usable.w > 0 && usable.h > 0) {
+        float fit = SDL_min(0.9f * usable.w / w, 0.9f * usable.h / h);
+        if (fit < 1) w = (int)(w * fit), h = (int)(h * fit);
+    }
+    L.win = SDL_CreateWindow("Mario Kart World", w, h, f);
     if (L.win) app_icon_set(L.win);
     L.ren = L.win ? SDL_CreateRenderer(L.win, nullptr) : nullptr;
     if (!L.ren) {
@@ -2043,7 +2171,8 @@ static bool open_window(void) {
     }
     SDL_SetRenderVSync(L.ren, 1);
     // under 960 x 540 the column and the pages' two panes no longer fit side by side
-    SDL_SetWindowMinimumSize(L.win, (int)(960 * ds), (int)(540 * ds));
+    // (never above the window it opened with: a minimum past the screen would push it out again)
+    SDL_SetWindowMinimumSize(L.win, SDL_min((int)(960 * ds), w), SDL_min((int)(540 * ds), h));
     return true;
 }
 
@@ -2098,14 +2227,17 @@ static int steam_console(void) { return cfg_steam_console(); }
 static int last_run_fatal(void) {
     char p[PLAT_PATH_MAX * 2];
     snprintf(p, sizeof p, "%s/logs/mkw.log", cfg_game_dir());
-    FILE *f = fopen(p, "rb");
+    PlatFile *f = plat_file_open(p);
     if (!f) return 0;
     static char tail[65536];
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f), from = n > (long)sizeof tail - 1 ? n - (long)sizeof tail + 1 : 0;
-    fseek(f, from, SEEK_SET);
-    size_t got = fread(tail, 1, sizeof tail - 1, f);
-    fclose(f);
+    PlatFileId id;
+    int64_t got = 0;
+    if (plat_file_id(f, &id)) {
+        uint64_t from = id.size > sizeof tail - 1 ? id.size - (sizeof tail - 1) : 0;
+        got = plat_file_pread(f, tail, sizeof tail - 1, from);
+    }
+    plat_file_close(f);
+    if (got <= 0) return 0;
     tail[got] = 0;
     return strstr(tail, "FATAL") != nullptr || strstr(tail, "fatal signal") != nullptr;
 }
@@ -2216,7 +2348,7 @@ extern "C" int launcher_run(void) {
         // update (asking for "copy" here would copy the whole RomFS over a linked one)
         setup_start(L.exe_dir, cfg_game_dir(), nullptr, -1);
     } else if (!L.shot_at || getenv("MKW_UPDATE_AS")) {
-        update_check_start(L.exe_dir);
+        update_check_start(L.exe_dir, false);
     }
     if (!L.shot_at || getenv("MKW_LAUNCHER_LASTRUN")) lastrun_start(L.exe_dir, cfg_game_dir());
     // MKW_LAUNCHER_FIND=1 (test): the search in a shot too, as at a plain start
@@ -2263,7 +2395,10 @@ extern "C" int launcher_run(void) {
                 continue;
             }
             if (e.type == SDL_EVENT_QUIT) L.result = LAUNCHER_QUIT;
-            if (e.type == SDL_EVENT_GAMEPAD_ADDED || e.type == SDL_EVENT_GAMEPAD_REMOVED) pads_refresh();
+            if (e.type == SDL_EVENT_GAMEPAD_ADDED || e.type == SDL_EVENT_GAMEPAD_REMOVED) {
+                pads_refresh();   // the main page's own list
+                input_hotplug();   // the settings' list (input.c) follows the same event, when it is running
+            }
             if (e.type == SDL_EVENT_JOYSTICK_ADDED && !SDL_IsGamepad(e.jdevice.which)) input_wheel_map();
             if (e.type == SDL_EVENT_KEY_DOWN && e.key.scancode == SDL_SCANCODE_F11 && !e.key.repeat)
                 SDL_SetWindowFullscreen(L.win, !(SDL_GetWindowFlags(L.win) & SDL_WINDOW_FULLSCREEN));

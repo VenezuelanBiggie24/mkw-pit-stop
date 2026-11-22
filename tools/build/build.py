@@ -1,4 +1,4 @@
-"""Build the game: compile the generated C (build/generated, from recomp/gen.py) and the runtime, link build/mkw (or
+"""Build the game: compile the generated C (from recomp/gen.py) and the runtime, link build/mkw (or
 build/mkw.exe with --target windows).
 
 Why: the generated code is ~0.9 GB of C in ~355 chunks; Ninja recompiles only what changed and runs the chunks in
@@ -24,7 +24,8 @@ targeting Windows) and links --pgo-rt (that version's profile runtime); docs/ps5
 
 Usage: uv run tools/build/build.py [--target linux|windows] [--guest-layout PROFILE] [--gen DIR] [--exefs DIR] [--romfs DIR]
        [--jobs N] [--frame-pointers] [--pgo-gen DIR] [--dry-run]
-Heavy (all cores, several GB): our runs go through tools/run/job.sh.
+Heavy (all cores, several GB): our runs go through tools/run/job.sh. --gen defaults to the dump's version
+(recomp/versions.py: build/generated, build/generated-180) for the default layout, else the layout's build folder.
 """
 
 import argparse
@@ -42,6 +43,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "i18n"))
 import catalog  # noqa: E402  (tools/i18n: the text catalogs from i18n/ui/*.po)
+from ext_glue import ext_sources, ext_table  # noqa: E402  (tools/build: extensions linked in, --ext)
 from plugin_glue import plugin_ninja, plugin_table  # noqa: E402  (tools/build: plugins linked in, --plugin)
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -57,14 +59,23 @@ WIN = ROOT / "build/win"  # tools/build/windeps.py
 # returns through it.
 ARCH_FLAGS = {"x86_64": ["-march=x86-64-v3"], "aarch64": ["-march=armv8.2-a+fp16+rcpc+dotprod+crc"]}
 GEN_ARCH_FLAGS = {"x86_64": [], "aarch64": ["-ffixed-x18"]}
+# --cpu noavx2 (x86-64 only): SSE4.2 without AVX2, FMA or BMI2, for an AMD FX or an Intel Core before Haswell (#82). Its own
+# object and dist folders (build/dist/<target>-noavx2); runtime/cpu/fma.c then supplies the correctly rounded fma.
+NOAVX2_FLAGS = ["-march=x86-64-v2"]
 HOST_ARCH = {"amd64": "x86_64", "x64": "x86_64", "arm64": "aarch64"}.get(platform.machine().lower(),
                                                                           platform.machine().lower())  # fmt: skip
 ARCH = HOST_ARCH if HOST_ARCH in ARCH_FLAGS else "x86_64"
-GEN_FLAGS = ["-O1", "-fno-strict-aliasing", "-Wno-return-type", "-Wno-unused-label", "-fvisibility=hidden",
-             *ARCH_FLAGS[ARCH], *GEN_ARCH_FLAGS[ARCH]]  # fmt: skip
-RT_FLAGS = ["-O2", "-g", "-Wall", "-fno-strict-aliasing", *ARCH_FLAGS[ARCH]]
+GEN_BASE_FLAGS = ["-O1", "-fno-strict-aliasing", "-Wno-return-type", "-Wno-unused-label", "-fvisibility=hidden"]
+# -fdeclspec: the FFX SDK's ffx_api.h (vk_tmp_ffx.cpp) marks its entry points __declspec(dllexport) on every platform,
+# which Clang only takes off Windows with this flag (SavageCore, PR 462: Linux, clang 22)
+RT_BASE_FLAGS = ["-O2", "-g", "-Wall", "-fdeclspec", "-fno-strict-aliasing"]
+GEN_FLAGS = [*GEN_BASE_FLAGS, *ARCH_FLAGS[ARCH], *GEN_ARCH_FLAGS[ARCH]]
+RT_FLAGS = [*RT_BASE_FLAGS, *ARCH_FLAGS[ARCH]]
 sys.path.insert(0, str(ROOT / "recomp"))
-from versions import detect as detect_version  # noqa: E402  (the game version of a dump: patches, RtGame.version)
+import versions  # noqa: E402  (the game version of a dump: generated dir, patches, RtGame.version)
+from versions import detect as detect_version  # noqa: E402
+import patches  # noqa: E402  (recomp/patches.py: the patch file's hash in patches.h)
+import hud_layouts  # noqa: E402  (the screen-edge HUD's layout table, written to build/obj/rt/hud_layouts.h)
 
 
 def gen_modules(gen: Path) -> list[str]:
@@ -72,12 +83,35 @@ def gen_modules(gen: Path) -> list[str]:
     return [m["name"] for m in json.loads((gen / "layout.json").read_text())]
 
 
-def set_arch(arch: str) -> None:
+def check_gen(gen: Path, exefs: Path) -> None:
+    """Fail fast when the generated C does not belong to the dump (1.0.0 built with 1.8.0's C or the reverse)."""
+    v = detect_version(exefs)
+    layout = gen / "layout.json"
+    if not layout.is_file():
+        sys.exit(f"{gen} has no layout.json: run `make generated EXEFS={exefs}` first"
+                 + (f" (1.8.0 writes {versions.gen_dir_for(v)})" if v.number != 100 else ""))
+    gen_mods, exefs_mods = set(gen_modules(gen)), set(versions.modules(exefs))
+    if gen_mods != exefs_mods:
+        want = versions.gen_dir_for(v)
+        sys.exit(f"{gen} has {', '.join(sorted(gen_mods))} but {exefs} is {v.name}"
+                 f" ({', '.join(sorted(exefs_mods))}): run `make generated EXEFS={exefs}`"
+                 + (f" (writes {want})" if gen != want else ""))
+    # its patch sites are compiled into the C, the host functions they call are the runtime's: both from one file
+    # (19/11/2026: two runs with recomp/patches-mkw.txt's new sites in the runtime and the old ones in the game code)
+    header = gen / "patches.h"
+    line = patches.source_line(v.patches)
+    if header.is_file() and line not in header.read_text().splitlines():
+        sys.exit(f"{gen}/patches.h was generated from another {v.patches.name}: run "
+                 f"`uv run recomp/gen.py --exefs {exefs}` first (only the changed chunks recompile)")
+
+
+def set_arch(arch: str, noavx2: bool = False) -> None:
     """Builds for arch from here on (GEN_FLAGS, RT_FLAGS and game_id() follow; the lists change in place)."""
     global ARCH
     ARCH = arch
-    GEN_FLAGS[5:] = [*ARCH_FLAGS[arch], *GEN_ARCH_FLAGS[arch]]
-    RT_FLAGS[4:] = ARCH_FLAGS[arch]
+    flags = NOAVX2_FLAGS if noavx2 else ARCH_FLAGS[arch]
+    GEN_FLAGS[len(GEN_BASE_FLAGS):] = [*flags, *GEN_ARCH_FLAGS[arch]]
+    RT_FLAGS[len(RT_BASE_FLAGS):] = flags
 
 
 # Built on Windows itself (not cross-compiled from Linux): Ninja runs each command with CreateProcess, no shell, and
@@ -163,7 +197,9 @@ def c_string(s: str) -> str:
 def game_id(profile: str = DEFAULT) -> str:
     """RT_GAME_ID: the headers the generated code is compiled against and its flags. A game code library built with
     another id is not loaded (runtime/core/boot/gamelib.c)."""
-    h = hashlib.sha256(" ".join(GEN_FLAGS).encode())
+    # the noavx2 level counts as v3: the id ties a library to the runtime's headers, and the package of each level
+    # builds its own game code (tools/prepare/gamecode.py compiles for v2 and writes the same id as a v3 build)
+    h = hashlib.sha256(" ".join(f.replace("x86-64-v2", "x86-64-v3") for f in GEN_FLAGS).encode())
     for p in sorted([*(RUNTIME / "cpu").glob("*.h"), RUNTIME / "core/boot/gamelib.h"]):
         # without CRs: Git for Windows checks out with CRLF (core.autocrlf=true), and a runtime built from such a clone
         # refused the release's mkwgame.dll of the same headers as "built for another version" (16/11/2026)
@@ -219,33 +255,35 @@ def port_version() -> str:
     return r.stdout.strip().removeprefix("v") if r.returncode == 0 and r.stdout.strip() else "dev"
 
 
-def defaults_glue(exefs: Path, romfs: Path, dist: bool, plugins: list[Path] | None = None) -> str:
+def defaults_glue(exefs: Path, romfs: Path, dist: bool, ext: list[Path] | None = None,
+                  plugins: list[Path] | None = None) -> str:
     """defaults.c: the executable's own defaults, the game copy's paths (none in the player's build: the folders next
     to the executable, main.c portable_paths) and the port's version. The player's build gets rt_game_builtin here:
-    it has no linked game code, gamelib.c loads the library. plugins: the plugin folders linked in (plugin_glue.py;
-    the table is there, empty, without any)."""
+    it has no linked game code, gamelib.c loads the library. ext: the extension folders linked in (ext_glue.py);
+    plugins: the plugin folders linked in (plugin_glue.py; the table is there, empty, without any)."""
     out = ["// Defaults written by tools/build/build.py; do not edit.", '#include "gamelib.h"', '#include "host.h"', ""]
     for name, path in (("exefs", exefs), ("romfs", romfs), ("profile", ROOT / "build/profile")):
         out.append(f"const char rt_default_{name}[] = {c_string('' if dist else str(path.resolve()))};")
     out += [f"const char rt_port_version[] = {c_string(port_version())};", ""]
     if dist:
         out += ["const RtGame *rt_game_builtin(void) { return 0; }", ""]
-    return "\n".join(out) + plugin_table(plugins or [])
+    return "\n".join(out) + ext_table(ext or []) + plugin_table(plugins or [])
 
 
 # What the game code library calls in the runtime (runtime/cpu/cpu.h): the executable exports them.
 RT_EXPORTS = ("rt_dispatch", "rt_sj_owner", "rt_svc", "rt_udf", "rt_ticks", "rt_spin_gate", "fnprof_hit")
 
 
-def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: Path | None,
+def ninja_file(target: Target, gen: Path | None, out: Path, rt_extra: list[str], dist: Path | None,
                runtime_only: bool = False, ld_extra: list[str] | None = None, profile: str = DEFAULT,
                exe: Path | None = None, gen_extra: list[str] | None = None,
                sys_flags: list[str] | None = None, gen_cc: str | None = None,
-               plugins: list[Path] | None = None) -> str:  # fmt: skip
+               ext: list[Path] | None = None, plugins: list[Path] | None = None) -> str:  # fmt: skip
     """dist: the player's build into that folder, the runtime (mkw, mkw.exe) and the game code apart (mkwgame.so,
     mkwgame.dll); else build/mkw with the game code linked in. runtime_only (with dist): the runtime alone, what a
     release ships and the CI builds, without the game's generated C."""
     inc = " ".join(f"-I{d}" for d in sorted({RUNTIME} | {p.parent for p in RUNTIME.rglob("*.h")}))
+    gen_inc = f"-I{gen}" if gen else ""  # --runtime-only has no generated C (it wrote -INone)
     gid = f'-DRT_GAME_ID=\\"{game_id(profile)}\\"'
     pic = ["-fPIC"] if dist and target is LINUX else []
     link_flags = list(target.link_flags) + (ld_extra or [])
@@ -263,8 +301,8 @@ def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: 
     lines = [
         f"builddir = {out}",
         f"genflags = {' '.join(GEN_FLAGS + pic + (sys_flags or []) + (gen_extra or []))} -I{RUNTIME / 'cpu'}",
-        f"rtflags = {' '.join(RT_FLAGS + target.rt_flags + rt_extra)} {gid} {inc} -I{gen} -I{out / 'rt'} -I{target.vma}",
-        f"tabflags = {' '.join(GEN_FLAGS + pic + (sys_flags or []))} {gid} {inc} -I{gen}",
+        f"rtflags = {' '.join(RT_FLAGS + target.rt_flags + rt_extra)} {gid} {inc} {gen_inc} -I{out / 'rt'} -I{target.vma}",
+        f"tabflags = {' '.join(GEN_FLAGS + pic + (sys_flags or []))} {gid} {inc} {gen_inc}",
         f"ldflags = {' '.join(link_flags)}",
         (
             f"rule cc\n  command = {gen_cc or cc} $genflags -MD -MF $out.d -c $in -o $out\n  depfile = $out.d\n  deps = gcc"
@@ -321,6 +359,10 @@ def ninja_file(target: Target, gen: Path, out: Path, rt_extra: list[str], dist: 
         obj = out / "rt" / rel.with_suffix(".o")
         rt_objs.append(str(obj))
         lines.append(f"build {obj}: {'rtcxx' if src.suffix == '.cpp' else 'rtcc'} {src}")
+    for src, define in ext_sources(ext or []):   # extensions (--ext): each folder's entry point renamed by define
+        obj = out / "ext" / define.rsplit("__", 1)[1] / src.with_suffix(".o").name
+        rt_objs.append(str(obj))
+        lines.append(f"build {obj}: {'rtcxx' if src.suffix == '.cpp' else 'rtcc'} {src}\n  rtflags = $rtflags {define}")
     if plugins:  # --plugin: each folder built as its own library would be, sealed into one object (plugin_glue.py)
         if target is not LINUX:
             raise SystemExit("--plugin: linking a plugin in is for Linux and PS5; Windows loads it as a .dll")
@@ -383,10 +425,14 @@ def windows_host_ninja(text: str) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--gen", type=Path, help="generated source directory (defaults to the selected layout's build folder)")
+    ap.add_argument("--gen", type=Path, default=None,
+                    help="generated C dir (default: the dump's version, build/generated or build/generated-180; with "
+                    "--guest-layout, that layout's build folder)")
     ap.add_argument("--guest-layout", choices=PLACEMENTS, default=DEFAULT, help="guest address placement used by gen.py")
     ap.add_argument("--target", choices=("linux", "windows"), default="linux")
     ap.add_argument("--arch", choices=tuple(ARCH_FLAGS), default=ARCH, help="Linux: the CPU (default: this machine's)")
+    ap.add_argument("--cpu", choices=("v3", "noavx2"), default="v3",
+                    help="x86-64: v3 (AVX2, the default) or noavx2 (x86-64-v2: the package for CPUs without AVX2, #82)")  # fmt: skip
     ap.add_argument("--out", type=Path, help="object directory (default build/obj, build/obj-win for windows)")
     ap.add_argument(
         "--dist", action="store_true",
@@ -407,6 +453,8 @@ def main() -> int:
         help="Linux: compile and link against this sysroot (tools/build/sysroot.py: glibc 2.31, the release)",
     )  # fmt: skip
     ap.add_argument("--dry-run", action="store_true", help="write build.ninja and show what would run")
+    ap.add_argument("--ext", type=Path, action="append", default=[], metavar="DIR",
+                    help="link the extension in this folder into the runtime (docs/project/extensions.md); repeatable")
     ap.add_argument("--plugin", type=Path, action="append", default=[], metavar="DIR",
                     help="link the plugin in this folder into the runtime (runtime/plugin, tools/plugin/README.md); "
                          "repeatable")  # fmt: skip
@@ -423,6 +471,11 @@ def main() -> int:
     ap.add_argument("--pgo-cc", metavar="CMD", help="with --pgo-gen: compiler command for the generated C")
     ap.add_argument("--pgo-rt", type=Path, metavar="LIB", help="with --pgo-gen: that compiler's profile runtime")
     args = ap.parse_args()
+    if args.gen is None and not args.runtime_only and args.guest_layout == DEFAULT:
+        try:
+            args.gen = versions.default_gen(args.exefs)
+        except (FileNotFoundError, ValueError) as e:
+            ap.error(f"cannot detect the game version of {args.exefs}: {e}")
     # Absolute, not resolved (game/ is a link): ninja puts $in in each command and ccache hashes the input's path, so a
     # relative --gen next to the absolute default rebuilt all 623 objects for real on every switch (16/11/2026).
     for name in ("gen", "exefs", "romfs", "out"):
@@ -437,7 +490,9 @@ def main() -> int:
     target = WINDOWS if args.target == "windows" else LINUX
     if args.arch != "x86_64" and target is WINDOWS:
         ap.error("--target windows is x86_64 only")
-    set_arch(args.arch)
+    if args.cpu == "noavx2" and args.arch != "x86_64":
+        ap.error("--cpu noavx2 is x86_64 only")
+    set_arch(args.arch, args.cpu == "noavx2")
     if args.sysroot and target is WINDOWS:
         ap.error("--sysroot is for Linux")
     if (args.pgo_cc or args.pgo_rt) and not args.pgo_gen:
@@ -461,10 +516,11 @@ def build(args: argparse.Namespace, build_root: Path) -> int:
     sys_flags = [f"--target={ARCH}-linux-gnu", f"--sysroot={args.sysroot.resolve()}"] if args.sysroot else []
     sys_ld = [*sys_flags, f"-L{args.sysroot.resolve()}/usr/local/lib"] if args.sysroot else []
     cross = ARCH != HOST_ARCH and target is LINUX  # another CPU's build: its own dist and object folders
-    dist = ROOT / "build/dist" / (args.target + (f"-{ARCH}" if cross else "")) if args.dist else None
+    nov = "-noavx2" if args.cpu == "noavx2" else ""
+    dist = ROOT / "build/dist" / (args.target + (f"-{ARCH}" if cross else "") + nov) if args.dist else None
     exe = build_root / (f"{target.exe.stem}-pgo-gen{target.exe.suffix}" if args.pgo_gen else target.exe.name)
     args.out = args.out or build_root / ("obj" + ("-dist" if dist else "") + ("-win" if target is WINDOWS else "")
-                                         + (f"-{ARCH}" if cross else "") + ("-pgo-gen" if args.pgo_gen else ""))
+                                         + (f"-{ARCH}" if cross else "") + nov + ("-pgo-gen" if args.pgo_gen else ""))
     if HOST_WINDOWS and not shutil.which("ninja") and (MSYS2_UCRT64_BIN / "ninja.exe").is_file():
         # at the end, as windeps.py does: what PATH already has stays first
         os.environ["PATH"] = f"{os.environ['PATH']}{os.pathsep}{MSYS2_UCRT64_BIN}"
@@ -490,12 +546,15 @@ def build(args: argparse.Namespace, build_root: Path) -> int:
             sys.exit(f"{tool} not found" + (" (uv run tools/build/windeps.py)" if target is WINDOWS else ""))
     if not (target.vma / "vk_mem_alloc.h").is_file():
         sys.exit(f"{target.vma}/vk_mem_alloc.h missing (tools/build/README.md)")
+    if not args.runtime_only:
+        check_gen(args.gen, args.exefs)
     jobs = args.jobs or max(1, min(os.cpu_count() or 1, int(mem_total_gb() * 0.6 / args.job_mem_gb)))
     (args.out / "rt").mkdir(parents=True, exist_ok=True)
     build_root.mkdir(parents=True, exist_ok=True)
     glue = [
-        (args.out / "rt/defaults.c", defaults_glue(args.exefs, args.romfs, dist is not None, args.plugin)),
+        (args.out / "rt/defaults.c", defaults_glue(args.exefs, args.romfs, dist is not None, args.ext, args.plugin)),
         (args.out / "rt/guest_layout.h", "#pragma once\n" + placement_defines(args.guest_layout)),
+        (args.out / "rt/hud_layouts.h", hud_layouts.header_text()),  # runtime/core/boot/patches.c includes it
     ]
     if modules is not None:
         glue.append((args.out / "rt/modules.c", modules))
@@ -512,7 +571,7 @@ def build(args: argparse.Namespace, build_root: Path) -> int:
         # the lifted code and its library take the sysroot only for another CPU: an x86-64 release's stay as they were
         ninja_file(
             target, args.gen, args.out, fp + sys_flags, dist, args.runtime_only, sys_ld + ld_pgo, args.guest_layout,
-            exe, gen_pgo, sys_flags if cross else None, args.pgo_cc, args.plugin,
+            exe, gen_pgo, sys_flags if cross else None, args.pgo_cc, args.ext, args.plugin,
         )
     )
     (args.out / "build.ninja").write_text(windows_host_ninja(ninja) if HOST_WINDOWS else ninja)

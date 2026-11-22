@@ -49,9 +49,13 @@ def vkey(tag: str) -> tuple[int, ...]:
     return tuple(int(p) for p in tag.lstrip("v").split("."))
 
 
-def behind(label: str, releases: set[str], keep: int = 2) -> bool:
+KEEP_RELEASES = 4
+
+
+def behind(label: str, releases: set[str], keep: int = KEEP_RELEASES) -> bool:
     """A release label (`v0.1.7`) older than the newest `keep` published releases: a report there is asked to try the
-    latest before it is worked on (14/11/2026: 43 of 130 open issues were on 0.1.8 or older, untouched for days)."""
+    latest before it is worked on (14/11/2026: 43 of 130 open issues were on 0.1.8 or older, untouched for days).
+    20/11/2026: `keep` 2 -> 4; with a release a day, 63 reports were asked to retry on a release two days old."""
     if not re.fullmatch(r"v\d+\.\d+\.\d+", label) or label not in releases:
         return False
     newest = sorted(releases, key=vkey, reverse=True)[:keep]
@@ -109,8 +113,35 @@ def has_log(body: str) -> bool:
     return any(block.count("\n") >= 6 for block in FENCE.findall(body or ""))
 
 
+PERF_FORM = re.compile(r"^### Frame time\s*$", re.M)
+# What a performance report says when it is a complaint and not a measurement
+COMPLAINT = re.compile(
+    r"\b(stutter\w*|hitch\w*|freez\w*|frozen|drops?|dips?|slow\w*|worse|regress\w*|lag\w*|spikes?|glitch\w*|crash\w*|"
+    r"bugs?|leak|artifact\w*|fix|problems?|issues?|poor\w*|unplayable|loss|lower)\b",
+    re.I,
+)
+FRAME_MS = re.compile(r"(\d+(?:[.,]\d+)?)\s*ms", re.I)
+GOOD_FRAME_MS = 20.0  # 60 fps is 16.7 ms: up to 20 ms typical needs no work
+
+
+def perf_is_data(title: str, body: str) -> bool:
+    """A performance form that only measures: typical frame time under GOOD_FRAME_MS and no complaint in its title or
+    notes (20/11/2026: 47 of 224 open issues were `perf:` reports, ~10 a plain "16.7 ms, runs fine" that nobody needs
+    to act on once it is in the table). A complaint, or a time that needs work, stays open as a bug."""
+    if not PERF_FORM.search(body or ""):
+        return False
+    typical = FRAME_MS.search(form_field(body, "Frame time") or "")
+    if not typical or float(typical.group(1).replace(",", ".")) > GOOD_FRAME_MS:
+        return False
+    notes = FORM_FILLER.sub("", form_field(body, "Notes") or "")
+    return not COMPLAINT.search(f"{title.split(':', 1)[-1]}\n{notes}")
+
+
 def wants_log(title: str, body: str, labels: set[str]) -> bool:
-    """A bug report needs its log; a performance report or a feature request does not."""
+    """A bug report needs its log, and so does the performance form (its row in docs/project/performance.md comes from
+    the log, not from the times written in it); a feature request or a bare "perf:" title does not."""
+    if PERF_FORM.search(body or ""):
+        return not has_log(body) and "from-source" not in labels
     if labels & {"performance", "enhancement"} or title.lower().startswith(("perf:", "[feature")):
         return False
     if not BUG_FORM.search(body) and not FAILURE.search(f"{title}\n{FENCE.sub('', body)}"):

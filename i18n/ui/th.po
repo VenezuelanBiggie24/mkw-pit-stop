@@ -8,6 +8,21 @@ msgctxt "UI_SWKBD_DEFAULT_NAME"
 msgid "Player"
 msgstr "ผู้เล่น"
 
+#. The on-screen number pad the game opens to ask for a number: its confirm key (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_OK"
+msgid "OK"
+msgstr "ตกลง"
+
+#. The on-screen number pad: the wide button under the keys that closes it without a number
+msgctxt "UI_KEYPAD_CANCEL"
+msgid "Cancel"
+msgstr "ยกเลิก"
+
+#. The on-screen number pad: the key that erases the last digit (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_DELETE"
+msgid "Delete"
+msgstr "ลบ"
+
 msgctxt "UI_MENU_TITLE"
 msgid "Settings"
 msgstr "การตั้งค่า"
@@ -361,6 +376,26 @@ msgctxt "UI_MENU_ASPECT_WINDOW"
 msgid "Window"
 msgstr "หน้าต่าง"
 
+msgctxt "UI_MENU_HUD_POSITION"
+msgid "HUD position"
+msgstr "ตำแหน่ง HUD"
+
+msgctxt "UI_MENU_HUD_POSITION_DESC"
+msgid ""
+"On a picture wider or taller than 16:9, keep the race HUD in the middle 16:9 area (the console's "
+"place) or put it at the screen's edges and corners. Takes effect at the next start."
+msgstr ""
+"บนภาพที่กว้างหรือสูงกว่า 16:9 จะคง HUD ของการแข่งไว้ในพื้นที่ 16:9 ตรงกลาง "
+"(ตำแหน่งเดียวกับบนเครื่อง) หรือย้ายไปที่ขอบและมุมของหน้าจอ มีผลเมื่อเริ่มครั้งถัดไป"
+
+msgctxt "UI_MENU_HUD_POSITION_16X9"
+msgid "16:9 area"
+msgstr "พื้นที่ 16:9"
+
+msgctxt "UI_MENU_HUD_POSITION_EDGES"
+msgid "Screen edges"
+msgstr "ขอบหน้าจอ"
+
 msgctxt "UI_MENU_PRESENT"
 msgid "Presentation"
 msgstr "การแสดงผล"
@@ -452,6 +487,20 @@ msgctxt "UI_MENU_FPS_AUTO"
 msgid "Automatic"
 msgstr "อัตโนมัติ"
 
+msgctxt "UI_MENU_LOGIC_HZ"
+msgid "Logic rate"
+msgstr "อัตราการประมวลผลลอจิก"
+
+msgctxt "UI_MENU_LOGIC_HZ_DESC"
+msgid ""
+"How many times a second the game updates karts, physics and timers. 60 is the console's rate; "
+"120, 144 or 240 make movement smoother on a high refresh rate screen but need a faster PC. Time "
+"trials and LAN games always run at 60."
+msgstr ""
+"จำนวนครั้งต่อวินาทีที่เกมอัปเดตรถโกคาร์ต ฟิสิกส์ และตัวจับเวลา 60 คือค่าของเครื่องคอนโซล ส่วน "
+"120, 144 หรือ 240 ทำให้การเคลื่อนไหวลื่นขึ้นบนจอที่มีอัตรารีเฟรชสูง แต่ต้องใช้พีซีที่เร็วกว่า "
+"โหมดไทม์ไทรอัลและเกม LAN จะทำงานที่ 60 เสมอ"
+
 msgctxt "UI_MENU_FRAMEGEN"
 msgid "Frame generation"
 msgstr "การสร้างเฟรม"
@@ -497,6 +546,118 @@ msgid ""
 msgstr ""
 "เริ่มแต่ละเฟรมให้ช้าที่สุดเท่าที่คอมพิวเตอร์ของคุณอนุญาต เพื่อให้สิ่งที่คุณกดขึ้นจอเร็วขึ้น "
 "จะได้ผลชัดที่สุดเมื่อ 20 หรือ 15 fps และเมื่อใช้การสร้างเฟรม ปิดไว้หากภาพกระตุก"
+
+msgctxt "UI_MENU_FG_ENGINE"
+msgid "Frame generation by"
+msgstr "สร้างเฟรมโดย"
+
+msgctxt "UI_MENU_FG_ENGINE_DESC"
+msgid ""
+"Who makes the frames between the game's own. The port's own works everywhere. NVIDIA DLSS Frame "
+"Generation (RTX 40 and 50) and AMD FSR 3.1 use the scene's depth and motion and need DLSS or FSR "
+"3.1 upscaling on."
+msgstr ""
+"ผู้สร้างเฟรมระหว่างเฟรมของเกม แบบของพอร์ตเองใช้ได้ทุกที่ NVIDIA DLSS Frame Generation (RTX 40 และ "
+"50) และ AMD FSR 3.1 ใช้ข้อมูลความลึกและการเคลื่อนไหวของฉาก และต้องเปิดการอัปสเกลด้วย AI แบบ DLSS "
+"หรือ FSR 3.1"
+
+msgctxt "UI_MENU_REFLEX"
+msgid "NVIDIA Reflex"
+msgstr "NVIDIA Reflex"
+
+msgctxt "UI_MENU_REFLEX_DESC"
+msgid ""
+"Starts each frame as late as the GPU allows, so what you press reaches the screen sooner. Boost "
+"also keeps the GPU's clocks up. NVIDIA GPUs only."
+msgstr ""
+"เริ่มแต่ละเฟรมให้ช้าที่สุดเท่าที่ GPU อนุญาต เพื่อให้สิ่งที่คุณกดขึ้นจอเร็วขึ้น Boost "
+"ยังรักษาความเร็วสัญญาณนาฬิกาของ GPU ให้สูงไว้ด้วย ใช้ได้กับ GPU ของ NVIDIA เท่านั้น"
+
+msgctxt "UI_MENU_REFLEX_BOOST"
+msgid "On + Boost"
+msgstr "เปิด + Boost"
+
+msgctxt "UI_MENU_TEMPORAL"
+msgid "AI upscaling"
+msgstr "อัปสเกลด้วย AI"
+
+msgctxt "UI_MENU_NOT_AVAILABLE"
+msgid "Not available on this PC: the game's own picture stays."
+msgstr "ใช้ไม่ได้บนพีซีเครื่องนี้: ภาพเดิมของเกมยังคงอยู่"
+
+msgctxt "UI_MENU_TEMPORAL_DESC"
+msgid ""
+"Renders the race at a lower resolution and rebuilds it from several frames: NVIDIA DLSS (RTX "
+"GPUs) or AMD FSR 3.1 (any GPU). Sharper and steadier edges than the game's own scaling; the HUD "
+"stays sharp."
+msgstr ""
+"เรนเดอร์การแข่งที่ความละเอียดต่ำลงแล้วสร้างขึ้นใหม่จากหลายเฟรม: NVIDIA DLSS (GPU RTX) หรือ AMD "
+"FSR 3.1 (GPU ใดก็ได้) ขอบคมและนิ่งกว่าการขยายภาพของเกมเอง และ HUD ยังคมชัด"
+
+msgctxt "UI_MENU_TEMPORAL_QUALITY"
+msgid "Upscaling quality"
+msgstr "คุณภาพการอัปสเกล"
+
+msgctxt "UI_MENU_TEMPORAL_QUALITY_DESC"
+msgid ""
+"The share of the screen's resolution the race renders at: Native (DLAA) 100 %, Quality 67 %, "
+"Balanced 58 %, Performance 50 %, Ultra performance 33 %. Applies at the next start."
+msgstr ""
+"สัดส่วนของความละเอียดหน้าจอที่ใช้เรนเดอร์การแข่ง: เนทีฟ (DLAA) 100 %, คุณภาพ 67 %, สมดุล 58 %, "
+"ประสิทธิภาพ 50 %, ประสิทธิภาพสูงสุด 33 % มีผลเมื่อเริ่มเกมครั้งถัดไป"
+
+msgctxt "UI_MENU_TQ_NATIVE"
+msgid "Native (DLAA)"
+msgstr "เนทีฟ (DLAA)"
+
+msgctxt "UI_MENU_TQ_QUALITY"
+msgid "Quality"
+msgstr "คุณภาพ"
+
+msgctxt "UI_MENU_TQ_BALANCED"
+msgid "Balanced"
+msgstr "สมดุล"
+
+msgctxt "UI_MENU_TQ_PERFORMANCE"
+msgid "Performance"
+msgstr "ประสิทธิภาพ"
+
+msgctxt "UI_MENU_TQ_ULTRA"
+msgid "Ultra performance"
+msgstr "ประสิทธิภาพสูงสุด"
+
+msgctxt "UI_MENU_DLSS_PRESET"
+msgid "DLSS model"
+msgstr "โมเดล DLSS"
+
+msgctxt "UI_MENU_DLSS_PRESET_DESC"
+msgid ""
+"NVIDIA's model DLSS uses: the default of the DLSS version next to the game, or presets J, K, L, M."
+msgstr "โมเดลที่ NVIDIA DLSS ใช้: ค่าเริ่มต้นของ DLSS เวอร์ชันที่อยู่ข้างเกม หรือพรีเซ็ต J, K, L, M"
+
+msgctxt "UI_MENU_DLSS_PRESET_DEFAULT"
+msgid "Default"
+msgstr "ค่าเริ่มต้น"
+
+msgctxt "UI_MENU_CAS"
+msgid "CAS sharpening"
+msgstr "การเพิ่มความคม CAS"
+
+msgctxt "UI_MENU_CAS_DESC"
+msgid ""
+"AMD's contrast adaptive sharpening of the race after DLSS or FSR 3.1, before the HUD is drawn. "
+"Needs AI upscaling on."
+msgstr ""
+"การเพิ่มความคมแบบปรับตามคอนทราสต์ของ AMD ใช้กับภาพการแข่งหลัง DLSS หรือ FSR 3.1 ก่อนวาด HUD "
+"ต้องเปิดการอัปสเกลด้วย AI"
+
+msgctxt "UI_MENU_CAS_SHARPNESS"
+msgid "CAS strength"
+msgstr "ความแรง CAS"
+
+msgctxt "UI_MENU_CAS_SHARPNESS_DESC"
+msgid "How strongly CAS sharpens: 0 is the lightest touch, 100 the strongest."
+msgstr "CAS เพิ่มความคมมากแค่ไหน: 0 เบาที่สุด 100 แรงที่สุด"
 
 msgctxt "UI_MENU_GRAPHICS"
 msgid "Picture"
@@ -552,6 +713,68 @@ msgid ""
 msgstr ""
 "อัตโนมัติจะแสดงภาพ HDR ของเกมเมื่อจอเปิด HDR อยู่ (บน Windows: การตั้งค่า > จอแสดงผล > ใช้ HDR) "
 "เหมือนคอนโซล ความสว่างเป็นไปตามการตั้งค่า HDR ของระบบ ปิดจะแสดงภาพมาตรฐานเสมอ มีผลทันที"
+
+msgctxt "UI_MENU_HDR_TONEMAP"
+msgid "HDR tone mapper"
+msgstr "การแมปโทน HDR"
+
+msgctxt "UI_MENU_HDR_TONEMAP_DESC"
+msgid ""
+"How the scene's brightness is fitted to the display in HDR. Vanilla is the game's own curve, "
+"which never goes above 1.5 times paper white. PsychoV35 is RenoDX's: the same mid-tones and "
+"colour grade, with highlights that roll off smoothly up to the display's peak. Applies after a "
+"restart, as do peak and paper white changes while it is on."
+msgstr ""
+"วิธีปรับความสว่างของฉากให้เข้ากับจอใน HDR Vanilla คือเส้นโค้งของเกมเอง ซึ่งไม่เกิน 1.5 เท่าของ "
+"paper white PsychoV35 เป็นของ RenoDX: โทนกลางและการเกรดสีเหมือนเดิม "
+"แต่ไฮไลต์จะไล่ระดับนุ่มนวลไปจนถึงความสว่างสูงสุดของจอ มีผลหลังรีสตาร์ท "
+"เช่นเดียวกับการเปลี่ยนค่าความสว่างสูงสุดและ paper white ขณะเปิดใช้"
+
+msgctxt "UI_MENU_HDR_TONEMAP_VANILLA"
+msgid "Vanilla"
+msgstr "Vanilla"
+
+msgctxt "UI_MENU_HDR_TONEMAP_PSYCHOV"
+msgid "PsychoV35"
+msgstr "PsychoV35"
+
+msgctxt "UI_MENU_HDR_TONEMAP_MISSING"
+msgid "Its programs are made by the setup. Set the game up again (an update does it) to add them."
+msgstr ""
+"โปรแกรมของตัวเลือกนี้สร้างโดยการตั้งค่าเกม ตั้งค่าเกมใหม่ (การอัปเดตจะทำให้) "
+"เพื่อเพิ่มโปรแกรมเหล่านั้น"
+
+msgctxt "UI_MENU_HDR_NEEDS_PSYCHOV"
+msgid "Only with the PsychoV35 tone mapper. Vanilla uses the display's own values, as the console."
+msgstr "ใช้ได้เฉพาะกับการแมปโทน PsychoV35 เท่านั้น Vanilla ใช้ค่าของจอเอง เหมือนคอนโซล"
+
+msgctxt "UI_MENU_HDR_PEAK"
+msgid "HDR peak brightness"
+msgstr "ความสว่างสูงสุด HDR"
+
+msgctxt "UI_MENU_HDR_PEAK_DESC"
+msgid ""
+"The brightest the game draws. Automatic uses the display's peak as Windows reports it. Applies at "
+"once."
+msgstr "ค่าที่สว่างที่สุดที่เกมวาด อัตโนมัติใช้ค่าสูงสุดของจอตามที่ Windows รายงาน มีผลทันที"
+
+msgctxt "UI_MENU_HDR_WHITE"
+msgid "HDR paper white"
+msgstr "Paper white HDR"
+
+msgctxt "UI_MENU_HDR_WHITE_DESC"
+msgid ""
+"How bright white menus and the scene's mid-tones are. Automatic uses Windows' SDR content "
+"brightness, which is often much brighter than a game wants; 203 nits is the HDR reference. Lower "
+"values leave the highlights more room. Applies at once."
+msgstr ""
+"ความสว่างของสีขาวในเมนูและโทนกลางของฉาก อัตโนมัติใช้ความสว่างเนื้อหา SDR ของ Windows "
+"ซึ่งมักสว่างกว่าที่เกมต้องการมาก 203 nits คือค่าอ้างอิงของ HDR "
+"ค่าที่ต่ำลงเหลือที่ว่างให้ไฮไลต์มากขึ้น มีผลทันที"
+
+msgctxt "UI_MENU_HDR_NITS"
+msgid "%s nits"
+msgstr "%s นิต"
 
 msgctxt "UI_MENU_SHARPNESS"
 msgid "FSR sharpness"
@@ -646,6 +869,18 @@ msgstr ""
 "«เล่นไร้สาย» ในเมนูไตเติลจะกลายเป็นเล่นผ่าน LAN "
 "เพื่อแข่งกับพีซีเครื่องอื่นในเครือข่ายภายในเดียวกัน (พอร์ต UDP 49152 และ 35000) "
 "เชื่อมต่อได้เฉพาะที่อยู่ในเครือข่ายภายใน ไม่ออกอินเทอร์เน็ต มีผลเมื่อเริ่มครั้งหน้า"
+
+msgctxt "UI_MENU_LAN_NET"
+msgid "LAN network"
+msgstr "เครือข่าย LAN"
+
+msgctxt "UI_MENU_LAN_NET_DESC"
+msgid ""
+"The network LAN play uses, for ZeroTier, N2N, Tailscale or a VPN: pick the one the other players "
+"are on. Automatic picks the best network by itself. Applies at the next start."
+msgstr ""
+"เครือข่ายที่ใช้เล่น LAN สำหรับ ZeroTier, N2N, Tailscale หรือ VPN: "
+"เลือกเครือข่ายเดียวกับผู้เล่นคนอื่น อัตโนมัติจะเลือกอันที่ดีที่สุด มีผลเมื่อเริ่มเกมครั้งถัดไป"
 
 msgctxt "UI_MENU_VOLUME"
 msgid "Volume"
@@ -761,6 +996,18 @@ msgctxt "UI_MENU_PAD_LAYOUT_IN_USE"
 msgid "in use: %s"
 msgstr "ใช้อยู่: %s"
 
+msgctxt "UI_MENU_KEYBOARD_MOUSE"
+msgid "Keyboard and mouse"
+msgstr "คีย์บอร์ดและเมาส์"
+
+msgctxt "UI_MENU_KEYBOARD_MOUSE_DESC"
+msgid ""
+"Off: the game ignores the keyboard and the mouse (controllers only) and the mouse cursor stays "
+"free. Esc still opens this menu."
+msgstr ""
+"ปิด: เกมจะไม่รับคีย์บอร์ดและเมาส์ (ใช้ได้เฉพาะคอนโทรลเลอร์) และเคอร์เซอร์เมาส์จะเป็นอิสระ กด Esc "
+"เพื่อเปิดเมนูนี้ได้เหมือนเดิม"
+
 msgctxt "UI_MENU_MOUSE_SENS"
 msgid "Mouse camera sensitivity"
 msgstr "ความไวกล้องของเมาส์"
@@ -833,6 +1080,36 @@ msgstr "คีย์บอร์ด"
 msgctxt "UI_MENU_ICONS_IN_USE"
 msgid "in use: %s"
 msgstr "ใช้อยู่: %s"
+
+msgctxt "UI_MENU_MENU_SHORTCUT"
+msgid "Menu shortcut"
+msgstr "ทางลัดเมนู"
+
+msgctxt "UI_MENU_MENU_SHORTCUT_DESC"
+msgid ""
+"Choose which controller input opens this menu (Start + Select or the Guide button). Keyboard "
+"defaults to F1 or Esc."
+msgstr ""
+"เลือกอินพุตของคอนโทรลเลอร์ที่จะเปิดเมนูนี้ (Start + Select หรือปุ่ม Guide) "
+"แป้นพิมพ์ใช้ค่าเริ่มต้นเป็น F1 หรือ Esc"
+
+msgctxt "UI_MENU_SHORTCUT_MINUS_PLUS"
+msgid "Start + Select"
+msgstr "Start + Select"
+
+msgctxt "UI_MENU_SHORTCUT_GUIDE"
+msgid "Guide button"
+msgstr "ปุ่ม Guide"
+
+msgctxt "UI_MENU_SHORTCUT_STEAM_NOTE"
+msgid ""
+"Note: If using the Guide button, turn off 'Guide button focuses Steam' in Steam (Settings -> "
+"Controller -> Advanced Settings).\n\nOn Windows, also turn off 'Allow your controller to open "
+"Game Bar' (Settings -> Gaming -> Game Bar)."
+msgstr ""
+"หมายเหตุ: หากใช้ปุ่ม Guide ให้ปิด 'Guide button focuses Steam' ใน Steam (การตั้งค่า -> "
+"คอนโทรลเลอร์ -> การตั้งค่าขั้นสูง)\n\nบน Windows ให้ปิด 'Allow your controller to open Game Bar' "
+"(การตั้งค่า -> เกม -> Game Bar) ด้วย"
 
 msgctxt "UI_BINDS_HELP"
 msgid ""
@@ -908,10 +1185,12 @@ msgstr "ผู้เล่น %d: %s"
 msgctxt "UI_MENU_PAD_BATTERY_DESC"
 msgid ""
 "The battery of each player's controller, as the controller reports it. Some controllers report "
-"none. A Switch 2 controller over Bluetooth reports a voltage, shown as high, medium or low."
+"none. A Switch 2 controller over Bluetooth reports a voltage and an Xbox controller on Linux's "
+"xone driver a level, each shown as high, medium or low."
 msgstr ""
 "แบตเตอรี่ของจอยผู้เล่นแต่ละคน ตามที่จอยรายงาน จอยบางรุ่นไม่รายงาน จอย Switch 2 "
-"ผ่านบลูทูธรายงานเป็นแรงดันไฟ แสดงเป็นสูง กลาง หรือต่ำ"
+"ผ่านบลูทูธรายงานเป็นแรงดันไฟ และจอย Xbox บน Linux ที่ใช้ไดรเวอร์ xone รายงานเป็นระดับ "
+"โดยแสดงเป็นสูง กลาง หรือต่ำ"
 
 msgctxt "UI_MENU_PADS_NONE"
 msgid "No controller connected"
@@ -2319,6 +2598,23 @@ msgctxt "UI_GB_ERROR"
 msgid "GameBanana did not answer: %s"
 msgstr "GameBanana ไม่ตอบกลับ: %s"
 
+#. %s: the content ratings GameBanana marks the mod with (e.g. Sexual Themes).
+msgctxt "UI_GB_RATED"
+msgid "Content rating: %s"
+msgstr "เรตติ้งเนื้อหา: %s"
+
+msgctxt "UI_GB_MATURE"
+msgid "NSFW mods"
+msgstr "ม็อด NSFW"
+
+msgctxt "UI_GB_MATURE_OBFUSCATE"
+msgid "Obfuscate"
+msgstr "เซ็นเซอร์"
+
+msgctxt "UI_GB_MATURE_SHOW"
+msgid "Show"
+msgstr "แสดง"
+
 #. Under an installed mod that replaces the game's graphics settings archive (general_format).
 msgctxt "UI_MOD_WARN_GRAPHICS"
 msgid ""
@@ -2403,6 +2699,22 @@ msgstr "คุณมี %s · %d MB ให้ดาวน์โหลด"
 msgctxt "UI_LAUNCH_UPDATE_NOW"
 msgid "Update"
 msgstr "อัปเดต"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARING"
+msgid "Setting up %s in the background. You can keep playing meanwhile."
+msgstr "กำลังตั้งค่า %s ในเบื้องหลัง ระหว่างนี้คุณยังเล่นต่อได้"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARED"
+msgid "%s is ready"
+msgstr "%s พร้อมแล้ว"
+
+msgctxt "UI_LAUNCH_UPDATE_RESTART"
+msgid "Restart with it"
+msgstr "เริ่มใหม่ด้วยเวอร์ชันนี้"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARE_FAILED"
+msgid "It could not be set up in advance (%s): it will be set up when it starts."
+msgstr "ไม่สามารถตั้งค่าล่วงหน้าได้ (%s): จะตั้งค่าเมื่อเริ่มเกม"
 
 #. Opens the release's notes on GitHub.
 msgctxt "UI_LAUNCH_WHATS_NEW"
@@ -2594,6 +2906,18 @@ msgctxt "UI_TOOLS_STEAM_RESTART"
 msgid "Added: restart Steam to see it"
 msgstr "เพิ่มแล้ว รีสตาร์ต Steam เพื่อดู"
 
+#. After Add to Steam, when only some profiles could be updated.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL"
+msgid "Updated %d of %d Steam profiles"
+msgstr "อัปเดตโปรไฟล์ Steam แล้ว %d จาก %d"
+
+#. After Add to Steam, when only some profiles could be updated and Steam is running.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL_RESTART"
+msgid "Updated %d of %d Steam profiles. Restart Steam to see the shortcut."
+msgstr "อัปเดตโปรไฟล์ Steam แล้ว %d จาก %d รีสตาร์ท Steam เพื่อดูทางลัด"
+
 #. Why Add to Steam failed.
 msgctxt "UI_TOOLS_STEAM_NONE"
 msgid "Steam is not installed for this user"
@@ -2619,6 +2943,11 @@ msgstr "ตรวจสอบตอนนี้"
 msgctxt "UI_TOOLS_CHECKING"
 msgid "Checking for a new version..."
 msgstr "กำลังตรวจสอบเวอร์ชันใหม่..."
+
+#. The manual update check found no newer version.
+msgctxt "UI_TOOLS_UPDATE_CURRENT"
+msgid "You're up to date."
+msgstr "คุณใช้เวอร์ชันล่าสุดแล้ว"
 
 #. Tools page row: %s is the version before the last update.
 #. printf format: keep every %... conversion, in the same order.
@@ -3170,3 +3499,56 @@ msgstr ""
 msgctxt "UI_LAUNCH_FOUND_FOLDER"
 msgid "folder"
 msgstr ""
+
+msgctxt "UI_LAUNCH_GPU_NONE"
+msgid "No graphics card here can run the game"
+msgstr "ไม่มีการ์ดจอในเครื่องนี้ที่รันเกมได้"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_OLD"
+msgid "%s: its driver offers %s, and the game needs Vulkan 1.3"
+msgstr "%s: ไดรเวอร์รองรับ %s แต่เกมต้องการ Vulkan 1.3"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_EXT"
+msgid "%s (%s): its driver lacks %s, which the game needs"
+msgstr "%s (%s): ไดรเวอร์ขาด %s ซึ่งเกมต้องการ"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_QUEUE"
+msgid "%s: it has no queue that does both graphics and compute"
+msgstr "%s: ไม่มีคิวที่ทำทั้งกราฟิกและการคำนวณพร้อมกัน"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SKIPPED"
+msgid "%s: not the one chosen in Settings, Screen, Graphics card"
+msgstr "%s: ไม่ใช่การ์ดที่เลือกไว้ใน การตั้งค่า > หน้าจอ > การ์ดจอ"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SOFTWARE"
+msgid "%s draws on the processor, not on a graphics card: far too slow to play"
+msgstr "%s วาดภาพด้วยโปรเซสเซอร์ ไม่ใช่การ์ดจอ: ช้าเกินกว่าจะเล่นได้"
+
+msgctxt "UI_LAUNCH_GPU_NO_DRIVER"
+msgid "No Vulkan driver was found."
+msgstr "ไม่พบไดรเวอร์ Vulkan"
+
+msgctxt "UI_LAUNCH_GPU_HELP"
+msgid ""
+"The game needs Vulkan 1.3. On AMD and Intel that is Mesa 22.0 or newer, newer than Debian 11 and "
+"Ubuntu 20.04 ship; on NVIDIA, its driver 510 or newer. Some older graphics cards cannot have it "
+"at all. The setup can run now: the game starts once the driver is updated."
+msgstr ""
+"เกมต้องการ Vulkan 1.3 บน AMD และ Intel คือ Mesa 22.0 ขึ้นไป ซึ่งใหม่กว่าที่มากับ Debian 11 และ "
+"Ubuntu 20.04 บน NVIDIA คือไดรเวอร์ 510 ขึ้นไป การ์ดจอรุ่นเก่าบางรุ่นไม่รองรับเลย "
+"การตั้งค่าทำได้ตั้งแต่ตอนนี้ เกมจะเริ่มเมื่ออัปเดตไดรเวอร์แล้ว"
+
+msgctxt "UI_LAUNCH_GPU_HELP_WIN"
+msgid ""
+"The game needs Vulkan 1.3: install the latest driver from your graphics card's maker (AMD, Intel "
+"or NVIDIA; on NVIDIA, 510 or newer). Some older graphics cards cannot have it at all. The setup "
+"can run now: the game starts once the driver is updated."
+msgstr ""
+"เกมต้องการ Vulkan 1.3: ติดตั้งไดรเวอร์ล่าสุดจากผู้ผลิตการ์ดจอของคุณ (AMD, Intel หรือ NVIDIA; บน "
+"NVIDIA ต้อง 510 ขึ้นไป) การ์ดจอรุ่นเก่าบางรุ่นไม่รองรับเลย การตั้งค่าทำได้ตั้งแต่ตอนนี้ "
+"เกมจะเริ่มเมื่ออัปเดตไดรเวอร์แล้ว"

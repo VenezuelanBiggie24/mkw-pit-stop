@@ -53,6 +53,13 @@ APPRUN = """#!/bin/sh
 # the game the setup builds; setup/ and the libraries stay in the mount.
 set -eu
 here=$(dirname "$(readlink -f "$0")")
+if [ "${1:-}" = --prepare-next ]; then
+    # the start screen of the version still played sets this one up beside it (prepare.py --next): this package's
+    # tools, and no copy of its mkw over the one running
+    shift
+    export LD_LIBRARY_PATH="$here/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    exec "$here/setup/python/bin/python3" -I "$here/setup/src/tools/prepare/prepare.py" --runtime "$here" --next "$@"
+fi
 home=${XDG_DATA_HOME:-$HOME/.local/share}/mkw-recomp
 mkdir -p "$home"
 if ! cmp -s "$here/mkw" "$home/mkw"; then
@@ -116,6 +123,7 @@ def check_no_game(root: Path) -> None:
 def licenses(dst: Path) -> None:
     dst.mkdir()
     shutil.copy2(ROOT / "LICENSE", dst / "mkw-recomp-LICENSE")
+    shutil.copy2(ROOT / "runtime/third_party/ffx_sdk/LICENSE.txt", dst / "FidelityFX-LICENSE.txt")
     for name, rel in LICENSES.items():
         shutil.copy2(sysroot.SYSROOT / rel, dst / f"{name}-copyright")
 
@@ -158,16 +166,24 @@ def _glibc_versions(text: str) -> list[str]:
     return [w.removeprefix("(GLIBC_").rstrip(")") for w in text.split() if w.startswith("(GLIBC_2.")]
 
 
-def windows(dist: Path, version: str) -> Path:
-    out = OUT / f"mkw-recomp-{version}-windows-x64.zip"
-    files = [dist / "mkw.exe", *(dist / d for d in WIN_DLLS), *sorted((dist / "setup").rglob("*"))]
+def windows(dist: Path, version: str, noavx2: bool = False) -> Path:
+    """The Windows zip. noavx2: the package for CPUs without AVX2 (#82): the same setup/ and DLLs, mkw.exe built for
+    x86-64-v2 (build/dist/windows-noavx2) and setup/cpu-level naming v2, so the setup compiles the game code for v2 and
+    the updater keeps the player on this package."""
+    out = OUT / f"mkw-recomp-{version}-windows-x64{'-noavx2' if noavx2 else ''}.zip"
+    exe = ROOT / "build/dist/windows-noavx2/mkw.exe" if noavx2 else dist / "mkw.exe"
+    files = [exe, *(dist / d for d in WIN_DLLS), *sorted((dist / "setup").rglob("*"))]
     check_no_game(dist / "setup")
     top = Path("mkw-recomp")
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for p in files:
             if p.is_file():
-                z.write(p, top / p.relative_to(dist))
+                z.write(p, top / p.relative_to(dist if p.is_relative_to(dist) else exe.parent))
+        if noavx2:
+            z.writestr(str(top / "setup/cpu-level"), "v2\n")
         z.write(ROOT / "LICENSE", top / "licenses/mkw-recomp-LICENSE")
+        z.write(ROOT / "runtime/third_party/ffx_sdk/LICENSE.txt", top / "licenses/FidelityFX-LICENSE.txt")
+        z.write(ROOT / "tools/build/recomplauncher.json", top / "recomplauncher.json")  # RecompLauncher's setup file (#706)
         # the libraries in mkw.exe and beside it (tools/build/windeps.py keeps each package's licence files)
         for p in sorted((ROOT / "build/win/deps/share/licenses").rglob("*")):
             if p.is_file():
@@ -179,13 +195,16 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--target", choices=("linux", "linux-aarch64", "windows"), default="linux")
     ap.add_argument("--version", required=True, help="the release's version, e.g. 0.1.0 (the tag without its v)")
+    ap.add_argument("--cpu", choices=("v3", "noavx2"), default="v3", help="windows: noavx2 = the package for CPUs without AVX2")
     args = ap.parse_args()
+    if args.cpu == "noavx2" and args.target != "windows":
+        ap.error("--cpu noavx2 is only for --target windows so far")
     dist = ROOT / "build/dist" / args.target
     if not (dist / "setup").is_dir():
         sys.exit(f"{dist}/setup missing: uv run tools/build/dist.py --target {args.target} first")
     OUT.mkdir(parents=True, exist_ok=True)
     if args.target == "windows":
-        out = windows(dist, args.version)
+        out = windows(dist, args.version, args.cpu == "noavx2")
     else:
         arch = "aarch64" if args.target == "linux-aarch64" else "x86_64"
         sysroot.use_arch(arch)

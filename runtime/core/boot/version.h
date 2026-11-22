@@ -10,8 +10,10 @@
 typedef struct { const char *name; uint64_t entries; } RtInitCount;
 
 // A sequence node class whose start tells race_scene.c where the game is: its name getter's vtable slot (main offset,
-// build/seq_nodes*.tsv) and what its start means
-enum { RT_RACE_ARM = 1, RT_RACE_START, RT_RACE_LEAVE, RT_RACE_FREE_ARM, RT_RACE_CHAT };
+// build/seq_nodes*.tsv) and what its start means; RT_RACE_TT_* over it: time trial begins or ends there (MKW_LOGIC_HZ
+// back to 60, game.c)
+enum { RT_RACE_ARM = 1, RT_RACE_START, RT_RACE_LEAVE, RT_RACE_FREE_ARM, RT_RACE_CHAT, RT_RACE_ROLE = 0xf };
+enum { RT_RACE_TT_ON = 0x10, RT_RACE_TT_OFF = 0x20 };
 typedef struct { const char *name; uint64_t name_slot; int role; } RtRaceEvent;
 #define RT_RACE_EVENTS 16
 #define RT_RACE_HOST 0xe00   // patch page offset of race_scene.c's first host function, one every 0x10 (patches.c)
@@ -49,6 +51,13 @@ typedef struct {
                                // tall; 0: tall Window is not offered (set vertplus)
     uint8_t fov_entry_x, fov_half_v;   // at set vertplus's site: the x register of the camera entry being written and
                                        // the v register of the replaced fmul's second operand
+    // set display (1.8.0): the display's requested size (w | h << 32 at [display + 0x10 + 8 * slot]), which the render
+    // targets and the window crop follow: its store in the per-mode update (value and base registers) and its setter
+    // (display, const size *, slot); 0 where the version has none (1.0.0 scales its picture to the whole output)
+    uint64_t display_store, display_set_fn;
+    uint8_t display_value_reg, display_base_reg;
+    uint64_t pane_matrix_fn;   // nn::ui2d's pane global-matrix builder (pane, draw info) (set aspect, host_pane_matrix);
+                               // 0: its callers are not in the version's table
     RtRaceEvent race_events[RT_RACE_EVENTS];   // race_scene.c; none: 20 and 15 fps apply everywhere
     // sdk offsets: the NVN2 driver's proc table (tools/gpu/nvn2_procs.py TABLES, the same rows)
     uint64_t sdk_name_pool, sdk_name_offsets, sdk_pointers;

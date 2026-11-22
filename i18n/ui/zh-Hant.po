@@ -8,6 +8,21 @@ msgctxt "UI_SWKBD_DEFAULT_NAME"
 msgid "Player"
 msgstr "玩家"
 
+#. The on-screen number pad the game opens to ask for a number: its confirm key (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_OK"
+msgid "OK"
+msgstr "確定"
+
+#. The on-screen number pad: the wide button under the keys that closes it without a number
+msgctxt "UI_KEYPAD_CANCEL"
+msgid "Cancel"
+msgstr "取消"
+
+#. The on-screen number pad: the key that erases the last digit (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_DELETE"
+msgid "Delete"
+msgstr "刪除"
+
 msgctxt "UI_MENU_TITLE"
 msgid "Settings"
 msgstr "設定"
@@ -340,6 +355,24 @@ msgctxt "UI_MENU_ASPECT_WINDOW"
 msgid "Window"
 msgstr "視窗"
 
+msgctxt "UI_MENU_HUD_POSITION"
+msgid "HUD position"
+msgstr "HUD 位置"
+
+msgctxt "UI_MENU_HUD_POSITION_DESC"
+msgid ""
+"On a picture wider or taller than 16:9, keep the race HUD in the middle 16:9 area (the console's "
+"place) or put it at the screen's edges and corners. Takes effect at the next start."
+msgstr "在比 16:9 更寬或更高的畫面上,將比賽 HUD 保留在中間的 16:9 區域(主機上的位置),或移到螢幕的邊緣和角落。下次啟動時生效。"
+
+msgctxt "UI_MENU_HUD_POSITION_16X9"
+msgid "16:9 area"
+msgstr "16:9 區域"
+
+msgctxt "UI_MENU_HUD_POSITION_EDGES"
+msgid "Screen edges"
+msgstr "螢幕邊緣"
+
 msgctxt "UI_MENU_PRESENT"
 msgid "Presentation"
 msgstr "呈現方式"
@@ -427,6 +460,17 @@ msgctxt "UI_MENU_FPS_AUTO"
 msgid "Automatic"
 msgstr "自動"
 
+msgctxt "UI_MENU_LOGIC_HZ"
+msgid "Logic rate"
+msgstr "邏輯頻率"
+
+msgctxt "UI_MENU_LOGIC_HZ_DESC"
+msgid ""
+"How many times a second the game updates karts, physics and timers. 60 is the console's rate; "
+"120, 144 or 240 make movement smoother on a high refresh rate screen but need a faster PC. Time "
+"trials and LAN games always run at 60."
+msgstr "遊戲每秒更新卡丁車、物理與計時器的次數。60 與主機相同；120、144 或 240 在高更新率螢幕上讓動作更流暢，但需要更快的電腦。計時賽與區域網路遊戲一律以 60 執行。"
+
 msgctxt "UI_MENU_FRAMEGEN"
 msgid "Frame generation"
 msgstr "幀生成"
@@ -463,6 +507,109 @@ msgid ""
 "Starts each frame as late as your computer allows, so what you press reaches the screen sooner. "
 "Matters most at 20 or 15 fps and with Frame generation. Turn it off if the picture stutters."
 msgstr "在電腦允許的範圍內盡量晚地開始每一幀，讓你按下的操作更快顯示在螢幕上。在 20 或 15 fps 時，以及開啟幀生成時，效果最明顯。畫面卡頓時請關閉此項。"
+
+msgctxt "UI_MENU_FG_ENGINE"
+msgid "Frame generation by"
+msgstr "幀生成方式"
+
+msgctxt "UI_MENU_FG_ENGINE_DESC"
+msgid ""
+"Who makes the frames between the game's own. The port's own works everywhere. NVIDIA DLSS Frame "
+"Generation (RTX 40 and 50) and AMD FSR 3.1 use the scene's depth and motion and need DLSS or FSR "
+"3.1 upscaling on."
+msgstr ""
+"由誰來產生遊戲幀之間的幀。移植版內建的方式在任何裝置上都能用。NVIDIA DLSS 幀生成（RTX 40 和 50）和 AMD FSR 3.1 使用場景的深度與動態資訊，並且需要開啟 DLSS "
+"或 FSR 3.1 AI 超解析度。"
+
+msgctxt "UI_MENU_REFLEX"
+msgid "NVIDIA Reflex"
+msgstr "NVIDIA Reflex"
+
+msgctxt "UI_MENU_REFLEX_DESC"
+msgid ""
+"Starts each frame as late as the GPU allows, so what you press reaches the screen sooner. Boost "
+"also keeps the GPU's clocks up. NVIDIA GPUs only."
+msgstr "在 GPU 允許的範圍內盡量晚地開始每一幀，讓你按下的操作更快顯示在螢幕上。Boost 還會讓 GPU 維持高時脈。僅限 NVIDIA GPU。"
+
+msgctxt "UI_MENU_REFLEX_BOOST"
+msgid "On + Boost"
+msgstr "ON + Boost"
+
+msgctxt "UI_MENU_TEMPORAL"
+msgid "AI upscaling"
+msgstr "AI 超解析度"
+
+msgctxt "UI_MENU_NOT_AVAILABLE"
+msgid "Not available on this PC: the game's own picture stays."
+msgstr "此電腦不支援：保持遊戲原有畫面。"
+
+msgctxt "UI_MENU_TEMPORAL_DESC"
+msgid ""
+"Renders the race at a lower resolution and rebuilds it from several frames: NVIDIA DLSS (RTX "
+"GPUs) or AMD FSR 3.1 (any GPU). Sharper and steadier edges than the game's own scaling; the HUD "
+"stays sharp."
+msgstr "以較低解析度算繪比賽畫面，再用多個幀重建：NVIDIA DLSS（RTX GPU）或 AMD FSR 3.1（任何 GPU）。邊緣比遊戲內建的縮放更銳利、更穩定；HUD 保持清晰。"
+
+msgctxt "UI_MENU_TEMPORAL_QUALITY"
+msgid "Upscaling quality"
+msgstr "超解析度品質"
+
+msgctxt "UI_MENU_TEMPORAL_QUALITY_DESC"
+msgid ""
+"The share of the screen's resolution the race renders at: Native (DLAA) 100 %, Quality 67 %, "
+"Balanced 58 %, Performance 50 %, Ultra performance 33 %. Applies at the next start."
+msgstr "比賽畫面算繪解析度占螢幕解析度的比例：原生（DLAA） 100 %、品質 67 %、平衡 58 %、效能 50 %、超級效能 33 %。下次啟動時生效。"
+
+msgctxt "UI_MENU_TQ_NATIVE"
+msgid "Native (DLAA)"
+msgstr "原生（DLAA）"
+
+msgctxt "UI_MENU_TQ_QUALITY"
+msgid "Quality"
+msgstr "品質"
+
+msgctxt "UI_MENU_TQ_BALANCED"
+msgid "Balanced"
+msgstr "平衡"
+
+msgctxt "UI_MENU_TQ_PERFORMANCE"
+msgid "Performance"
+msgstr "效能"
+
+msgctxt "UI_MENU_TQ_ULTRA"
+msgid "Ultra performance"
+msgstr "超級效能"
+
+msgctxt "UI_MENU_DLSS_PRESET"
+msgid "DLSS model"
+msgstr "DLSS 模型"
+
+msgctxt "UI_MENU_DLSS_PRESET_DESC"
+msgid ""
+"NVIDIA's model DLSS uses: the default of the DLSS version next to the game, or presets J, K, L, M."
+msgstr "NVIDIA DLSS 使用的模型：遊戲旁邊 DLSS 版本的預設模型，或預設集 J、K、L、M。"
+
+msgctxt "UI_MENU_DLSS_PRESET_DEFAULT"
+msgid "Default"
+msgstr "預設"
+
+msgctxt "UI_MENU_CAS"
+msgid "CAS sharpening"
+msgstr "CAS 銳化"
+
+msgctxt "UI_MENU_CAS_DESC"
+msgid ""
+"AMD's contrast adaptive sharpening of the race after DLSS or FSR 3.1, before the HUD is drawn. "
+"Needs AI upscaling on."
+msgstr "在 DLSS 或 FSR 3.1 之後、繪製 HUD 之前，對比賽畫面套用 AMD 的對比自適應銳化。需要開啟 AI 超解析度。"
+
+msgctxt "UI_MENU_CAS_SHARPNESS"
+msgid "CAS strength"
+msgstr "CAS 強度"
+
+msgctxt "UI_MENU_CAS_SHARPNESS_DESC"
+msgid "How strongly CAS sharpens: 0 is the lightest touch, 100 the strongest."
+msgstr "CAS 的銳化強度：0 最輕，100 最強。"
 
 msgctxt "UI_MENU_GRAPHICS"
 msgid "Picture"
@@ -516,6 +663,61 @@ msgid ""
 msgstr ""
 "「自動」會在螢幕處於 HDR 模式時（Windows 中為 設定 > 顯示 > 使用 HDR）像主機一樣顯示遊戲自帶的 HDR 畫面，亮度跟隨系統的 HDR "
 "設定。「OFF」則始終顯示標準畫面。立即生效。"
+
+msgctxt "UI_MENU_HDR_TONEMAP"
+msgid "HDR tone mapper"
+msgstr "HDR 色調映射"
+
+msgctxt "UI_MENU_HDR_TONEMAP_DESC"
+msgid ""
+"How the scene's brightness is fitted to the display in HDR. Vanilla is the game's own curve, "
+"which never goes above 1.5 times paper white. PsychoV35 is RenoDX's: the same mid-tones and "
+"colour grade, with highlights that roll off smoothly up to the display's peak. Applies after a "
+"restart, as do peak and paper white changes while it is on."
+msgstr ""
+"HDR 下場景亮度如何適配顯示器。Vanilla 是遊戲內建的曲線，不會超過紙白的 1.5 倍。PsychoV35 來自 "
+"RenoDX：中間調和調色相同，高光則平滑過渡到顯示器的峰值亮度。重新啟動後生效；開啟時，峰值亮度和紙白的變更同樣需要重新啟動。"
+
+msgctxt "UI_MENU_HDR_TONEMAP_VANILLA"
+msgid "Vanilla"
+msgstr "Vanilla"
+
+msgctxt "UI_MENU_HDR_TONEMAP_PSYCHOV"
+msgid "PsychoV35"
+msgstr "PsychoV35"
+
+msgctxt "UI_MENU_HDR_TONEMAP_MISSING"
+msgid "Its programs are made by the setup. Set the game up again (an update does it) to add them."
+msgstr "其程式由安裝步驟產生。請重新設定遊戲（更新時會自動進行）以新增它們。"
+
+msgctxt "UI_MENU_HDR_NEEDS_PSYCHOV"
+msgid "Only with the PsychoV35 tone mapper. Vanilla uses the display's own values, as the console."
+msgstr "僅在使用 PsychoV35 色調映射時有效。Vanilla 與主機一樣使用顯示器本身的數值。"
+
+msgctxt "UI_MENU_HDR_PEAK"
+msgid "HDR peak brightness"
+msgstr "HDR 峰值亮度"
+
+msgctxt "UI_MENU_HDR_PEAK_DESC"
+msgid ""
+"The brightest the game draws. Automatic uses the display's peak as Windows reports it. Applies at "
+"once."
+msgstr "遊戲繪製的最高亮度。自動使用 Windows 回報的顯示器峰值。立即生效。"
+
+msgctxt "UI_MENU_HDR_WHITE"
+msgid "HDR paper white"
+msgstr "HDR 紙白"
+
+msgctxt "UI_MENU_HDR_WHITE_DESC"
+msgid ""
+"How bright white menus and the scene's mid-tones are. Automatic uses Windows' SDR content "
+"brightness, which is often much brighter than a game wants; 203 nits is the HDR reference. Lower "
+"values leave the highlights more room. Applies at once."
+msgstr "選單白色和場景中間調的亮度。自動使用 Windows 的 SDR 內容亮度，通常比遊戲所需亮得多；HDR 參考值為 203 尼特。數值越低，高光空間越大。立即生效。"
+
+msgctxt "UI_MENU_HDR_NITS"
+msgid "%s nits"
+msgstr "%s 尼特"
 
 msgctxt "UI_MENU_SHARPNESS"
 msgid "FSR sharpness"
@@ -603,6 +805,16 @@ msgid ""
 "ports 49152 and 35000). It only reaches local network addresses, never the internet. Applies at "
 "the next start."
 msgstr "標題選單的本地無線遊戲變為區域網路遊戲，可與同一區域網路中的其他電腦比賽（UDP 連接埠 49152 和 35000）。只連線區域網路位址，絕不連線網際網路。下次啟動時生效。"
+
+msgctxt "UI_MENU_LAN_NET"
+msgid "LAN network"
+msgstr "區域網路"
+
+msgctxt "UI_MENU_LAN_NET_DESC"
+msgid ""
+"The network LAN play uses, for ZeroTier, N2N, Tailscale or a VPN: pick the one the other players "
+"are on. Automatic picks the best network by itself. Applies at the next start."
+msgstr "區域網路遊戲使用的網路。使用 ZeroTier、N2N、Tailscale 或 VPN 時，請選擇其他玩家所在的網路。自動會選擇最合適的。下次啟動時生效。"
 
 msgctxt "UI_MENU_VOLUME"
 msgid "Volume"
@@ -716,6 +928,16 @@ msgctxt "UI_MENU_PAD_LAYOUT_IN_USE"
 msgid "in use: %s"
 msgstr "正在使用：%s"
 
+msgctxt "UI_MENU_KEYBOARD_MOUSE"
+msgid "Keyboard and mouse"
+msgstr "鍵盤和滑鼠"
+
+msgctxt "UI_MENU_KEYBOARD_MOUSE_DESC"
+msgid ""
+"Off: the game ignores the keyboard and the mouse (controllers only) and the mouse cursor stays "
+"free. Esc still opens this menu."
+msgstr "關閉：遊戲忽略鍵盤和滑鼠（僅手把），滑鼠游標保持自由。按 Esc 仍可開啟此選單。"
+
 msgctxt "UI_MENU_MOUSE_SENS"
 msgid "Mouse camera sensitivity"
 msgstr "滑鼠鏡頭靈敏度"
@@ -784,6 +1006,33 @@ msgstr "鍵盤"
 msgctxt "UI_MENU_ICONS_IN_USE"
 msgid "in use: %s"
 msgstr "正在使用：%s"
+
+msgctxt "UI_MENU_MENU_SHORTCUT"
+msgid "Menu shortcut"
+msgstr "選單快速鍵"
+
+msgctxt "UI_MENU_MENU_SHORTCUT_DESC"
+msgid ""
+"Choose which controller input opens this menu (Start + Select or the Guide button). Keyboard "
+"defaults to F1 or Esc."
+msgstr "選擇哪個控制器輸入開啟此選單(Start + Select 或 Guide 按鈕)。鍵盤預設為 F1 或 Esc。"
+
+msgctxt "UI_MENU_SHORTCUT_MINUS_PLUS"
+msgid "Start + Select"
+msgstr "Start + Select"
+
+msgctxt "UI_MENU_SHORTCUT_GUIDE"
+msgid "Guide button"
+msgstr "Guide 按鈕"
+
+msgctxt "UI_MENU_SHORTCUT_STEAM_NOTE"
+msgid ""
+"Note: If using the Guide button, turn off 'Guide button focuses Steam' in Steam (Settings -> "
+"Controller -> Advanced Settings).\n\nOn Windows, also turn off 'Allow your controller to open "
+"Game Bar' (Settings -> Gaming -> Game Bar)."
+msgstr ""
+"注意:如果使用 Guide 按鈕,請關閉 Steam 中的 'Guide button focuses Steam'(設定 -> 控制器 -> 進階設定)。\n\n在 Windows "
+"上,另請關閉 'Allow your controller to open Game Bar'(設定 -> 遊戲 -> Game Bar)。"
 
 msgctxt "UI_BINDS_HELP"
 msgid ""
@@ -857,8 +1106,11 @@ msgstr "玩家%d：%s"
 msgctxt "UI_MENU_PAD_BATTERY_DESC"
 msgid ""
 "The battery of each player's controller, as the controller reports it. Some controllers report "
-"none. A Switch 2 controller over Bluetooth reports a voltage, shown as high, medium or low."
-msgstr "每位玩家控制器的電量，以控制器回報的為準。有些控制器不回報電量。透過藍牙連接的 Switch 2 控制器回報的是電壓，顯示為高、中、低。"
+"none. A Switch 2 controller over Bluetooth reports a voltage and an Xbox controller on Linux's "
+"xone driver a level, each shown as high, medium or low."
+msgstr ""
+"每位玩家控制器的電量，以控制器回報的為準。有些控制器不回報電量。透過藍牙連接的 Switch 2 控制器回報的是電壓，Linux 上使用 xone 驅動程式的 Xbox "
+"控制器回報的是等級，均顯示為高、中、低。"
 
 msgctxt "UI_MENU_PADS_NONE"
 msgid "No controller connected"
@@ -2246,6 +2498,23 @@ msgctxt "UI_GB_ERROR"
 msgid "GameBanana did not answer: %s"
 msgstr "GameBanana 沒有回應：%s"
 
+#. %s: the content ratings GameBanana marks the mod with (e.g. Sexual Themes).
+msgctxt "UI_GB_RATED"
+msgid "Content rating: %s"
+msgstr "內容分級：%s"
+
+msgctxt "UI_GB_MATURE"
+msgid "NSFW mods"
+msgstr "NSFW 模組"
+
+msgctxt "UI_GB_MATURE_OBFUSCATE"
+msgid "Obfuscate"
+msgstr "打碼"
+
+msgctxt "UI_GB_MATURE_SHOW"
+msgid "Show"
+msgstr "顯示"
+
 #. Under an installed mod that replaces the game's graphics settings archive (general_format).
 msgctxt "UI_MOD_WARN_GRAPHICS"
 msgid ""
@@ -2324,6 +2593,22 @@ msgstr "你有 %s · %d MB 需要下載"
 msgctxt "UI_LAUNCH_UPDATE_NOW"
 msgid "Update"
 msgstr "更新"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARING"
+msgid "Setting up %s in the background. You can keep playing meanwhile."
+msgstr "正在背景準備 %s。在此期間可以繼續遊戲。"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARED"
+msgid "%s is ready"
+msgstr "%s 已準備就緒"
+
+msgctxt "UI_LAUNCH_UPDATE_RESTART"
+msgid "Restart with it"
+msgstr "用它重新啟動"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARE_FAILED"
+msgid "It could not be set up in advance (%s): it will be set up when it starts."
+msgstr "無法提前準備（%s）：將在啟動時準備。"
 
 #. Opens the release's notes on GitHub.
 msgctxt "UI_LAUNCH_WHATS_NEW"
@@ -2515,6 +2800,18 @@ msgctxt "UI_TOOLS_STEAM_RESTART"
 msgid "Added: restart Steam to see it"
 msgstr "已加入：重新啟動 Steam 即可看到"
 
+#. After Add to Steam, when only some profiles could be updated.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL"
+msgid "Updated %d of %d Steam profiles"
+msgstr "已更新 %d/%d 個 Steam 使用者設定檔"
+
+#. After Add to Steam, when only some profiles could be updated and Steam is running.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL_RESTART"
+msgid "Updated %d of %d Steam profiles. Restart Steam to see the shortcut."
+msgstr "已更新 %d/%d 個 Steam 使用者設定檔。請重新啟動 Steam 以查看捷徑。"
+
 #. Why Add to Steam failed.
 msgctxt "UI_TOOLS_STEAM_NONE"
 msgid "Steam is not installed for this user"
@@ -2540,6 +2837,11 @@ msgstr "立即檢查"
 msgctxt "UI_TOOLS_CHECKING"
 msgid "Checking for a new version..."
 msgstr "正在檢查新版本..."
+
+#. The manual update check found no newer version.
+msgctxt "UI_TOOLS_UPDATE_CURRENT"
+msgid "You're up to date."
+msgstr "已是最新版本。"
 
 #. Tools page row: %s is the version before the last update.
 #. printf format: keep every %... conversion, in the same order.
@@ -3086,3 +3388,54 @@ msgstr ""
 msgctxt "UI_LAUNCH_FOUND_FOLDER"
 msgid "folder"
 msgstr ""
+
+msgctxt "UI_LAUNCH_GPU_NONE"
+msgid "No graphics card here can run the game"
+msgstr "這台電腦上沒有能執行遊戲的顯示卡"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_OLD"
+msgid "%s: its driver offers %s, and the game needs Vulkan 1.3"
+msgstr "%s：其驅動程式提供 %s，而遊戲需要 Vulkan 1.3"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_EXT"
+msgid "%s (%s): its driver lacks %s, which the game needs"
+msgstr "%s (%s)：其驅動程式缺少遊戲需要的 %s"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_QUEUE"
+msgid "%s: it has no queue that does both graphics and compute"
+msgstr "%s：沒有能同時處理圖形和運算的佇列"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SKIPPED"
+msgid "%s: not the one chosen in Settings, Screen, Graphics card"
+msgstr "%s：不是在 設定 > 畫面 > 顯示卡 中選擇的那張"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SOFTWARE"
+msgid "%s draws on the processor, not on a graphics card: far too slow to play"
+msgstr "%s 用處理器而不是顯示卡繪製：太慢，無法遊玩"
+
+msgctxt "UI_LAUNCH_GPU_NO_DRIVER"
+msgid "No Vulkan driver was found."
+msgstr "找不到 Vulkan 驅動程式。"
+
+msgctxt "UI_LAUNCH_GPU_HELP"
+msgid ""
+"The game needs Vulkan 1.3. On AMD and Intel that is Mesa 22.0 or newer, newer than Debian 11 and "
+"Ubuntu 20.04 ship; on NVIDIA, its driver 510 or newer. Some older graphics cards cannot have it "
+"at all. The setup can run now: the game starts once the driver is updated."
+msgstr ""
+"遊戲需要 Vulkan 1.3。在 AMD 和 Intel 上即 Mesa 22.0 或更新版本，比 Debian 11 和 Ubuntu 20.04 內建的更新；在 NVIDIA 上為驅動程式 "
+"510 或更新版本。部分舊顯示卡完全無法支援。現在就可以進行設定：驅動程式更新後遊戲即可啟動。"
+
+msgctxt "UI_LAUNCH_GPU_HELP_WIN"
+msgid ""
+"The game needs Vulkan 1.3: install the latest driver from your graphics card's maker (AMD, Intel "
+"or NVIDIA; on NVIDIA, 510 or newer). Some older graphics cards cannot have it at all. The setup "
+"can run now: the game starts once the driver is updated."
+msgstr ""
+"遊戲需要 Vulkan 1.3：請安裝顯示卡廠商（AMD、Intel 或 NVIDIA）的最新驅動程式（NVIDIA 需 510 "
+"或更新版本）。部分舊顯示卡完全無法支援。現在就可以進行設定：驅動程式更新後遊戲即可啟動。"

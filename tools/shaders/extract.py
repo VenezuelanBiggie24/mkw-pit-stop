@@ -332,10 +332,12 @@ def main() -> None:
                 continue
             seen.add(key)
             stages[stage] += 1
-            (args.out / f"{key}.ctl").write_bytes(ctl)
-            (args.out / f"{key}.code").write_bytes(code)
-            if c1:
-                (args.out / f"{key}.c1").write_bytes(c1)
+            # named by content: a file an earlier run left is already this program (the setup keeps the folder
+            # between updates, tools/prepare/prepare.py clear_work)
+            for ext, data_ in (("ctl", ctl), ("code", code), ("c1", c1)):
+                p = args.out / f"{key}.{ext}"
+                if data_ and not (p.is_file() and p.stat().st_size == len(data_)):
+                    p.write_bytes(data_)
             rows.append((key, stage, len(code), name, index))
         pairs |= {(v, f) for p in program.values() for v in p["vs"] for f in p["ps"]}
     with (args.out / "index.csv").open("w", newline="") as f:

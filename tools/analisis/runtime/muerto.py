@@ -4,7 +4,7 @@ Why: the runtime is totk-pc-recomp's, adapted. Four sweeps found ~5,600 dead lin
 on 05/11/2026; this repeats them after more code is brought over. Each prints a table; nothing is changed.
 - funcs: global functions of build/obj/rt that no object of the binary asks for (nm: defined T, never U) and whose
   name appears once in the runtime's .c/.cpp/.inc (its definition).
-- keys: names of cfg.c's known[] list that no call outside the probes takes as a literal ("MKW_X", "X" or
+- keys: names of the rows[] table of cfg.c that no call outside the probes takes as a literal ("MKW_X", "X" or
   PREFIX "X"), writers and descriptions aside (opt_*, row_*, cfg_set, cfg_meta, plat_setenv), that no file but cfg.c
   and the menu names as "MKW_X" (helpers such as portable_path take the name), nor a "BIND_%s"-style
   name built from a prefix, nor the generated patches.h's switches: a menu option among them does nothing. A menu row
@@ -60,9 +60,9 @@ def funcs() -> None:
 
 def keys() -> None:
     cfg = (RT / "core/base/cfg.c").read_text()
-    known = re.search(r"known\[\] = \{(.*?)\};", cfg, re.DOTALL)
+    known = re.search(r"rows\[\] = \{(.*?)\n\};", cfg, re.DOTALL)
     if not known:
-        sys.exit("muerto: no known[] list in runtime/core/base/cfg.c")
+        sys.exit("muerto: no rows[] table in runtime/core/base/cfg.c")
     src = text_of([p for p in SOURCES if "probes" not in p.parts])
     calls = re.findall(r'\b(\w+)\(\s*(?:PREFIX\s*)?"(?:MKW_)?(\w+)"', src)
     read = {key for fn, key in calls if not re.match(r"opt_|row_|cfg_set$|cfg_meta$|plat_setenv$", fn)}
@@ -73,7 +73,7 @@ def keys() -> None:
     switches = set(re.findall(r'"MKW_(\w+)"', patches.read_text())) if patches.exists() else set()
     in_menu = (RT / "ui/menu/menu.cpp").read_text()
     print("| Key | In the menu |\n|---|---|")
-    for key in re.findall(r'"([A-Z0-9_]+)"', known.group(1)):
+    for key in re.findall(r'^\s*(?:S|KS|K)\("([A-Z0-9_]+)"', known.group(1), re.M):
         if key not in read and key not in switches and not key.startswith(prefixes):
             print(f"| `MKW_{key}` | {'yes' if f'MKW_{key}' in in_menu else 'no'} |")
 

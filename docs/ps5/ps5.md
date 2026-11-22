@@ -221,7 +221,7 @@ The PS5 build runs races at 60 fps without frame generation: its device profile 
 `MKW_DEVICE_PROFILE` auto or `ps5`) sets `MKW_FPS` to 60, below `mkw.ini` and Pit Stop, so `FPS = 30` or `auto` and
 `FRAMEGEN` still apply. A Grand Prix race at 60 (20/11/2026, 1.8.0, `MKW_TRACE=perf`): 17.0-17.4 ms a frame on
 average, window medians at the 16.7 ms cap, 1% lows 35-41 fps, game speed 0.95-0.98x, since frames over 16.7 ms slow the
-race down (about 2% take over 20 ms, where a course streams in new textures: docs/project/roadmap.md). Not yet played at
+race down (about 2% take over 20 ms, where a course streams in new textures: roadmap.md). Not yet played at
 this default outside that benchmark (menus, time trials, split screen, long sessions). At 30 the game advances two
 ticks a frame and the race keeps full speed; that was the default until 20/11/2026, when a race frame's work was ~26-27
 ms, and with `auto` the game then swapped its 60 and 30 Hz present interval ~1,400 times a minute (36-41 fps, uneven).
@@ -362,7 +362,7 @@ probe commands, so it needs linked game module metadata to reach those probes.
 
 ## Profile-guided build
 
-**Measured: no real gain** (19/11/2026, [roadmap](../project/roadmap.md)), so releases do not use it. This is how to repeat it.
+**Measured: no real gain** (19/11/2026, [roadmap](roadmap.md)), so releases do not use it. This is how to repeat it.
 
 The PS5 SDK has no compiler-rt profile runtime, so the profile is taken on a PC and used by the PS5 build. The PC build
 compiles the PS5's own generated tree (same generator, `ps5-high144`, same patches and chunk file names, by which the

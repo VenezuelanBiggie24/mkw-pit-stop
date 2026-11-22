@@ -29,6 +29,7 @@ int nvn_texels_box(const nvn_texdesc *d, unsigned level, unsigned layer, uint32_
 // 3D, multisampled and unknown formats and a box that is not that.
 int nvn_texels_region(const nvn_texdesc *d, unsigned level, unsigned layer, uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                       const void *storage, void *rows, size_t pitch);
+extern uint64_t nvn_texels_box_bl;   // bytes nvn_texels_box moved in block-linear storage (16 at most a step), atomic
 // Byte offset of (x byte, y block row, z slice) inside one level of block height 2^th and block depth 2^td GOBs.
 uint64_t nvn_bl_offset(uint32_t x, uint32_t y, uint32_t z, uint32_t row_bytes, uint32_t rows, unsigned th, unsigned td);
 // Geometry of a level as the two functions above use it; -1 for textures they reject.
@@ -37,6 +38,11 @@ int nvn_deswizzle_geom(const nvn_texdesc *d, unsigned level, unsigned layer, uin
 // The copy loop on its own, for callers that know the level geometry (bl points at the level's first byte).
 void tex_bl_copy(uint8_t *bl, uint8_t *lin, size_t pitch, uint32_t row_bytes, uint32_t rows, uint32_t slices,
                  unsigned th, unsigned td, int to_linear);
+// Linear rows [r0, r1) of one block-linear level and layer as nvn_deswizzle writes them (row r is block row r % rows
+// of slice r / rows of a 3D level), touching nothing else of dst: one level split over threads (tex_par_for). *n_rows
+// gets the level's rows times its slices. -1 for linear storage and for what nvn_deswizzle rejects.
+int nvn_deswizzle_rows(const nvn_texdesc *d, unsigned level, unsigned layer, const void *src_storage, void *dst_linear,
+                       size_t dst_pitch, uint32_t r0, uint32_t r1, uint32_t *n_rows);
 
 // ---- tex_astc.c (LAS Recomp runtime/nvn/astc.c, MIT) ----
 // ASTC LDR 2D to RGBA8, bit-exact with astcenc's 8-bit decode. blocks: row-major 16-byte blocks covering
@@ -52,6 +58,14 @@ int astc_mt_for(void (*fn)(void *arg, uint32_t i0, uint32_t i1), void *arg, uint
 // tex_astc_mt.c: the same bytes as astc_decode_ldr, large images split by block rows over a worker pool; blocks.
 void astc_decode_ldr_mt(const uint8_t *blocks, uint32_t width, uint32_t height, uint32_t bw, uint32_t bh, bool srgb,
                         uint8_t *rgba_out);
+
+// ---- tex_par.c ----
+// fn(ctx, i) for every i in [0, n), on the caller and the texture workers; returns when all are done. One job at a
+// time: while the workers are busy (another caller, or fn calling it) the caller does every item itself. Items should
+// take tens of microseconds or more: each job wakes every worker.
+typedef void TexParFn(void *ctx, uint32_t i);
+void tex_par_for(uint32_t n, TexParFn *fn, void *ctx);
+int tex_par_threads(void);   // the threads a job runs on, the caller included (1: no workers)
 
 // ---- vk_formats.c (LAS Recomp runtime/nvn/vulkan/textures.c format table, MIT) ----
 typedef struct TexVkFormat {

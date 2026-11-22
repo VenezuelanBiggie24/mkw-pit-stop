@@ -29,7 +29,7 @@ Temprano, y avanzando rápido. A 18/11/2026 en una PS5 estándar:
   **Pit Stop**, un menú de ajustes pensado para el mando con filas rápidas (**Master volume**, **Vibration strength**,
   **Performance HUD**), todas las categorías de ajustes y reasignación de botones del DualSense en vivo, guardado en
   `/app0/mkw.ini`.
-- **Problemas conocidos ([docs/project/roadmap.md](docs/project/roadmap.md)):**
+- **Problemas conocidos ([docs/ps5/roadmap.md](docs/ps5/roadmap.md)):**
   - *Sesiones largas:* la memoria libre baja carrera tras carrera porque el juego conserva datos de circuitos
     anteriores; cuando escasea, las texturas pueden salir corruptas o faltar. Reinicia el título tras unas cuantas
     carreras si pasa.
@@ -223,7 +223,7 @@ el nuevo valor por defecto.
 
 Alrededor del 2 % de los fotogramas de carrera tarda más de 20 ms: es donde un circuito carga texturas nuevas, y marcan
 el 1 % más bajo y la ligera cámara lenta. Lo medido y lo pendiente está en
-[docs/project/roadmap.md](docs/project/roadmap.md) y [docs/ps5/ps5.md](docs/ps5/ps5.md#frame-rate); las cifras de PC, en
+[docs/ps5/roadmap.md](docs/ps5/roadmap.md) y [docs/ps5/ps5.md](docs/ps5/ps5.md#frame-rate); las cifras de PC, en
 [docs/project/performance.md](docs/project/performance.md).
 
 ## Informar de errores

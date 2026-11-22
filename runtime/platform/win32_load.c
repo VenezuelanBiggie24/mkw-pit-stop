@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <windows.h>
 #define COBJMACROS
-#include <dxgi.h>
+#include <dxgi1_4.h>
 #include <bcrypt.h>
 #include <pdh.h>
 #include <pdhmsg.h>
@@ -91,8 +91,12 @@ struct PlatLoad {
     wchar_t luid[40];                    // "luid_0x<high>_0x<low>" of the adapter, lower case; empty for any
 };
 
+static uint8_t g_luid[8];   // the adapter plat_gpu_vram_mib was asked about, for plat_gpu_process_vram_mib
+static int g_luid_set;
+
 uint64_t plat_gpu_vram_mib(uint32_t vendor, uint32_t device, const uint8_t *luid) {
     (void)vendor, (void)device;
+    if (luid) memcpy(g_luid, luid, 8), g_luid_set = 1;
     typedef HRESULT(WINAPI * CreateFactory_t)(REFIID, void **);
     static const GUID iid_factory1 = {0x770aae78, 0xf26f, 0x4dba, {0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87}};
     HMODULE l = luid ? plat_lib_open("dxgi.dll") : NULL;
@@ -105,6 +109,34 @@ uint64_t plat_gpu_vram_mib(uint32_t vendor, uint32_t device, const uint8_t *luid
         DXGI_ADAPTER_DESC1 desc;
         if (SUCCEEDED(IDXGIAdapter1_GetDesc1(a, &desc)) && !memcmp(&desc.AdapterLuid, luid, 8))
             mib = desc.DedicatedVideoMemory >> 20;
+        IDXGIAdapter1_Release(a);
+    }
+    IDXGIFactory1_Release(f);
+    return mib;
+}
+
+// What Windows counts as this process's dedicated video memory (DXGI's local segment): the figure to hold against
+// VMA's blocks to see memory the runtime does not account for (driver pipelines, swapchain, its own overhead).
+uint64_t plat_gpu_process_vram_mib(void) {
+    typedef HRESULT(WINAPI * CreateFactory_t)(REFIID, void **);
+    static const GUID iid_factory1 = {0x770aae78, 0xf26f, 0x4dba, {0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87}};
+    static const GUID iid_adapter3 = {0x645967a4, 0x1392, 0x4310, {0xa7, 0x98, 0x80, 0x53, 0xce, 0x3e, 0x93, 0xfd}};
+    HMODULE l = g_luid_set ? plat_lib_open("dxgi.dll") : NULL;
+    CreateFactory_t create = l ? (CreateFactory_t)(void *)GetProcAddress(l, "CreateDXGIFactory1") : NULL;
+    IDXGIFactory1 *f;
+    if (!create || FAILED(create(&iid_factory1, (void **)&f))) return 0;
+    uint64_t mib = 0;
+    IDXGIAdapter1 *a;
+    for (UINT i = 0; !mib && IDXGIFactory1_EnumAdapters1(f, i, &a) == S_OK; i++) {
+        DXGI_ADAPTER_DESC1 desc;
+        IDXGIAdapter3 *a3;
+        DXGI_QUERY_VIDEO_MEMORY_INFO info;
+        if (SUCCEEDED(IDXGIAdapter1_GetDesc1(a, &desc)) && !memcmp(&desc.AdapterLuid, g_luid, 8) &&
+            SUCCEEDED(IDXGIAdapter1_QueryInterface(a, &iid_adapter3, (void **)&a3))) {
+            if (SUCCEEDED(IDXGIAdapter3_QueryVideoMemoryInfo(a3, 0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info)))
+                mib = info.CurrentUsage >> 20;
+            IDXGIAdapter3_Release(a3);
+        }
         IDXGIAdapter1_Release(a);
     }
     IDXGIFactory1_Release(f);
@@ -231,8 +263,12 @@ void plat_process_memory(uint64_t *resident, uint64_t *private_bytes) {
 
 void plat_heap_trim(void) { _heapmin(); }
 
+void plat_heap_stats(uint64_t *in_use, uint64_t *free_bytes, uint64_t *mapped) { *in_use = *free_bytes = *mapped = 0; }
+
 // Placed maps are Linux-only (vk_memory.c placed_pool): nothing to undo here.
 int plat_mem_replace_anon(uint64_t addr, uint64_t n) { (void)addr, (void)n; return 0; }
+void plat_mem_name(const void *p, size_t n, const char *name) { (void)p, (void)n, (void)name; }
+int64_t plat_mem_resident(const void *p, size_t n) { (void)p, (void)n; return -1; }
 
 // CPU time (user + kernel) of this process's threads with that description (SetThreadDescription in plat_thread_new_ex),
 // summed; -1 when none. GetThreadTimes ticks at ~15.6 ms: the overlay sums seconds of it.

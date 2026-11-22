@@ -276,6 +276,7 @@ void destroy_tex(Tex *e) {
     if (e->rb) vk_defer_buffer(e->rb, e->rba);   // a readback the parts sent may still write (readback_record_locked)
     if (binds) vk_mem_defer_fence(prev);
     vk_mem_defer_use(0);
+    free(e->gpu_base);
     free(e);
 }
 

@@ -30,174 +30,447 @@ static unsigned version;
 static PlatMutex set_lock = PLAT_MUTEX_INIT;   // cfg_set, cfg_reset, cfg_save
 static int save_ok = 1;                         // the last cfg_save_to wrote (or had nothing to write)
 
-// Every name the runtime reads (and the patch sets in generated/), without the prefix. A file key outside this list is
-// logged as unknown. A new variable goes here too, or its ini key logs a harmless "unknown key" line.
-static const char *const known[] = {
-    "AB", "ANISO", "APP_POOL", "ASPECT", "ASSUME_FOCUS", "ASTC", "ASTC_BC1", "ASTC_BC7", "ASTC_TIME", "ASYNC_PREEMPT", "AUDIO", "AUDIO_CHANNELS", "AUDIO_OFF", "AUDIO_PREFILL_MS", "AUDIO_SKEW",
-    "BACKGROUND_MUTE", "BACKGROUND_WINDOW", "BIND_A", "BIND_B", "BIND_DOWN", "BIND_L", "BIND_LCLICK", "BIND_LEFT", "BIND_LSTICK_DOWN", "BIND_LSTICK_LEFT",
-    "BIND_LSTICK_RIGHT", "BIND_LSTICK_UP", "BIND_MINUS",
-    "BIND_PLUS", "BIND_R", "BIND_RCLICK", "BIND_RIGHT", "BIND_RSTICK_DOWN", "BIND_RSTICK_LEFT", "BIND_RSTICK_RIGHT", "BIND_RSTICK_UP",
-    "BIND_SKIP", "BIND_STATS", "BIND_UP", "BIND_X", "BIND_Y",
-    "BIND_ZL", "BIND_ZR", "BLACK_CHECK", "BUTTON_ICONS", "CLASSIC_GP", "CLASSIC_VS", "CORE_DIAG", "CRIT", "CRIT_OUT", "CTL", "DESC_TEMPLATE", "DETAIL_DISTANCE", "DEVICE_PROFILE", "DISCORD", "DISCORD_APP", "DUMP", "DUMP_BUF", "DUMP_DIR", "DUMP_DRAWS", "DUMP_DRAWS_RECT", "DUMP_DRAWS_SKIP", "DSU", "DSU_SERVER", "DSU_SLOT", "DYN_DIFF", "DUMP_LOG",
-    "EXEFS", "FEEDBACK", "FG_BIAS", "FG_DUMP", "FG_DUMP_DIR", "FG_LAMBDA", "FG_PROBE", "FIX_C0", "FIX_ZERO", "FLIGHT", "FLIGHT_AT", "FLIGHT_DIR", "FLIGHT_FRAMES", "FLIGHT_SPIKE_MS",
-    "FLIGHT_THUMBS", "FPS", "SPLIT_FPS", "FRAMEGEN", "FREEZE_IDLE", "GLYPH_DUMP", "FREE_CORES", "FULLSCREEN", "GAME_DIR", "GPL", "GPL_DRAW_BUILD", "GPU",
-    "GPU_CRUMBS", "GPU_CRUMBS_DRAW", "HDR", "HDR_FAKE", "GPU_INDEX", "GPU_MEM_LIMIT", "GPU_NAME", "INPUT", "INPUT_RECORD", "INPUT_SCRIPT", "LAN", "LAN_IP", "LAN_PEERS", "LANG", "LATENCY", "LOW_LATENCY",
-    "LOCALE", "MEMORY", "MESH_COMPUTE", "MENU_LANG", "MENU_TEST",
-    "MENU_TEST_DIR", "MENU_TEST_SET", "MINIMAL_LAYOUT", "MIRROR_GAP", "MODS", "MODS_ACK", "MODS_PLAYED", "MOTION",
-    "MOUSE_SENS", "PLAYER",   // PLAYER: the launcher's choice (core/base/players.h), no row: Reset all leaves it
-    "ONE_PER_CORE", "OPERATION_MODE", "PAD_LAYOUT", "PERF_OVERLAY", "PERF_SLOW_MS", "PICTURE_FIT", "PIPELINE_CACHE", "PIPE_MEMO", "PIPE_PREBUILD", "PIPE_SKIP", "PIPE_STALL", "PIPE_SYNC", "PIPE_TRACE", "POOL_SPILL", "PIPE_WAIT", "PIPE_WORKERS",
-    "PROBE", "QUEUE_WAITS", "PROFILE", "PROFILE_CHAINS", "PROFILE_DIR", "PROFILE_FRAMES",
-    "PROFILE_MAIN", "PROFILE_RENDER", "PUSH_SKIP", "PUSH_STAGE", "RDOC", "RDOC_DIR", "RDOC_DLL", "REC_SET_WRITE", "REEXEC",
-    "BIND_XF", "REG_LATE", "REG_QUEUED", "REPLAY_ASYNC", "USNAP_ASYNC", "USNAP_CMP",
-    "REPLAY_CHECK", "RESOLUTION", "RESOLVE_CHECK", "ROMFS", "RTSTATS", "ROMFS_MODS", "ROMFS_PATCHES",
-    "RUMBLE", "RUMBLE_CURVE", "RUMBLE_STRENGTH", "RUMBLE_TRIGGERS",
-    "SHADER_MEMO", "SHADOW_SIZE", "SHARED_FONTS", "SHARPNESS", "SHORTCUT_ASKED", "SHOTS", "SHOTS_DIR", "SHOTS_FULL", "SPARSE_IMAGES", "SPARSE_MIB", "SPARSE_NO_BUFFER", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SPLIT_US", "STEAM_X11", "STICK_DEADZONE", "SWITCH2", "SWKBD_ANSWER",
-    "SKIP_PROGRAMS", "SWKBD_TEST", "TEX_ALIAS", "TEX_MEMO", "TEX_QUALITY", "TEX_OVERWRITTEN", "TEX_RELEASED_MIB", "TIMER_1MS", "TRACE", "TURBO", "TURBO_SPEED", "SKIP_MOVIES", "SEED", "UNLOCK_ALL", "QUICK_RACE", "FREEZE_KEYS", "QUALITY", "TRACE_UBO", "TRACE_UBO_OUT", "UBO_SNAPSHOT", "UPSCALER", "VRR", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
-    "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_TEX_POOL_MIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "VRAM_LOG", "VRAM_MARGIN", "VS_OUTS",
-    // the PS5 port's (ps5-port-60fps)
-    "ADDR_SPIN", "ADDR_SPIN_US", "ODD_CHECK", "ODD_CHECK_WAR", "USNAP_AT_SUBMIT", "IND_SNAP", "IND_SNAP_COUNT", "EVENT_WAIT", "SYNC_POLL_WAIT", "IND_READ", "IND_READ_FRAMES", "RTSIG", "ASTC_BC1_ALPHA", "ASTC_BC_ARRAYS", "ASTC_BC_CHECK", "ASTC_ERRORS", "ASTC_ERRORS_LAG", "COMPUTE_WRITTEN", "CORE_HANDOFF",
-    "EARLY_BATCH", "EARLY_SIBLING_CMP", "EARLY_SIBLING_EMU", "EARLY_SIBLING_MAX", "EARLY_SIBLING_MAX_B", "EARLY_SIBLING_SNAP", "EARLY_SIBLING_SNAP_CHECK", "EARLY_SIBLING_TEST", "EARLY_SIBLING_STEP", "EARLY_SIBLING_WAIT", "EARLY_WAIT_AWAY", "GPU_ONLY_RELEASE", "HEADLESS", "HEAP_SHRINK_RELEASE",
-    "HOST_MEMSET", "HOST_ROUND",
-    "LIST_WATCH", "PACK", "PACK_COLD_S", "PACK_STORE_MIB", "PACK_VERIFY", "POOL_RELEASE", "PROFILE_FN", "PROFILE_FROM",
-    "PROFILE_FN_MAINWAIT", "PROFILE_ONLY", "PROFILE_US", "PS5_FAST_LOCK", "PS5_OVERLAP", "PS5_PW_BATCH", "PS5_TSC_CLOCK", "PW_HOT",
-    "QORDER_LOG", "QORDER_LOG_AT", "QORDER_PARTS", "QORDER_PRE", "QUEUE_HOLD_MS", "QUEUE_WAITS",
-    "REPLAY_PAR", "REPLAY_PAR_CHECK_BY_CHUNK", "REPLAY_PAR_FIRST", "REPLAY_PAR_HEAD", "REPLAY_PAR_JOIN", "REPLAY_PAR_PIPE",
-    "REPLAY_PAR_PRECHECK", "REPLAY_PAR_THREADS",
-    "SEQ_UNTIL",
-    "SEQ_WATCH", "GOV_RATE_LIMIT", "GOV_TOTAL", "GOV_EVICT_IDLE", "SHADOW", "SHADOW_TRIM", "SNAP_BG", "SPARSE_EVICT", "SVC_STATS", "TEX_EVICT_IDLE", "TEX_LOCK_SPIN", "TEX_MAKE_FAST", "TEX_READBACK", "TEX_UP_DUMP",
-    "TEX_UP_DUMP_DIR", "TEX_UP_LOG", "TEX_UP_LOG_AT", "TEX_ZERO_LOG", "YIELD_NOLOCK", "ZERO_SCAN_CACHE",
-    // the bench driver, multiplayer and extra pads (PS5 port)
-    "BENCH", "BENCH_MAX", "KEYBOARD_PLAYER", "LOBBY", "LOCAL_WIRELESS", "NET_HOST", "NET_IFACE", "NET_JOIN", "NET_NAME",
-    "NET_PORT", "NET_REGION", "NET_RELAY_ONLY", "VIRTUAL_PADS",
-    "UPDATE_AS", "UPDATE_CHECK", "UPDATE_REPO", "START_SCREEN", "WINDOW_SIZE", "ZSTD_CHECK", "ZSTD_NATIVE",
-};
-
-// The mkw.ini section a key cfg_set may write goes to when the file lacks it (mkw.ini.example's sections).
-static const struct { const char *key, *section; } sections[] = {
-    {"FULLSCREEN", "display"}, {"WINDOW_SIZE", "display"}, {"PERF_OVERLAY", "display"}, {"VK_PRESENT", "display"},
-    {"GPU_INDEX", "display"}, {"UPSCALER", "display"}, {"HDR", "display"}, {"SHARPNESS", "display"}, {"PICTURE_FIT", "display"},
-    {"DEVICE_PROFILE", "display"}, {"RESOLUTION", "display"}, {"ASPECT", "display"}, {"FPS", "display"}, {"SPLIT_FPS", "display"}, {"FRAMEGEN", "display"}, {"VRR", "display"}, {"LOW_LATENCY", "display"},
-    {"QUALITY", "graphics"}, {"ANISO", "graphics"}, {"TEX_QUALITY", "graphics"}, {"DETAIL_DISTANCE", "graphics"}, {"SHADOW_SIZE", "graphics"},
-    {"MENU_LANG", "language"}, {"LANG", "language"}, {"OPERATION_MODE", "language"}, {"LAN", "language"}, {"LAN_PEERS", "language"},
-    {"VOLUME", "audio"}, {"AUDIO_CHANNELS", "audio"}, {"BACKGROUND_MUTE", "audio"},
-    {"MOTION", "input"}, {"RUMBLE_STRENGTH", "input"}, {"RUMBLE_CURVE", "input"}, {"RUMBLE_TRIGGERS", "input"},
-    {"PAD_LAYOUT", "input"}, {"BUTTON_ICONS", "input"}, {"MOUSE_SENS", "input"}, {"STICK_DEADZONE", "input"}, {"SWITCH2", "input"}, {"INPUT_RECORD", "input"},
-    {"LOCAL_WIRELESS", "multiplayer"}, {"LOBBY", "multiplayer"}, {"NET_NAME", "multiplayer"}, {"NET_PORT", "multiplayer"},
-    {"NET_HOST", "multiplayer"}, {"NET_REGION", "multiplayer"}, {"NET_IFACE", "multiplayer"}, {"NET_JOIN", "multiplayer"},
-    {"NET_RELAY_ONLY", "multiplayer"}, {"KEYBOARD_PLAYER", "input"},
-    {"DSU", "input"}, {"DSU_SERVER", "input"}, {"DSU_SLOT", "input"},
-    {"BIND_A", "input"}, {"BIND_B", "input"}, {"BIND_X", "input"}, {"BIND_Y", "input"}, {"BIND_LCLICK", "input"},
-    {"BIND_RCLICK", "input"}, {"BIND_L", "input"}, {"BIND_R", "input"}, {"BIND_ZL", "input"}, {"BIND_ZR", "input"},
-    {"BIND_PLUS", "input"}, {"BIND_MINUS", "input"}, {"BIND_LEFT", "input"}, {"BIND_UP", "input"},
-    {"BIND_RIGHT", "input"}, {"BIND_DOWN", "input"}, {"BIND_LSTICK_LEFT", "input"}, {"BIND_LSTICK_UP", "input"},
-    {"BIND_LSTICK_RIGHT", "input"}, {"BIND_LSTICK_DOWN", "input"}, {"BIND_RSTICK_LEFT", "input"},
-    {"BIND_RSTICK_UP", "input"}, {"BIND_RSTICK_RIGHT", "input"}, {"BIND_RSTICK_DOWN", "input"},
-    {"ASYNC_PREEMPT", "performance"}, {"REPLAY_ASYNC", "performance"}, {"REPLAY_PAR", "performance"}, {"FREE_CORES", "performance"},
-    {"TIMER_1MS", "performance"}, {"PIPE_WAIT", "performance"}, {"PIPE_SKIP", "performance"},
-    {"PIPE_PREBUILD", "performance"}, {"GPL", "performance"}, {"ASTC", "performance"}, {"MEMORY", "performance"},
-    {"TEX_ALIAS", "performance"}, {"FIX_C0", "performance"}, {"FIX_ZERO", "performance"},
-    {"BIND_SKIP", "performance"}, {"SHADER_MEMO", "performance"}, {"PIPE_MEMO", "performance"}, {"TEX_MEMO", "performance"}, {"DESC_TEMPLATE", "performance"},
-    {"PUSH_SKIP", "performance"}, {"SPLIT_DRAWS", "performance"}, {"SPLIT_US", "performance"}, {"VK_VALIDATION", "performance"},
-    {"VK_DYN_VERTEX", "performance"}, {"VK_SUBGROUP_PIN", "performance"},
-    {"TRACE", "diagnostics"}, {"FLIGHT", "diagnostics"}, {"FLIGHT_SPIKE_MS", "diagnostics"}, {"SEQ_WATCH", "diagnostics"}, {"SEQ_UNTIL", "diagnostics"},
-    {"TURBO", "hacks"}, {"TURBO_SPEED", "hacks"}, {"SKIP_MOVIES", "hacks"}, {"SEED", "hacks"}, {"UNLOCK_ALL", "hacks"}, {"FREEZE_KEYS", "hacks"},
-    {"QUICK_RACE", "hacks"}, {"CLASSIC_GP", "hacks"}, {"CLASSIC_VS", "hacks"}, {"MODS", "launcher"}, {"MODS_ACK", "launcher"}, {"MODS_PLAYED", "launcher"},
-    {"UPDATE_CHECK", "launcher"}, {"START_SCREEN", "launcher"}, {"DISCORD", "launcher"}, {"GAME_DIR", "launcher"}, {"PLAYER", "launcher"},
-    {"SHORTCUT_ASKED", "launcher"},
-    {"BENCH", "hacks"}, {"BENCH_MAX", "hacks"},
-};
-
-// The settings the menu shows: the value in effect when the key is unset, and what the key accepts. The only place a
-// default lives: consumers read cfg_value / cfg_int / cfg_double / cfg_bool. A row with an empty default has no fixed
-// value (it depends on the machine); its consumer reads cfg_get and keeps an "unset" branch.
+// One row per name the runtime reads (and the patch sets in generated/), without the prefix. A file key outside the
+// table is logged as unknown, so a new variable gets its row here. S: a setting the menu shows (CfgMeta: the value in
+// effect when the key is unset, what the key accepts, whether it applies at once) and the mkw.ini section cfg_set
+// writes it to when the file lacks it (mkw.ini.example's sections; NULL: none). The only place a default lives:
+// consumers read cfg_value / cfg_int / cfg_double / cfg_bool. A row with an empty default has no fixed value (it
+// depends on the machine); its consumer reads cfg_get and keeps an "unset" branch. K: a key with no menu row (add it in
+// alphabetical order, one per line, so two additions rarely meet); KS: the same with an ini section.
+#ifdef __PROSPERO__
+#define REPLAY_PAR_DEFAULT "1"   // the PS5 records a submission's chunks in parallel (vk_exec_par.c)
+#else
+#define REPLAY_PAR_DEFAULT "0"
+#endif
 #define LIVE 1
 #define RESTART 0
-static const CfgMeta metas[] = {
+#define S(k, sec, d, v, l) {{k, d, v, l}, sec}
+#define K(k) {{k, NULL, NULL, 0}, NULL}
+#define KS(k, sec) {{k, NULL, NULL, 0}, sec}
+typedef struct { CfgMeta m; const char *section; } CfgRow;
+static const CfgRow rows[] = {
     // Screen
-    {"FULLSCREEN", "0", "0|1", LIVE}, {"WINDOW_SIZE", "1920x1080", NULL, LIVE},
-    {"VK_PRESENT", "mailbox", "mailbox|fifo|immediate", LIVE}, {"GPU_INDEX", "", NULL, RESTART},
-    {"PERF_OVERLAY", "off", "off|fps|full", LIVE}, {"FPS", "auto", "auto|game|60|30|20|15", LIVE}, {"LOW_LATENCY", "1", "0|1", LIVE},
-    {"FRAMEGEN", "off", "off|auto|2|3|4|120", LIVE},
+    S("FULLSCREEN", "display", "0", "0|1", LIVE),
+    S("WINDOW_SIZE", "display", "1920x1080", NULL, LIVE),
+    S("VK_PRESENT", "display", "mailbox", "mailbox|fifo|immediate", LIVE),
+    S("GPU_INDEX", "display", "", NULL, RESTART),
+    S("PERF_OVERLAY", "display", "off", "off|fps|full", LIVE),
+    S("FPS", "display", "auto", "auto|game|60|30|20|15", LIVE),
     // split screen (2-4 players on this machine) at 30 fps at most (game.c); same: MKW_FPS as for one player
-    {"SPLIT_FPS", "same", "same|30", LIVE},
+    S("SPLIT_FPS", "display", "same", "same|30", LIVE),
+    S("LOGIC_HZ", "display", "60", "60|120|144|240", RESTART),
+    S("LOW_LATENCY", "display", "1", "0|1", LIVE),
+    S("FRAMEGEN", "display", "off", "off|auto|2|3|4|120", LIVE),
     // the screen has variable refresh (FreeSync, G-Sync), told by the player: Vulkan does not say whether it is on.
     // Off, frame generation's Automatic uses only the factors that split the refreshes evenly (vk_framegen.c fits)
-    {"VRR", "0", "0|1", LIVE},
+    S("VRR", "display", "0", "0|1", LIVE),
     // bilinear by default (Adrià 15/11/2026): FSR 1 only when the player picks it or Auto-set does
-    {"UPSCALER", "bilinear", "fsr|bilinear", LIVE}, {"SHARPNESS", "80", "0..100", LIVE},
-    {"PICTURE_FIT", "keep", "keep|stretch", LIVE}, {"HDR", "auto", "auto|off", LIVE},   // auto: HDR when the display is (hdr6c, 12/11/2026)
-    {"DEVICE_PROFILE", "auto", "auto|desktop|deck|ps5", RESTART},
-    {"RESOLUTION", "original", "original|540|720|900|1080|1440|2160", RESTART},
-    {"ASPECT", "16:9", "16:9|window|21:9|32:9|48:9", RESTART},
+    S("UPSCALER", "display", "bilinear", "fsr|bilinear", LIVE),
+    S("SHARPNESS", "display", "80", "0..100", LIVE),
+    S("PICTURE_FIT", "display", "keep", "keep|stretch", LIVE),
+    S("HDR", "display", "auto", "auto|off", LIVE),   // auto: HDR when the display is (hdr6c, 12/11/2026)
+    // RenoDX tone mapping (gfx_shader.c, tools/shaders/renodx.py): the game's own curve by default, as the console
+    S("HDR_TONEMAP", "display", "vanilla", "vanilla|psychov", RESTART),
+    // the peak and paper white told to the game (gfx_hdr.c), only with HDR_TONEMAP psychov; auto: the system's
+    S("HDR_PEAK", "display", "auto", NULL, LIVE),   // "auto" or 100..10000 nits
+    S("HDR_WHITE", "display", "auto", NULL, LIVE),   // "auto" or 40..1000 nits
+    // the system's peak/paper white nits of the last HDR10 swapchain: the RenoDX programs are loaded before the window
+    // exists (pipeline prebuild), so their headroom comes from here (gfx_hdr_headroom); written only with HDR_TONEMAP
+    // psychov; not a menu row
+    S("HDR_SYSTEM", "display", "", NULL, LIVE),
+    S("DEVICE_PROFILE", "display", "auto", "auto|desktop|deck|ps5", RESTART),
+    S("RESOLUTION", "display", "original", "original|540|720|900|1080|1440|2160", RESTART),
+    S("ASPECT", "display", "16:9", "16:9|window|21:9|32:9|48:9", RESTART),
+    S("HUD_POSITION", "display", "16:9", "16:9|edges", RESTART),   // the race HUD in the middle 16:9 or at the screen edges
+    // temporal upscaling in the place of the game's own (vk_temporal.c): the engine is live, the quality sets the
+    // game's 3D resolution (romfs_res.c) and applies at the next start
+    S("TEMPORAL", "display", "off", "off|dlss|fsr3", LIVE),
+    S("TEMPORAL_QUALITY", "display", "quality", "native|quality|balanced|performance|ultra", RESTART),
+    S("TEMPORAL_SHARPNESS", "display", "20", "0..100", LIVE),
+    S("CAS", "display", "off", "off|on", LIVE),
+    S("CAS_SHARPNESS", "display", "50", "0..100", LIVE),
+    S("TEMPORAL_KART", "display", "1", "0|1", LIVE),
+    S("DLSS_PRESET", "display", "default", "default|j|k|l|m", LIVE),
+    // frame generation's engine: the port's own optical flow, DLSS Frame Generation or FSR 3.1 frame generation
+    S("FG_ENGINE", "display", "flow", "flow|dlss|fsr3", LIVE),
+    // the HUD in DLSS-G's and FSR 3.1's made frames: the game frame's own laid over them (own), or the engine's own
+    // handling of the picture without the HUD (engine; vk_framegen.c, fg_hud.comp)
+    S("FG_HUD", "display", "own", "own|engine", LIVE),
+    S("REFLEX", "display", "off", "off|on|boost", LIVE),
     // Game
-    {"LANG", "", "ja|en-US|fr|de|it|es|zh-CN|ko|nl|pt|ru|zh-TW|en-GB|fr-CA|es-419|zh-Hans|zh-Hant|pt-BR|pl|th|ca|gl|eu", RESTART},
-    {"OPERATION_MODE", "docked", "docked|handheld", RESTART},
-    {"LAN", "0", "0|1", RESTART},   // LAN play (sdk/ov/ov_socket.c), off until played between two PCs (#144)
+    S("LANG", "language", "", "ja|en-US|fr|de|it|es|zh-CN|ko|nl|pt|ru|zh-TW|en-GB|fr-CA|es-419|zh-Hans|zh-Hant|pt-BR|pl|th|ca|gl|eu", RESTART),
+    S("OPERATION_MODE", "language", "docked", "docked|handheld", RESTART),
+    S("LAN", "language", "0", "0|1", RESTART),   // LAN play (sdk/ov/ov_socket.c), off until played between two PCs (#144)
+    S("LAN_IP", NULL, "", NULL, RESTART),   // the address LAN play uses; unset: the best interface (ov_lanaddr.c); the Network row (#707)
     // Graphics: the console's look by default
-    {"QUALITY", "console", "low|medium|console|high|ultra|custom", RESTART},   // the menu's presets; nothing reads it
-    {"ANISO", "game", "game|2|4|8|16", RESTART}, {"TEX_QUALITY", "full", "full|half|quarter", RESTART},
-    {"DETAIL_DISTANCE", "2", "1|1.5|2|3|4", RESTART}, {"SHADOW_SIZE", "console", "console|1024|2048|3072|4096", RESTART},
+    S("QUALITY", "graphics", "console", "low|medium|console|high|ultra|custom", RESTART),   // the menu's presets; nothing reads it
+    S("ANISO", "graphics", "game", "game|2|4|8|16", RESTART),
+    S("TEX_QUALITY", "graphics", "full", "full|half|quarter", RESTART),
+    S("DETAIL_DISTANCE", "graphics", "2", "1|1.5|2|3|4", RESTART),
+    S("SHADOW_SIZE", "graphics", "console", "console|1024|2048|3072|4096", RESTART),
     // Sound, Controls, Menu
-    {"VOLUME", "100", "0..100", LIVE}, {"AUDIO_CHANNELS", "auto", "auto|2|6", RESTART}, {"BACKGROUND_MUTE", "0", "0|1", LIVE},
-    {"MOTION", "1", "0|1", LIVE}, {"RUMBLE_STRENGTH", "130", "0..300", LIVE}, {"RUMBLE_CURVE", "0.6", "0.2..1.5", LIVE},
-    {"RUMBLE_TRIGGERS", "0", "0|1", LIVE}, {"PAD_LAYOUT", "auto", "auto|nintendo|xbox", LIVE},
-    {"KEYBOARD_PLAYER", "shared", "shared|own", RESTART},   // own: the keyboard alone is player 1 (desktop)
-    {"BUTTON_ICONS", "auto", "auto|nintendo|xbox|playstation|keyboard", LIVE},
-    {"MOUSE_SENS", "1", "0..10", LIVE}, {"STICK_DEADZONE", "8", "0..40", LIVE}, {"SWITCH2", "0", "0|1|2", RESTART},
+    S("VOLUME", "audio", "100", "0..100", LIVE),
+    S("AUDIO_CHANNELS", "audio", "auto", "auto|2|6", RESTART),
+    S("BACKGROUND_MUTE", "audio", "0", "0|1", LIVE),
+    S("MOTION", "input", "1", "0|1", LIVE),
+    S("RUMBLE_STRENGTH", "input", "130", "0..300", LIVE),
+    S("RUMBLE_CURVE", "input", "0.6", "0.2..1.5", LIVE),
+    S("RUMBLE_TRIGGERS", "input", "0", "0|1", LIVE),
+    S("PAD_LAYOUT", "input", "auto", "auto|nintendo|xbox", LIVE),
+    S("PAD_P2", "input", "0", "0|1", LIVE),
+    S("BUTTON_ICONS", "input", "auto", "auto|nintendo|xbox|playstation|keyboard", LIVE),
+    S("MENU_SHORTCUT", "input", "minus_plus", "minus_plus|guide", LIVE),
+    S("KEYBOARD_MOUSE", "input", "1", "0|1", LIVE),   // the Controls row that turns the keyboard and mouse off for the game (#663)
+    S("MOUSE_SENS", "input", "1", "0..10", LIVE),
+    S("STICK_DEADZONE", "input", "8", "0..40", LIVE),
+    S("SWITCH2", "input", "0", "0|1|2", RESTART),
     // Cemuhook / DSU motion (input/dsu.c, #435): a server's gyro for a gamepad without one; off unless asked for. The
     // server's address (26760 is the port every DSU server uses) and its slot for player 1 have no menu row
-    {"DSU", "0", "0|1", LIVE}, {"DSU_SERVER", "127.0.0.1:26760", NULL, LIVE}, {"DSU_SLOT", "0", "0..3", LIVE},
-    {"MENU_LANG", "", "en|ja|fr|de|it|es|nl|pt|pt-BR|ru|zh-Hans|zh-Hant|ko|es-419|ca|gl|eu|pl|tr|uk|th", LIVE}, {"UPDATE_CHECK", "1", "0|1", LIVE},
-    {"START_SCREEN", "auto", "auto|always|skip", LIVE},   // ui/launcher/launcher.cpp console_start
-    {"DISCORD", "0", "0|1", LIVE},   // Discord Rich Presence (core/presence): off by default, the player's friends see it
-    {"MODS", "", NULL, RESTART},   // the Mods page's enabled mods, comma-separated in load order; not a menu row
-    {"MODS_ACK", "0", "0|1", LIVE},   // the player ticked the Mods page's "I understand" once
-    {"MODS_PLAYED", "", NULL, LIVE},   // the mods of the last start: a new set backs the save up first (launcher)
-    {"GAME_DIR", "", NULL, RESTART},   // unset: beside the executable; the launcher remembers the selection there
+    S("DSU", "input", "0", "0|1", LIVE),
+    S("DSU_SERVER", "input", "127.0.0.1:26760", NULL, LIVE),
+    S("DSU_SLOT", "input", "0", "0..3", LIVE),
+    S("MENU_LANG", "language", "", "en|ja|fr|de|it|es|nl|pt|pt-BR|ru|zh-Hans|zh-Hant|ko|es-419|ca|gl|eu|pl|tr|uk|th", LIVE),
+    S("UPDATE_CHECK", "launcher", "1", "0|1", LIVE),
+    S("START_SCREEN", "launcher", "auto", "auto|always|skip", LIVE),   // ui/launcher/launcher.cpp console_start
+    S("DISCORD", "launcher", "0", "0|1", LIVE),   // Discord Rich Presence (core/presence): off by default, the player's friends see it
+    S("MODS", "launcher", "", NULL, RESTART),   // the Mods page's enabled mods, comma-separated in load order; not a menu row
+    S("MODS_ACK", "launcher", "0", "0|1", LIVE),   // the player ticked the Mods page's "I understand" once
+    S("MODS_PLAYED", "launcher", "", NULL, LIVE),   // the mods of the last start: a new set backs the save up first (launcher)
+    S("GB_MATURE", "launcher", "obfuscate", "obfuscate|show", LIVE),   // the GameBanana tab's rated mods: blurred, or shown
+                                                     // (a blurred page still names the content ratings)
+    S("GAME_DIR", "launcher", "", NULL, RESTART),   // unset: beside the executable; the launcher remembers the selection there
+    S("KEYBOARD_PLAYER", "input", "shared", "shared|own", RESTART),   // own: the keyboard alone is player 1 (desktop)
     // Multiplayer (runtime/net): local wireless off until two consoles have raced together over it
-    {"LOCAL_WIRELESS", "lan", "off|lan|online", RESTART}, {"LOBBY", "", NULL, RESTART}, {"NET_NAME", "", NULL, LIVE},
-    {"NET_PORT", "11460", "1024..65535", RESTART}, {"NET_HOST", "private", "private|public", LIVE},
-    {"NET_REGION", "any", "any|eu|na|sa|asia|oc|af", LIVE}, {"NET_IFACE", "", NULL, RESTART}, {"NET_JOIN", "", NULL, LIVE},
-    {"NET_RELAY_ONLY", "0", "0|1", LIVE},
+    S("LOCAL_WIRELESS", "multiplayer", "lan", "off|lan|online", RESTART),
+    S("LOBBY", "multiplayer", "", NULL, RESTART),
+    S("NET_NAME", "multiplayer", "", NULL, LIVE),
+    S("NET_PORT", "multiplayer", "11460", "1024..65535", RESTART),
+    S("NET_HOST", "multiplayer", "private", "private|public", LIVE),
+    S("NET_REGION", "multiplayer", "any", "any|eu|na|sa|asia|oc|af", LIVE),
+    S("NET_IFACE", "multiplayer", "", NULL, RESTART),
+    S("NET_JOIN", "multiplayer", "", NULL, LIVE),
+    S("NET_RELAY_ONLY", "multiplayer", "0", "0|1", LIVE),
     // Advanced: scheduling
-    {"ASYNC_PREEMPT", "1", "0|1|2", RESTART}, {"REPLAY_ASYNC", "1", "0|1", RESTART},
-#ifdef __PROSPERO__
-    {"REPLAY_PAR", "1", "0|1|2", RESTART},
-#else
-    {"REPLAY_PAR", "0", "0|1|2", RESTART},
-#endif
-    {"FREE_CORES", "0", "0|1", RESTART}, {"TIMER_1MS", "1", "0|1", RESTART},
+    S("ASYNC_PREEMPT", "performance", "1", "0|1|2", RESTART),
+    S("REPLAY_ASYNC", "performance", "1", "0|1", RESTART),
+    S("REPLAY_PAR", "performance", REPLAY_PAR_DEFAULT, "0|1|2", RESTART),
+    S("PACK", NULL, "0", "0|1", RESTART),   // PS5: cold guest memory compressed (vk_mem_upload.c pack_step)
+    S("FREE_CORES", "performance", "0", "0|1", RESTART),
+    S("TIMER_1MS", "performance", "1", "0|1", RESTART),
     // shaders and pipelines
-    {"PIPE_WAIT", "default", "default|draw", RESTART}, {"PIPE_SKIP", "fullscreen", "strict|any|fullscreen", RESTART},
-    {"PIPE_PREBUILD", "1", "0|1", RESTART}, {"GPL", "1", "0|1", RESTART},
+    S("PIPE_WAIT", "performance", "default", "default|draw", RESTART),
+    S("PIPE_SKIP", "performance", "fullscreen", "strict|any|fullscreen", RESTART),
+    S("PIPE_PREBUILD", "performance", "1", "0|1", RESTART),
+    S("GPL", "performance", "1", "0|1", RESTART),
     // textures and memory
-    {"ASTC", "auto", "auto|gpu|native|cpu", RESTART}, {"MEMORY", "auto", "auto|import|mirror|verify", RESTART},
-    {"TEX_ALIAS", "1", "0|1", RESTART}, {"ZSTD_NATIVE", "1", "0|1", RESTART}, {"ZSTD_CHECK", "0", "0|1", RESTART},
-    {"PACK", "0", "0|1", RESTART},   // PS5: cold guest memory compressed (vk_mem_upload.c pack_step)
+    S("ASTC", "performance", "auto", "auto|gpu|native|cpu", RESTART),
+    S("MEMORY", "performance", "auto", "auto|import|mirror|verify", RESTART),
+    S("TEX_ALIAS", "performance", "1", "0|1", RESTART),
+    S("ZSTD_NATIVE", NULL, "1", "0|1", RESTART),
+    S("ZSTD_CHECK", NULL, "0", "0|1", RESTART),
     // render fixes
-    {"FIX_C0", "1", "0|1", RESTART}, {"FIX_ZERO", "1", "0|1", RESTART},
-    {"BIND_SKIP", "1", "0|1", RESTART}, {"SHADER_MEMO", "1", "0|1", RESTART}, {"PIPE_MEMO", "1", "0|1", RESTART}, {"TEX_MEMO", "1", "0|1", RESTART},
-    {"DESC_TEMPLATE", "1", "0|1", RESTART},
-    {"PUSH_SKIP", "1", "0|1", RESTART}, {"SPLIT_DRAWS", "64", "0..1000", RESTART},
-    {"SPLIT_US", "2000", "0..20000", RESTART},
+    S("FIX_C0", "performance", "1", "0|1", RESTART),
+    S("FIX_ZERO", "performance", "1", "0|1", RESTART),
+    S("BIND_SKIP", "performance", "1", "0|1", RESTART),
+    S("SHADER_MEMO", "performance", "1", "0|1", RESTART),
+    S("PIPE_MEMO", "performance", "1", "0|1", RESTART),
+    S("TEX_MEMO", "performance", "1", "0|1", RESTART),
+    S("DESC_TEMPLATE", "performance", "1", "0|1", RESTART),
+    S("PUSH_SKIP", "performance", "1", "0|1", RESTART),
+    S("SPLIT_DRAWS", "performance", "64", "0..1000", RESTART),
+    S("SPLIT_US", "performance", "2000", "0..20000", RESTART),
     // Vulkan
-    {"VK_VALIDATION", "0", "0|1", RESTART}, {"VK_DYN_VERTEX", "", "0|1", RESTART},
-    {"VK_SUBGROUP_PIN", "1", "0|1", RESTART},
+    S("VK_VALIDATION", "performance", "0", "0|1", RESTART),
+    S("VK_DYN_VERTEX", "performance", "", "0|1", RESTART),
+    S("VK_DYN_A2C", "performance", "", "0|1", RESTART),
+    S("VK_SUBGROUP_PIN", "performance", "1", "0|1", RESTART),
     // diagnostics
-    {"TRACE", "", NULL, RESTART}, {"FLIGHT", "0", "0|1", RESTART}, {"FLIGHT_SPIKE_MS", "100", "0..60000", RESTART},
-    {"INPUT_RECORD", "", NULL, RESTART}, {"SEQ_WATCH", "0", "0|1", RESTART}, {"SEQ_UNTIL", "", NULL, RESTART},
+    S("TRACE", "diagnostics", "", NULL, RESTART),
+    S("FLIGHT", "diagnostics", "0", "0|1", RESTART),
+    S("FLIGHT_SPIKE_MS", "diagnostics", "100", "0..60000", RESTART),
+    S("SEQ_WATCH", "diagnostics", "0", "0|1", RESTART),
+    S("SEQ_UNTIL", "diagnostics", "", NULL, RESTART),
+    S("INPUT_RECORD", "input", "", NULL, RESTART),
     // Hacks: none of them on the console, all off by default
-    {"TURBO", "off", "off|hold|toggle|on|until", LIVE}, {"TURBO_SPEED", "4", "2..8", LIVE},
-    {"SKIP_MOVIES", "0", "0|1", LIVE}, {"SEED", "", NULL, RESTART},
-    {"UNLOCK_ALL", "0", "0|1", RESTART}, {"FREEZE_KEYS", "0", "0|1", LIVE}, {"QUICK_RACE", "off", "off|tt|gp|free", RESTART},
-    {"CLASSIC_GP", "0", "0|1", LIVE},   // core/hacks/classic.c: the cups' intermissions become laps on one course
-    {"BENCH", "off", "off|tt|gp", RESTART}, {"BENCH_MAX", "0", "0..3600", RESTART},
-    {"CLASSIC_VS", "0", "0|1", LIVE},   // core/hacks/classic.c: VS races' routes become laps on one course
+    S("TURBO", "hacks", "off", "off|hold|toggle|on|until", LIVE),
+    S("TURBO_SPEED", "hacks", "4", "2..8", LIVE),
+    S("SKIP_MOVIES", "hacks", "0", "0|1", LIVE),
+    S("SEED", "hacks", "", NULL, RESTART),
+    S("UNLOCK_ALL", "hacks", "0", "0|1", RESTART),
+    S("FREEZE_KEYS", "hacks", "0", "0|1", LIVE),
+    S("BENCH", "hacks", "off", "off|tt|gp", RESTART),
+    S("BENCH_MAX", "hacks", "0", "0..3600", RESTART),
+    S("QUICK_RACE", "hacks", "off", "off|tt|gp|free", RESTART),
+    S("CLASSIC_GP", "hacks", "0", "0|1", LIVE),   // core/hacks/classic.c: the cups' intermissions become laps on one course
+    S("CLASSIC_VS", "hacks", "0", "0|1", LIVE),   // core/hacks/classic.c: VS races' routes become laps on one course
+    // no menu row
+    KS("BIND_A", "input"),
+    KS("BIND_B", "input"),
+    KS("BIND_DOWN", "input"),
+    KS("BIND_L", "input"),
+    KS("BIND_LCLICK", "input"),
+    KS("BIND_LEFT", "input"),
+    KS("BIND_LSTICK_DOWN", "input"),
+    KS("BIND_LSTICK_LEFT", "input"),
+    KS("BIND_LSTICK_RIGHT", "input"),
+    KS("BIND_LSTICK_UP", "input"),
+    KS("BIND_MINUS", "input"),
+    KS("BIND_PLUS", "input"),
+    KS("BIND_R", "input"),
+    KS("BIND_RCLICK", "input"),
+    KS("BIND_RIGHT", "input"),
+    KS("BIND_RSTICK_DOWN", "input"),
+    KS("BIND_RSTICK_LEFT", "input"),
+    KS("BIND_RSTICK_RIGHT", "input"),
+    KS("BIND_RSTICK_UP", "input"),
+    KS("BIND_UP", "input"),
+    KS("BIND_X", "input"),
+    KS("BIND_Y", "input"),
+    KS("BIND_ZL", "input"),
+    KS("BIND_ZR", "input"),
+    KS("LAN_PEERS", "language"),
+    KS("PLAYER", "launcher"),
+    KS("SHORTCUT_ASKED", "launcher"),
+    K("AB"),
+    K("ADDR_SPIN"),
+    K("ADDR_SPIN_US"),
+    K("APP_POOL"),
+    K("ASSUME_FOCUS"),
+    K("ASTC_BC1"),
+    K("ASTC_BC1_ALPHA"),
+    K("ASTC_BC7"),
+    K("ASTC_BC_ARRAYS"),
+    K("ASTC_BC_CHECK"),
+    K("ASTC_ERRORS"),
+    K("ASTC_ERRORS_LAG"),
+    K("ASTC_TIME"),
+    K("AUDIO"),
+    K("AUDIO_OFF"),
+    K("AUDIO_PREFILL_MS"),
+    K("AUDIO_SKEW"),
+    K("BACKGROUND_WINDOW"),
+    K("BIND_STATS"),
+    K("BIND_XF"),
+    K("BLACK_CHECK"),
+    K("COMPUTE_WRITTEN"),
+    K("CORE_DIAG"),
+    K("CORE_HANDOFF"),
+    K("CRIT"),
+    K("CRIT_OUT"),
+    K("CTL"),
+    K("DISCORD_APP"),
+    K("DLSSG_DISABLE_BUF"),
+    K("DLSSG_EXP"),
+    K("DUMP"),
+    K("DUMP_BUF"),
+    K("DUMP_DIR"),
+    K("DUMP_DRAWS"),
+    K("DUMP_DRAWS_RECT"),
+    K("DUMP_DRAWS_SKIP"),
+    K("DUMP_LOG"),
+    K("DYN_DIFF"),
+    K("EARLY_BATCH"),
+    K("EARLY_SIBLING_CMP"),
+    K("EARLY_SIBLING_EMU"),
+    K("EARLY_SIBLING_MAX"),
+    K("EARLY_SIBLING_MAX_B"),
+    K("EARLY_SIBLING_SNAP"),
+    K("EARLY_SIBLING_SNAP_CHECK"),
+    K("EARLY_SIBLING_STEP"),
+    K("EARLY_SIBLING_TEST"),
+    K("EARLY_SIBLING_WAIT"),
+    K("EARLY_WAIT_AWAY"),
+    K("EVENT_WAIT"),
+    K("EXEFS"),
+    K("FEEDBACK"),
+    K("FG_AB"),
+    K("FG_BIAS"),
+    K("FG_DUMP"),
+    K("FG_DUMP_DIR"),
+    K("FG_FLIP_THREAD"),
+    K("FG_HUDLESS"),
+    K("FG_LAMBDA"),
+    K("FG_LOAD"),
+    K("FG_LOG_EVERY"),
+    K("FG_MAILBOX"),
+    K("FG_OCCUPANCY"),
+    K("FG_PROBE"),
+    K("FG_QUEUE"),
+    K("FG_QUEUE_PRIO"),
+    K("FG_TEST"),
+    K("FG_VBLANK"),
+    K("FG_XWAIT"),
+    K("FLIGHT_AT"),
+    K("FLIGHT_DIR"),
+    K("FLIGHT_FRAMES"),
+    K("FLIGHT_THUMBS"),
+    K("FREEZE_IDLE"),
+    K("GLYPH_DUMP"),
+    K("GOV_EVICT_IDLE"),
+    K("GOV_RATE_LIMIT"),
+    K("GOV_TOTAL"),
+    K("GPL_DRAW_BUILD"),
+    K("GPU"),
+    K("GPU_CRUMBS"),
+    K("GPU_CRUMBS_DRAW"),
+    K("GPU_MEM_LIMIT"),
+    K("GPU_NAME"),
+    K("GPU_ONLY_RELEASE"),
+    K("HDR_FAKE"),
+    K("HEADLESS"),
+    K("HEAP_SHRINK_RELEASE"),
+    K("HL_TRACE"),
+    K("HOST_MEMSET"),
+    K("HOST_ROUND"),
+    K("HUD_PROBE"),
+    K("IND_READ"),
+    K("IND_READ_FRAMES"),
+    K("IND_SNAP"),
+    K("IND_SNAP_COUNT"),
+    K("INPUT"),
+    K("INPUT_SCRIPT"),
+    K("LATENCY"),
+    K("LIST_WATCH"),
+    K("LOCALE"),
+    K("LOGIC_HZ_TT"),
+    K("MENU_TEST"),
+    K("MENU_TEST_DIR"),
+    K("MENU_TEST_SET"),
+    K("MESH_COMPUTE"),
+    K("MINIMAL_LAYOUT"),
+    K("MIRROR_GAP"),
+    K("NGX_LOG"),
+    K("ODD_CHECK"),
+    K("ODD_CHECK_WAR"),
+    K("ONE_PER_CORE"),
+    K("PACK_COLD_S"),
+    K("PACK_STORE_MIB"),
+    K("PACK_VERIFY"),
+    K("PERF_SLOW_MS"),
+    K("PHASE_LOCK"),
+    K("PIPELINE_CACHE"),
+    K("PIPE_AUTOSAVE_S"),
+    K("PIPE_STALL"),
+    K("PIPE_SYNC"),
+    K("PIPE_TRACE"),
+    K("PIPE_WORKERS"),
+    K("POOL_RELEASE"),
+    K("POOL_SPILL"),
+    K("PROBE"),
+    K("PROFILE"),
+    K("PROFILE_CHAINS"),
+    K("PROFILE_DIR"),
+    K("PROFILE_FN"),
+    K("PROFILE_FN_MAINWAIT"),
+    K("PROFILE_FRAMES"),
+    K("PROFILE_FROM"),
+    K("PROFILE_MAIN"),
+    K("PROFILE_ONLY"),
+    K("PROFILE_RENDER"),
+    K("PROFILE_US"),
+    K("PS5_FAST_LOCK"),
+    K("PS5_OVERLAP"),
+    K("PS5_PW_BATCH"),
+    K("PS5_TSC_CLOCK"),
+    K("PUSH_STAGE"),
+    K("PW_HOT"),
+    K("QORDER_LOG"),
+    K("QORDER_LOG_AT"),
+    K("QORDER_PARTS"),
+    K("QORDER_PRE"),
+    K("QUEUE_HOLD_MS"),
+    K("QUEUE_WAITS"),
+    K("RDOC"),
+    K("RDOC_DIR"),
+    K("RDOC_DLL"),
+    K("RDX_SPLIT"),
+    K("REC_SET_WRITE"),
+    K("REEXEC"),
+    K("REG_LATE"),
+    K("REG_QUEUED"),
+    K("REPLAY_CHECK"),
+    K("REPLAY_PAR_CHECK_BY_CHUNK"),
+    K("REPLAY_PAR_FIRST"),
+    K("REPLAY_PAR_HEAD"),
+    K("REPLAY_PAR_JOIN"),
+    K("REPLAY_PAR_PIPE"),
+    K("REPLAY_PAR_PRECHECK"),
+    K("REPLAY_PAR_THREADS"),
+    K("RESOLVE_CHECK"),
+    K("ROMFS"),
+    K("ROMFS_MODS"),
+    K("ROMFS_PATCHES"),
+    K("RTSIG"),
+    K("RTSTATS"),
+    K("RUMBLE"),
+    K("SCREEN_RAW"),
+    K("SHADOW"),
+    K("SHADOW_AUTO_RUNS"),
+    K("SHADOW_DRAWS"),
+    K("SHADOW_TRIM"),
+    K("SHARED_FONTS"),
+    K("SHOTS"),
+    K("SHOTS_DIR"),
+    K("SHOTS_FULL"),
+    K("SKIP_PROGRAMS"),
+    K("SNAP_BG"),
+    K("SPARSE_EVICT"),
+    K("SPARSE_IMAGES"),
+    K("SPARSE_MIB"),
+    K("SPARSE_NO_BUFFER"),
+    K("SPIN"),
+    K("SPIN_HANDOFF_US"),
+    K("STEAM_X11"),
+    K("SVC_STATS"),
+    K("SWKBD_ANSWER"),
+    K("SWKBD_TEST"),
+    K("SYNC_POLL_WAIT"),
+    K("TEMPORAL_DEBUG"),
+    K("TEMPORAL_HDR"),
+    K("TEMPORAL_JSIGN"),
+    K("TEMPORAL_KART_CIRCLE"),
+    K("TEMPORAL_KART_DEPTH"),
+    K("TEMPORAL_NGX"),
+    K("TEX_EVICT_IDLE"),
+    K("TEX_LOCK_SPIN"),
+    K("TEX_MAKE_FAST"),
+    K("TEX_OVERWRITTEN"),
+    K("TEX_PAR"),
+    K("TEX_READBACK"),
+    K("TEX_RELEASED_MIB"),
+    K("TEX_UP_DUMP"),
+    K("TEX_UP_DUMP_DIR"),
+    K("TEX_UP_LOG"),
+    K("TEX_UP_LOG_AT"),
+    K("TEX_ZERO_LOG"),
+    K("TRACE_UBO"),
+    K("TRACE_UBO_OUT"),
+    K("UBO_SNAPSHOT"),
+    K("UPDATE_AS"),
+    K("UPDATE_REPO"),
+    K("USNAP_ASYNC"),
+    K("USNAP_AT_SUBMIT"),
+    K("USNAP_CMP"),
+    K("VIRTUAL_PADS"),
+    K("VK_NO_FLOAT64"),
+    K("VK_RECORDER"),
+    K("VK_SSBO_ALIGN"),
+    K("VK_SUBGROUP"),
+    K("VK_TEX_POOL_MIN"),
+    K("VRAM_HEADROOM"),
+    K("VRAM_LOG"),
+    K("VRAM_MARGIN"),
+    K("VSYNC_LOCK"),
+    K("VS_OUTS"),
+    K("WB_PAR"),
+    K("YIELD_NOLOCK"),
+    K("ZERO_SCAN_CACHE"),
 };
+#define N_ROWS (sizeof rows / sizeof *rows)
 
 static int is_known(const char *key) {
-    for (size_t i = 0; i < sizeof known / sizeof *known; i++)
-        if (!strcmp(known[i], key)) return 1;
+    for (size_t i = 0; i < N_ROWS; i++)
+        if (!strcmp(rows[i].m.key, key)) return 1;
     return 0;
 }
 
@@ -364,6 +637,11 @@ static const struct { const char *key, *value; } PS5[] = {
     // 19/11/2026; GPU 7.6 -> 6.2 ms, free direct memory median 375 -> 642 MiB); races that happened to start after the
     // governor had shed shadows (vk_mem_shadow_shed) were the fast ones at 18.8-19.7. Menus checked by the user.
     {"SHADOW", "0"},
+    // Upstream's texture workers (MKW_TEX_PAR, tex_par.c) off, as before the 22/11/2026 merge: tried on the console
+    // 19/11/2026 (texpar-*, six Grand Prix runs) the large deswizzles took 40 % less time but the race frame did not
+    // move (A/B medians -0.06 ms) and the 0.1 % lows were ~1 fps worse. The ASTC alpha scan and decode keep their own
+    // pool (astc_mt_for, MKW_TEX_MAKE_FAST).
+    {"TEX_PAR", "0"},
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 
@@ -434,10 +712,18 @@ int cfg_steam_console(void) {
 }
 
 const char *cfg_steam_video_driver(void) {
+#ifdef _WIN32
+    // The Windows build under Wine/Proton sees the Linux session's variables too (DISPLAY, WAYLAND_DISPLAY, Steam's),
+    // and SDL has no x11 driver there: "SDL video init failed (x11 not available)", no window and no Vulkan device, for
+    // the game, the start screen and the setup's prewarm alike (SteamOS desktop, Proton 11.0, 20/11/2026). Wine's own
+    // driver puts the window on X11 or Wayland.
+    return NULL;
+#else
     const char *own = getenv("SDL_VIDEODRIVER"), *wl = getenv("WAYLAND_DISPLAY"), *x = getenv("DISPLAY"),
                *gs = getenv("GAMESCOPE_WAYLAND_DISPLAY"), *off = cfg_get("MKW_STEAM_X11");
     if ((own && *own) || (gs && *gs) || (off && !strcmp(off, "0")) || !cfg_steam_started()) return NULL;
     return wl && *wl && x && *x ? "x11" : NULL;
+#endif
 }
 
 const char *cfg_get(const char *name) {
@@ -525,11 +811,11 @@ void cfg_each_active(void (*cb)(const char *key, const char *value, int from_env
         const char *v = __atomic_load_n(&entries[i].value, __ATOMIC_ACQUIRE);
         if (v) cb(entries[i].key, v, 0, ctx);
     }
-    for (size_t i = 0; i < sizeof known / sizeof *known; i++) {
+    for (size_t i = 0; i < N_ROWS; i++) {
         char var[80];
-        snprintf(var, sizeof var, PREFIX "%s", known[i]);
+        snprintf(var, sizeof var, PREFIX "%s", rows[i].m.key);
         const char *e = getenv(var);
-        if (e) cb(known[i], e, 1, ctx);
+        if (e) cb(rows[i].m.key, e, 1, ctx);
     }
 }
 
@@ -537,12 +823,16 @@ const CfgMeta *cfg_meta(const char *key) {
     char k[64];
     snprintf(k, sizeof k, "%s", key);
     const char *name = norm_key(k);
-    for (size_t i = 0; i < sizeof metas / sizeof *metas; i++)
-        if (!strcmp(metas[i].key, name)) return &metas[i];
+    for (size_t i = 0; i < N_ROWS; i++)
+        if (rows[i].m.def && !strcmp(rows[i].m.key, name)) return &rows[i].m;   // def NULL: a K or KS row, no menu row
     return NULL;
 }
 
-const CfgMeta *cfg_meta_at(int i) { return i >= 0 && (size_t)i < sizeof metas / sizeof *metas ? &metas[i] : NULL; }
+const CfgMeta *cfg_meta_at(int i) {
+    for (size_t r = 0; i >= 0 && r < N_ROWS; r++)
+        if (rows[r].m.def && !i--) return &rows[r].m;
+    return NULL;
+}
 
 const char *cfg_value(const char *name) {
     const char *e = cfg_get(name);
@@ -646,8 +936,8 @@ static void put(Out *o, const char *s, size_t n) {
 static void puts_(Out *o, const char *s) { put(o, s, strlen(s)); }
 
 static const char *section_of(const char *key) {
-    for (size_t i = 0; i < sizeof sections / sizeof *sections; i++)
-        if (!strcmp(sections[i].key, key)) return sections[i].section;
+    for (size_t i = 0; i < N_ROWS; i++)
+        if (!strcmp(rows[i].m.key, key)) return rows[i].section;
     return NULL;
 }
 

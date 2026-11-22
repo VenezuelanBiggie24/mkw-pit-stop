@@ -84,7 +84,7 @@ def test_log_wanted_only_from_bug_reports():
     assert classify.has_log(LAUNCHER)
     assert classify.has_log(FORM.format(ver="v0.1.7", log=LOG))
     assert classify.wants_log("black screen", FORM.format(ver="v0.1.7", log="There are no logs"), {"bug"})
-    assert not classify.wants_log("perf: stutter", "slow", set())
+    assert not classify.wants_log("perf: stutter", "slow", set())  # a bare title, not the performance form
     assert not classify.wants_log("ultrawide", "please", {"enhancement"})
     # #257: a request without the form and without a failure in it
     assert not classify.wants_log("A community space outside GitHub", "Could you open a Matrix room?", set())
@@ -143,7 +143,7 @@ def test_modified_build_from_the_log_line():
     log = "[host] cfg: read mkw.ini\n[host] log: C:/mkw/logs/mkw.log (MKW Recomp 0.1.8-3-gabc1234-dirty)\n"
     assert classify.modified_build(log) == "0.1.8-3-gabc1234-dirty"
     assert classify.modified_build(log.replace("-dirty", "")) is None
-    assert classify.modified_build("[host] log: C:/mkw/logs/mkw.log\n") is None   # up to 0.1.8: no version
+    assert classify.modified_build("[host] log: C:/mkw/logs/mkw.log\n") is None  # up to 0.1.8: no version
 
 
 def test_mods_from_the_log_line():
@@ -152,13 +152,48 @@ def test_mods_from_the_log_line():
     assert classify.mods_enabled("[host] cfg: read mkw.ini\n") is None
 
 
-def test_behind_the_newest_two():
-    rel = {"v0.1.8", "v0.1.9", "v0.1.10"}
-    assert classify.behind("v0.1.8", rel)
-    assert not classify.behind("v0.1.9", rel)
-    assert not classify.behind("v0.1.10", rel)
+PERF = """### Version
+
+v0.1.13
+
+### Frame time
+
+{ft}
+
+### Log
+
+{log}
+
+### Notes
+
+{notes}"""
+
+
+def test_performance_form_needs_its_log_and_a_plain_measurement_is_data():
+    ok = PERF.format(ft="typical 16.7 ms, worst 24 ms", log=LOG, notes="Runs great")
+    assert classify.perf_is_data("perf: RTX 3050", ok)
+    # a time that needs work, a complaint in the notes or in the title stay open as bugs
+    assert not classify.perf_is_data("perf: x", PERF.format(ft="typical 35 ms", log=LOG, notes="_No response_"))
+    assert not classify.perf_is_data(
+        "perf: x", PERF.format(ft="typical 16 ms", log=LOG, notes="stutters in split screen")
+    )
+    assert not classify.perf_is_data("perf: fps drops after a while", ok)
+    # no time in ms: left to a person; a bare title is not the form
+    assert not classify.perf_is_data("perf: x", PERF.format(ft="60 fps", log=LOG, notes="fine"))
+    assert not classify.perf_is_data("perf: x", "typical 16 ms")
+    # the log is what its row is made from: asked for, except from a source build
+    assert classify.wants_log("perf: x", PERF.format(ft="16 ms", log="_No response_", notes=""), {"performance"})
+    assert not classify.wants_log("perf: x", ok, {"performance"})
+    assert not classify.wants_log("perf: x", PERF.format(ft="16 ms", log="", notes=""), {"from-source"})
+
+
+def test_behind_the_newest_four():
+    rel = {f"v0.1.{i}" for i in range(5, 16)}
+    assert classify.behind("v0.1.10", rel)
+    assert not classify.behind("v0.1.12", rel)
+    assert not classify.behind("v0.1.15", rel)
     # labels that are not a published release never count as old
-    assert not classify.behind("v0.1.11", rel)
+    assert not classify.behind("v0.1.16", rel)
     assert not classify.behind("unknown-version", rel)
     assert not classify.behind("from-source", rel)
 

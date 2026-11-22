@@ -1,5 +1,8 @@
 # Contributing
 
+Not sure where to help? [docs/project/roadmap.md](docs/project/roadmap.md) lists the open work in priority order, and
+the issues labelled `good first issue` are the small ones.
+
 ## Rules of the project
 
 - **Recompilation, not emulation.** No CPU interpreter or JIT, and no GPU emulation below NVN2 (Ampere command
@@ -54,6 +57,10 @@
   one; `uv run tools/docs/check.py` (run by the pre-commit and the CI) checks it.
 - Settings the player sees have a row in the settings table (`runtime/core/base/cfg.c`), with the console's value as
   default; `tools/git/cfg_rows.py` checks it.
+- Check input where it enters (environment variables, files, names): a bad value logs a warning and falls back to the
+  default, never changes meaning silently (`atoi("off")` is 0); size buffers from the longest accepted input.
+- A step that is optional must not make the whole run fail: warn and go on.
+- Before pushing: `ruff check`, a build without warnings and `uv run tools/docs/check.py` pass.
 - Commits follow [Conventional Commits](https://www.conventionalcommits.org/) (`fix(sm86): ...`), in English.
 
 ## Translations
@@ -61,6 +68,10 @@
 The menu, start screen and setup texts are in `i18n/` as gettext `.po` files, one per language (see
 [i18n/README.md](i18n/README.md)). The first versions of most languages are machine-assisted: corrections from native
 speakers are very welcome, edited in Poedit or any text editor and sent as a pull request.
+
+A pull request that adds or changes a text edits only the English: `i18n/ui/mkw.pot` and `runtime/gfx/nvn/host/ui_text.h`.
+Leave the `<lang>.po` files alone: every `.po` ends in the same place, so two such pull requests always conflict.
+The maintainers run `uv run tools/i18n/catalog.py update` and add the translations when merging.
 
 ## Pull requests
 

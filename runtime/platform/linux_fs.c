@@ -181,6 +181,11 @@ int64_t plat_file_size(const char *path) {
     return stat(path, &st) ? -1 : (int64_t)st.st_size;
 }
 
+uint64_t plat_path_write_time(const char *path) {
+    struct stat st;
+    return stat(path, &st) ? 0 : (uint64_t)st.st_mtim.tv_sec * 1000000000u + (uint64_t)st.st_mtim.tv_nsec;
+}
+
 // The owner's write permission stands for Windows' read-only attribute.
 int plat_file_set_readonly(const char *path, int on) {
     struct stat st;
@@ -289,6 +294,17 @@ int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
     plat_sample_hold(0);
     plat_mem_back_release((uintptr_t)buf, n);
     return ret;
+}
+
+PlatFile *plat_file_scratch(const char *dir) {
+    int fd = open(dir, O_RDWR | O_TMPFILE | O_CLOEXEC, 0600);
+    if (fd < 0) {   // a file system without O_TMPFILE: a name of our own, removed at once
+        char p[4096];
+        snprintf(p, sizeof p, "%s/.mkw-scratch-%d", dir, (int)getpid());
+        fd = open(p, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (fd >= 0) unlink(p);
+    }
+    return fd < 0 ? NULL : (PlatFile *)(intptr_t)(fd + 1);
 }
 
 int plat_file_id(PlatFile *f, PlatFileId *out) {

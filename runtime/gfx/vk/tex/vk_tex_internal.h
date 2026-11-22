@@ -38,6 +38,7 @@ typedef struct Tex {
     struct Tex *next_at;          // other entries at the same storage address
     uint8_t gpu_dirty;            // mirrored, and the GPU wrote the image after the last write-back to the storage
     uint32_t gpu_gen;             // page generation when the GPU write that set gpu_dirty was recorded
+    uint8_t *gpu_base;            // storage that fills no whole page: its bytes at that GPU write (gpu_base_note)
     uint64_t gpu_seq;             // order of that GPU write among all of them (gpu_writes)
     uint64_t gpu_fence;           // fence of the submission that made that write (0: not recorded in one)
     uint64_t wr_fence;            // any entry: newest submission recorded to write its image (render, copy, clear,
@@ -209,6 +210,9 @@ int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now);
 // ASTC/region copies' (cpu_content).
 int tex_has_gpu_content(const Tex *e);
 void gpu_baseline(Tex *e);   // CPU writes to the storage from here on are newer than the image (cpu_took_back)
+void gpu_base_note(Tex *e);          // at a GPU write: the bytes of storage that fills no whole page
+int gpu_base_kept(const Tex *e);     // those bytes unchanged since: 1; changed: 0; storage with whole pages: -1
+int rewritten_since_gpu(const Tex *e);   // the CPU rewrote e's storage after its GPU write: that render is not written back
 extern uint64_t trace_addr;
 int tracing(uint64_t addr);
 

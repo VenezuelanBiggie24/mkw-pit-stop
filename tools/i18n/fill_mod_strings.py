@@ -982,6 +982,60 @@ BROWSER = {
 for _ctx, _langs in BROWSER.items():
     T.setdefault(_ctx, {}).update(_langs)
 
+# The NSFW-mods choice of the GameBanana tab (11/2026)
+NSFW = {
+    "UI_GB_RATED": {
+        "ca": "Contingut: %s", "de": "Inhaltsbewertung: %s", "fr": "Contenu : %s",
+        "es": "Contenido: %s", "es-419": "Contenido: %s",
+        "it": "Contenuto: %s", "pt": "Conteúdo: %s",
+        "pt-BR": "Conteúdo: %s", "nl": "Contentwaardering: %s",
+        "ru": "Рейтинг контента: %s", "ja": "コンテンツレーティング: %s",
+        "ko": "콘텐츠 등급: %s", "zh-Hans": "内容分级：%s",
+        "zh-Hant": "內容分級：%s", "gl": "Contido: %s",
+        "eu": "Edukia: %s", "pl": "Ocena treści: %s",
+        "tr": "İçerik derecesi: %s", "uk": "Рейтинг контенту: %s",
+        "th": "เรตติ้งเนื้อหา: %s",
+    },
+    "UI_GB_MATURE": {
+        "ca": "Mods NSFW", "de": "NSFW-Mods", "fr": "Mods NSFW",
+        "es": "Mods NSFW", "es-419": "Mods NSFW",
+        "it": "Mod NSFW", "pt": "Mods NSFW",
+        "pt-BR": "Mods NSFW", "nl": "NSFW-mods",
+        "ru": "NSFW-моды", "ja": "NSFW MOD",
+        "ko": "NSFW 모드", "zh-Hans": "NSFW 模组",
+        "zh-Hant": "NSFW 模組", "gl": "Mods NSFW",
+        "eu": "NSFW modak", "pl": "Mody NSFW",
+        "tr": "NSFW modlar", "uk": "NSFW-моди",
+        "th": "ม็อด NSFW",
+    },
+    "UI_GB_MATURE_OBFUSCATE": {
+        "ca": "Difuminar", "de": "Verschleiern", "fr": "Flouter",
+        "es": "Difuminar", "es-419": "Difuminar",
+        "it": "Sfocare", "pt": "Desfocar",
+        "pt-BR": "Desfocar", "nl": "Vervagen",
+        "ru": "Размыть", "ja": "ぼかす",
+        "ko": "가리기", "zh-Hans": "打码",
+        "zh-Hant": "打碼", "gl": "Difuminar",
+        "eu": "Lausotu", "pl": "Zamazać",
+        "tr": "Sansürle", "uk": "Розмити",
+        "th": "เซ็นเซอร์",
+    },
+    "UI_GB_MATURE_SHOW": {
+        "ca": "Mostra", "de": "Zeigen", "fr": "Afficher",
+        "es": "Mostrar", "es-419": "Mostrar",
+        "it": "Mostra", "pt": "Mostrar",
+        "pt-BR": "Mostrar", "nl": "Tonen",
+        "ru": "Показать", "ja": "表示",
+        "ko": "표시", "zh-Hans": "显示",
+        "zh-Hant": "顯示", "gl": "Mostrar",
+        "eu": "Erakutsi", "pl": "Pokaż",
+        "tr": "Göster", "uk": "Показати",
+        "th": "แสดง",
+    },
+}
+for _ctx, _langs in NSFW.items():
+    T.setdefault(_ctx, {}).update(_langs)
+
 # The start screen's notice about how the last game ended (ui/launcher/launcher_lastrun.cpp, 14/11/2026).
 LASTRUN = {
     "UI_LAUNCH_LASTRUN_KNOWN": {
@@ -1073,6 +1127,200 @@ LASTRUN = {
 }
 for _ctx, _langs in LASTRUN.items():
     T.setdefault(_ctx, {}).update(_langs)
+
+
+# The manual update check's "no newer version" line (11/2026)
+T.setdefault("UI_TOOLS_UPDATE_CURRENT", {}).update({
+    "ca": "Tens l'última versió.", "de": "Du bist auf dem neuesten Stand.", "fr": "Vous êtes à jour.",
+    "es": "Estás al día.", "es-419": "Estás al día.", "it": "Sei aggiornato.",
+    "pt": "Estás atualizado.", "pt-BR": "Você está atualizado.", "nl": "Je bent up-to-date.",
+    "ru": "У вас последняя версия.", "ja": "最新の状態です。", "ko": "최신 버전입니다.",
+    "zh-Hans": "已是最新版本。", "zh-Hant": "已是最新版本。", "gl": "Tes a última versión.",
+    "eu": "Azken bertsioa duzu.", "pl": "Masz najnowszą wersję.", "tr": "Güncelsiniz.",
+    "uk": "У вас остання версія.", "th": "คุณใช้เวอร์ชันล่าสุดแล้ว",
+})
+
+
+# Add to Steam's partial result: only some profiles could be updated (11/2026); keep %d %d in order
+T.setdefault("UI_TOOLS_STEAM_PARTIAL", {}).update({
+    "ca": "S'han actualitzat %d de %d perfils de Steam", "de": "%d von %d Steam-Profilen aktualisiert",
+    "fr": "%d profils Steam sur %d mis à jour", "es": "Actualizados %d de %d perfiles de Steam",
+    "es-419": "Se actualizaron %d de %d perfiles de Steam", "it": "Aggiornati %d profili Steam su %d",
+    "pt": "Atualizados %d de %d perfis do Steam", "pt-BR": "%d de %d perfis do Steam atualizados",
+    "nl": "%d van %d Steam-profielen bijgewerkt", "ru": "Обновлено профилей Steam: %d из %d",
+    "ja": "Steam プロフィールを %d/%d 件更新しました", "ko": "Steam 프로필 %d/%d개 업데이트됨",
+    "zh-Hans": "已更新 %d/%d 个 Steam 用户配置", "zh-Hant": "已更新 %d/%d 個 Steam 使用者設定檔",
+    "gl": "Actualizados %d de %d perfís de Steam", "eu": "Steam-en %d profil eguneratu dira %d-tik",
+    "pl": "Zaktualizowano %d z %d profili Steam", "tr": "%d / %d Steam profili güncellendi",
+    "uk": "Оновлено профілів Steam: %d з %d", "th": "อัปเดตโปรไฟล์ Steam แล้ว %d จาก %d",
+})
+T.setdefault("UI_TOOLS_STEAM_PARTIAL_RESTART", {}).update({
+    "ca": "S'han actualitzat %d de %d perfils de Steam. Reinicia Steam per veure l'accés directe.",
+    "de": "%d von %d Steam-Profilen aktualisiert. Starte Steam neu, um die Verknüpfung zu sehen.",
+    "fr": "%d profils Steam sur %d mis à jour. Redémarrez Steam pour voir le raccourci.",
+    "es": "Actualizados %d de %d perfiles de Steam. Reinicia Steam para ver el acceso directo.",
+    "es-419": "Se actualizaron %d de %d perfiles de Steam. Reinicia Steam para ver el acceso directo.",
+    "it": "Aggiornati %d profili Steam su %d. Riavvia Steam per vedere il collegamento.",
+    "pt": "Atualizados %d de %d perfis do Steam. Reinicia o Steam para ver o atalho.",
+    "pt-BR": "%d de %d perfis do Steam atualizados. Reinicie o Steam para ver o atalho.",
+    "nl": "%d van %d Steam-profielen bijgewerkt. Herstart Steam om de snelkoppeling te zien.",
+    "ru": "Обновлено профилей Steam: %d из %d. Перезапустите Steam, чтобы увидеть ярлык.",
+    "ja": "Steam プロフィールを %d/%d 件更新しました。ショートカットを表示するには Steam を再起動してください。",
+    "ko": "Steam 프로필 %d/%d개 업데이트됨. 바로가기를 보려면 Steam을 다시 시작하세요.",
+    "zh-Hans": "已更新 %d/%d 个 Steam 用户配置。请重启 Steam 以查看快捷方式。",
+    "zh-Hant": "已更新 %d/%d 個 Steam 使用者設定檔。請重新啟動 Steam 以查看捷徑。",
+    "gl": "Actualizados %d de %d perfís de Steam. Reinicia Steam para ver o atallo.",
+    "eu": "Steam-en %d profil eguneratu dira %d-tik. Berrabiarazi Steam lasterbidea ikusteko.",
+    "pl": "Zaktualizowano %d z %d profili Steam. Uruchom Steam ponownie, aby zobaczyć skrót.",
+    "tr": "%d / %d Steam profili güncellendi. Kısayolu görmek için Steam'i yeniden başlatın.",
+    "uk": "Оновлено профілів Steam: %d з %d. Перезапустіть Steam, щоб побачити ярлик.",
+    "th": "อัปเดตโปรไฟล์ Steam แล้ว %d จาก %d รีสตาร์ท Steam เพื่อดูทางลัด",
+})
+
+# The HDR tone mapper rows of the Screen tab (#580). "Vanilla" and "PsychoV35" are names, kept as they are.
+_HDR_LANGS = ("fr de es es-419 it pt pt-BR nl ru ja ko zh-Hans zh-Hant ca gl eu pl tr uk th").split()
+T["UI_MENU_HDR_TONEMAP_VANILLA"] = dict.fromkeys(_HDR_LANGS, "Vanilla")
+T["UI_MENU_HDR_TONEMAP_PSYCHOV"] = dict.fromkeys(_HDR_LANGS, "PsychoV35")
+T["UI_MENU_HDR_NITS"] = {
+    "fr": "%s nits", "de": "%s Nits", "es": "%s nits", "es-419": "%s nits", "it": "%s nit", "pt": "%s nits",
+    "pt-BR": "%s nits", "nl": "%s nits", "ru": "%s нит", "ja": "%s ニト", "ko": "%s니트", "zh-Hans": "%s 尼特",
+    "zh-Hant": "%s 尼特", "ca": "%s nits", "gl": "%s nits", "eu": "%s nit", "pl": "%s nitów", "tr": "%s nit",
+    "uk": "%s ніт", "th": "%s นิต",
+}
+T["UI_MENU_HDR_TONEMAP"] = {
+    "fr": "Tone mapping HDR", "de": "HDR-Tonemapping", "es": "Mapeo de tonos HDR", "es-419": "Mapeo de tonos HDR",
+    "it": "Tone mapping HDR", "pt": "Mapeamento de tons HDR", "pt-BR": "Mapeamento de tons HDR",
+    "nl": "HDR-tonemapping", "ru": "Тональная компрессия HDR", "ja": "HDRトーンマッピング",
+    "ko": "HDR 톤 매핑", "zh-Hans": "HDR 色调映射", "zh-Hant": "HDR 色調映射", "ca": "Mapatge de tons HDR",
+    "gl": "Mapeo de tons HDR", "eu": "HDR tonu-mapaketa", "pl": "Mapowanie tonów HDR", "tr": "HDR ton eşleme",
+    "uk": "Тональне відображення HDR", "th": "การแมปโทน HDR",
+}
+T["UI_MENU_HDR_TONEMAP_DESC"] = {
+    "fr": "Comment la luminosité de la scène est adaptée à l'écran en HDR. Vanilla est la courbe du jeu, qui ne dépasse jamais 1,5 fois le blanc de référence. PsychoV35 est celle de RenoDX : mêmes tons moyens et même étalonnage, avec des hautes lumières qui s'atténuent en douceur jusqu'au pic de l'écran. S'applique après un redémarrage, comme les changements de pic et de blanc de référence tant qu'il est activé.",
+    "de": "Wie die Helligkeit der Szene in HDR an das Display angepasst wird. Vanilla ist die eigene Kurve des Spiels, die nie über das 1,5-Fache des Papierweiß hinausgeht. PsychoV35 stammt von RenoDX: dieselben Mitteltöne und dieselbe Farbabstimmung, aber Lichter, die sanft bis zur Spitzenhelligkeit des Displays auslaufen. Gilt nach einem Neustart, ebenso Änderungen von Spitzenhelligkeit und Papierweiß, solange es aktiv ist.",
+    "es": "Cómo se ajusta el brillo de la escena a la pantalla en HDR. Vanilla es la curva del propio juego, que nunca pasa de 1,5 veces el blanco de papel. PsychoV35 es la de RenoDX: los mismos tonos medios y la misma gradación de color, con luces altas que se suavizan hasta el pico de la pantalla. Se aplica tras reiniciar, igual que los cambios de pico y blanco de papel mientras está activo.",
+    "es-419": "Cómo se ajusta el brillo de la escena a la pantalla en HDR. Vanilla es la curva del propio juego, que nunca pasa de 1,5 veces el blanco de papel. PsychoV35 es la de RenoDX: los mismos tonos medios y la misma gradación de color, con luces altas que se suavizan hasta el pico de la pantalla. Se aplica al reiniciar, igual que los cambios de pico y blanco de papel mientras está activo.",
+    "it": "Come la luminosità della scena viene adattata al display in HDR. Vanilla è la curva del gioco, che non supera mai 1,5 volte il bianco di riferimento. PsychoV35 è quella di RenoDX: stessi mezzitoni e stessa gradazione colore, con alte luci che si attenuano dolcemente fino al picco del display. Si applica dopo un riavvio, come le modifiche a picco e bianco di riferimento finché è attivo.",
+    "pt": "Como o brilho da cena é ajustado ao ecrã em HDR. Vanilla é a curva do próprio jogo, que nunca passa de 1,5 vezes o branco de papel. PsychoV35 é a do RenoDX: os mesmos tons médios e a mesma gradação de cor, com realces que suavizam até ao pico do ecrã. Aplica-se depois de reiniciar, tal como as alterações de pico e branco de papel enquanto está ativo.",
+    "pt-BR": "Como o brilho da cena é ajustado à tela em HDR. Vanilla é a curva do próprio jogo, que nunca passa de 1,5 vez o branco de papel. PsychoV35 é a do RenoDX: os mesmos tons médios e a mesma gradação de cor, com realces que suavizam até o pico da tela. Vale depois de reiniciar, assim como as mudanças de pico e branco de papel enquanto está ativo.",
+    "nl": "Hoe de helderheid van de scène in HDR op het scherm wordt afgestemd. Vanilla is de eigen curve van het spel, die nooit boven 1,5 keer papierwit uitkomt. PsychoV35 is die van RenoDX: dezelfde middentonen en kleurafwerking, met hooglichten die soepel uitlopen tot de piek van het scherm. Geldt na een herstart, net als wijzigingen van piek en papierwit zolang het aan staat.",
+    "ru": "Как яркость сцены подгоняется под дисплей в HDR. Vanilla — собственная кривая игры, которая никогда не превышает 1,5 бумажного белого. PsychoV35 — кривая RenoDX: те же средние тона и цветокоррекция, а света плавно доходят до пика дисплея. Применяется после перезапуска, как и изменения пика и бумажного белого, пока она включена.",
+    "ja": "HDR でシーンの明るさをディスプレイに合わせる方法です。Vanilla はゲーム本来のカーブで、ペーパーホワイトの 1.5 倍を超えません。PsychoV35 は RenoDX のもので、中間調と色調はそのまま、ハイライトがディスプレイのピークまで滑らかに伸びます。再起動後に反映され、有効な間はピークとペーパーホワイトの変更も同様です。",
+    "ko": "HDR에서 장면의 밝기를 디스플레이에 맞추는 방식입니다. Vanilla는 게임 자체 곡선으로, 페이퍼 화이트의 1.5배를 넘지 않습니다. PsychoV35는 RenoDX의 것으로, 중간 톤과 색감은 같고 하이라이트가 디스플레이 최대 밝기까지 부드럽게 이어집니다. 다시 시작한 뒤 적용되며, 켜져 있는 동안 최대 밝기와 페이퍼 화이트 변경도 마찬가지입니다.",
+    "zh-Hans": "HDR 下场景亮度如何适配显示器。Vanilla 是游戏自带的曲线，不会超过纸白的 1.5 倍。PsychoV35 来自 RenoDX：中间调和调色相同，高光则平滑过渡到显示器的峰值亮度。重启后生效；开启时，峰值亮度和纸白的更改同样需要重启。",
+    "zh-Hant": "HDR 下場景亮度如何適配顯示器。Vanilla 是遊戲內建的曲線，不會超過紙白的 1.5 倍。PsychoV35 來自 RenoDX：中間調和調色相同，高光則平滑過渡到顯示器的峰值亮度。重新啟動後生效；開啟時，峰值亮度和紙白的變更同樣需要重新啟動。",
+    "ca": "Com s'ajusta la brillantor de l'escena a la pantalla en HDR. Vanilla és la corba del propi joc, que mai passa d'1,5 vegades el blanc de paper. PsychoV35 és la de RenoDX: els mateixos tons mitjans i la mateixa gradació de color, amb llums altes que se suavitzen fins al pic de la pantalla. S'aplica en reiniciar, igual que els canvis de pic i blanc de paper mentre està activat.",
+    "gl": "Como se axusta o brillo da escena á pantalla en HDR. Vanilla é a curva do propio xogo, que nunca pasa de 1,5 veces o branco de papel. PsychoV35 é a de RenoDX: os mesmos tons medios e a mesma gradación de cor, con luces altas que se suavizan ata o pico da pantalla. Aplícase ao reiniciar, igual que os cambios de pico e branco de papel mentres está activo.",
+    "eu": "Eszenaren distira HDR-n pantailara nola egokitzen den. Vanilla jokoaren beraren kurba da, eta ez da inoiz paper-zuriaren 1,5 aldiz baino gehiago igotzen. PsychoV35 RenoDX-ena da: erdi-tonu eta kolore-gradazio berberak, eta pantailaren gailurrera arte leunki doazen argi gorenak. Berrabiaraztean aplikatzen da, baita gailurraren eta paper-zuriaren aldaketak ere aktibo dagoen bitartean.",
+    "pl": "Jak jasność sceny jest dopasowywana do wyświetlacza w HDR. Vanilla to własna krzywa gry, która nigdy nie przekracza 1,5-krotności bieli papieru. PsychoV35 to krzywa z RenoDX: te same półtony i gradacja kolorów, a światła płynnie narastają aż do szczytu jasności wyświetlacza. Działa po ponownym uruchomieniu, podobnie jak zmiany szczytu jasności i bieli papieru, gdy jest włączona.",
+    "tr": "HDR'de sahnenin parlaklığının ekrana nasıl uyarlandığı. Vanilla, oyunun kendi eğrisidir ve kağıt beyazının 1,5 katını asla geçmez. PsychoV35, RenoDX'indir: aynı orta tonlar ve renk derecelendirmesi, ekranın tepe parlaklığına kadar yumuşakça açılan vurgularla. Yeniden başlatınca geçerli olur; açıkken tepe parlaklığı ve kağıt beyazı değişiklikleri de öyle.",
+    "uk": "Як яскравість сцени підганяється під дисплей у HDR. Vanilla — власна крива гри, яка ніколи не перевищує 1,5 паперового білого. PsychoV35 — крива RenoDX: ті самі середні тони й кольорокорекція, а світла плавно доходять до піку дисплея. Застосовується після перезапуску, як і зміни піку та паперового білого, поки вона ввімкнена.",
+    "th": "วิธีปรับความสว่างของฉากให้เข้ากับจอใน HDR Vanilla คือเส้นโค้งของเกมเอง ซึ่งไม่เกิน 1.5 เท่าของ paper white PsychoV35 เป็นของ RenoDX: โทนกลางและการเกรดสีเหมือนเดิม แต่ไฮไลต์จะไล่ระดับนุ่มนวลไปจนถึงความสว่างสูงสุดของจอ มีผลหลังรีสตาร์ท เช่นเดียวกับการเปลี่ยนค่าความสว่างสูงสุดและ paper white ขณะเปิดใช้",
+}
+T["UI_MENU_HDR_TONEMAP_MISSING"] = {
+    "fr": "Ses programmes sont créés par l'installation. Relancez l'installation du jeu (une mise à jour le fait) pour les ajouter.",
+    "de": "Die Programme dafür erstellt das Setup. Richte das Spiel erneut ein (ein Update erledigt das), um sie hinzuzufügen.",
+    "es": "Sus programas los crea la preparación. Vuelve a preparar el juego (una actualización lo hace) para añadirlos.",
+    "es-419": "Sus programas los crea la preparación. Vuelve a preparar el juego (una actualización lo hace) para agregarlos.",
+    "it": "I suoi programmi li crea la configurazione. Configura di nuovo il gioco (un aggiornamento lo fa) per aggiungerli.",
+    "pt": "Os seus programas são criados pela preparação. Prepara o jogo de novo (uma atualização di-lo) para os adicionar.",
+    "pt-BR": "Os programas dele são criados pela preparação. Prepare o jogo de novo (uma atualização faz isso) para adicioná-los.",
+    "nl": "De programma's ervoor worden door de setup gemaakt. Zet het spel opnieuw op (een update doet dat) om ze toe te voegen.",
+    "ru": "Его программы создаёт установка. Запустите подготовку игры заново (это делает обновление), чтобы добавить их.",
+    "ja": "必要なプログラムはセットアップで作られます。追加するにはゲームをもう一度セットアップしてください（アップデートでも行われます）。",
+    "ko": "필요한 프로그램은 설정 과정에서 만들어집니다. 추가하려면 게임을 다시 설정하세요(업데이트 시에도 실행됩니다).",
+    "zh-Hans": "其程序由安装步骤生成。请重新设置游戏（更新时会自动进行）以添加它们。",
+    "zh-Hant": "其程式由安裝步驟產生。請重新設定遊戲（更新時會自動進行）以新增它們。",
+    "ca": "Els seus programes els crea la preparació. Torna a preparar el joc (una actualització ho fa) per afegir-los.",
+    "gl": "Os seus programas créaos a preparación. Volve preparar o xogo (unha actualización fáino) para engadilos.",
+    "eu": "Bere programak prestaketak sortzen ditu. Prestatu jokoa berriro (eguneratze batek egiten du) gehitzeko.",
+    "pl": "Jego programy tworzy konfiguracja. Skonfiguruj grę ponownie (robi to aktualizacja), aby je dodać.",
+    "tr": "Programlarını kurulum oluşturur. Eklemek için oyunu yeniden kurun (bir güncelleme bunu yapar).",
+    "uk": "Його програми створює налаштування. Налаштуйте гру знову (це робить оновлення), щоб додати їх.",
+    "th": "โปรแกรมของตัวเลือกนี้สร้างโดยการตั้งค่าเกม ตั้งค่าเกมใหม่ (การอัปเดตจะทำให้) เพื่อเพิ่มโปรแกรมเหล่านั้น",
+}
+T["UI_MENU_HDR_NEEDS_PSYCHOV"] = {
+    "fr": "Seulement avec le tone mapping PsychoV35. Vanilla utilise les valeurs propres de l'écran, comme la console.",
+    "de": "Nur mit dem PsychoV35-Tonemapping. Vanilla nutzt die eigenen Werte des Displays, wie die Konsole.",
+    "es": "Solo con el mapeo de tonos PsychoV35. Vanilla usa los valores propios de la pantalla, como la consola.",
+    "es-419": "Solo con el mapeo de tonos PsychoV35. Vanilla usa los valores propios de la pantalla, como la consola.",
+    "it": "Solo con il tone mapping PsychoV35. Vanilla usa i valori del display, come la console.",
+    "pt": "Apenas com o mapeamento de tons PsychoV35. Vanilla usa os valores do próprio ecrã, como a consola.",
+    "pt-BR": "Somente com o mapeamento de tons PsychoV35. Vanilla usa os valores da própria tela, como o console.",
+    "nl": "Alleen met de PsychoV35-tonemapping. Vanilla gebruikt de eigen waarden van het scherm, zoals de console.",
+    "ru": "Только с тональной компрессией PsychoV35. Vanilla использует значения самого дисплея, как консоль.",
+    "ja": "PsychoV35 トーンマッピングのときのみ有効です。Vanilla ではコンソールと同じく、ディスプレイ自身の値を使います。",
+    "ko": "PsychoV35 톤 매핑에서만 사용할 수 있습니다. Vanilla는 콘솔처럼 디스플레이 자체 값을 사용합니다.",
+    "zh-Hans": "仅在使用 PsychoV35 色调映射时有效。Vanilla 与主机一样使用显示器自身的数值。",
+    "zh-Hant": "僅在使用 PsychoV35 色調映射時有效。Vanilla 與主機一樣使用顯示器本身的數值。",
+    "ca": "Només amb el mapatge de tons PsychoV35. Vanilla fa servir els valors propis de la pantalla, com la consola.",
+    "gl": "Só co mapeo de tons PsychoV35. Vanilla usa os valores propios da pantalla, como a consola.",
+    "eu": "PsychoV35 tonu-mapaketarekin soilik. Vanillak pantailaren berezko balioak erabiltzen ditu, kontsolak bezala.",
+    "pl": "Tylko z mapowaniem tonów PsychoV35. Vanilla używa własnych wartości wyświetlacza, tak jak konsola.",
+    "tr": "Yalnızca PsychoV35 ton eşleme ile. Vanilla, konsoldaki gibi ekranın kendi değerlerini kullanır.",
+    "uk": "Лише з тональним відображенням PsychoV35. Vanilla використовує значення самого дисплея, як консоль.",
+    "th": "ใช้ได้เฉพาะกับการแมปโทน PsychoV35 เท่านั้น Vanilla ใช้ค่าของจอเอง เหมือนคอนโซล",
+}
+T["UI_MENU_HDR_PEAK"] = {
+    "fr": "Luminosité de crête HDR", "de": "HDR-Spitzenhelligkeit", "es": "Brillo máximo HDR",
+    "es-419": "Brillo máximo HDR", "it": "Luminosità di picco HDR", "pt": "Brilho máximo HDR",
+    "pt-BR": "Brilho máximo HDR", "nl": "HDR-piekhelderheid", "ru": "Пиковая яркость HDR",
+    "ja": "HDR ピーク輝度", "ko": "HDR 최대 밝기", "zh-Hans": "HDR 峰值亮度", "zh-Hant": "HDR 峰值亮度",
+    "ca": "Brillantor màxima HDR", "gl": "Brillo máximo HDR", "eu": "HDR gehieneko distira",
+    "pl": "Maks. jasność HDR", "tr": "HDR tepe parlaklığı", "uk": "Пікова яскравість HDR", "th": "ความสว่างสูงสุด HDR",
+}
+T["UI_MENU_HDR_PEAK_DESC"] = {
+    "fr": "Le plus lumineux que le jeu dessine. Automatique utilise le pic de l'écran tel que Windows le rapporte. S'applique immédiatement.",
+    "de": "Das Hellste, was das Spiel zeichnet. Automatisch nutzt die Spitzenhelligkeit des Displays, wie Windows sie meldet. Gilt sofort.",
+    "es": "Lo más brillante que dibuja el juego. Automático usa el pico de la pantalla tal como lo informa Windows. Se aplica al instante.",
+    "es-419": "Lo más brillante que dibuja el juego. Automático usa el pico de la pantalla tal como lo informa Windows. Se aplica al instante.",
+    "it": "Il massimo che il gioco disegna. Automatico usa il picco del display come lo riporta Windows. Si applica subito.",
+    "pt": "O mais brilhante que o jogo desenha. Automático usa o pico do ecrã como o Windows o indica. Aplica-se de imediato.",
+    "pt-BR": "O mais brilhante que o jogo desenha. Automático usa o pico da tela como o Windows informa. Vale na hora.",
+    "nl": "Het helderste dat het spel tekent. Automatisch gebruikt de piek van het scherm zoals Windows die meldt. Geldt direct.",
+    "ru": "Самое яркое, что рисует игра. «Авто» берёт пик дисплея, как его сообщает Windows. Применяется сразу.",
+    "ja": "ゲームが描画する最大の明るさです。自動は Windows が報告するディスプレイのピークを使います。すぐに反映されます。",
+    "ko": "게임이 그리는 가장 밝은 값입니다. 자동은 Windows가 보고하는 디스플레이 최대 밝기를 사용합니다. 즉시 적용됩니다.",
+    "zh-Hans": "游戏绘制的最高亮度。自动使用 Windows 报告的显示器峰值。立即生效。",
+    "zh-Hant": "遊戲繪製的最高亮度。自動使用 Windows 回報的顯示器峰值。立即生效。",
+    "ca": "El més brillant que dibuixa el joc. Automàtic fa servir el pic de la pantalla tal com el comunica Windows. S'aplica a l'instant.",
+    "gl": "O máis brillante que debuxa o xogo. Automático usa o pico da pantalla tal como o informa Windows. Aplícase ao instante.",
+    "eu": "Jokoak marrazten duen punturik distiratsuena. Automatikoak Windowsek jakinarazten duen pantailaren gailurra erabiltzen du. Berehala aplikatzen da.",
+    "pl": "Najjaśniejszy poziom, jaki rysuje gra. Automatycznie używa szczytu jasności wyświetlacza zgłaszanego przez Windows. Działa od razu.",
+    "tr": "Oyunun çizdiği en parlak değer. Otomatik, Windows'un bildirdiği ekran tepe parlaklığını kullanır. Hemen uygulanır.",
+    "uk": "Найяскравіше, що малює гра. «Авто» бере пік дисплея, як його повідомляє Windows. Застосовується одразу.",
+    "th": "ค่าที่สว่างที่สุดที่เกมวาด อัตโนมัติใช้ค่าสูงสุดของจอตามที่ Windows รายงาน มีผลทันที",
+}
+T["UI_MENU_HDR_WHITE"] = {
+    "fr": "Blanc de référence HDR", "de": "HDR-Papierweiß", "es": "Blanco de papel HDR",
+    "es-419": "Blanco de papel HDR", "it": "Bianco di riferimento HDR", "pt": "Branco de papel HDR",
+    "pt-BR": "Branco de papel HDR", "nl": "HDR-papierwit", "ru": "Бумажный белый HDR",
+    "ja": "HDR ペーパーホワイト", "ko": "HDR 페이퍼 화이트", "zh-Hans": "HDR 纸白", "zh-Hant": "HDR 紙白",
+    "ca": "Blanc de paper HDR", "gl": "Branco de papel HDR", "eu": "HDR paper-zuria",
+    "pl": "Biel papieru HDR", "tr": "HDR kağıt beyazı", "uk": "Паперовий білий HDR", "th": "Paper white HDR",
+}
+T["UI_MENU_HDR_WHITE_DESC"] = {
+    "fr": "La luminosité du blanc des menus et des tons moyens de la scène. Automatique utilise la luminosité du contenu SDR de Windows, souvent bien plus forte que ce qu'un jeu demande ; 203 nits est la référence HDR. Des valeurs plus basses laissent plus de place aux hautes lumières. S'applique immédiatement.",
+    "de": "Wie hell das Weiß der Menüs und die Mitteltöne der Szene sind. Automatisch nutzt die SDR-Inhaltshelligkeit von Windows, die oft viel heller ist, als ein Spiel braucht; 203 Nits ist die HDR-Referenz. Niedrigere Werte lassen den Lichtern mehr Spielraum. Gilt sofort.",
+    "es": "Qué tan brillantes son el blanco de los menús y los tonos medios de la escena. Automático usa el brillo de contenido SDR de Windows, que suele ser mucho más alto de lo que un juego quiere; 203 nits es la referencia HDR. Valores más bajos dejan más espacio a las luces altas. Se aplica al instante.",
+    "es-419": "Qué tan brillantes son el blanco de los menús y los tonos medios de la escena. Automático usa el brillo de contenido SDR de Windows, que suele ser mucho más alto de lo que un juego quiere; 203 nits es la referencia HDR. Valores más bajos dejan más espacio a las luces altas. Se aplica al instante.",
+    "it": "Quanto sono luminosi il bianco dei menu e i mezzitoni della scena. Automatico usa la luminosità dei contenuti SDR di Windows, spesso molto più alta di quella che serve a un gioco; 203 nit è il riferimento HDR. Valori più bassi lasciano più spazio alle alte luci. Si applica subito.",
+    "pt": "Quão brilhantes são o branco dos menus e os tons médios da cena. Automático usa o brilho de conteúdo SDR do Windows, que costuma ser muito mais alto do que um jogo quer; 203 nits é a referência HDR. Valores mais baixos dão mais espaço aos realces. Aplica-se de imediato.",
+    "pt-BR": "Quão brilhantes são o branco dos menus e os tons médios da cena. Automático usa o brilho de conteúdo SDR do Windows, que costuma ser muito mais alto do que um jogo quer; 203 nits é a referência HDR. Valores menores dão mais espaço aos realces. Vale na hora.",
+    "nl": "Hoe helder het wit van de menu's en de middentonen van de scène zijn. Automatisch gebruikt de SDR-inhoudshelderheid van Windows, vaak veel helderder dan een spel wil; 203 nits is de HDR-referentie. Lagere waarden geven de hooglichten meer ruimte. Geldt direct.",
+    "ru": "Насколько ярки белый цвет меню и средние тона сцены. «Авто» берёт яркость SDR-контента Windows, которая часто намного выше, чем нужно игре; 203 нита — эталон HDR. Меньшие значения оставляют больше места светам. Применяется сразу.",
+    "ja": "メニューの白やシーンの中間調の明るさです。自動は Windows の SDR コンテンツの明るさを使いますが、ゲームには明るすぎることがよくあります。HDR の基準は 203 ニトです。値を下げるとハイライトの余裕が増えます。すぐに反映されます。",
+    "ko": "메뉴의 흰색과 장면 중간 톤의 밝기입니다. 자동은 Windows의 SDR 콘텐츠 밝기를 사용하는데, 게임에는 너무 밝은 경우가 많습니다. HDR 기준은 203니트입니다. 값을 낮추면 하이라이트 여유가 늘어납니다. 즉시 적용됩니다.",
+    "zh-Hans": "菜单白色和场景中间调的亮度。自动使用 Windows 的 SDR 内容亮度，通常比游戏所需亮得多；HDR 参考值为 203 尼特。数值越低，高光空间越大。立即生效。",
+    "zh-Hant": "選單白色和場景中間調的亮度。自動使用 Windows 的 SDR 內容亮度，通常比遊戲所需亮得多；HDR 參考值為 203 尼特。數值越低，高光空間越大。立即生效。",
+    "ca": "Com de brillants són el blanc dels menús i els tons mitjans de l'escena. Automàtic fa servir la brillantor de contingut SDR de Windows, que sol ser molt més alta del que un joc vol; 203 nits és la referència HDR. Valors més baixos deixen més espai a les llums altes. S'aplica a l'instant.",
+    "gl": "Canto de brillantes son o branco dos menús e os tons medios da escena. Automático usa o brillo de contido SDR de Windows, que adoita ser moito máis alto do que un xogo quere; 203 nits é a referencia HDR. Valores máis baixos deixan máis espazo ás luces altas. Aplícase ao instante.",
+    "eu": "Menuen zuriaren eta eszenaren erdi-tonuen distira. Automatikoak Windowsen SDR edukiaren distira erabiltzen du, askotan joko batek nahi duena baino askoz handiagoa; 203 nit da HDR erreferentzia. Balio txikiagoek argi gorenei leku gehiago uzten diete. Berehala aplikatzen da.",
+    "pl": "Jak jasna jest biel menu i półtony sceny. Automatycznie używa jasności treści SDR z Windows, często znacznie wyższej, niż potrzebuje gra; 203 nity to odniesienie HDR. Niższe wartości zostawiają więcej miejsca światłom. Działa od razu.",
+    "tr": "Menülerin beyazının ve sahnenin orta tonlarının parlaklığı. Otomatik, Windows'un SDR içerik parlaklığını kullanır; bu çoğu zaman bir oyunun istediğinden çok daha yüksektir; 203 nit HDR referansıdır. Düşük değerler vurgulara daha çok yer bırakır. Hemen uygulanır.",
+    "uk": "Наскільки яскраві білий колір меню та середні тони сцени. «Авто» бере яскравість SDR-контенту Windows, яка часто значно вища, ніж потрібно грі; 203 ніти — еталон HDR. Менші значення залишають більше місця світлам. Застосовується одразу.",
+    "th": "ความสว่างของสีขาวในเมนูและโทนกลางของฉาก อัตโนมัติใช้ความสว่างเนื้อหา SDR ของ Windows ซึ่งมักสว่างกว่าที่เกมต้องการมาก 203 nits คือค่าอ้างอิงของ HDR ค่าที่ต่ำลงเหลือที่ว่างให้ไฮไลต์มากขึ้น มีผลทันที",
+}
 
 
 def main():

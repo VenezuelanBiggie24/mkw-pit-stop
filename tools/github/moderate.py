@@ -13,8 +13,13 @@ Rules (the bot never comments where a maintainer already did):
 - a bug report without a log and no replies yet: `needs-logs`, closed as not planned after 7 days without a reply from its author
 - a known error: `duplicate` and "looks like #N", closed as its duplicate at once; its author's reply reopens it
   (14/11/2026: the 3 days, swept once a day and late, left 13 labelled duplicates open for up to 5 days)
-- a report on a release older than the newest two, quiet for 3 days: `needs-retry`, asked to try the latest; closed as
-  not planned after 7 days without a reply from its author (14/11/2026: 43 of 130 open issues were on 0.1.8 or older)
+- a report on a release older than the newest four (KEEP_RELEASES), quiet for 3 days: `needs-retry`, asked to try the
+  latest; closed as not planned after 7 days without a reply from its author (14/11/2026: 43 of 130 open issues were on
+  0.1.8 or older; 20/11/2026: two -> four, a release a day made 63 reports "old" at two days)
+- a performance form without its log: `needs-logs` (its row comes from the log); one that only measures (typical
+  frame time up to 20 ms, no complaint in its notes) with a log: `perf-data`, thanked and closed as completed
+- an issue whose last word is a maintainer's answer 14 days old: `no-reply`, closed as not planned; its author's reply
+  reopens it (20/11/2026: 132 of 224 open issues were answered, 39 never heard back)
 - a maintainer's reply with "Fixed in vX": closed if vX is out, else `fixed-next-release`; with "same as #N": duplicate
 - a closed issue is reopened when its author, or anyone attaching a log, says it still happens
 - a published release closes the `fixed-next-release` issues with a link to it
@@ -39,6 +44,8 @@ MAINTAINERS = {"OWNER", "MEMBER", "COLLABORATOR"}
 MARK = "<!-- mkw-bot:{} -->"
 DUP_DAYS, LOG_DAYS = 0, 7  # DUP_DAYS 0: duplicates labelled before 14/11/2026, when they waited 3 days, close now
 QUIET_DAYS, RETRY_DAYS = 3, 7
+# 20/11/2026: 132 of 224 open issues had our answer and 39 no word back from their author since; they stayed open for ever
+ANSWERED_DAYS = 14
 NOT_RETRIED = {"duplicate", "needs-logs", "needs-retry", "fixed-next-release", "enhancement"}
 NEW_LABELS = {
     "performance": ("fbca04", "Performance report: frame times on a player's machine"),
@@ -47,6 +54,26 @@ NEW_LABELS = {
     "needs-retry": ("d4c5f9", "Reported on an older release: waiting for a try on the latest"),
 }
 
+# Labels the bot makes and keeps (NEW_LABELS are dropped when a report is edited to another release)
+EXTRA_LABELS = {
+    "perf-data": ("fbca04", "Performance report that only measures: closed once its row can go in performance.md"),
+    "no-reply": ("ededed", "Closed: answered by a maintainer, no word back from its author"),
+}
+BOT_KINDS = (
+    "dup",
+    "dup_old",
+    "dup_next",
+    "dup_older",
+    "retry",
+    "logs",
+    "quiet",
+    "perf_data",
+    "modified",
+    "mods",
+    "warm",
+)
+BOT_CLOSED = {"duplicate", "needs-retry", "no-reply"}  # labels of what the bot closes and its author's reply reopens
+
 TEXT = {
     "wiki": " What you can do about it is in the wiki: [Troubleshooting]({repo_url}/wiki/Troubleshooting#{wiki}).",
     "empty": "This issue has no details to act on, so it is closed. Please open a new one with the "
@@ -54,7 +81,8 @@ TEXT = {
     "game": "Only Mario Kart World 1.0.0 or 1.8.0 dumped from your own console is supported; issues about obtaining the game, "
     "its files or keys are closed.",
     "logs": "Thanks for the report. To find the cause we need the log: please attach `logs/mkw.log` from the game "
-    "folder (or `logs/setup.log` and `logs/warm.log` if the setup failed) by dragging it into a comment; the wiki says "
+    "folder (or `logs/setup.log` and `logs/warm.log` if the setup failed, `logs/launcher.log` if the start screen does "
+    "not open) by dragging it into a comment; the wiki says "
     "[where it is]({repo_url}/wiki/Installation#where-things-live). Without it this issue is closed "
     f"in {LOG_DAYS} days.",
     "dup": "Thanks for the report. This looks like #{issue}: {what}. Please follow and add to that issue instead; this "
@@ -68,6 +96,12 @@ TEXT = {
     "retry": "This was reported on {ver}, and {latest} is out with many fixes since. Please try the "
     "[latest release]({repo_url}/releases/latest) and reply here: whether it still happens, with its `logs/mkw.log` "
     f"attached. Without a reply this issue is closed in {RETRY_DAYS} days.",
+    "perf_data": "Thanks for the measurement. It is a report of a machine that runs fine (typical frame time within 60 "
+    "fps), so there is nothing to fix: it is closed, and its row goes into "
+    "[docs/project/performance.md]({repo_url}/blob/main/docs/project/performance.md) from the attached log. If you "
+    "see stutter or slowdowns in the scene, reply here and it is reopened.",
+    "quiet_closed": f"Closed: we answered and heard nothing back in {ANSWERED_DAYS} days. If it still happens on the "
+    "latest release, reply here with `logs/mkw.log` attached and it is reopened.",
     "retry_closed": f"Closed: no reply in {RETRY_DAYS} days. If it still happens on the latest release, reply here with "
     "`logs/mkw.log` attached and it is reopened, or open a new issue.",
     "logs_closed": f"Closed: no log in {LOG_DAYS} days. If it still happens on the latest release, open a new issue "
@@ -155,7 +189,7 @@ class Moderator:
     def ensure_label(self, name: str) -> None:
         if name in self.labels:
             return
-        color, desc = NEW_LABELS.get(name, ("c2e0c6", f"Reported on {name}"))
+        color, desc = (NEW_LABELS | EXTRA_LABELS).get(name, ("c2e0c6", f"Reported on {name}"))
         self.gh.run("label", "create", name, "--color", color, "--description", desc)
         self.labels.add(name)
 
@@ -208,6 +242,11 @@ class Moderator:
             if MARK.format("mods") not in said:
                 self.gh.comment(n, "mods", TEXT["mods"].format(mods=on))
         sig = classify.known_error(n, "\n".join([title, body, *(t for _, t in newest)]), ver, self.sigs)
+        # #474/#661 (21/11/2026): two attachments both named mkw.log (0.1.11 and 0.1.13) both count as the newest, and
+        # the older one's video-memory errors closed a performance report whose current log has none. With several
+        # logs, every one must carry the signature.
+        if sig and len(newest) > 1 and any(not classify.known_error(n, t, ver, [sig]) for _, t in newest):
+            sig = None
         for name, text in [] if sig else older:
             if (s := classify.known_error(n, text, ver, self.sigs)) and MARK.format("dup_older") not in said:
                 self.gh.comment(n, "dup_older", TEXT["dup_older"].format(name=name, issue=s.issue, what=s.what))
@@ -228,6 +267,17 @@ class Moderator:
         elif not sig and not comments and classify.wants_log(title, reported, have | add):
             self.gh.label(n, "needs-logs")
             self.gh.comment(n, "logs", TEXT["logs"].format(repo_url=self.repo_url))
+        if (
+            not sig
+            and "perf-data" not in have
+            and MARK.format("perf_data") not in said
+            and classify.perf_is_data(title, body)
+            and classify.has_log(reported)
+        ):
+            self.ensure_label("perf-data")
+            self.gh.label(n, "perf-data")
+            self.gh.comment(n, "perf_data", TEXT["perf_data"].format(repo_url=self.repo_url))
+            self.gh.close(n, "completed")
 
     def on_comment(self, issue: dict, c: dict) -> bool:
         """A maintainer's reply that settles the issue, or its author answering the bot. True if it closed it."""
@@ -239,13 +289,13 @@ class Moderator:
             # closed by the bot as a known error or for no reply: whatever its author says next reopens it
             by_bot = (
                 mine
-                and ({"duplicate", "needs-retry"} & have)
-                and any(MARK.format(k) in x["body"] for x in self.comments(n) for k in ("dup", "retry"))
+                and (BOT_CLOSED & have)
+                and any(MARK.format(k) in x["body"] for x in self.comments(n) for k in ("dup", "retry", "quiet"))
             )
             if by_bot:
                 print(f"#{n} {issue['title'][:70]}: its author replied after the bot closed it, reopened")
                 self.gh.run("issue", "reopen", str(n))
-                self.gh.unlabel(n, *sorted({"duplicate", "needs-retry"} & have))
+                self.gh.unlabel(n, *sorted(BOT_CLOSED & have))
                 return False
             if c["author_association"] not in MAINTAINERS and classify.still_happens(c["body"], mine):
                 print(f"#{n} {issue['title'][:70]}: still happens, reopened")
@@ -269,7 +319,7 @@ class Moderator:
                 self.gh.label(n, "fixed-next-release")
             return False
         if c["user"]["login"] == issue["user"]["login"]:
-            drop = {"duplicate", "needs-retry"} & have
+            drop = {"duplicate", "needs-retry", "no-reply"} & have
             if "needs-logs" in have and classify.has_log(c["body"]):
                 drop.add("needs-logs")
             if drop:
@@ -307,6 +357,11 @@ class Moderator:
         n = issue["number"]
         have = {lb["name"] for lb in issue["labels"]}
         now = datetime.now(UTC)
+        if "needs-retry" in have and not any(classify.behind(lb, set(self.releases)) for lb in have):
+            # Asked when the report was behind the newest two releases; with KEEP_RELEASES 4 it no longer is
+            print(f"#{n} {issue['title'][:70]}: no longer behind, needs-retry dropped")
+            self.gh.unlabel(n, "needs-retry")
+            have.discard("needs-retry")
         for label, days in (("duplicate", DUP_DAYS), ("needs-logs", LOG_DAYS), ("needs-retry", RETRY_DAYS)):
             if label not in have or not (since := self.labeled_at(n, label)) or now - since < timedelta(days=days):
                 continue
@@ -326,7 +381,31 @@ class Moderator:
             else:
                 self.gh.close(n, "not planned", TEXT["logs_closed"])
                 return
+        if self.close_if_unanswered(issue, comments, have):
+            return
         self.ask_retry(issue, comments)
+
+    def close_if_unanswered(self, issue: dict, comments: list[dict], have: set[str]) -> bool:
+        """Closes an issue whose last word is a maintainer's answer, ANSWERED_DAYS old: its author never came back.
+        Not what is waiting for a release (`fixed-next-release`), a feature request, an issue a known error points to
+        (it tracks that error) or an answer the bot gave. Its author's reply reopens it (on_comment)."""
+        n = issue["number"]
+        if have & (NOT_RETRIED | BOT_CLOSED) or n in {s.issue for s in self.sigs}:
+            return False
+        said = [c for c in comments if not any(MARK.format(k) in c["body"] for k in BOT_KINDS)]
+        if not said or said[-1]["author_association"] not in MAINTAINERS or issue["author_association"] in MAINTAINERS:
+            return False
+        if classify.reply_decision(said[-1]["body"]):
+            return False
+        since = datetime.fromisoformat(said[-1]["created_at"])
+        if datetime.now(UTC) - since < timedelta(days=ANSWERED_DAYS):
+            return False
+        print(f"#{n} {issue['title'][:70]}: answered {since:%d/%m}, no word back")
+        self.ensure_label("no-reply")
+        self.gh.label(n, "no-reply")
+        self.gh.comment(n, "quiet", TEXT["quiet_closed"])
+        self.gh.close(n, "not planned")
+        return True
 
     def release(self, tag: str) -> None:
         url = self.releases.get(tag) or f"{self.repo_url}/releases/tag/{tag}"

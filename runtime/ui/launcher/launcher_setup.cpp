@@ -20,6 +20,13 @@ static const char *const kDesktopSteps[SETUP_STEPS] = {"check", "exefs", "romfs"
 static const char *const kPs5Steps[SETUP_PS5_STEPS] = {"check", "nup", "exefs", "romfs", "generate", "compile",
                                                        "link", "shaders", "deploy"};
 
+// A desktop step's name in prepare.py's events (the start screen's setup; the PS5 build has its own list).
+int setup_step_index(const char *name) {
+    for (int i = 0; name && i < SETUP_STEPS; i++)
+        if (!strcmp(name, kDesktopSteps[i])) return i;
+    return -1;
+}
+
 static SDL_Mutex *g_lock;
 static SetupState g_state = {0, SETUP_MODE_DESKTOP, -1, SETUP_STEPS, {}, 0, 0, 0, {}, {}, {}};
 static SDL_Process *g_proc;

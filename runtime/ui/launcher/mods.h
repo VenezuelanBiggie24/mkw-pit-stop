@@ -31,7 +31,7 @@ typedef struct {
 // The import/run state for the page's progress line (launcher_setup.cpp's SetupState, smaller: no steps).
 typedef struct {
     int running, finished;   // finished: 1 imported, -1 failed
-    char done[64];           // the mod's folder name, from import.py's "done <name> ..."
+    char done[MOD_NAME_MAX + 1];   // the mod's folder name, from import.py's "done <name> ...": up to 64 characters
     char code[32];           // import.py's "error <code> ...", or "stopped"
     char error[512];         // the detail after the code
 } ModsState;
@@ -90,6 +90,7 @@ typedef struct {
     int nmods;
     char winner[MOD_NAME_MAX];
     int resolved;   // a pick that still matches the mods in the conflict
+    int has_original;
 } ModConflict;
 int mods_conflict_count(void);
 const ModConflict *mods_conflict_at(int i);

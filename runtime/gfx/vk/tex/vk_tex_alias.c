@@ -249,6 +249,7 @@ static void gpu_written_locked(Tex *e, int fresh) {
     if (!e->pub.mirrored) return;
     e->gpu_dirty = 1;
     gpu_baseline(e);   // CPU writes up to here are older than this one
+    gpu_base_note(e);
     e->gpu_seq = ++gpu_writes;
     e->gpu_fence = f;
     if (wb_at_fence(&e->t.d, e->t.L.size)) __atomic_store_n(&small_pending, 1, __ATOMIC_RELEASE);

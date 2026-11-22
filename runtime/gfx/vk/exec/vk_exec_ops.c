@@ -12,6 +12,7 @@
 #include "nvn_api.h"
 #include "nvn_hmap.h"
 #include "tex.h"
+#include "vk_temporal.h"
 #include "vk.h"
 #include "vk_draw_internal.h"
 #include "vk_exec.h"
@@ -45,6 +46,7 @@ static void op_draw(VkExec *ex, const p_draw *d) {
             uint32_t v = first + 4 * i, k[6] = {0, 1, 2, 0, 2, 3};
             for (int j = 0; j < 6; j++) ix[6 * i + j] = v + k[j];
         }
+        vk_exec_frame.cpu_idx[1]++, vk_exec_frame.cpu_idx_bytes += sizeof *ix * 6 * q;
         int ok = bind_index(ex, ix, sizeof *ix * 6 * q, VK_INDEX_TYPE_UINT32);
         free(ix);
         if (ok) vkCmdDrawIndexed(ex->cb, 6 * q, inst, 0, 0, (uint32_t)d->base_instance);
@@ -53,6 +55,7 @@ static void op_draw(VkExec *ex, const p_draw *d) {
         if (!ix) rt_fatal("vk: out of memory");
         for (uint32_t i = 0; i < n; i++) ix[i] = first + i;
         ix[n] = first;
+        vk_exec_frame.cpu_idx[2]++, vk_exec_frame.cpu_idx_bytes += sizeof *ix * (n + 1);
         int ok = bind_index(ex, ix, sizeof *ix * (n + 1), VK_INDEX_TYPE_UINT32);
         free(ix);
         if (ok) vkCmdDrawIndexed(ex->cb, n + 1, inst, 0, 0, (uint32_t)d->base_instance);
@@ -117,6 +120,7 @@ static void op_draw_idx(VkExec *ex, const p_draw_idx *d) {
             uint8_t v = ((const uint8_t *)(uintptr_t)d->ibuf)[i];
             ix[i] = restart && v == 0xff ? 0xffff : v;
         }
+        vk_exec_frame.cpu_idx[0]++, vk_exec_frame.cpu_idx_bytes += sizeof *ix * (size_t)d->count;
         bind_index(ex, ix, sizeof *ix * (size_t)d->count, VK_INDEX_TYPE_UINT16);
         free(ix);
     } else if (sp.offset % isize[d->itype]) {
@@ -322,6 +326,7 @@ static void op_dispatch(VkExec *ex, const p_dispatch *d) {
     int present;
     const GfxShader *cs = shader_for(ex, NVN_STAGE_CS, &present);   // synchronous: a skipped dispatch changes results
     if (!cs) return;
+    if (vk_tmp_dispatch(ex, cs)) return;   // DLSS or FSR 3.1 in the place of the game's upscale (vk_temporal.c)
     const VkPipeInfo *info = NULL;
     VkPipeline p = vk_pipeline_compute(cs, &info);
     if (!p || !info) return warn_once(W_PIPELINE, "a compute pipeline could not be created: dispatches with it are skipped");
@@ -639,13 +644,24 @@ void vk_exec_op_draw(VkExec *ex, uint32_t op, const void *payload) {
             bind_gen++;
         return;
     }
-    switch (op) {
-    case OP_UPDATE_UB: op_update_ub(ex, payload); break;
-    case OP_DRAW: op_draw(ex, payload); break;
-    case OP_DRAW_IDX: op_draw_idx(ex, payload); break;
-    case OP_DISPATCH: op_dispatch(ex, payload); break;
-    case OP_DRAW_IDX_IND: op_draw_idx_ind(ex, payload); break;
-    case OP_DISPATCH_IND: op_dispatch_ind(ex, payload); break;
-    default: rt_fatal("vk: op %s is not a draw op", nvn_op_name(op));
+    // a draw that samples the upscaler's picture after the HUD went over it (the game's last pass) is recorded once
+    // more into the picture without the HUD, for frame generation (vk_temporal.c)
+    int draw = op == OP_DRAW || op == OP_DRAW_IDX || op == OP_DRAW_IDX_IND;
+    for (int again = 0; again < 2; again++) {
+        if (draw && !again) vk_tmp_hl_seen(VK_NULL_HANDLE);
+        switch (op) {
+        case OP_UPDATE_UB: op_update_ub(ex, payload); break;
+        case OP_DRAW: op_draw(ex, payload); break;
+        case OP_DRAW_IDX: op_draw_idx(ex, payload); break;
+        case OP_DISPATCH: op_dispatch(ex, payload); break;
+        case OP_DRAW_IDX_IND: op_draw_idx_ind(ex, payload); break;
+        case OP_DISPATCH_IND: op_dispatch_ind(ex, payload); break;
+        default: rt_fatal("vk: op %s is not a draw op", nvn_op_name(op));
+        }
+        if (again) {
+            vk_tmp_hl_redo_end(ex);
+            break;
+        }
+        if (!draw || !vk_tmp_hl_redo_begin(ex)) break;
     }
 }

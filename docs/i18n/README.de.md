@@ -64,7 +64,7 @@ Früh, und es geht schnell voran. Stand 18.11.2026 auf einer Standard-PS5:
 - **Pit-Stop-Overlay im Spiel.** Drücke jederzeit **Options + Touchpad-Klick**, um **Pit Stop** zu öffnen, ein
   Einstellungsmenü für den Controller mit Schnellzeilen (**Master volume**, **Vibration strength**, **Performance HUD**),
   allen Einstellungskategorien und live umbelegbaren DualSense-Tasten, gespeichert in `/app0/mkw.ini`.
-- **Bekannte Probleme ([docs/project/roadmap.md](../../docs/project/roadmap.md)):**
+- **Bekannte Probleme ([docs/ps5/roadmap.md](../../docs/ps5/roadmap.md)):**
   - *Lange Sitzungen:* der freie Speicher sinkt von Rennen zu Rennen, weil das Spiel Daten früherer Strecken behält;
     wird er knapp, können Texturen fehlerhaft sein oder fehlen. Starte den Titel nach einigen Rennen neu, falls das
     passiert.
@@ -260,7 +260,7 @@ Standard noch nicht gespielt.
 
 Etwa 2 % der Renn-Frames brauchen über 20 ms: dort lädt eine Strecke neue Texturen nach, und sie bestimmen die 1-%-Lows
 und die leichte Zeitlupe. Was gemessen wurde und was noch offen ist, steht in
-[docs/project/roadmap.md](../../docs/project/roadmap.md) und [docs/ps5/ps5.md](../../docs/ps5/ps5.md#frame-rate); Zahlen für den PC
+[docs/ps5/roadmap.md](../../docs/ps5/roadmap.md) und [docs/ps5/ps5.md](../../docs/ps5/ps5.md#frame-rate); Zahlen für den PC
 in [docs/project/performance.md](../../docs/project/performance.md).
 
 ## Fehler melden

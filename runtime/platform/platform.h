@@ -181,6 +181,9 @@ static inline uint64_t plat_scaled(PlatScale s, uint64_t t) {
     return t * s.q + (uint64_t)(((unsigned __int128)t * s.f) >> 64);
 }
 void plat_sleep_ns(uint64_t ns);          // returns no earlier than ns later; overshoot well under 1 ms
+// Frame pacing against an absolute plat_now_ns deadline: high-resolution wait, then yield across the timer's wake-up
+// margin. A deadline in the past returns immediately, so a stalled frame does not add another relative sleep.
+void plat_sleep_until_ns(uint64_t deadline);
 // Sleeps about ns on the OS's high-resolution timer without spinning: wakes up to PLAT_WAIT_LATE_NS late, never early.
 void plat_wait_ns(uint64_t ns);
 #ifdef _WIN32
@@ -205,6 +208,7 @@ int plat_mutex_trylock(PlatMutex *m);     // 1 when acquired
 void plat_mutex_unlock(PlatMutex *m);
 int plat_lock_report(int holds, char *buf, int size);   // MKW_LOCK_PROF=1: the locks waited on (holds, Linux only: kept
                                                        // while a thread slept on them) longest since the last call
+uint64_t plat_lock_waited_ns(void);   // MKW_LOCK_PROF=1: this thread's lock waits so far, summed (0 off)
 void plat_mutex_lock_shared(PlatMutex *m);
 int plat_mutex_trylock_shared(PlatMutex *m);   // 1 when acquired
 void plat_mutex_unlock_shared(PlatMutex *m);
@@ -350,7 +354,15 @@ void plat_mem_pack_collect(void);                  // frees the blobs of units u
 void plat_mem_pack_summary(char *out, size_t cap);
 // When the region holding addr was frozen (memory.c mem_frozen_ms: plat_now_ms at the freeze, | 1), 0 not frozen.
 void plat_mem_frozen_ms_hook(uint32_t (*fn)(uint64_t addr));
+// Committed pages' contents dropped from RAM, their state and protection kept: they read zero when made accessible
+// again (Linux, MADV_DONTNEED). 1 on success; 0 where the platform cannot (Windows, for now).
+int plat_mem_drop(uint64_t addr, uint64_t n);
 int plat_mem_replace_anon(uint64_t addr, uint64_t n);      // fresh read-write pages over a range (Linux); 1 on success
+// A label for an anonymous range in /proc/self/smaps ("[anon:NAME]", Linux), so a memory census (tools/run/memwatch.py)
+// tells the game's memory, the runtime's and the driver's apart; a no-op elsewhere or on failure.
+void plat_mem_name(const void *p, size_t n, const char *name);
+// Bytes of the page-aligned range [p, p+n) in RAM now (mincore, Linux); -1 where it cannot be told. For diagnostics.
+int64_t plat_mem_resident(const void *p, size_t n);
 // Writes n bytes at addr through the page protection (committed pages of a reservation, even inaccessible ones), as the
 // kernel would; no fault reaches the hooks. 1 on success; 0 where the platform cannot (Windows).
 int plat_mem_poke(uint64_t addr, const void *src, size_t n);
@@ -401,6 +413,9 @@ typedef struct {
     uintptr_t ret;             // rip in no module: the word at rsp, the caller's return address after a wild call
 } PlatCrash;
 void plat_crash_hook(void (*fn)(const PlatCrash *c));
+// Windows: is hardware-enforced stack protection (CET shadow stacks) on for this process: 1 yes, 0 no, -1 not
+// reported (older Windows, and always on Linux). Logged at start: a silent 0xC0000409 exit was seen only on Windows.
+int plat_shadow_stack(void);
 int plat_mem_read(uint64_t addr, void *out, size_t n);    // copies n bytes, 0 instead of faulting on unmapped memory
 int plat_mem_readable(uint64_t addr, uint64_t n);         // every page of [addr, addr + n) can be read; no fault
 void *plat_aligned_alloc(size_t size, size_t align);      // free with plat_aligned_free; NULL on failure
@@ -471,6 +486,9 @@ static inline int64_t plat_ftell64(FILE *f) { return (int64_t)ftello(f); }
 #endif
 void plat_file_delete(const char *path);
 int64_t plat_file_size(const char *path);                 // bytes of a file, -1 when missing or unreadable
+// Last write time of a file or a directory in the OS's units (as PlatFileId.write_time), only to compare two paths of
+// one volume; 0 when missing. A directory's moves when an entry in it is created, renamed or removed.
+uint64_t plat_path_write_time(const char *path);
 int plat_file_set_readonly(const char *path, int on);     // sets or clears the read-only attribute; 1 on success
 // An exclusive lock on path (created if missing), held until the process ends: 1 taken, 0 when another process holds
 // it, -1 when the file cannot be opened. The OS drops it when the process dies, however it dies.
@@ -494,6 +512,9 @@ void plat_file_close(PlatFile *f);
 // Bytes read at off (0 at or past the end of the file), -1 on an I/O error, -2 when the OS refused to write into buf
 // (a read-only page).
 int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off);
+// A read-write file of the runtime's own in dir, gone when the process ends however it ends (Linux: never linked);
+// NULL where the platform cannot (Windows, for now). For pages taken out of RAM (core/memory/memory_spill.c).
+PlatFile *plat_file_scratch(const char *dir);
 // What changes when the file is replaced or written: its volume, file id, size, last write and creation (on Linux,
 // status change) times in the OS's units. 0 on failure.
 typedef struct { uint64_t volume, file_id, size, write_time, create_time; } PlatFileId;
@@ -597,6 +618,9 @@ void plat_gpu_load(PlatLoad *l, float *load_pct, float *vram_used_mb);
 // its RAM), for the adapter with Vulkan's vendor and device ids (Linux: amdgpu's mem_info_vram_total) or deviceLUID
 // (Windows: DXGI's DedicatedVideoMemory). 0 when unknown.
 uint64_t plat_gpu_vram_mib(uint32_t vendor, uint32_t device, const uint8_t *luid);
+// Dedicated video memory this process uses as the OS counts it, in MiB (Windows: DXGI QueryVideoMemoryInfo, local
+// segment, for the adapter plat_gpu_vram_mib saw); 0 when unknown (Linux).
+uint64_t plat_gpu_process_vram_mib(void);
 // Physical memory in MB: in use and installed on the machine, and this process's working set.
 void plat_mem_info(float *used_mb, float *total_mb, float *proc_mb);
 // This process's memory in bytes: resident (the working set) and private (Windows: committed private bytes; Linux: the
@@ -604,4 +628,6 @@ void plat_mem_info(float *used_mb, float *total_mb, float *proc_mb);
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes);
 // Hands the C heap's free pages back to the system after a large release of small blocks.
 void plat_heap_trim(void);
+// The C heap in bytes: in use, free inside it, and what it has mapped (all arenas); 0 when unknown (Windows).
+void plat_heap_stats(uint64_t *in_use, uint64_t *free_bytes, uint64_t *mapped);
 

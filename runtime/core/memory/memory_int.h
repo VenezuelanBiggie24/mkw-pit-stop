@@ -13,7 +13,7 @@ extern _Thread_local int frz_held;
 static inline void frz_take(void) { plat_mutex_lock(&frz_lock); frz_held++; }
 static inline void frz_drop(void) { frz_held--; plat_mutex_unlock(&frz_lock); }
 extern uint8_t *trapped;                  // per guest page: 1 a read trap (memory.c), 2 an early-read watch, 3 a base
-                                          // trap (memory_btrap.c)
+                                          // trap (memory_btrap.c), 4 a spilled page (memory_spill.c)
 extern int64_t mem_early_pages;           // frz_lock: pages watched now
 int watched(uint64_t addr, uint64_t size);
 int mem_trap_init(void);                  // the trap map + poke; 0 when poke is unavailable
@@ -22,6 +22,8 @@ uint64_t mem_early_release_locked(uint64_t a, int access);   // the fence to wai
 void mem_early_resolve_hold(uint64_t a, size_t n);
 void mem_thaw_regions_locked(uint64_t a, uint64_t n);   // frz_lock held: no region over [a, a+n) stays frozen
 void mem_base_fill_locked(uint64_t p);   // frz_lock held: a base-trapped page copied to its base, then writable
+void mem_spill_fill_locked(uint64_t p, int why);   // frz_lock held: a spilled page (and the next ones) back from the
+                                                   // file, read-write; why 1: an access, 2: a thaw
 void mem_early_filled_locked(uint64_t a, int access);   // a trapped page was filled from the live shadow
 // memory_early.c's state its diagnosis reads (memory_early_diag.c)
 void mem_early_page_fences(uint64_t addr, uint64_t *lastf, uint64_t *prevf);

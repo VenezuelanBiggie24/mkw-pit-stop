@@ -20,6 +20,7 @@
 #include "cfg.h"
 #include "host.h"
 #include "ov.h"
+#include "ov_lanif.h"
 
 static int lan_only(struct in_addr a) { return ov_lan_only(ntohl(a.s_addr)); }
 
@@ -81,7 +82,8 @@ typedef struct {
     int score, seen;
 } LanBest;
 
-static void lan_offer(LanBest *b, struct in_addr x, struct in_addr xm, int default_route, const char *ifname) {
+static void lan_offer(void *ctx, struct in_addr x, struct in_addr xm, int default_route, const char *ifname) {
+    LanBest *b = ctx;
     if (is_tailscale(x)) xm.s_addr = htonl(0xffc00000u);   // its /32 widened to the range (above)
     int s = lan_score(x, xm, default_route);
     static int logged;   // the candidates of the first look, for a report
@@ -112,14 +114,11 @@ static int linux_default_route(const char *ifname) {
 }
 #endif
 
-int ov_lan_address(uint8_t ip[4], uint8_t mask[4]) {
-    struct in_addr want = {0}, a = {0}, m = {0};
-    LanBest best = {0};
-    const char *e = cfg_get("MKW_LAN_IP");
-    if (e && *e && inet_pton(AF_INET, e, &want) != 1) rt_log("nifm: MKW_LAN_IP %s is not an IPv4 address", e);
-    uint32_t first;
-    if (!want.s_addr && ov_lan_peer_first(&first) && !(want.s_addr = route_to(first)))
-        rt_log("nifm: no route to the first of MKW_LAN_PEERS");
+typedef void (*LanVisit)(void *ctx, struct in_addr a, struct in_addr m, int default_route, const char *ifname);
+
+// visit for every address of an interface that is up and lan_pick takes (want: only that one; none: any local network
+// address), with its mask and whether the interface carries the default route. -1 when the system's list is not there.
+static int lan_scan(struct in_addr want, LanVisit visit, void *ctx) {
 #ifdef _WIN32
     WSADATA wsa;
     if (WSAStartup(MAKEWORD(2, 2), &wsa)) return -1;
@@ -141,7 +140,7 @@ int ov_lan_address(uint8_t ip[4], uint8_t mask[4]) {
             if (!lan_pick(x, want)) continue;
             uint8_t bits = u->OnLinkPrefixLength > 32 ? 24 : u->OnLinkPrefixLength;
             xm.s_addr = htonl(bits ? 0xffffffffu << (32 - bits) : 0);
-            lan_offer(&best, x, xm, i->FirstGatewayAddress != NULL, name);
+            visit(ctx, x, xm, i->FirstGatewayAddress != NULL, name);
         }
     }
     free(list);
@@ -151,12 +150,44 @@ int ov_lan_address(uint8_t ip[4], uint8_t mask[4]) {
         for (i = list; i; i = i->ifa_next)
             if (i->ifa_addr && i->ifa_netmask && i->ifa_addr->sa_family == AF_INET && (i->ifa_flags & IFF_UP) &&
                 lan_pick(((struct sockaddr_in *)i->ifa_addr)->sin_addr, want))
-                lan_offer(&best, ((struct sockaddr_in *)i->ifa_addr)->sin_addr,
-                          ((struct sockaddr_in *)i->ifa_netmask)->sin_addr, linux_default_route(i->ifa_name),
-                          i->ifa_name);
+                visit(ctx, ((struct sockaddr_in *)i->ifa_addr)->sin_addr, ((struct sockaddr_in *)i->ifa_netmask)->sin_addr,
+                      linux_default_route(i->ifa_name), i->ifa_name);
         freeifaddrs(list);
     }
 #endif
+    return 0;
+}
+
+typedef struct {
+    OvLanIf *out;
+    int n, max;
+} LanList;
+
+static void lan_list_add(void *ctx, struct in_addr x, struct in_addr xm, int default_route, const char *ifname) {
+    (void)xm, (void)default_route;
+    LanList *l = ctx;
+    if (l->n >= l->max) return;
+    inet_ntop(AF_INET, &x, l->out[l->n].ip, sizeof l->out[l->n].ip);
+    snprintf(l->out[l->n].name, sizeof l->out[l->n].name, "%s", ifname);
+    l->n++;
+}
+
+int ov_lan_list(OvLanIf *out, int max) {
+    LanList l = {out, 0, max};
+    struct in_addr any = {0};
+    lan_scan(any, lan_list_add, &l);
+    return l.n;
+}
+
+int ov_lan_address(uint8_t ip[4], uint8_t mask[4]) {
+    struct in_addr want = {0}, a = {0}, m = {0};
+    LanBest best = {0};
+    const char *e = cfg_get("MKW_LAN_IP");
+    if (e && *e && inet_pton(AF_INET, e, &want) != 1) rt_log("nifm: MKW_LAN_IP %s is not an IPv4 address", e);
+    uint32_t first;
+    if (!want.s_addr && ov_lan_peer_first(&first) && !(want.s_addr = route_to(first)))
+        rt_log("nifm: no route to the first of MKW_LAN_PEERS");
+    if (lan_scan(want, lan_offer, &best) < 0) return -1;
     if (best.seen) a = best.a, m = best.m;
     if (!a.s_addr && want.s_addr) a = want, m.s_addr = htonl(0xffffff00u);   // MKW_LAN_IP not on an interface: /24
     if (a.s_addr && is_tailscale(a)) m.s_addr = htonl(0xffc00000u);   // the range, even when picked by want

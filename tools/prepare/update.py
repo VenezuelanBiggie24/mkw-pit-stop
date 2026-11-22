@@ -18,11 +18,13 @@ Usage: python -I update.py check --version VER [--os linux|windows]
        python -I update.py fetch --tag TAG --dest DIR [--os linux|windows]
        python -I update.py clean --game DIR [--previous VERSION]
 MKW_UPDATE_REPO=owner/name (default adriadam10/mkw-recomp) and MKW_UPDATE_AS=<version> (compare as that version: a
-test) change what is asked.
+test) change what is asked; MKW_UPDATE_API=<url> asks <url>/releases/latest instead of GitHub's (a test: a local
+server offering a package not released).
 """
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 import platform
@@ -31,9 +33,9 @@ import shutil
 import ssl
 import sys
 import time
-import urllib.error
 import urllib.request
 import zipfile
+from contextlib import suppress
 from pathlib import Path
 
 REPO = os.environ.get("MKW_UPDATE_REPO") or "adriadam10/mkw-recomp"
@@ -44,6 +46,7 @@ ASSET_SUFFIX = {  # tools/build/release.py's names
     "linux-aarch64": "-aarch64.AppImage",
     "windows": "-windows-x64.zip",
 }
+NOAVX2_SUFFIX = {"windows": "-windows-x64-noavx2.zip"}  # the package for CPUs without AVX2 (release.py --cpu noavx2)
 CLEAN_WAIT = 20  # s
 OLD_SUFFIX = ".old"  # what the launcher renames the replaced files to (Windows: a running exe cannot be removed)
 PREVIOUS = "update-previous"  # the version an update replaced, kept for the Tools page's Undo (launcher_update.h)
@@ -93,12 +96,16 @@ def version_key(v: str) -> tuple[int, int, int] | None:
 
 
 def latest_asset(os_name: str) -> tuple[str, dict]:
-    with get(f"https://api.github.com/repos/{REPO}/releases/latest", CHECK_TIMEOUT) as r:
+    api = os.environ.get("MKW_UPDATE_API") or f"https://api.github.com/repos/{REPO}"
+    with get(f"{api}/releases/latest", CHECK_TIMEOUT) as r:
         rel = json.load(r)
     if rel.get("draft") or rel.get("prerelease"):
         raise ValueError("the latest release is not a published one")
+    # a -noavx2 package (it carries setup/cpu-level) updates to the same kind: the normal one would not start on its CPU
+    marker = Path(__file__).resolve().parents[3] / "cpu-level"
+    suffix = NOAVX2_SUFFIX.get(os_name) if marker.is_file() and marker.read_text().strip() == "v2" else None
     for a in rel.get("assets", []):
-        if a["name"].endswith(ASSET_SUFFIX[os_name]):
+        if a["name"].endswith(suffix or ASSET_SUFFIX[os_name]):
             return rel["tag_name"], a
     raise ValueError(f"release {rel['tag_name']} has no package for {os_name}")
 
@@ -124,13 +131,21 @@ def fetch(args: argparse.Namespace) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     part = dest / (asset["name"] + ".part")
     h, done, total, step = hashlib.sha256(), 0, int(asset["size"]), max(1, int(asset["size"]) // 200)
-    with get(asset["browser_download_url"], FETCH_TIMEOUT) as r, part.open("wb") as f:
-        while chunk := r.read(1 << 20):
-            f.write(chunk)
-            h.update(chunk)
-            if done // step != (done + len(chunk)) // step:
-                emit("progress", done + len(chunk), total)
-            done += len(chunk)
+    with get(asset["browser_download_url"], FETCH_TIMEOUT) as r:
+        f = part.open("wb")
+        try:
+            with f:
+                while chunk := r.read(1 << 20):
+                    f.write(chunk)
+                    h.update(chunk)
+                    if done // step != (done + len(chunk)) // step:
+                        emit("progress", done + len(chunk), total)
+                    done += len(chunk)
+        except OSError, http.client.HTTPException:
+            # Windows needs the handle closed before unlinking. Report the download error even if unlink fails.
+            with suppress(OSError):
+                part.unlink(missing_ok=True)
+            raise
     if done != total or "sha256:" + h.hexdigest() != digest:
         part.unlink()
         raise ValueError(f"{asset['name']} came damaged ({done} of {total} bytes or another sha256): try again")
@@ -175,7 +190,7 @@ def clean(args: argparse.Namespace) -> None:
                     shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink()
                 n += 1
                 break
-            except OSError:   # a running exe on Windows; in keep/, a leftover entry the previous clean-up left
+            except OSError:  # a running exe on Windows; in keep/, a leftover entry the previous clean-up left
                 time.sleep(1)
     shutil.rmtree(game / "update", ignore_errors=True)
     emit("cleaned", n)
@@ -199,7 +214,7 @@ def main() -> None:
     args = ap.parse_args()
     try:
         {"check": check, "fetch": fetch, "clean": clean}[args.cmd](args)
-    except (OSError, ValueError, KeyError, zipfile.BadZipFile, urllib.error.URLError) as e:
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, http.client.HTTPException) as e:
         emit("error", args.cmd, str(e).replace("\n", " "))
         sys.exit(1)
 
