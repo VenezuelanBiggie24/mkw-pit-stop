@@ -947,6 +947,8 @@ int main(int argc, char **argv) {
     {
         const RtGame *builtin = rt_game_builtin();
         char why[256] = "";
+        // first: a ProsperoStore update may have moved the game files and saves out of the folder (ps5_recv.c)
+        ps5_store_restore("/data/prosperostore", "PPSA99193", "/app0");
         for (int i = 0; builtin && i < builtin->nexefs; i++)
             if (!strcmp(builtin->exefs_sha256[i].file, "main")) ps5_game_set_main_sha256(builtin->exefs_sha256[i].sha256);
         int ready = builtin != NULL && ps5_game_files_ready("/app0", RT_GAME_ID, why, sizeof why);

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import os
 import struct
 import sys
@@ -178,3 +179,15 @@ def test_nup_writer_keeps_only_what_is_asked(tmp_path: Path) -> None:
     assert nup_writer.write_nup(src, out, keep=lambda n: n.endswith((".spv", ".res.json"))) == 3
     with nup_reader.NupReader(out) as r:
         assert sorted(r.romfs) == ["a.cs.spv", "a.res.json", "a.spv"]
+
+
+def test_content_version() -> None:
+    # every release before 0.2.1 shipped 01.000.000: each new one must compare higher, as ProsperoStore compares them
+    assert release_ps5.content_version("0.2.1") == "01.002.001"
+    assert release_ps5.content_version("0.10.0") == "01.010.000"
+    assert release_ps5.content_version("1.0.0") == "02.000.000"
+    assert release_ps5.content_version("0.2.1-rc1") == "01.002.001"
+    assert "01.000.000" < release_ps5.content_version("0.2.1") < release_ps5.content_version("0.10.0")
+    for bad in ("0.2", "ps5-0.2.1", "0.2.1000"):
+        with pytest.raises(ValueError):
+            release_ps5.content_version(bad)

@@ -77,6 +77,22 @@ PS5_SOURCES = [
 SOURCES = list(dict.fromkeys(dist.SOURCES + PS5_SOURCES))
 
 
+def content_version(version: str) -> str:
+    """param.json's contentVersion for a release: 0.2.1 -> 01.002.001.
+
+    ProsperoStore offers an update when the release's contentVersion is higher than the installed one
+    (darkxex/ps5-homebrew-catalog docs/versioning.md), and the title's own was 01.000.000 in every release up to 0.2.0.
+    The first field is the major version plus one, so 0.x releases stay above those installs.
+    """
+    parts = version.split("-")[0].split(".")
+    if len(parts) != 3 or not all(x.isdigit() for x in parts):
+        raise ValueError(f"release version must be MAJOR.MINOR.PATCH, not {version!r}")
+    major, minor, patch = (int(x) for x in parts)
+    if major > 98 or minor > 999 or patch > 999:
+        raise ValueError(f"release version {version!r} does not fit contentVersion NN.NNN.NNN")
+    return f"{major + 1:02d}.{minor:03d}.{patch:03d}"
+
+
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -285,8 +301,14 @@ def stage_ps5_bundle(bundle: Path, target_os: str, version: str, include_radv: b
     sce_sys.mkdir(exist_ok=True)
     param_src = title / "ps5/sce_sys/param.json"
     if param_src.is_file():
-        param = param_src.read_text(encoding="utf-8").replace('"Mario Kart World PS5"', '"Mario Kart World: Pit Stop"')
-        (sce_sys / "param.json").write_text(param, encoding="utf-8")
+        param = json.loads(param_src.read_text(encoding="utf-8"))
+        loc = param.setdefault("localizedParameters", {}).setdefault("en-US", {})
+        if loc.get("titleName") == "Mario Kart World PS5":
+            loc["titleName"] = "Mario Kart World: Pit Stop"
+        # the same value in the placeholder (linked from this bundle) and in the title the builder makes from it, so a
+        # store sees one version whichever of the two is in the folder
+        param["contentVersion"] = content_version(version)
+        (sce_sys / "param.json").write_text(json.dumps(param, indent=2) + "\n", encoding="utf-8")
     icon = ROOT / "docs/images/icon0.png"
     if icon.is_file():
         shutil.copy2(icon, sce_sys / "icon0.png")
