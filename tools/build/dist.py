@@ -128,7 +128,10 @@ PINS = {
 # run them; tools/prepare/steam.py draws Steam's library images with tools/build/icon.py).
 # tools/mod: the Mods page's import, merge, GameBanana and .ips tools (the launcher runs them; tests/launcher/test_setup.py checks
 # every tool it names is here: until 13/11/2026 none was, and the page failed with "no setup tools" in every package)
+# tools/build/ext_glue.py and plugin_glue.py: build.py imports them (--ext, --plugin); the 0.2.0 PS5 builder first packed
+# without them stopped at that import (22/11/2026)
 SOURCES = ["recomp", "sm86", "tools/build/build.py", "tools/build/icon.py", "tools/prepare", "tools/mod", "tools/romfs/resolution.py",
+           "tools/build/ext_glue.py", "tools/build/plugin_glue.py",
            "tools/i18n/catalog.py", "tools/i18n/game_texts.py", "tools/i18n/game_fonts.py", "i18n/game",
            "tools/shaders/extract.py", "tools/shaders/translate.py", "tools/shaders/shaderc_lib.py",
            "tools/ps5/prepare_ps5.py", "tools/ps5/ps5_prepare_common.py", "tools/ps5/nup_reader.py",
