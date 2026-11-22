@@ -48,7 +48,8 @@ Early, and moving fast. On 18/11/2026 on a base PS5:
   - *Sparse tiles:* from boot a few sparse texture tiles stay unloaded: minor texture corruption near the start line
     and a black-and-white race intro.
   - *Multiplayer:* the first race on a course can drop a player whose shaders are still compiling; later races work.
-    Split screen runs below 30 fps in busy scenes.
+    Split screen at the 60 fps default: 2 players average ~46 fps (the race in slow motion, 0.77x), 3 or 4 players
+    ~24 fps (0.40x); see [Performance](#performance).
   - *Menus:* mode, character and vehicle select screens still differ slightly from the console.
 
 ## What you need ("You bring")
@@ -224,8 +225,23 @@ frame generation off):
 | 16/11/2026 | 30 fps (the previous default) | 33.3 ms | 33.3 ms | | 1.00x |
 
 The new default is untested on the console as it ships: these numbers come from benchmark races with the runtime's
-performance logging on (`MKW_TRACE=perf`, which costs a little), set to 60 fps by hand. Menus, time trials, split
-screen, long sessions and other courses have not been played at the new default yet.
+performance logging on (`MKW_TRACE=perf`, which costs a little), set to 60 fps by hand. Menus, time trials, long
+sessions and other courses have not been played at the new default yet.
+
+**Split screen** (22/11/2026, the same benchmark at 60 fps, one build for all four runs, `ps5-0.1.0-12-g77aae4a`; every
+player is driven by the script):
+
+| Players | Average frame time | Typical frame | 1% low | 0.1% low | Worst frame | Race speed |
+|---|---|---|---|---|---|---|
+| 1 | 17.1 ms (58.6 fps) | 16.7 ms | 39.8 fps | 20.5 fps | 74 ms | 0.98x |
+| 2 | 21.7 ms (46.2 fps) | 21.3 ms | 32.2 fps | 18.6 fps | 70 ms | 0.77x |
+| 3 | 41.9 ms (23.9 fps) | 42.2 ms | 19.5 fps | 14.3 fps | 99 ms | 0.40x |
+| 4 | 41.9 ms (23.9 fps) | 42.7 ms | 19.2 fps | 14.2 fps | 99 ms | 0.40x |
+
+At the 60 fps setting the game counts every frame as 1/60 s, so frames slower than that make the race slow motion:
+2 players run at about three quarters of real time, 3 and 4 at under half. Three players cost the same as four. At
+the 30 fps setting a frame may take 33.3 ms at full speed: by these frame times (not measured at 30 yet), 2 players
+would hold 30 fps and 3 or 4 would still run at about 0.8x.
 
 About 2% of race frames take over 20 ms: they are where a course streams in new textures, and they set the 1% lows
 and the slight slow motion. What was measured and what is left is in
