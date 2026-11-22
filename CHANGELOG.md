@@ -5,6 +5,33 @@ Each version's section is that release's notes: `tools/build/notes.py` puts it i
 section has a summary paragraph, `### Changes` (each with its issue, #N), `### Tested` (what was run from the packages
 before publishing) and optionally `### Known issues`.
 
+## ps5-0.2.1
+
+**Mario Kart World: Pit Stop** (`PPSA99193`) 0.2.1 gets the title ready for ProsperoStore. An update installed from the store now keeps the game files you built, your saves and your settings, and every release now has its own version number, so the store can tell that a newer one is out. The game itself is the same as in 0.2.0. As before, you build the title on your PC, on Windows or Linux, from your own *Mario Kart World* 1.8.0 or 1.0.0 dump. Nothing of the game is in the release.
+
+### Changes
+
+- Updates through ProsperoStore keep your build. A clean update from the store replaces the title's folder with the new placeholder and moves the old folder to `prosperostore/previous/PPSA99193`. On its first start, the title now moves back everything the new release does not bring: the game files from the PC builder (`romfs.nup` or the dump's folders, `spirv.nup`, `exefs/`), the saves in `profile/`, `mkw.ini` and `mods/`. These are renames on the same drive, so nothing is copied. Then build again from the PC as usual: only the new game code and changed shaders are sent. The store's quick update leaves the folder in place and needs none of this.
+- Each release has its own `contentVersion` in `sce_sys/param.json`: 0.2.1 is `01.002.001`, and every release before it said `01.000.000`. The placeholder and the title the builder makes carry the same value, which is what the store compares to offer an update.
+
+### Tested
+
+Before publishing:
+
+- On a base PS5, a clean ProsperoStore update done by hand over FTP (the old folder moved to `/data/prosperostore/previous/PPSA99193`, the 0.2.1 placeholder put in its place and a store receipt written): on its first start the placeholder moved 25 entries back, among them `updates/`, `spirv.nup`, `profile/`, `mkw.ini` and `mods/`, and kept its own `eboot.bin`. The first try of this test found that `lstat` on the console does not see files in the title's folder, so the old `eboot.bin` was moved over the new one; the release has the fix.
+- On Linux: the receiver's tests, with the move back after a store update (`tests/ps5/test_ps5_recv.py`), and the `contentVersion` numbering (`tests/ps5/test_ps5_builder.py`). The changed C files compile with the PS5 toolchain.
+- The 0.2.1 placeholder zip passes the release's no-game-content check, and its `param.json` says `01.002.001`.
+
+Not run: an update through ProsperoStore itself, and a whole title build from the 0.2.1 builder packages.
+
+### Known issues
+
+- After a store update, the title has to be built again from the PC before it starts the game, as after any update.
+- Peak video memory before the first race is about 1 GiB higher than in 0.1.0's code (6.2 instead of 5.2 GiB in the benchmark). Nothing failed from it in the benchmark; long sessions may run short of memory sooner.
+- Races at 60 fps run slightly slower than real time (0.97x in the benchmark), because a few frames take longer than 16.7 ms where the course streams in new textures.
+- Split screen with 3 or 4 players has not been measured at 30 fps. At about 42 ms a frame, it would run at about 0.8x speed.
+- Still open from 0.1.0: free memory falls race after race in long sessions; a few sparse texture tiles stay unloaded from boot; the first multiplayer race on a course can drop a player whose shaders are still compiling. There is no Nintendo online play.
+
 ## ps5-0.2.0
 
 **Mario Kart World: Pit Stop** (`PPSA99193`) 0.2.0, now built on mkw-recomp 0.1.17. Races run at 60 fps by default with no frame generation; split screen is held at 30 fps. Black frames in races are gone, texture streaming is faster (the 1% low in the Grand Prix benchmark went from 37.7 to 42.1 fps) and plugins can be linked into the PS5 title. As before, you build the title on your PC, on Windows or Linux, from your own *Mario Kart World* 1.8.0 or 1.0.0 dump. Nothing of the game is in the release.
