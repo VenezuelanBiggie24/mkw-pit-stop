@@ -222,8 +222,12 @@ frame generation off):
 
 | Date | Frame rate setting | Average frame time | Typical frame | 1% low | Race speed |
 |---|---|---|---|---|---|
+| 22/11/2026 | 60 fps (the default) | 17.1 ms (58.5 fps) | 16.8 ms | 42.1 fps | 0.97x |
 | 20/11/2026 | 60 fps (the new default) | 17.0–17.4 ms (57–59 fps) | 16.7 ms (at the cap) | 35–41 fps | 0.95–0.98x |
 | 16/11/2026 | 30 fps (the previous default) | 33.3 ms | 33.3 ms | | 1.00x |
+
+The 22/11 row is one run of `main` at `v0.1.17-153-g30b6f62` (after the 0.1.17 merge and the partial texture
+re-uploads): 0.1% low 25.8 fps, worst frame 77.6 ms, 21 of 12,279 frames over 33.3 ms.
 
 The new default is untested on the console as it ships: these numbers come from benchmark races with the runtime's
 performance logging on (`MKW_TRACE=perf`, which costs a little), set to 60 fps by hand. Menus, time trials, long
