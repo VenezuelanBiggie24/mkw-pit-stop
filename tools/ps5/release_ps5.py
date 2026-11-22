@@ -412,7 +412,8 @@ def _write_zip(src_dir: Path, root_arcname: str, out_zip: Path) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--version", default="0.1.0", help="release version, e.g. 0.1.0")
-    ap.add_argument("--changelog-section", default="ps5-0.1.0", help="CHANGELOG.md section name (default: ps5-0.1.0)")
+    ap.add_argument("--changelog-section", help="CHANGELOG.md section name (default: ps5-<version>; a fixed ps5-0.1.0 "
+                    "default gave the first 0.2.0 pack 0.1.0's notes)")
     ap.add_argument("--target", choices=("all", "linux", "windows", "placeholder"), default="all",
                     help="which release asset(s) to build (default: all)")
     ap.add_argument("--include-radv", action="store_true",
@@ -484,7 +485,7 @@ def main() -> int:
             print(f"{win_zip}: {win_zip.stat().st_size / 2**20:.1f} MiB (clean)")
 
     notes_path = OUT / f"notes-ps5-{args.version}.md"
-    subprocess.run([sys.executable, str(ROOT / "tools/build/notes.py"), "--version", args.changelog_section,
+    subprocess.run([sys.executable, str(ROOT / "tools/build/notes.py"), "--version", args.changelog_section or f"ps5-{args.version}",
                     "--template", str(ROOT / "docs/ps5/release-template-ps5.md"), "--out", str(notes_path)], check=True)
     artifacts.append(notes_path)
 
