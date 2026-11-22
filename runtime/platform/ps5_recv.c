@@ -1124,6 +1124,13 @@ static int store_location(const char *receipt, char *out, size_t cap) {
     return strstr(out, "/..") == NULL;
 }
 
+// lstat fails on paths that exist from inside the title (console test, 22/11/2026: the restore saw none of the new
+// folder's entries and renamed the old eboot.bin over the new one), so stat answers too, as in ps5_sys.c
+static int path_exists(const char *path) {
+    struct stat st;
+    return lstat(path, &st) == 0 || stat(path, &st) == 0;
+}
+
 static int same_file(const char *a, const char *b) {
     struct stat x, y;
     // /app0 is ShadowMountPlus's mount of the folder: the device differs, the size and modification time do not
@@ -1146,11 +1153,13 @@ int ps5_store_restore(const char *store_root, const char *title_id, const char *
     // and what the previous folder still holds stays for the player to look at
     static const char *const used[] = {".pitstop-manifest.tsv", "profile", "mkw.ini", "exefs", "romfs", "romfs.nup",
                                        "spirv", "spirv.nup", "pitstop-game-dirs.txt", "pitstop-game.id"};
-    struct stat st;
     for (size_t i = 0; i < sizeof used / sizeof *used; i++) {
         snprintf(p, sizeof p, "%s/%s", target, used[i]);
-        if (lstat(p, &st) == 0) return 0;
+        if (path_exists(p)) return 0;
     }
+    // the release's own entries: never taken from the old folder, whatever a check of the new one says
+    static const char *const release[] = {"eboot.bin", "sce_sys", "sce_module", "licenses", "LEGAL.txt",
+                                          "pitstop-runtime.json"};
     DIR *d = opendir(kept);
     if (!d) return 0;
     int moved = 0;
@@ -1161,8 +1170,10 @@ int ps5_store_restore(const char *store_root, const char *title_id, const char *
         if (snprintf(from, sizeof from, "%s/%s", kept, e->d_name) >= (int)sizeof from ||
             snprintf(to, sizeof to, "%s/%s", target, e->d_name) >= (int)sizeof to)
             continue;
-        // what the new release brings (eboot.bin, sce_sys/, sce_module/, licences) is the new version's
-        if (lstat(to, &st) == 0) continue;
+        int own = 0;
+        for (size_t i = 0; i < sizeof release / sizeof *release; i++) own |= !strcmp(e->d_name, release[i]);
+        // what the new release brings is the new version's
+        if (own || path_exists(to)) continue;
         // the same drive, so a rename: the 23 GB romfs.nup moves at once, nothing is copied
         if (rename(from, to) == 0) moved++;
         else fprintf(stderr, "ps5 store restore: %s -> %s failed (%s)\n", from, to, strerror(errno));

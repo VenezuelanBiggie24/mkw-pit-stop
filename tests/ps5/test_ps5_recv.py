@@ -501,6 +501,16 @@ def test_ps5_store_restore(tmp_path: Path) -> None:
     assert (kept / "sce_sys" / "param.json").exists()
     assert restore(app0) == 0   # a folder in use is never filled again
 
+    # the release's own entries never come from the old folder, even where the new one lacks them (on the console lstat
+    # missed the new eboot.bin and the old one was renamed over it)
+    store, target, kept, app0 = _store_layout(tmp_path / "own")
+    (kept / "LEGAL.txt").write_text("old", encoding="utf-8")
+    (kept / "pitstop-runtime.json").write_text("old", encoding="utf-8")
+    app0.symlink_to(target)
+    assert restore(app0) == 6
+    assert not (target / "LEGAL.txt").exists() and not (target / "pitstop-runtime.json").exists()
+    assert (kept / "LEGAL.txt").exists() and (kept / "eboot.bin").read_bytes() == b"old built game"
+
     # a folder that is not the running one (installed by hand elsewhere) and a title the store did not install
     store, target, kept, app0 = _store_layout(tmp_path / "other")
     other = tmp_path / "other" / "hand"
