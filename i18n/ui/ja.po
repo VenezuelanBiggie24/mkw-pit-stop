@@ -8,6 +8,21 @@ msgctxt "UI_SWKBD_DEFAULT_NAME"
 msgid "Player"
 msgstr "プレイヤー"
 
+#. The on-screen number pad the game opens to ask for a number: its confirm key (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_OK"
+msgid "OK"
+msgstr "OK"
+
+#. The on-screen number pad: the wide button under the keys that closes it without a number
+msgctxt "UI_KEYPAD_CANCEL"
+msgid "Cancel"
+msgstr "キャンセル"
+
+#. The on-screen number pad: the key that erases the last digit (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_DELETE"
+msgid "Delete"
+msgstr "削除"
+
 msgctxt "UI_MENU_TITLE"
 msgid "Settings"
 msgstr "設定"
@@ -345,6 +360,24 @@ msgctxt "UI_MENU_ASPECT_WINDOW"
 msgid "Window"
 msgstr "ウィンドウ"
 
+msgctxt "UI_MENU_HUD_POSITION"
+msgid "HUD position"
+msgstr "HUDの位置"
+
+msgctxt "UI_MENU_HUD_POSITION_DESC"
+msgid ""
+"On a picture wider or taller than 16:9, keep the race HUD in the middle 16:9 area (the console's "
+"place) or put it at the screen's edges and corners. Takes effect at the next start."
+msgstr "16:9より横長または縦長の画面で、レースのHUDを中央の16:9の範囲(本体と同じ位置)に置くか、画面の端と隅に置きます。次回の起動から反映されます。"
+
+msgctxt "UI_MENU_HUD_POSITION_16X9"
+msgid "16:9 area"
+msgstr "16:9の範囲"
+
+msgctxt "UI_MENU_HUD_POSITION_EDGES"
+msgid "Screen edges"
+msgstr "画面の端"
+
 msgctxt "UI_MENU_PRESENT"
 msgid "Presentation"
 msgstr "表示方式"
@@ -431,6 +464,19 @@ msgctxt "UI_MENU_FPS_AUTO"
 msgid "Automatic"
 msgstr "自動"
 
+msgctxt "UI_MENU_LOGIC_HZ"
+msgid "Logic rate"
+msgstr "ロジックの更新頻度"
+
+msgctxt "UI_MENU_LOGIC_HZ_DESC"
+msgid ""
+"How many times a second the game updates karts, physics and timers. 60 is the console's rate; "
+"120, 144 or 240 make movement smoother on a high refresh rate screen but need a faster PC. Time "
+"trials and LAN games always run at 60."
+msgstr ""
+"ゲームがカート、物理、タイマーを1秒間に何回更新するか。60はSwitch "
+"2本体と同じです。120、144、240は高リフレッシュレートの画面で動きを滑らかにしますが、より速いPCが必要です。タイムアタックとLANのゲームは常に60で動きます。"
+
 msgctxt "UI_MENU_FRAMEGEN"
 msgid "Frame generation"
 msgstr "フレーム生成"
@@ -472,6 +518,113 @@ msgid ""
 msgstr ""
 "お使いのパソコンが対応できる限り遅いタイミングで各フレームを開始するため、押した操作が画面に早く反映されます。20 fpsや15 "
 "fpsのとき、またフレーム生成と併用するときに効果が大きくなります。映像がカクつく場合はオフにしてください。"
+
+msgctxt "UI_MENU_FG_ENGINE"
+msgid "Frame generation by"
+msgstr "フレーム生成の方式"
+
+msgctxt "UI_MENU_FG_ENGINE_DESC"
+msgid ""
+"Who makes the frames between the game's own. The port's own works everywhere. NVIDIA DLSS Frame "
+"Generation (RTX 40 and 50) and AMD FSR 3.1 use the scene's depth and motion and need DLSS or FSR "
+"3.1 upscaling on."
+msgstr ""
+"ゲームのフレームの間のフレームを作る方式です。移植版独自の方式はどの環境でも動きます。NVIDIA DLSS フレーム生成（RTX 40・50）と AMD FSR 3.1 "
+"はシーンの深度と動きを使い、DLSS または FSR 3.1 のAIアップスケーリングをONにする必要があります。"
+
+msgctxt "UI_MENU_REFLEX"
+msgid "NVIDIA Reflex"
+msgstr "NVIDIA Reflex"
+
+msgctxt "UI_MENU_REFLEX_DESC"
+msgid ""
+"Starts each frame as late as the GPU allows, so what you press reaches the screen sooner. Boost "
+"also keeps the GPU's clocks up. NVIDIA GPUs only."
+msgstr "GPUが許す限り遅いタイミングで各フレームを開始するため、押した操作が画面に早く反映されます。Boostは GPU のクロックも高く保ちます。NVIDIA GPU専用です。"
+
+msgctxt "UI_MENU_REFLEX_BOOST"
+msgid "On + Boost"
+msgstr "ON + Boost"
+
+msgctxt "UI_MENU_TEMPORAL"
+msgid "AI upscaling"
+msgstr "AIアップスケーリング"
+
+msgctxt "UI_MENU_NOT_AVAILABLE"
+msgid "Not available on this PC: the game's own picture stays."
+msgstr "このPCでは使えません：ゲーム本来の画面のままです。"
+
+msgctxt "UI_MENU_TEMPORAL_DESC"
+msgid ""
+"Renders the race at a lower resolution and rebuilds it from several frames: NVIDIA DLSS (RTX "
+"GPUs) or AMD FSR 3.1 (any GPU). Sharper and steadier edges than the game's own scaling; the HUD "
+"stays sharp."
+msgstr ""
+"レースを低い解像度で描画し、複数のフレームから再構成します。NVIDIA DLSS（RTX GPU）または AMD FSR 3.1（すべての "
+"GPU）。ゲーム自身の拡大よりも輪郭がシャープで安定し、HUDはシャープなままです。"
+
+msgctxt "UI_MENU_TEMPORAL_QUALITY"
+msgid "Upscaling quality"
+msgstr "アップスケーリングの品質"
+
+msgctxt "UI_MENU_TEMPORAL_QUALITY_DESC"
+msgid ""
+"The share of the screen's resolution the race renders at: Native (DLAA) 100 %, Quality 67 %, "
+"Balanced 58 %, Performance 50 %, Ultra performance 33 %. Applies at the next start."
+msgstr ""
+"画面の解像度に対するレースの描画解像度の割合です：ネイティブ（DLAA） 100 %、クオリティ 67 %、バランス 58 %、パフォーマンス 50 %、ウルトラパフォーマンス 33 "
+"%。次回の起動から適用されます。"
+
+msgctxt "UI_MENU_TQ_NATIVE"
+msgid "Native (DLAA)"
+msgstr "ネイティブ（DLAA）"
+
+msgctxt "UI_MENU_TQ_QUALITY"
+msgid "Quality"
+msgstr "クオリティ"
+
+msgctxt "UI_MENU_TQ_BALANCED"
+msgid "Balanced"
+msgstr "バランス"
+
+msgctxt "UI_MENU_TQ_PERFORMANCE"
+msgid "Performance"
+msgstr "パフォーマンス"
+
+msgctxt "UI_MENU_TQ_ULTRA"
+msgid "Ultra performance"
+msgstr "ウルトラパフォーマンス"
+
+msgctxt "UI_MENU_DLSS_PRESET"
+msgid "DLSS model"
+msgstr "DLSSモデル"
+
+msgctxt "UI_MENU_DLSS_PRESET_DESC"
+msgid ""
+"NVIDIA's model DLSS uses: the default of the DLSS version next to the game, or presets J, K, L, M."
+msgstr "NVIDIA DLSS が使うモデルです。ゲームの横にある DLSS バージョンの既定、またはプリセット J、K、L、M。"
+
+msgctxt "UI_MENU_DLSS_PRESET_DEFAULT"
+msgid "Default"
+msgstr "既定"
+
+msgctxt "UI_MENU_CAS"
+msgid "CAS sharpening"
+msgstr "CASシャープ化"
+
+msgctxt "UI_MENU_CAS_DESC"
+msgid ""
+"AMD's contrast adaptive sharpening of the race after DLSS or FSR 3.1, before the HUD is drawn. "
+"Needs AI upscaling on."
+msgstr "DLSS または FSR 3.1 の後、HUDを描く前に、レース映像へ AMD のコントラスト適応シャープニングをかけます。AIアップスケーリングがONのときに使えます。"
+
+msgctxt "UI_MENU_CAS_SHARPNESS"
+msgid "CAS strength"
+msgstr "CASの強さ"
+
+msgctxt "UI_MENU_CAS_SHARPNESS_DESC"
+msgid "How strongly CAS sharpens: 0 is the lightest touch, 100 the strongest."
+msgstr "CASのシャープ化の強さです。0がもっとも弱く、100がもっとも強くなります。"
 
 msgctxt "UI_MENU_GRAPHICS"
 msgid "Picture"
@@ -525,6 +678,63 @@ msgid ""
 msgstr ""
 "「自動」は、ディスプレイがHDRのとき（Windowsでは、設定 > システム > ディスプレイ > "
 "HDRを使う）、本体と同じくゲーム自体のHDR映像を表示します。明るさはシステムのHDR設定に従います。「OFF」は常に通常の映像を表示します。すぐに反映されます。"
+
+msgctxt "UI_MENU_HDR_TONEMAP"
+msgid "HDR tone mapper"
+msgstr "HDRトーンマッピング"
+
+msgctxt "UI_MENU_HDR_TONEMAP_DESC"
+msgid ""
+"How the scene's brightness is fitted to the display in HDR. Vanilla is the game's own curve, "
+"which never goes above 1.5 times paper white. PsychoV35 is RenoDX's: the same mid-tones and "
+"colour grade, with highlights that roll off smoothly up to the display's peak. Applies after a "
+"restart, as do peak and paper white changes while it is on."
+msgstr ""
+"HDR でシーンの明るさをディスプレイに合わせる方法です。Vanilla はゲーム本来のカーブで、ペーパーホワイトの 1.5 倍を超えません。PsychoV35 は RenoDX "
+"のもので、中間調と色調はそのまま、ハイライトがディスプレイのピークまで滑らかに伸びます。再起動後に反映され、有効な間はピークとペーパーホワイトの変更も同様です。"
+
+msgctxt "UI_MENU_HDR_TONEMAP_VANILLA"
+msgid "Vanilla"
+msgstr "Vanilla"
+
+msgctxt "UI_MENU_HDR_TONEMAP_PSYCHOV"
+msgid "PsychoV35"
+msgstr "PsychoV35"
+
+msgctxt "UI_MENU_HDR_TONEMAP_MISSING"
+msgid "Its programs are made by the setup. Set the game up again (an update does it) to add them."
+msgstr "必要なプログラムはセットアップで作られます。追加するにはゲームをもう一度セットアップしてください（アップデートでも行われます）。"
+
+msgctxt "UI_MENU_HDR_NEEDS_PSYCHOV"
+msgid "Only with the PsychoV35 tone mapper. Vanilla uses the display's own values, as the console."
+msgstr "PsychoV35 トーンマッピングのときのみ有効です。Vanilla ではコンソールと同じく、ディスプレイ自身の値を使います。"
+
+msgctxt "UI_MENU_HDR_PEAK"
+msgid "HDR peak brightness"
+msgstr "HDR ピーク輝度"
+
+msgctxt "UI_MENU_HDR_PEAK_DESC"
+msgid ""
+"The brightest the game draws. Automatic uses the display's peak as Windows reports it. Applies at "
+"once."
+msgstr "ゲームが描画する最大の明るさです。自動は Windows が報告するディスプレイのピークを使います。すぐに反映されます。"
+
+msgctxt "UI_MENU_HDR_WHITE"
+msgid "HDR paper white"
+msgstr "HDR ペーパーホワイト"
+
+msgctxt "UI_MENU_HDR_WHITE_DESC"
+msgid ""
+"How bright white menus and the scene's mid-tones are. Automatic uses Windows' SDR content "
+"brightness, which is often much brighter than a game wants; 203 nits is the HDR reference. Lower "
+"values leave the highlights more room. Applies at once."
+msgstr ""
+"メニューの白やシーンの中間調の明るさです。自動は Windows の SDR コンテンツの明るさを使いますが、ゲームには明るすぎることがよくあります。HDR の基準は 203 "
+"ニトです。値を下げるとハイライトの余裕が増えます。すぐに反映されます。"
+
+msgctxt "UI_MENU_HDR_NITS"
+msgid "%s nits"
+msgstr "%s ニト"
 
 msgctxt "UI_MENU_SHARPNESS"
 msgid "FSR sharpness"
@@ -614,6 +824,17 @@ msgid ""
 "the next start."
 msgstr ""
 "タイトルメニューのローカル通信がLANプレイになり、同じローカルネットワーク上の他のPCとレースできます(UDPポート49152と35000)。ローカルネットワークのアドレスにのみ接続し、インターネットには接続しません。次回の起動から反映されます。"
+
+msgctxt "UI_MENU_LAN_NET"
+msgid "LAN network"
+msgstr "LANのネットワーク"
+
+msgctxt "UI_MENU_LAN_NET_DESC"
+msgid ""
+"The network LAN play uses, for ZeroTier, N2N, Tailscale or a VPN: pick the one the other players "
+"are on. Automatic picks the best network by itself. Applies at the next start."
+msgstr ""
+"LANプレイで使うネットワークです。ZeroTier、N2N、Tailscale、VPNを使う場合は、他のプレイヤーと同じものを選びます。自動では最適なものを選びます。次回の起動から反映されます。"
 
 msgctxt "UI_MENU_VOLUME"
 msgid "Volume"
@@ -726,6 +947,16 @@ msgctxt "UI_MENU_PAD_LAYOUT_IN_USE"
 msgid "in use: %s"
 msgstr "使用中: %s"
 
+msgctxt "UI_MENU_KEYBOARD_MOUSE"
+msgid "Keyboard and mouse"
+msgstr "キーボードとマウス"
+
+msgctxt "UI_MENU_KEYBOARD_MOUSE_DESC"
+msgid ""
+"Off: the game ignores the keyboard and the mouse (controllers only) and the mouse cursor stays "
+"free. Esc still opens this menu."
+msgstr "オフ：ゲームはキーボードとマウスを無視し（コントローラーのみ）、マウスカーソルは自由になります。Escでこのメニューは開けます。"
+
 msgctxt "UI_MENU_MOUSE_SENS"
 msgid "Mouse camera sensitivity"
 msgstr "マウスのカメラ感度"
@@ -795,6 +1026,34 @@ msgstr "キーボード"
 msgctxt "UI_MENU_ICONS_IN_USE"
 msgid "in use: %s"
 msgstr "使用中: %s"
+
+msgctxt "UI_MENU_MENU_SHORTCUT"
+msgid "Menu shortcut"
+msgstr "メニューショートカット"
+
+msgctxt "UI_MENU_MENU_SHORTCUT_DESC"
+msgid ""
+"Choose which controller input opens this menu (Start + Select or the Guide button). Keyboard "
+"defaults to F1 or Esc."
+msgstr "このメニューを開くコントローラーの入力を選択します(Start + Select または Guide ボタン)。キーボードは F1 または Esc です。"
+
+msgctxt "UI_MENU_SHORTCUT_MINUS_PLUS"
+msgid "Start + Select"
+msgstr "Start + Select"
+
+msgctxt "UI_MENU_SHORTCUT_GUIDE"
+msgid "Guide button"
+msgstr "Guide ボタン"
+
+msgctxt "UI_MENU_SHORTCUT_STEAM_NOTE"
+msgid ""
+"Note: If using the Guide button, turn off 'Guide button focuses Steam' in Steam (Settings -> "
+"Controller -> Advanced Settings).\n\nOn Windows, also turn off 'Allow your controller to open "
+"Game Bar' (Settings -> Gaming -> Game Bar)."
+msgstr ""
+"注: Guide ボタンを使う場合は、Steam の 'Guide button focuses Steam'(設定 -> コントローラ -> "
+"詳細設定)をオフにしてください。\n\nWindows では 'Allow your controller to open Game Bar'(設定 -> ゲーム -> Game "
+"Bar)もオフにしてください。"
 
 msgctxt "UI_BINDS_HELP"
 msgid ""
@@ -869,10 +1128,11 @@ msgstr "プレイヤー%d: %s"
 msgctxt "UI_MENU_PAD_BATTERY_DESC"
 msgid ""
 "The battery of each player's controller, as the controller reports it. Some controllers report "
-"none. A Switch 2 controller over Bluetooth reports a voltage, shown as high, medium or low."
+"none. A Switch 2 controller over Bluetooth reports a voltage and an Xbox controller on Linux's "
+"xone driver a level, each shown as high, medium or low."
 msgstr ""
 "各プレイヤーのコントローラーの電池残量（コントローラーが報告する値）。報告しないコントローラーもあります。Bluetooth接続のSwitch "
-"2のコントローラーは電圧を報告し、高・中・低で表示します。"
+"2のコントローラーは電圧を、LinuxのxoneドライバーのXboxコントローラーはレベルを報告し、高・中・低で表示します。"
 
 msgctxt "UI_MENU_PADS_NONE"
 msgid "No controller connected"
@@ -2261,6 +2521,23 @@ msgctxt "UI_GB_ERROR"
 msgid "GameBanana did not answer: %s"
 msgstr "GameBananaから応答がありませんでした: %s"
 
+#. %s: the content ratings GameBanana marks the mod with (e.g. Sexual Themes).
+msgctxt "UI_GB_RATED"
+msgid "Content rating: %s"
+msgstr "コンテンツレーティング: %s"
+
+msgctxt "UI_GB_MATURE"
+msgid "NSFW mods"
+msgstr "NSFW MOD"
+
+msgctxt "UI_GB_MATURE_OBFUSCATE"
+msgid "Obfuscate"
+msgstr "ぼかす"
+
+msgctxt "UI_GB_MATURE_SHOW"
+msgid "Show"
+msgstr "表示"
+
 #. Under an installed mod that replaces the game's graphics settings archive (general_format).
 msgctxt "UI_MOD_WARN_GRAPHICS"
 msgid ""
@@ -2283,6 +2560,22 @@ msgid "I understand"
 msgstr "理解しました"
 
 #. Under a mod that changes the game's code (its .ips): the game code is built with it.
+msgctxt "UI_MOD_PLUGIN"
+msgid ""
+"Native plugin: runs its own program on your computer alongside the game. Enable it only if you "
+"trust where it comes from"
+msgstr "ネイティブプラグイン：ゲームと一緒にあなたのコンピューターで独自のプログラムを実行します。入手元を信頼できる場合のみ有効にしてください"
+
+#. A mod's button beside Delete: opens the options page its plugin draws (runtime/ui/launcher/mod_page.cpp).
+msgctxt "UI_MOD_OPTIONS"
+msgid "Options"
+msgstr "オプション"
+
+#. The options page of a mod whose plugin has none for this system.
+msgctxt "UI_MOD_NO_OPTIONS"
+msgid "This mod has no options"
+msgstr "このModにはオプションがありません"
+
 msgctxt "UI_MOD_CODE_REBUILD"
 msgid "code: turning it on or off builds the game code again before you play (a few minutes)"
 msgstr "コード: オン/オフを切り替えると、プレイ前にゲームのコードを再ビルドします（数分）"
@@ -2325,6 +2618,22 @@ msgstr "%s · %d MB をダウンロードします"
 msgctxt "UI_LAUNCH_UPDATE_NOW"
 msgid "Update"
 msgstr "更新する"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARING"
+msgid "Setting up %s in the background. You can keep playing meanwhile."
+msgstr "%s をバックグラウンドで準備しています。その間もプレイを続けられます。"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARED"
+msgid "%s is ready"
+msgstr "%s の準備ができました"
+
+msgctxt "UI_LAUNCH_UPDATE_RESTART"
+msgid "Restart with it"
+msgstr "このバージョンで再起動"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARE_FAILED"
+msgid "It could not be set up in advance (%s): it will be set up when it starts."
+msgstr "事前に準備できませんでした（%s）。起動時に準備されます。"
 
 #. Opens the release's notes on GitHub.
 msgctxt "UI_LAUNCH_WHATS_NEW"
@@ -2516,6 +2825,18 @@ msgctxt "UI_TOOLS_STEAM_RESTART"
 msgid "Added: restart Steam to see it"
 msgstr "追加しました。Steam を再起動すると表示されます"
 
+#. After Add to Steam, when only some profiles could be updated.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL"
+msgid "Updated %d of %d Steam profiles"
+msgstr "Steam プロフィールを %d/%d 件更新しました"
+
+#. After Add to Steam, when only some profiles could be updated and Steam is running.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL_RESTART"
+msgid "Updated %d of %d Steam profiles. Restart Steam to see the shortcut."
+msgstr "Steam プロフィールを %d/%d 件更新しました。ショートカットを表示するには Steam を再起動してください。"
+
 #. Why Add to Steam failed.
 msgctxt "UI_TOOLS_STEAM_NONE"
 msgid "Steam is not installed for this user"
@@ -2541,6 +2862,11 @@ msgstr "今すぐ確認"
 msgctxt "UI_TOOLS_CHECKING"
 msgid "Checking for a new version..."
 msgstr "新しいバージョンを確認中..."
+
+#. The manual update check found no newer version.
+msgctxt "UI_TOOLS_UPDATE_CURRENT"
+msgid "You're up to date."
+msgstr "最新の状態です。"
 
 #. Tools page row: %s is the version before the last update.
 #. printf format: keep every %... conversion, in the same order.
@@ -3087,3 +3413,55 @@ msgstr ""
 msgctxt "UI_LAUNCH_FOUND_FOLDER"
 msgid "folder"
 msgstr ""
+
+msgctxt "UI_LAUNCH_GPU_NONE"
+msgid "No graphics card here can run the game"
+msgstr "このPCのグラフィックカードではゲームを実行できません"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_OLD"
+msgid "%s: its driver offers %s, and the game needs Vulkan 1.3"
+msgstr "%s: ドライバーが提供するのは %s で、ゲームには Vulkan 1.3 が必要です"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_EXT"
+msgid "%s (%s): its driver lacks %s, which the game needs"
+msgstr "%s (%s): ドライバーに、ゲームに必要な %s がありません"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_QUEUE"
+msgid "%s: it has no queue that does both graphics and compute"
+msgstr "%s: グラフィックスと計算を同時に行えるキューがありません"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SKIPPED"
+msgid "%s: not the one chosen in Settings, Screen, Graphics card"
+msgstr "%s: 設定 > 画面 > グラフィックカード で選ばれたものではありません"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SOFTWARE"
+msgid "%s draws on the processor, not on a graphics card: far too slow to play"
+msgstr "%s はグラフィックカードではなくプロセッサで描画します。遅すぎてプレイできません"
+
+msgctxt "UI_LAUNCH_GPU_NO_DRIVER"
+msgid "No Vulkan driver was found."
+msgstr "Vulkan ドライバーが見つかりませんでした。"
+
+msgctxt "UI_LAUNCH_GPU_HELP"
+msgid ""
+"The game needs Vulkan 1.3. On AMD and Intel that is Mesa 22.0 or newer, newer than Debian 11 and "
+"Ubuntu 20.04 ship; on NVIDIA, its driver 510 or newer. Some older graphics cards cannot have it "
+"at all. The setup can run now: the game starts once the driver is updated."
+msgstr ""
+"ゲームには Vulkan 1.3 が必要です。AMD と Intel では Mesa 22.0 以降で、Debian 11 や Ubuntu 20.04 "
+"に含まれるものより新しいものです。NVIDIA ではドライバー 510 "
+"以降です。古いグラフィックカードの中には対応できないものもあります。準備は今すぐ進められます。ドライバーを更新すればゲームが起動します。"
+
+msgctxt "UI_LAUNCH_GPU_HELP_WIN"
+msgid ""
+"The game needs Vulkan 1.3: install the latest driver from your graphics card's maker (AMD, Intel "
+"or NVIDIA; on NVIDIA, 510 or newer). Some older graphics cards cannot have it at all. The setup "
+"can run now: the game starts once the driver is updated."
+msgstr ""
+"ゲームには Vulkan 1.3 が必要です。グラフィックカードのメーカー (AMD、Intel、NVIDIA) の最新ドライバーをインストールしてください (NVIDIA は 510 "
+"以降)。古いグラフィックカードの中には対応できないものもあります。準備は今すぐ進められます。ドライバーを更新すればゲームが起動します。"

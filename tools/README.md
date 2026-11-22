@@ -10,6 +10,7 @@ default, or `MKW_GAME=<dir>`, with `exefs/` and `romfs/` inside) and write to `b
 | [cpu/](cpu/README.md) | Lifter coverage over the NSOs |
 | [docs/](docs/README.md) | Docs checks at every commit and the README's generated progress bars |
 | [ext/](ext/README.md) | Example extensions for `runtime/core/ext` (`hello`: the smallest one, and the hook's test) |
+| [ffx/](ffx/README.md) | Production StillTie game-field SPIR-V build and optional diagnostic FSR 3.1.6 provider |
 | [git/](git/README.md) | Pre-commit hook that keeps generated code and game files out of the repo |
 | [i18n/](i18n/README.md) | The menu's text catalogs: from `i18n/ui/*.po` to the C the runtime compiles |
 | [github/](github/README.md) | Issue moderation: release and GPU labels, missing logs, known errors, replies that close |
@@ -18,6 +19,7 @@ default, or `MKW_GAME=<dir>`, with `exefs/` and `romfs/` inside) and write to `b
 | [romfs/](romfs/README.md) | RomFS overlays: the game's internal resolutions |
 | [prepare/](prepare/README.md) | Builds the game on the player's machine from their copy (started by the start screen) |
 | [mod/](mod/README.md) | Mod import for the start screen's Mods page (started by it the same way) |
+| [plugin/](plugin/README.md) | The native plugin API's test and its example plugin |
 | [ps5/](ps5/README.md) | Mario Kart World: Pit Stop (`PPSA99193`), the game-free PS5 Vulkan smoke title (`PPSA99192`), console deployment and PS5 release packaging |
 | [run/](run/README.md) | Game runs (live with a control channel, to the race, under perf) and diagnostics: stacks, memory |
 | [test/](test/README.md) | Runtime tests without the game: frame captures replayed serially and in chunks |

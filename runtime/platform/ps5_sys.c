@@ -612,3 +612,32 @@ void plat_fs_busy_reason(const char *dir, char *out, size_t cap) {
     (void)dir;
     if (cap) out[0] = 0;
 }
+
+// ---- the platform calls upstream's 22/11/2026 merge brought (memory census, spill, shader pack, VRAM and heap lines)
+
+// Last write time in ns (as linux_fs.c): spirv/shaders.pack against its folder (gfx_shader_pack.c).
+uint64_t plat_path_write_time(const char *path) {
+    char buf[PLAT_PATH_MAX];
+    const char *p = posix_path(path, buf);
+    struct stat st;
+    return !p || stat(p, &st) ? 0 : (uint64_t)st.st_mtim.tv_sec * 1000000000u + (uint64_t)st.st_mtim.tv_nsec;
+}
+
+// MKW_MEM_SPILL (core/memory/memory_spill.c) is a Linux feature: the console's memory is direct memory, given back by
+// ps5_guest_memory.c's own decommit and MKW_PACK, not by dropping pages to a file. Without a scratch file and a drop,
+// the spill stays off.
+PlatFile *plat_file_scratch(const char *dir) { (void)dir; return NULL; }
+int plat_mem_drop(uint64_t addr, uint64_t n) { (void)addr, (void)n; return 0; }
+
+// No /proc/self/smaps or mincore here: the census labels are a no-op and residency is unknown (-1).
+void plat_mem_name(const void *p, size_t n, const char *name) { (void)p, (void)n, (void)name; }
+int64_t plat_mem_resident(const void *p, size_t n) { (void)p, (void)n; return -1; }
+
+// Windows-only figures: CET shadow stacks, the OS's per-process VRAM count. The C heap's figures are not reported.
+int plat_shadow_stack(void) { return -1; }
+uint64_t plat_gpu_process_vram_mib(void) { return 0; }
+void plat_heap_stats(uint64_t *in_use, uint64_t *free_bytes, uint64_t *mapped) {
+    if (in_use) *in_use = 0;
+    if (free_bytes) *free_bytes = 0;
+    if (mapped) *mapped = 0;
+}

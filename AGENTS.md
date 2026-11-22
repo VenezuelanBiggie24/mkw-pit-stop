@@ -69,4 +69,7 @@ A game run takes minutes; most changes can be checked in seconds:
 - A change that adds, moves or removes a file updates its folder's README in the same commit;
   `uv run tools/docs/check.py` checks it.
 - Settings the player sees need a row in `runtime/core/base/cfg.c` (`tools/git/cfg_rows.py` checks it).
+- Validate input where it enters (env vars, files): a bad value warns and falls back to the default, never changes
+  meaning silently; size buffers from the longest accepted input; an optional step warns instead of aborting the run.
+- Before pushing: `ruff check`, a warning-free build and `uv run tools/docs/check.py`.
 - Conventional Commits in English. Say in the pull request that the change was AI-assisted and what was tested.

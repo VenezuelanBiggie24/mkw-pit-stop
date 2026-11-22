@@ -28,7 +28,7 @@ No começo, e avançando rápido. Em 18/11/2026, num PS5 padrão:
   **Pit Stop**, um menu de configurações feito para o controle, com linhas rápidas (**Master volume**,
   **Vibration strength**, **Performance HUD**), todas as categorias de configurações e remapeamento dos botões do
   DualSense em tempo real, salvo em `/app0/mkw.ini`.
-- **Problemas conhecidos ([docs/project/roadmap.md](docs/project/roadmap.md)):**
+- **Problemas conhecidos ([docs/ps5/roadmap.md](docs/ps5/roadmap.md)):**
   - *Sessões longas:* a memória livre cai corrida após corrida porque o jogo guarda dados de pistas anteriores; quando
     fica baixa, as texturas podem sair corrompidas ou faltar. Reinicie o título depois de algumas corridas se isso
     acontecer.
@@ -219,7 +219,7 @@ registro de desempenho do runtime ligado (`MKW_TRACE=perf`, que custa um pouco),
 contrarrelógio, tela dividida, sessões longas e outras pistas ainda não foram jogados com o novo padrão.
 
 Cerca de 2% dos quadros de corrida levam mais de 20 ms: é onde uma pista carrega texturas novas, e eles definem o 1% mais
-baixo e a leve câmera lenta. O que foi medido e o que falta está em [docs/project/roadmap.md](docs/project/roadmap.md) e
+baixo e a leve câmera lenta. O que foi medido e o que falta está em [docs/ps5/roadmap.md](docs/ps5/roadmap.md) e
 [docs/ps5/ps5.md](docs/ps5/ps5.md#frame-rate); os números de PC, em [docs/project/performance.md](docs/project/performance.md).
 
 ## Relatar erros

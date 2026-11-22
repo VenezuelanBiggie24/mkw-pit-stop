@@ -30,9 +30,13 @@
 #include "input_wsys.h"
 #include "switch2.h"
 #include "nvn_api.h"
+#include "plugin.h"
 #include "ui/menu/menu.h"
 #include "vk.h"
 #include "platform/platform.h"
+#ifdef __linux__
+#include "linux_power.h"
+#endif
 
 enum { STICK_MAX = 32767, STICK_DIR = 16384, TRIGGER_ON = 16384, RESCAN_MS = 1000 };
 
@@ -119,6 +123,17 @@ static float mouse_sens_get(void) {
     return mouse_sens;
 }
 
+
+static int kbm_on = -1;   // MKW_KEYBOARD_MOUSE, 0 = the keyboard and the mouse give the game no input (#663); live
+static unsigned kbm_seen;
+
+static int kbm_get(void) {
+    unsigned ver = cfg_version();
+    if (kbm_on >= 0 && ver == kbm_seen) return kbm_on;
+    kbm_seen = ver;
+    kbm_on = cfg_int("MKW_KEYBOARD_MOUSE") != 0;
+    return kbm_on;
+}
 
 // The mouse camera as a right-stick sample, held for the whole presented frame. Under `lock`.
 static void mouse_camera(int32_t out[2]) {
@@ -234,9 +249,11 @@ static void scan_pads(void) {
     input_wheel_map();
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
+    const char *p2_cfg = cfg_get("MKW_PAD_P2");
+    int pad_p2 = p2_cfg && atoi(p2_cfg) > 0;
     for (int i = 0; ids && i < n; i++) {
         if (pad_is_open(ids[i])) continue;
-        int p = keyboard_own;
+        int p = keyboard_own || pad_p2;   // MKW_KEYBOARD_PLAYER=own or pad_p2: the first gamepad is player 2
         while (p < INPUT_MAX_PLAYERS && (p ? extra[p] != NULL : pad != NULL)) p++;
         if (p == INPUT_MAX_PLAYERS) break;
         SDL_Gamepad *g = SDL_OpenGamepad(ids[i]);
@@ -401,6 +418,15 @@ static void pads_update(void) {
     SDL_UpdateGamepads();
 }
 
+// A gamepad arrived or left: open the new ones, close the gone, as the periodic rescan does. The start screen calls
+// this from its SDL event loop (it reads its own gamepads for its main page and never polls here); a no-op unless
+// the gamepads are running, so hotplug alone never starts the input, its power thread and the Switch 2 handling.
+void input_hotplug(void) {
+    plat_mutex_lock(&lock);
+    if (state == 1) scan_pads();
+    plat_mutex_unlock(&lock);
+}
+
 // A gamepad's inputs by position (pd[PAD_*] != 0 held).
 static void gamepad_physical(SDL_Gamepad *g, uint8_t pd[PAD_COUNT]) {
     for (int p = PAD_SOUTH; p < PAD_ZL; p++) pd[p] = SDL_GetGamepadButton(g, pad_sdl[p]);
@@ -518,7 +544,7 @@ static int poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx,
         }
         uint64_t kb = 0;
         int keyboard_stick = 0;
-        if (ikb_foreground()) {
+        if (ikb_foreground() && kbm_get()) {
             uint8_t down[KEY_COUNT] = {0};
             // Mouse buttons count only while the cursor is captured, and a button already held when the capture began
             // (the click that refocused the window) is ignored until it is released.
@@ -557,6 +583,20 @@ static int poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx,
     script_apply(&b, sl, sr, 0);
     skip_input(&b);
     rec_apply(b, sl, sr);
+    // A plugin's filter first (MkwPluginApi.input_filter): what it takes reaches neither the Guide shortcut nor the game.
+    // Pit Stop's chords (Start+Back, the Minus+Plus keys) were read above from the physical pad, before any filter.
+    int32_t st[4] = {sl[0], sl[1], sr[0], sr[1]};
+#ifndef MKW_PS5_NATIVE
+    int guide = state == 1 && pad && SDL_GamepadConnected(pad) && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_GUIDE);
+#else
+    int guide = 0;   // the PS button belongs to the system
+#endif
+    plugins_input_filter(0, &b, st, &guide);
+    sl[0] = st[0], sl[1] = st[1], sr[0] = st[2], sr[1] = st[3];
+    // MKW_MENU_SHORTCUT=guide: a press of the Guide button opens or closes the menu too (upstream d090cd4)
+    static int guide_held;
+    if (guide && !guide_held && !strcmp(cfg_value("MKW_MENU_SHORTCUT"), "guide")) toggle = 1;
+    guide_held = guide;
     if (toggle || menu_is_open()) {
         b = 0;
         sl[0] = sl[1] = sr[0] = sr[1] = 0;
@@ -579,7 +619,7 @@ static volatile int32_t g_block;
 
 int input_cursor_allowed(void) {
     const char *in = cfg_get("MKW_INPUT");
-    return g_block != 1 && g_menu != 1 && mouse_sens_get() > 0 && !(in && !strcmp(in, "none"));
+    return g_block != 1 && g_menu != 1 && mouse_sens_get() > 0 && kbm_get() && !(in && !strcmp(in, "none"));
 }
 
 void input_block(int on) {
@@ -611,6 +651,18 @@ void input_poll(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_
 
 void input_poll_ui(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     poll_merged(buttons, lx, ly, rx, ry);
+#ifndef MKW_PS5_NATIVE
+    // MKW_PAD_P2=1: the first gamepad is player 2's (pads_update), and it drives the menus too
+    const char *p2_cfg = cfg_get("MKW_PAD_P2");
+    if (p2_cfg && atoi(p2_cfg) > 0 && extra[1] && SDL_GamepadConnected(extra[1])) {
+        uint8_t pd2[PAD_COUNT] = {0};
+        int32_t sl2[2] = {0, 0}, sr2[2] = {0, 0};
+        gamepad_read(extra[1], pd2, sl2, sr2);
+        *buttons |= input_map_pad_buttons(pd2, pad_layout_get());
+        pick(lx, ly, sl2[0], sl2[1]);
+        pick(rx, ry, sr2[0], sr2[1]);
+    }
+#endif
 }
 
 uint32_t input_player_mask(void) {
@@ -672,6 +724,9 @@ void input_poll_player(int player, uint64_t *buttons, int32_t *lx, int32_t *ly, 
     }
     plat_mutex_unlock(&lock);
     script_apply(&b, sl, sr, player);
+    int32_t st[4] = {sl[0], sl[1], sr[0], sr[1]};
+    plugins_input_filter(player, &b, st, NULL);
+    sl[0] = st[0], sl[1] = st[1], sr[0] = st[2], sr[1] = st[3];
     stick_bits(&b, sl[0], sl[1], B_SL_LEFT);
     stick_bits(&b, sr[0], sr[1], B_SR_LEFT);
     if (g_block || g_menu) b = 0, sl[0] = sl[1] = sr[0] = sr[1] = 0;
@@ -789,6 +844,22 @@ int input_pad_power_sdl(int player, char *name, size_t name_size, uint32_t *id, 
 int input_pad_power_sdl(int player, char *name, size_t name_size, uint32_t *id, int *percent) {
     (void)player, (void)name, (void)name_size, (void)id, (void)percent;
     return -2;
+}
+#endif
+
+#ifdef __linux__
+// The player's order among Xbox-named gamepads (linux_power.c reads the Nth Xbox sysfs supply for it, so pads of
+// other makes in earlier slots must not shift the index). Under `lock`, like every SDL gamepad call.
+int input_pad_xbox_index(int player) {
+    int n = 0;
+    plat_mutex_lock(&lock);
+    if (state == 1)
+        for (int q = 0; q < player && q < INPUT_MAX_PLAYERS; q++) {
+            SDL_Gamepad *g = q ? extra[q] : pad;
+            if (g && SDL_GamepadConnected(g) && linux_power_is_xbox(SDL_GetGamepadName(g))) n++;
+        }
+    plat_mutex_unlock(&lock);
+    return n;
 }
 #endif
 

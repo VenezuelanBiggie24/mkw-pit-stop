@@ -8,6 +8,21 @@ msgctxt "UI_SWKBD_DEFAULT_NAME"
 msgid "Player"
 msgstr "Oyuncu"
 
+#. The on-screen number pad the game opens to ask for a number: its confirm key (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_OK"
+msgid "OK"
+msgstr "Tamam"
+
+#. The on-screen number pad: the wide button under the keys that closes it without a number
+msgctxt "UI_KEYPAD_CANCEL"
+msgid "Cancel"
+msgstr "İptal"
+
+#. The on-screen number pad: the key that erases the last digit (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_DELETE"
+msgid "Delete"
+msgstr "Sil"
+
 msgctxt "UI_MENU_TITLE"
 msgid "Settings"
 msgstr "Ayarlar"
@@ -368,6 +383,27 @@ msgctxt "UI_MENU_ASPECT_WINDOW"
 msgid "Window"
 msgstr "Pencere"
 
+msgctxt "UI_MENU_HUD_POSITION"
+msgid "HUD position"
+msgstr "HUD konumu"
+
+msgctxt "UI_MENU_HUD_POSITION_DESC"
+msgid ""
+"On a picture wider or taller than 16:9, keep the race HUD in the middle 16:9 area (the console's "
+"place) or put it at the screen's edges and corners. Takes effect at the next start."
+msgstr ""
+"16:9'dan daha geniş ya da daha yüksek bir görüntüde yarış HUD'unu ortadaki 16:9 alanında "
+"(konsoldaki yerinde) tutar ya da ekranın kenarlarına ve köşelerine taşır. Bir sonraki başlatmada "
+"geçerli olur."
+
+msgctxt "UI_MENU_HUD_POSITION_16X9"
+msgid "16:9 area"
+msgstr "16:9 alanı"
+
+msgctxt "UI_MENU_HUD_POSITION_EDGES"
+msgid "Screen edges"
+msgstr "Ekran kenarları"
+
 msgctxt "UI_MENU_PRESENT"
 msgid "Presentation"
 msgstr "Sunum"
@@ -459,6 +495,20 @@ msgctxt "UI_MENU_FPS_AUTO"
 msgid "Automatic"
 msgstr "Otomatik"
 
+msgctxt "UI_MENU_LOGIC_HZ"
+msgid "Logic rate"
+msgstr "Mantık hızı"
+
+msgctxt "UI_MENU_LOGIC_HZ_DESC"
+msgid ""
+"How many times a second the game updates karts, physics and timers. 60 is the console's rate; "
+"120, 144 or 240 make movement smoother on a high refresh rate screen but need a faster PC. Time "
+"trials and LAN games always run at 60."
+msgstr ""
+"Oyunun kartları, fiziği ve zamanlayıcıları saniyede kaç kez güncellediği. 60 konsolunkidir; 120, "
+"144 veya 240 yüksek yenileme hızlı bir ekranda hareketi daha akıcı yapar ama daha hızlı bir PC "
+"ister. Zamana karşı ve LAN oyunları her zaman 60'ta çalışır."
+
 msgctxt "UI_MENU_FRAMEGEN"
 msgid "Frame generation"
 msgstr "Kare üretimi"
@@ -505,6 +555,121 @@ msgstr ""
 "Her kareyi bilgisayarınızın izin verdiği kadar geç başlatır, böylece bastığınız tuş görüntüye "
 "daha erken yansır. En çok 20 veya 15 fps'te ve Kare üretimiyle fark yaratır. Görüntü takılıyorsa "
 "kapatın."
+
+msgctxt "UI_MENU_FG_ENGINE"
+msgid "Frame generation by"
+msgstr "Kare üretimini yapan"
+
+msgctxt "UI_MENU_FG_ENGINE_DESC"
+msgid ""
+"Who makes the frames between the game's own. The port's own works everywhere. NVIDIA DLSS Frame "
+"Generation (RTX 40 and 50) and AMD FSR 3.1 use the scene's depth and motion and need DLSS or FSR "
+"3.1 upscaling on."
+msgstr ""
+"Oyunun kareleri arasındaki kareleri kimin ürettiği. Portun kendi üretimi her yerde çalışır. "
+"NVIDIA DLSS Frame Generation (RTX 40 ve 50) ve AMD FSR 3.1 sahnenin derinliğini ve hareketini "
+"kullanır ve DLSS veya FSR 3.1 yapay zekâ ölçeklemesinin açık olmasını gerektirir."
+
+msgctxt "UI_MENU_REFLEX"
+msgid "NVIDIA Reflex"
+msgstr "NVIDIA Reflex"
+
+msgctxt "UI_MENU_REFLEX_DESC"
+msgid ""
+"Starts each frame as late as the GPU allows, so what you press reaches the screen sooner. Boost "
+"also keeps the GPU's clocks up. NVIDIA GPUs only."
+msgstr ""
+"Her kareyi GPU'nun izin verdiği kadar geç başlatır, böylece bastığınız tuş görüntüye daha erken "
+"yansır. Boost ayrıca GPU saat hızlarını yüksek tutar. Yalnızca NVIDIA GPU'lar."
+
+msgctxt "UI_MENU_REFLEX_BOOST"
+msgid "On + Boost"
+msgstr "Açık + Boost"
+
+msgctxt "UI_MENU_TEMPORAL"
+msgid "AI upscaling"
+msgstr "Yapay zekâ ölçekleme"
+
+msgctxt "UI_MENU_NOT_AVAILABLE"
+msgid "Not available on this PC: the game's own picture stays."
+msgstr "Bu bilgisayarda kullanılamaz: oyunun kendi görüntüsü korunur."
+
+msgctxt "UI_MENU_TEMPORAL_DESC"
+msgid ""
+"Renders the race at a lower resolution and rebuilds it from several frames: NVIDIA DLSS (RTX "
+"GPUs) or AMD FSR 3.1 (any GPU). Sharper and steadier edges than the game's own scaling; the HUD "
+"stays sharp."
+msgstr ""
+"Yarışı daha düşük çözünürlükte işler ve birkaç kareden yeniden oluşturur: NVIDIA DLSS (RTX "
+"GPU'lar) veya AMD FSR 3.1 (her GPU). Oyunun kendi ölçeklemesinden daha keskin ve daha sabit "
+"kenarlar; HUD keskin kalır."
+
+msgctxt "UI_MENU_TEMPORAL_QUALITY"
+msgid "Upscaling quality"
+msgstr "Ölçekleme kalitesi"
+
+msgctxt "UI_MENU_TEMPORAL_QUALITY_DESC"
+msgid ""
+"The share of the screen's resolution the race renders at: Native (DLAA) 100 %, Quality 67 %, "
+"Balanced 58 %, Performance 50 %, Ultra performance 33 %. Applies at the next start."
+msgstr ""
+"Yarışın işlendiği ekran çözünürlüğü oranı: Yerel (DLAA) %100, Kalite %67, Dengeli %58, Performans "
+"%50, Ultra performans %33. Bir sonraki başlatmada uygulanır."
+
+msgctxt "UI_MENU_TQ_NATIVE"
+msgid "Native (DLAA)"
+msgstr "Yerel (DLAA)"
+
+msgctxt "UI_MENU_TQ_QUALITY"
+msgid "Quality"
+msgstr "Kalite"
+
+msgctxt "UI_MENU_TQ_BALANCED"
+msgid "Balanced"
+msgstr "Dengeli"
+
+msgctxt "UI_MENU_TQ_PERFORMANCE"
+msgid "Performance"
+msgstr "Performans"
+
+msgctxt "UI_MENU_TQ_ULTRA"
+msgid "Ultra performance"
+msgstr "Ultra performans"
+
+msgctxt "UI_MENU_DLSS_PRESET"
+msgid "DLSS model"
+msgstr "DLSS modeli"
+
+msgctxt "UI_MENU_DLSS_PRESET_DESC"
+msgid ""
+"NVIDIA's model DLSS uses: the default of the DLSS version next to the game, or presets J, K, L, M."
+msgstr ""
+"NVIDIA DLSS'in kullandığı model: oyunun yanındaki DLSS sürümünün varsayılanı ya da J, K, L, M ön "
+"ayarları."
+
+msgctxt "UI_MENU_DLSS_PRESET_DEFAULT"
+msgid "Default"
+msgstr "Varsayılan"
+
+msgctxt "UI_MENU_CAS"
+msgid "CAS sharpening"
+msgstr "CAS keskinleştirme"
+
+msgctxt "UI_MENU_CAS_DESC"
+msgid ""
+"AMD's contrast adaptive sharpening of the race after DLSS or FSR 3.1, before the HUD is drawn. "
+"Needs AI upscaling on."
+msgstr ""
+"AMD'nin kontrasta uyarlanan keskinleştirmesi; DLSS veya FSR 3.1'den sonra, HUD çizilmeden önce "
+"yarışa uygulanır. Yapay zekâ ölçeklemesinin açık olmasını gerektirir."
+
+msgctxt "UI_MENU_CAS_SHARPNESS"
+msgid "CAS strength"
+msgstr "CAS gücü"
+
+msgctxt "UI_MENU_CAS_SHARPNESS_DESC"
+msgid "How strongly CAS sharpens: 0 is the lightest touch, 100 the strongest."
+msgstr "CAS'ın ne kadar keskinleştirdiği: 0 en hafif, 100 en güçlü."
 
 msgctxt "UI_MENU_GRAPHICS"
 msgid "Picture"
@@ -563,6 +728,70 @@ msgstr ""
 "Otomatik, ekran HDR'deyken (Windows'ta Ayarlar > Ekran > HDR kullan) oyunun kendi HDR görüntüsünü "
 "gösterir, konsol gibi; parlaklığı sistemin HDR ayarlarını izler. Kapalı her zaman standart "
 "görüntüyü gösterir. Hemen uygulanır."
+
+msgctxt "UI_MENU_HDR_TONEMAP"
+msgid "HDR tone mapper"
+msgstr "HDR ton eşleme"
+
+msgctxt "UI_MENU_HDR_TONEMAP_DESC"
+msgid ""
+"How the scene's brightness is fitted to the display in HDR. Vanilla is the game's own curve, "
+"which never goes above 1.5 times paper white. PsychoV35 is RenoDX's: the same mid-tones and "
+"colour grade, with highlights that roll off smoothly up to the display's peak. Applies after a "
+"restart, as do peak and paper white changes while it is on."
+msgstr ""
+"HDR'de sahnenin parlaklığının ekrana nasıl uyarlandığı. Vanilla, oyunun kendi eğrisidir ve kağıt "
+"beyazının 1,5 katını asla geçmez. PsychoV35, RenoDX'indir: aynı orta tonlar ve renk "
+"derecelendirmesi, ekranın tepe parlaklığına kadar yumuşakça açılan vurgularla. Yeniden başlatınca "
+"geçerli olur; açıkken tepe parlaklığı ve kağıt beyazı değişiklikleri de öyle."
+
+msgctxt "UI_MENU_HDR_TONEMAP_VANILLA"
+msgid "Vanilla"
+msgstr "Vanilla"
+
+msgctxt "UI_MENU_HDR_TONEMAP_PSYCHOV"
+msgid "PsychoV35"
+msgstr "PsychoV35"
+
+msgctxt "UI_MENU_HDR_TONEMAP_MISSING"
+msgid "Its programs are made by the setup. Set the game up again (an update does it) to add them."
+msgstr ""
+"Programlarını kurulum oluşturur. Eklemek için oyunu yeniden kurun (bir güncelleme bunu yapar)."
+
+msgctxt "UI_MENU_HDR_NEEDS_PSYCHOV"
+msgid "Only with the PsychoV35 tone mapper. Vanilla uses the display's own values, as the console."
+msgstr ""
+"Yalnızca PsychoV35 ton eşleme ile. Vanilla, konsoldaki gibi ekranın kendi değerlerini kullanır."
+
+msgctxt "UI_MENU_HDR_PEAK"
+msgid "HDR peak brightness"
+msgstr "HDR tepe parlaklığı"
+
+msgctxt "UI_MENU_HDR_PEAK_DESC"
+msgid ""
+"The brightest the game draws. Automatic uses the display's peak as Windows reports it. Applies at "
+"once."
+msgstr ""
+"Oyunun çizdiği en parlak değer. Otomatik, Windows'un bildirdiği ekran tepe parlaklığını kullanır. "
+"Hemen uygulanır."
+
+msgctxt "UI_MENU_HDR_WHITE"
+msgid "HDR paper white"
+msgstr "HDR kağıt beyazı"
+
+msgctxt "UI_MENU_HDR_WHITE_DESC"
+msgid ""
+"How bright white menus and the scene's mid-tones are. Automatic uses Windows' SDR content "
+"brightness, which is often much brighter than a game wants; 203 nits is the HDR reference. Lower "
+"values leave the highlights more room. Applies at once."
+msgstr ""
+"Menülerin beyazının ve sahnenin orta tonlarının parlaklığı. Otomatik, Windows'un SDR içerik "
+"parlaklığını kullanır; bu çoğu zaman bir oyunun istediğinden çok daha yüksektir; 203 nit HDR "
+"referansıdır. Düşük değerler vurgulara daha çok yer bırakır. Hemen uygulanır."
+
+msgctxt "UI_MENU_HDR_NITS"
+msgid "%s nits"
+msgstr "%s nit"
 
 msgctxt "UI_MENU_SHARPNESS"
 msgid "FSR sharpness"
@@ -658,6 +887,18 @@ msgstr ""
 "Başlık menüsündeki Kablosuz Oyun, aynı yerel ağdaki diğer PC'lerle yarışmak için LAN oyununa "
 "dönüşür (UDP bağlantı noktaları 49152 ve 35000). Yalnızca yerel ağ adreslerine ulaşır, asla "
 "internete değil. Bir sonraki başlatmada uygulanır."
+
+msgctxt "UI_MENU_LAN_NET"
+msgid "LAN network"
+msgstr "LAN ağı"
+
+msgctxt "UI_MENU_LAN_NET_DESC"
+msgid ""
+"The network LAN play uses, for ZeroTier, N2N, Tailscale or a VPN: pick the one the other players "
+"are on. Automatic picks the best network by itself. Applies at the next start."
+msgstr ""
+"LAN oyununun kullandığı ağ; ZeroTier, N2N, Tailscale veya VPN için diğer oyuncuların ağını seçin. "
+"Otomatik en iyisini seçer. Bir sonraki başlatmada geçerli olur."
 
 msgctxt "UI_MENU_VOLUME"
 msgid "Volume"
@@ -774,6 +1015,18 @@ msgctxt "UI_MENU_PAD_LAYOUT_IN_USE"
 msgid "in use: %s"
 msgstr "kullanımda: %s"
 
+msgctxt "UI_MENU_KEYBOARD_MOUSE"
+msgid "Keyboard and mouse"
+msgstr "Klavye ve fare"
+
+msgctxt "UI_MENU_KEYBOARD_MOUSE_DESC"
+msgid ""
+"Off: the game ignores the keyboard and the mouse (controllers only) and the mouse cursor stays "
+"free. Esc still opens this menu."
+msgstr ""
+"Kapalı: oyun klavyeyi ve fareyi yok sayar (yalnızca kontrolcüler) ve fare imleci serbest kalır. "
+"Esc bu menüyü yine açar."
+
 msgctxt "UI_MENU_MOUSE_SENS"
 msgid "Mouse camera sensitivity"
 msgstr "Fare kamera hassasiyeti"
@@ -849,6 +1102,36 @@ msgstr "Klavye"
 msgctxt "UI_MENU_ICONS_IN_USE"
 msgid "in use: %s"
 msgstr "kullanımda: %s"
+
+msgctxt "UI_MENU_MENU_SHORTCUT"
+msgid "Menu shortcut"
+msgstr "Menü kısayolu"
+
+msgctxt "UI_MENU_MENU_SHORTCUT_DESC"
+msgid ""
+"Choose which controller input opens this menu (Start + Select or the Guide button). Keyboard "
+"defaults to F1 or Esc."
+msgstr ""
+"Bu menüyü açacak kontrolcü girdisini seçin (Start + Select veya Guide düğmesi). Klavye varsayılan "
+"olarak F1 veya Esc kullanır."
+
+msgctxt "UI_MENU_SHORTCUT_MINUS_PLUS"
+msgid "Start + Select"
+msgstr "Start + Select"
+
+msgctxt "UI_MENU_SHORTCUT_GUIDE"
+msgid "Guide button"
+msgstr "Guide düğmesi"
+
+msgctxt "UI_MENU_SHORTCUT_STEAM_NOTE"
+msgid ""
+"Note: If using the Guide button, turn off 'Guide button focuses Steam' in Steam (Settings -> "
+"Controller -> Advanced Settings).\n\nOn Windows, also turn off 'Allow your controller to open "
+"Game Bar' (Settings -> Gaming -> Game Bar)."
+msgstr ""
+"Not: Guide düğmesini kullanıyorsanız Steam'de 'Guide button focuses Steam' seçeneğini kapatın "
+"(Ayarlar -> Kontrolcü -> Gelişmiş Ayarlar).\n\nWindows'ta ayrıca 'Allow your controller to open "
+"Game Bar' seçeneğini kapatın (Ayarlar -> Oyun -> Game Bar)."
 
 msgctxt "UI_BINDS_HELP"
 msgid ""
@@ -926,10 +1209,12 @@ msgstr "Oyuncu %d: %s"
 msgctxt "UI_MENU_PAD_BATTERY_DESC"
 msgid ""
 "The battery of each player's controller, as the controller reports it. Some controllers report "
-"none. A Switch 2 controller over Bluetooth reports a voltage, shown as high, medium or low."
+"none. A Switch 2 controller over Bluetooth reports a voltage and an Xbox controller on Linux's "
+"xone driver a level, each shown as high, medium or low."
 msgstr ""
 "Her oyuncunun kumandasının pili, kumandanın bildirdiği gibi. Bazı kumandalar bildirmez. Bluetooth "
-"ile bağlı bir Switch 2 kumandası bir voltaj bildirir; yüksek, orta veya düşük olarak gösterilir."
+"ile bağlı bir Switch 2 kumandası bir voltaj, Linux'ta xone sürücülü bir Xbox kumandası ise bir "
+"seviye bildirir; her biri yüksek, orta veya düşük olarak gösterilir."
 
 msgctxt "UI_MENU_PADS_NONE"
 msgid "No controller connected"
@@ -2341,6 +2626,23 @@ msgctxt "UI_GB_ERROR"
 msgid "GameBanana did not answer: %s"
 msgstr "GameBanana yanıt vermedi: %s"
 
+#. %s: the content ratings GameBanana marks the mod with (e.g. Sexual Themes).
+msgctxt "UI_GB_RATED"
+msgid "Content rating: %s"
+msgstr "İçerik derecesi: %s"
+
+msgctxt "UI_GB_MATURE"
+msgid "NSFW mods"
+msgstr "NSFW modlar"
+
+msgctxt "UI_GB_MATURE_OBFUSCATE"
+msgid "Obfuscate"
+msgstr "Sansürle"
+
+msgctxt "UI_GB_MATURE_SHOW"
+msgid "Show"
+msgstr "Göster"
+
 #. Under an installed mod that replaces the game's graphics settings archive (general_format).
 msgctxt "UI_MOD_WARN_GRAPHICS"
 msgid ""
@@ -2367,6 +2669,24 @@ msgid "I understand"
 msgstr "Anladım"
 
 #. Under a mod that changes the game's code (its .ips): the game code is built with it.
+msgctxt "UI_MOD_PLUGIN"
+msgid ""
+"Native plugin: runs its own program on your computer alongside the game. Enable it only if you "
+"trust where it comes from"
+msgstr ""
+"Yerel eklenti: oyunla birlikte bilgisayarınızda kendi programını çalıştırır. Yalnızca kaynağına "
+"güveniyorsanız etkinleştirin"
+
+#. A mod's button beside Delete: opens the options page its plugin draws (runtime/ui/launcher/mod_page.cpp).
+msgctxt "UI_MOD_OPTIONS"
+msgid "Options"
+msgstr "Seçenekler"
+
+#. The options page of a mod whose plugin has none for this system.
+msgctxt "UI_MOD_NO_OPTIONS"
+msgid "This mod has no options"
+msgstr "Bu modun seçenekleri yok"
+
 msgctxt "UI_MOD_CODE_REBUILD"
 msgid "code: turning it on or off builds the game code again before you play (a few minutes)"
 msgstr "kod: açıp kapatmak, oynamadan önce oyun kodunu yeniden derler (birkaç dakika)"
@@ -2411,6 +2731,22 @@ msgstr "%s · %d MB indirmen gerekiyor"
 msgctxt "UI_LAUNCH_UPDATE_NOW"
 msgid "Update"
 msgstr "Güncelle"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARING"
+msgid "Setting up %s in the background. You can keep playing meanwhile."
+msgstr "%s arka planda hazırlanıyor. Bu sırada oynamaya devam edebilirsin."
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARED"
+msgid "%s is ready"
+msgstr "%s hazır"
+
+msgctxt "UI_LAUNCH_UPDATE_RESTART"
+msgid "Restart with it"
+msgstr "Bununla yeniden başlat"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARE_FAILED"
+msgid "It could not be set up in advance (%s): it will be set up when it starts."
+msgstr "Önceden hazırlanamadı (%s): başlatılırken hazırlanacak."
 
 #. Opens the release's notes on GitHub.
 msgctxt "UI_LAUNCH_WHATS_NEW"
@@ -2603,6 +2939,18 @@ msgctxt "UI_TOOLS_STEAM_RESTART"
 msgid "Added: restart Steam to see it"
 msgstr "Eklendi: görmek için Steam'i yeniden başlat"
 
+#. After Add to Steam, when only some profiles could be updated.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL"
+msgid "Updated %d of %d Steam profiles"
+msgstr "%d / %d Steam profili güncellendi"
+
+#. After Add to Steam, when only some profiles could be updated and Steam is running.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL_RESTART"
+msgid "Updated %d of %d Steam profiles. Restart Steam to see the shortcut."
+msgstr "%d / %d Steam profili güncellendi. Kısayolu görmek için Steam'i yeniden başlatın."
+
 #. Why Add to Steam failed.
 msgctxt "UI_TOOLS_STEAM_NONE"
 msgid "Steam is not installed for this user"
@@ -2628,6 +2976,11 @@ msgstr "Şimdi denetle"
 msgctxt "UI_TOOLS_CHECKING"
 msgid "Checking for a new version..."
 msgstr "Yeni sürüm aranıyor..."
+
+#. The manual update check found no newer version.
+msgctxt "UI_TOOLS_UPDATE_CURRENT"
+msgid "You're up to date."
+msgstr "Güncelsiniz."
 
 #. Tools page row: %s is the version before the last update.
 #. printf format: keep every %... conversion, in the same order.
@@ -3184,3 +3537,56 @@ msgstr ""
 msgctxt "UI_LAUNCH_FOUND_FOLDER"
 msgid "folder"
 msgstr ""
+
+msgctxt "UI_LAUNCH_GPU_NONE"
+msgid "No graphics card here can run the game"
+msgstr "Bu bilgisayardaki hiçbir ekran kartı oyunu çalıştıramıyor"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_OLD"
+msgid "%s: its driver offers %s, and the game needs Vulkan 1.3"
+msgstr "%s: sürücüsü %s sunuyor, oyunun ise Vulkan 1.3'e ihtiyacı var"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_EXT"
+msgid "%s (%s): its driver lacks %s, which the game needs"
+msgstr "%s (%s): sürücüsünde oyunun ihtiyaç duyduğu %s eksik"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_QUEUE"
+msgid "%s: it has no queue that does both graphics and compute"
+msgstr "%s: grafik ve hesaplamayı aynı anda yapan bir kuyruğu yok"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SKIPPED"
+msgid "%s: not the one chosen in Settings, Screen, Graphics card"
+msgstr "%s: Ayarlar, Ekran, Ekran kartı'nda seçilen bu değil"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SOFTWARE"
+msgid "%s draws on the processor, not on a graphics card: far too slow to play"
+msgstr "%s ekran kartıyla değil işlemciyle çiziyor: oynamak için çok yavaş"
+
+msgctxt "UI_LAUNCH_GPU_NO_DRIVER"
+msgid "No Vulkan driver was found."
+msgstr "Hiçbir Vulkan sürücüsü bulunamadı."
+
+msgctxt "UI_LAUNCH_GPU_HELP"
+msgid ""
+"The game needs Vulkan 1.3. On AMD and Intel that is Mesa 22.0 or newer, newer than Debian 11 and "
+"Ubuntu 20.04 ship; on NVIDIA, its driver 510 or newer. Some older graphics cards cannot have it "
+"at all. The setup can run now: the game starts once the driver is updated."
+msgstr ""
+"Oyunun Vulkan 1.3'e ihtiyacı var. AMD ve Intel'de bu Mesa 22.0 veya daha yenisi demek, Debian 11 "
+"ve Ubuntu 20.04'ün sunduğundan daha yeni; NVIDIA'da 510 veya daha yeni sürücü. Bazı eski ekran "
+"kartları bunu hiç desteklemez. Kurulum şimdi yapılabilir: sürücü güncellenince oyun başlar."
+
+msgctxt "UI_LAUNCH_GPU_HELP_WIN"
+msgid ""
+"The game needs Vulkan 1.3: install the latest driver from your graphics card's maker (AMD, Intel "
+"or NVIDIA; on NVIDIA, 510 or newer). Some older graphics cards cannot have it at all. The setup "
+"can run now: the game starts once the driver is updated."
+msgstr ""
+"Oyunun Vulkan 1.3'e ihtiyacı var: ekran kartınızın üreticisinin en yeni sürücüsünü kurun (AMD, "
+"Intel veya NVIDIA; NVIDIA'da 510 veya daha yeni). Bazı eski ekran kartları bunu hiç desteklemez. "
+"Kurulum şimdi yapılabilir: sürücü güncellenince oyun başlar."

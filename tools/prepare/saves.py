@@ -9,10 +9,15 @@ Usage: python tools/prepare/saves.py backup --profile <player folder> --dest <ga
 
 import argparse
 import re
+import stat
 import sys
 import time
 import zipfile
 from pathlib import Path
+
+
+def raise_scan_error(error: OSError) -> None:
+    raise error
 
 
 def backup(profile: Path, dest: Path, name: str) -> str:
@@ -20,17 +25,47 @@ def backup(profile: Path, dest: Path, name: str) -> str:
         raise FileNotFoundError(f"noprofile {profile}")
     dest.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^\w.-]+", "_", name).strip("._") or "player"
-    out = dest / f"{safe}-{time.strftime('%Y%m%d-%H%M%S')}.zip"
-    tmp = out.with_suffix(".part")
-    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
-        for p in sorted(profile.rglob("*")):
-            if p.is_file():
-                z.write(p, p.relative_to(profile))
-    tmp.replace(out)  # a backup is whole or absent, never half written
-    return str(out)
+    stem = f"{safe}-{time.strftime('%Y%m%d-%H%M%S')}"
+    number = 0
+    while True:
+        out = dest / f"{stem}{f'-{number}' if number else ''}.zip"
+        number += 1
+        if out.exists():
+            continue
+        tmp = out.with_suffix(".part")
+        try:
+            stream = tmp.open("xb")  # reserve the name across processes; stale partials stay untouched
+        except FileExistsError:
+            continue
+        # Another backup may have published after our exists() but before we reserved its old partial name.
+        if out.exists():
+            stream.close()
+            tmp.unlink()
+            continue
+        try:
+            with stream, zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as z:
+                # Skipping an unreadable directory would publish a ZIP with missing saves.
+                for folder, dirs, files in profile.walk(on_error=raise_scan_error):
+                    dirs.sort()
+                    for filename in sorted(files):
+                        path = folder / filename
+                        try:
+                            mode = path.stat().st_mode
+                        except FileNotFoundError:
+                            if path.is_symlink():
+                                continue  # a dangling link has no file contents to back up
+                            raise
+                        if stat.S_ISREG(mode):
+                            z.write(path, path.relative_to(profile))
+            tmp.replace(out)  # a backup is whole or absent, never half written
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+        return str(out)
 
 
 def main() -> None:
+    sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")  # the launcher reads this pipe as UTF-8
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("backup")

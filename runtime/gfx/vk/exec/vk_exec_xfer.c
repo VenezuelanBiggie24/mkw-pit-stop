@@ -494,7 +494,14 @@ static int sub_resolve(const tex_t *t, const view_t *v, int has_v, const NVNcopy
     s->level = has_v && v->set_levels ? v->base_level : 0;
     s->layer0 = has_v && v->set_layers ? v->min_layer : 0;
     if (img->drop) {   // vk_tex_image.c tex_drop: the level is not in the image
-        if (s->level < img->drop) return 0;
+        if (s->level < img->drop) {
+            static volatile int32_t n_below;
+            int32_t n = plat_inc32(&n_below);
+            if (n <= 4 || (n & (n - 1)) == 0)
+                rt_log("vk: copy touches level %u below the %u dropped (image width %llu): skipped (%d so far)", s->level, img->drop,
+                       (unsigned long long)img->width, n);
+            return 0;
+        }
         s->level -= img->drop;
     }
     uint32_t lw = max1(img->width >> s->level), lh = max1(img->height >> s->level);

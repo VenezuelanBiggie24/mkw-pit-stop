@@ -30,7 +30,7 @@ static struct {
     SDL_Process *proc;
     SDL_Mutex *lock;
     int running, finished;
-    char done[64], code[32], error[512];
+    char done[MOD_NAME_MAX + 1], code[32], error[512];
     char pick[PLAT_PATH_MAX];   // the zip or folder the dialog chose
     int pick_is_zip;
     char name[MOD_NAME_MAX];    // the rename field; empty: import.py takes the mod's own name
@@ -44,7 +44,7 @@ static struct {
     int nconflicts;
     // what the import and merge threads leave for the UI thread (mods_poll): G.mods, G.n and the config are only
     // touched there, since the page draws them every frame without the lock
-    char pending_enable[64];
+    char pending_enable[MOD_NAME_MAX + 1];
     int pending_refresh;
 } G = {};
 
@@ -253,6 +253,7 @@ static int list_cb(const char *name, int kind, uint64_t, void *) {
         if (json_value(json, "has_romfs", v, sizeof v)) m->has_romfs = !strcmp(v, "true") || !strcmp(v, "1");
         if (json_value(json, "romfs_files", v, sizeof v)) m->romfs_files = atoi(v);
         if (json_value(json, "has_exefs", v, sizeof v)) m->has_exefs = !strcmp(v, "true") || !strcmp(v, "1");
+        if (json_value(json, "has_plugin", v, sizeof v)) m->has_plugin = !strcmp(v, "true") || !strcmp(v, "1");
         if (json_value(json, "exefs_match", v, sizeof v)) m->exefs_match = !strcmp(v, "true") || !strcmp(v, "1");
         m->code = strstr(json, "\"image\"") || strstr(json, "\"patches\"");
         const char *warn = strstr(json, "\"warnings\"");   // a list of names; ours, so a search is enough
@@ -271,6 +272,11 @@ static int list_cb(const char *name, int kind, uint64_t, void *) {
             m->exefs_build[n] = 0;
         }
         json_switches(json, m);
+    }
+    if (!m->has_plugin) {   // a mod copied in by hand, without the import's mod.json, still shows its plugin
+        char plugin[PLAT_PATH_MAX * 2 + 32];
+        snprintf(plugin, sizeof plugin, "%s/mods/%s/plugin", cfg_game_dir(), name);
+        m->has_plugin = plat_dir_exists(plugin);
     }
     G.n++;
     return 1;
@@ -576,7 +582,8 @@ static void on_line(char *line) {
     char *arg = strchr(line, ' ');
     if (arg) *arg++ = 0;
     if (!strcmp(line, "done") && arg) {
-        char *sp = strchr(arg, ' ');
+        // Names may contain spaces; '=' cannot survive import.py's clean_name, so only metadata ends the name.
+        char *sp = strstr(arg, " romfs=");
         if (sp) *sp = 0;
         snprintf(G.done, sizeof G.done, "%s", arg);
     } else if (!strcmp(line, "error") && arg) {
@@ -807,12 +814,17 @@ static void conflicts_load(void) {
         if (!json_string(&q, "archive", c->archive, sizeof c->archive)) break;
         if (!json_string(&q, "inner", c->inner, sizeof c->inner)) break;
         if (!json_string(&q, "winner", c->winner, sizeof c->winner)) break;
-        c->resolved = strstr(q, "\"resolved\": true") != NULL;
+        const char *end = strchr(q, '}');
+        if (!end) break;
+        const char *resolved = strstr(q, "\"resolved\": true");
+        const char *original = strstr(q, "\"has_original\": true");
+        c->resolved = resolved && resolved < end;
+        c->has_original = original && original < end;
         // the mods array of this object: names until the closing bracket
         const char *m = strstr(p, "\"mods\"");
-        if (!m) break;
+        if (!m || m >= end) break;
         m = strchr(m, '[');
-        if (!m) break;
+        if (!m || m >= end) break;
         m++;
         char name[MOD_NAME_MAX];
         while (c->nmods < 8) {
@@ -828,7 +840,7 @@ static void conflicts_load(void) {
             else break;
         }
         G.nconflicts++;
-        p = q;
+        p = end + 1;
     }
     rt_log("mods: conflicts file %s (%d bytes)", path, (int)n);
 }
@@ -892,7 +904,7 @@ void mods_conflict_pick(const char *archive, const char *inner) {
         while (k < c->nmods && strcmp(c->mods[k], c->winner)) k++;
         const char *win;
         if (k < c->nmods - 1) win = c->mods[k + 1];
-        else if (k == c->nmods - 1) win = "vanilla";
+        else if (k == c->nmods - 1 && c->has_original) win = "vanilla";
         else win = c->nmods ? c->mods[0] : "vanilla";
         rewrite_choices(archive, inner, win, nullptr);
         mods_merge_start(G.exe_dir);

@@ -6,7 +6,7 @@
 
 Why: a row is added per report, in the order the reports come, so versions and resolutions ended up mixed and two
 machines could not be compared at a glance. The order: `pre-release`, then the numbered versions (0.1.6 < 0.1.10),
-then `source` (a build from source, not a release); inside a version the lowest internal resolution first (`720p to
+then `source <commit>` (a build from source, not a release; the hash is the commit it was built from); inside a version the lowest internal resolution first (`720p to
 2160p` counts as 720p); rows that tie keep the order they were added in. check.py runs `--check` at commit time.
 
 Usage: uv run tools/docs/perf_table.py           (rewrites the table in place)
@@ -26,7 +26,7 @@ def key(row: str) -> tuple:
     v = cells[VERSION].lower()
     if v == "pre-release":
         ver = (0,)
-    elif v == "source":
+    elif v.startswith("source"):
         ver = (2,)
     else:
         ver = (1, *(int(n) for n in re.findall(r"\d+", v)))

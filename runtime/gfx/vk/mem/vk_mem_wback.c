@@ -95,7 +95,7 @@ void wback_reset(void) {
 }
 
 int vk_mem_gpu_may_write(uint64_t addr, uint64_t size) {
-    if (!shadow_on) return 1;   // imported pools: nothing tells
+    if (!shadow_live) return 1;   // imported pools: nothing tells
     plat_mutex_lock(&shadow_lock);
     sdone_drain();
     int hit = 0;
@@ -140,7 +140,7 @@ static void wb_order_note(uint64_t addr, uint64_t size, uint64_t fence) {
 
 void vk_mem_gpu_pending(uint64_t addr, uint64_t size) {
     mem_early_gpu_wrote(addr, size, vk_exec_recording_fence());   // MKW_EARLY_READ
-    if (!shadow_on || !size) return;
+    if (!shadow_live || !size) return;
     uint8_t *base = lost_base(addr, size);
     if (merge_mode < 0) {
         merge_mode = rt_knob("SHADOW_MERGE", "1");
@@ -169,7 +169,7 @@ void vk_mem_gpu_pending(uint64_t addr, uint64_t size) {
 }
 
 void vk_gpu_written(uint64_t addr, uint64_t size) {
-    if (shadow_on && size) {
+    if (shadow_live && size) {
         plat_mutex_lock_shared(&pool_lock);
         const pidx_ent *e = pidx_find(&pool_index, addr, size);
         PoolRec *r = e ? e->buf : NULL;
@@ -210,6 +210,7 @@ void vk_gpu_written(uint64_t addr, uint64_t size) {
                 if (watch_hi) watch_event("write-back copied", addr, addr + size, 0, wb);
             } else if (watch_hi) watch_event("write-back trapped", addr, addr + size, 0, size);
         }
+        if (r) vk_pool_diag_note(r->flags, 2, wb);
         int defer = RT_KNOB_ON(wb_defer);
         if (defer && !plat_mutex_trylock(&shadow_lock)) {
             plat_mutex_lock(&sdone_lock);

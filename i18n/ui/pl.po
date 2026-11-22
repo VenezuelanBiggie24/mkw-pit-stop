@@ -8,6 +8,21 @@ msgctxt "UI_SWKBD_DEFAULT_NAME"
 msgid "Player"
 msgstr "Gracz"
 
+#. The on-screen number pad the game opens to ask for a number: its confirm key (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_OK"
+msgid "OK"
+msgstr "OK"
+
+#. The on-screen number pad: the wide button under the keys that closes it without a number
+msgctxt "UI_KEYPAD_CANCEL"
+msgid "Cancel"
+msgstr "Anuluj"
+
+#. The on-screen number pad: the key that erases the last digit (keep it short, it fits a small key)
+msgctxt "UI_KEYPAD_DELETE"
+msgid "Delete"
+msgstr "Usuń"
+
 msgctxt "UI_MENU_TITLE"
 msgid "Settings"
 msgstr "Ustawienia"
@@ -369,6 +384,27 @@ msgctxt "UI_MENU_ASPECT_WINDOW"
 msgid "Window"
 msgstr "Okno"
 
+msgctxt "UI_MENU_HUD_POSITION"
+msgid "HUD position"
+msgstr "Położenie HUD"
+
+msgctxt "UI_MENU_HUD_POSITION_DESC"
+msgid ""
+"On a picture wider or taller than 16:9, keep the race HUD in the middle 16:9 area (the console's "
+"place) or put it at the screen's edges and corners. Takes effect at the next start."
+msgstr ""
+"Na obrazie szerszym lub wyższym niż 16:9 zostawia HUD wyścigu w środkowym obszarze 16:9 (tam, "
+"gdzie na konsoli) albo przenosi go do krawędzi i narożników ekranu. Działa od następnego "
+"uruchomienia."
+
+msgctxt "UI_MENU_HUD_POSITION_16X9"
+msgid "16:9 area"
+msgstr "Obszar 16:9"
+
+msgctxt "UI_MENU_HUD_POSITION_EDGES"
+msgid "Screen edges"
+msgstr "Krawędzie ekranu"
+
 msgctxt "UI_MENU_PRESENT"
 msgid "Presentation"
 msgstr "Wyświetlanie"
@@ -460,6 +496,20 @@ msgctxt "UI_MENU_FPS_AUTO"
 msgid "Automatic"
 msgstr "Automatycznie"
 
+msgctxt "UI_MENU_LOGIC_HZ"
+msgid "Logic rate"
+msgstr "Częstotliwość logiki"
+
+msgctxt "UI_MENU_LOGIC_HZ_DESC"
+msgid ""
+"How many times a second the game updates karts, physics and timers. 60 is the console's rate; "
+"120, 144 or 240 make movement smoother on a high refresh rate screen but need a faster PC. Time "
+"trials and LAN games always run at 60."
+msgstr ""
+"Ile razy na sekundę gra aktualizuje gokarty, fizykę i liczniki czasu. 60 to wartość konsoli; 120, "
+"144 lub 240 dają płynniejszy ruch na ekranie o wysokiej częstotliwości odświeżania, ale wymagają "
+"szybszego PC. Jazda na czas i gry w sieci LAN zawsze działają z 60."
+
 msgctxt "UI_MENU_FRAMEGEN"
 msgid "Frame generation"
 msgstr "Generowanie klatek"
@@ -507,6 +557,119 @@ msgstr ""
 "Rozpoczyna każdą klatkę tak późno, jak pozwala komputer, dzięki czemu to, co naciśniesz, szybciej "
 "pojawi się na ekranie. Ma to największe znaczenie przy 20 lub 15 fps oraz z generowaniem klatek. "
 "Wyłącz, jeśli obraz się zacina."
+
+msgctxt "UI_MENU_FG_ENGINE"
+msgid "Frame generation by"
+msgstr "Generowanie klatek przez"
+
+msgctxt "UI_MENU_FG_ENGINE_DESC"
+msgid ""
+"Who makes the frames between the game's own. The port's own works everywhere. NVIDIA DLSS Frame "
+"Generation (RTX 40 and 50) and AMD FSR 3.1 use the scene's depth and motion and need DLSS or FSR "
+"3.1 upscaling on."
+msgstr ""
+"Kto tworzy klatki między klatkami gry. Własne generowanie portu działa wszędzie. NVIDIA DLSS "
+"Frame Generation (RTX 40 i 50) oraz AMD FSR 3.1 korzystają z głębi i ruchu sceny i wymagają "
+"włączonego skalowania AI DLSS lub FSR 3.1."
+
+msgctxt "UI_MENU_REFLEX"
+msgid "NVIDIA Reflex"
+msgstr "NVIDIA Reflex"
+
+msgctxt "UI_MENU_REFLEX_DESC"
+msgid ""
+"Starts each frame as late as the GPU allows, so what you press reaches the screen sooner. Boost "
+"also keeps the GPU's clocks up. NVIDIA GPUs only."
+msgstr ""
+"Rozpoczyna każdą klatkę tak późno, jak pozwala GPU, dzięki czemu to, co naciśniesz, szybciej "
+"pojawi się na ekranie. Boost dodatkowo utrzymuje wysokie taktowanie GPU. Tylko GPU NVIDIA."
+
+msgctxt "UI_MENU_REFLEX_BOOST"
+msgid "On + Boost"
+msgstr "Wł. + Boost"
+
+msgctxt "UI_MENU_TEMPORAL"
+msgid "AI upscaling"
+msgstr "Skalowanie AI"
+
+msgctxt "UI_MENU_NOT_AVAILABLE"
+msgid "Not available on this PC: the game's own picture stays."
+msgstr "Niedostępne na tym komputerze: zostaje oryginalny obraz gry."
+
+msgctxt "UI_MENU_TEMPORAL_DESC"
+msgid ""
+"Renders the race at a lower resolution and rebuilds it from several frames: NVIDIA DLSS (RTX "
+"GPUs) or AMD FSR 3.1 (any GPU). Sharper and steadier edges than the game's own scaling; the HUD "
+"stays sharp."
+msgstr ""
+"Renderuje wyścig w niższej rozdzielczości i odtwarza go z kilku klatek: NVIDIA DLSS (GPU RTX) lub "
+"AMD FSR 3.1 (dowolny GPU). Ostrzejsze i stabilniejsze krawędzie niż przy skalowaniu gry; HUD "
+"pozostaje ostry."
+
+msgctxt "UI_MENU_TEMPORAL_QUALITY"
+msgid "Upscaling quality"
+msgstr "Jakość skalowania"
+
+msgctxt "UI_MENU_TEMPORAL_QUALITY_DESC"
+msgid ""
+"The share of the screen's resolution the race renders at: Native (DLAA) 100 %, Quality 67 %, "
+"Balanced 58 %, Performance 50 %, Ultra performance 33 %. Applies at the next start."
+msgstr ""
+"Część rozdzielczości ekranu, w jakiej renderowany jest wyścig: Natywna (DLAA) 100 %, Jakość 67 %, "
+"Zrównoważona 58 %, Wydajność 50 %, Ultrawydajność 33 %. Działa od następnego uruchomienia."
+
+msgctxt "UI_MENU_TQ_NATIVE"
+msgid "Native (DLAA)"
+msgstr "Natywna (DLAA)"
+
+msgctxt "UI_MENU_TQ_QUALITY"
+msgid "Quality"
+msgstr "Jakość"
+
+msgctxt "UI_MENU_TQ_BALANCED"
+msgid "Balanced"
+msgstr "Zrównoważona"
+
+msgctxt "UI_MENU_TQ_PERFORMANCE"
+msgid "Performance"
+msgstr "Wydajność"
+
+msgctxt "UI_MENU_TQ_ULTRA"
+msgid "Ultra performance"
+msgstr "Ultrawydajność"
+
+msgctxt "UI_MENU_DLSS_PRESET"
+msgid "DLSS model"
+msgstr "Model DLSS"
+
+msgctxt "UI_MENU_DLSS_PRESET_DESC"
+msgid ""
+"NVIDIA's model DLSS uses: the default of the DLSS version next to the game, or presets J, K, L, M."
+msgstr "Model używany przez NVIDIA DLSS: domyślny dla wersji DLSS obok gry albo presety J, K, L, M."
+
+msgctxt "UI_MENU_DLSS_PRESET_DEFAULT"
+msgid "Default"
+msgstr "Domyślny"
+
+msgctxt "UI_MENU_CAS"
+msgid "CAS sharpening"
+msgstr "Wyostrzanie CAS"
+
+msgctxt "UI_MENU_CAS_DESC"
+msgid ""
+"AMD's contrast adaptive sharpening of the race after DLSS or FSR 3.1, before the HUD is drawn. "
+"Needs AI upscaling on."
+msgstr ""
+"Adaptacyjne wyostrzanie kontrastu AMD, stosowane do wyścigu po DLSS lub FSR 3.1, zanim zostanie "
+"narysowany HUD. Wymaga włączonego skalowania AI."
+
+msgctxt "UI_MENU_CAS_SHARPNESS"
+msgid "CAS strength"
+msgstr "Siła CAS"
+
+msgctxt "UI_MENU_CAS_SHARPNESS_DESC"
+msgid "How strongly CAS sharpens: 0 is the lightest touch, 100 the strongest."
+msgstr "Jak mocno CAS wyostrza: 0 to najlżej, 100 najmocniej."
 
 msgctxt "UI_MENU_GRAPHICS"
 msgid "Picture"
@@ -565,6 +728,70 @@ msgstr ""
 "Automatycznie pokazuje własny obraz HDR gry, gdy wyświetlacz działa w HDR (w Windows: Ustawienia "
 "> Ekran > Użyj HDR), tak jak konsola; jego jasność zależy od ustawień HDR systemu. Wył. zawsze "
 "pokazuje obraz standardowy. Działa od razu."
+
+msgctxt "UI_MENU_HDR_TONEMAP"
+msgid "HDR tone mapper"
+msgstr "Mapowanie tonów HDR"
+
+msgctxt "UI_MENU_HDR_TONEMAP_DESC"
+msgid ""
+"How the scene's brightness is fitted to the display in HDR. Vanilla is the game's own curve, "
+"which never goes above 1.5 times paper white. PsychoV35 is RenoDX's: the same mid-tones and "
+"colour grade, with highlights that roll off smoothly up to the display's peak. Applies after a "
+"restart, as do peak and paper white changes while it is on."
+msgstr ""
+"Jak jasność sceny jest dopasowywana do wyświetlacza w HDR. Vanilla to własna krzywa gry, która "
+"nigdy nie przekracza 1,5-krotności bieli papieru. PsychoV35 to krzywa z RenoDX: te same półtony i "
+"gradacja kolorów, a światła płynnie narastają aż do szczytu jasności wyświetlacza. Działa po "
+"ponownym uruchomieniu, podobnie jak zmiany szczytu jasności i bieli papieru, gdy jest włączona."
+
+msgctxt "UI_MENU_HDR_TONEMAP_VANILLA"
+msgid "Vanilla"
+msgstr "Vanilla"
+
+msgctxt "UI_MENU_HDR_TONEMAP_PSYCHOV"
+msgid "PsychoV35"
+msgstr "PsychoV35"
+
+msgctxt "UI_MENU_HDR_TONEMAP_MISSING"
+msgid "Its programs are made by the setup. Set the game up again (an update does it) to add them."
+msgstr ""
+"Jego programy tworzy konfiguracja. Skonfiguruj grę ponownie (robi to aktualizacja), aby je dodać."
+
+msgctxt "UI_MENU_HDR_NEEDS_PSYCHOV"
+msgid "Only with the PsychoV35 tone mapper. Vanilla uses the display's own values, as the console."
+msgstr ""
+"Tylko z mapowaniem tonów PsychoV35. Vanilla używa własnych wartości wyświetlacza, tak jak konsola."
+
+msgctxt "UI_MENU_HDR_PEAK"
+msgid "HDR peak brightness"
+msgstr "Maks. jasność HDR"
+
+msgctxt "UI_MENU_HDR_PEAK_DESC"
+msgid ""
+"The brightest the game draws. Automatic uses the display's peak as Windows reports it. Applies at "
+"once."
+msgstr ""
+"Najjaśniejszy poziom, jaki rysuje gra. Automatycznie używa szczytu jasności wyświetlacza "
+"zgłaszanego przez Windows. Działa od razu."
+
+msgctxt "UI_MENU_HDR_WHITE"
+msgid "HDR paper white"
+msgstr "Biel papieru HDR"
+
+msgctxt "UI_MENU_HDR_WHITE_DESC"
+msgid ""
+"How bright white menus and the scene's mid-tones are. Automatic uses Windows' SDR content "
+"brightness, which is often much brighter than a game wants; 203 nits is the HDR reference. Lower "
+"values leave the highlights more room. Applies at once."
+msgstr ""
+"Jak jasna jest biel menu i półtony sceny. Automatycznie używa jasności treści SDR z Windows, "
+"często znacznie wyższej, niż potrzebuje gra; 203 nity to odniesienie HDR. Niższe wartości "
+"zostawiają więcej miejsca światłom. Działa od razu."
+
+msgctxt "UI_MENU_HDR_NITS"
+msgid "%s nits"
+msgstr "%s nitów"
 
 msgctxt "UI_MENU_SHARPNESS"
 msgid "FSR sharpness"
@@ -660,6 +887,18 @@ msgstr ""
 "Gra bezprzewodowa w menu tytułowym staje się grą w sieci LAN, aby ścigać się z innymi komputerami "
 "w tej samej sieci lokalnej (porty UDP 49152 i 35000). Łączy się tylko z adresami sieci lokalnej, "
 "nigdy z internetem. Działa od następnego uruchomienia."
+
+msgctxt "UI_MENU_LAN_NET"
+msgid "LAN network"
+msgstr "Sieć LAN"
+
+msgctxt "UI_MENU_LAN_NET_DESC"
+msgid ""
+"The network LAN play uses, for ZeroTier, N2N, Tailscale or a VPN: pick the one the other players "
+"are on. Automatic picks the best network by itself. Applies at the next start."
+msgstr ""
+"Sieć używana w grze LAN, np. ZeroTier, N2N, Tailscale lub VPN: wybierz tę, w której są inni "
+"gracze. Automatycznie wybiera najlepszą. Zadziała po następnym uruchomieniu."
 
 msgctxt "UI_MENU_VOLUME"
 msgid "Volume"
@@ -776,6 +1015,18 @@ msgctxt "UI_MENU_PAD_LAYOUT_IN_USE"
 msgid "in use: %s"
 msgstr "używane: %s"
 
+msgctxt "UI_MENU_KEYBOARD_MOUSE"
+msgid "Keyboard and mouse"
+msgstr "Klawiatura i mysz"
+
+msgctxt "UI_MENU_KEYBOARD_MOUSE_DESC"
+msgid ""
+"Off: the game ignores the keyboard and the mouse (controllers only) and the mouse cursor stays "
+"free. Esc still opens this menu."
+msgstr ""
+"Wył.: gra ignoruje klawiaturę i mysz (tylko kontrolery), a kursor myszy pozostaje wolny. Esc "
+"nadal otwiera to menu."
+
 msgctxt "UI_MENU_MOUSE_SENS"
 msgid "Mouse camera sensitivity"
 msgstr "Czułość kamery myszą"
@@ -851,6 +1102,36 @@ msgstr "Klawiatura"
 msgctxt "UI_MENU_ICONS_IN_USE"
 msgid "in use: %s"
 msgstr "używane: %s"
+
+msgctxt "UI_MENU_MENU_SHORTCUT"
+msgid "Menu shortcut"
+msgstr "Skrót menu"
+
+msgctxt "UI_MENU_MENU_SHORTCUT_DESC"
+msgid ""
+"Choose which controller input opens this menu (Start + Select or the Guide button). Keyboard "
+"defaults to F1 or Esc."
+msgstr ""
+"Wybierz, które wejście kontrolera otwiera to menu (Start + Select lub przycisk Guide). Klawiatura "
+"domyślnie używa F1 lub Esc."
+
+msgctxt "UI_MENU_SHORTCUT_MINUS_PLUS"
+msgid "Start + Select"
+msgstr "Start + Select"
+
+msgctxt "UI_MENU_SHORTCUT_GUIDE"
+msgid "Guide button"
+msgstr "Przycisk Guide"
+
+msgctxt "UI_MENU_SHORTCUT_STEAM_NOTE"
+msgid ""
+"Note: If using the Guide button, turn off 'Guide button focuses Steam' in Steam (Settings -> "
+"Controller -> Advanced Settings).\n\nOn Windows, also turn off 'Allow your controller to open "
+"Game Bar' (Settings -> Gaming -> Game Bar)."
+msgstr ""
+"Uwaga: jeśli używasz przycisku Guide, wyłącz 'Guide button focuses Steam' w Steam (Ustawienia -> "
+"Kontroler -> Ustawienia zaawansowane).\n\nW systemie Windows wyłącz również 'Allow your "
+"controller to open Game Bar' (Ustawienia -> Gry -> Game Bar)."
 
 msgctxt "UI_BINDS_HELP"
 msgid ""
@@ -928,11 +1209,12 @@ msgstr "Gracz %d: %s"
 msgctxt "UI_MENU_PAD_BATTERY_DESC"
 msgid ""
 "The battery of each player's controller, as the controller reports it. Some controllers report "
-"none. A Switch 2 controller over Bluetooth reports a voltage, shown as high, medium or low."
+"none. A Switch 2 controller over Bluetooth reports a voltage and an Xbox controller on Linux's "
+"xone driver a level, each shown as high, medium or low."
 msgstr ""
 "Bateria kontrolera każdego gracza, tak jak zgłasza ją kontroler. Niektóre kontrolery jej nie "
-"zgłaszają. Kontroler Switch 2 przez Bluetooth zgłasza napięcie, pokazane jako wysokie, średnie "
-"lub niskie."
+"zgłaszają. Kontroler Switch 2 przez Bluetooth zgłasza napięcie, a kontroler Xbox w Linuksie ze "
+"sterownikiem xone poziom naładowania; oba pokazane jako wysokie, średnie lub niskie."
 
 msgctxt "UI_MENU_PADS_NONE"
 msgid "No controller connected"
@@ -2348,6 +2630,23 @@ msgctxt "UI_GB_ERROR"
 msgid "GameBanana did not answer: %s"
 msgstr "GameBanana nie odpowiedziało: %s"
 
+#. %s: the content ratings GameBanana marks the mod with (e.g. Sexual Themes).
+msgctxt "UI_GB_RATED"
+msgid "Content rating: %s"
+msgstr "Ocena treści: %s"
+
+msgctxt "UI_GB_MATURE"
+msgid "NSFW mods"
+msgstr "Mody NSFW"
+
+msgctxt "UI_GB_MATURE_OBFUSCATE"
+msgid "Obfuscate"
+msgstr "Zamazać"
+
+msgctxt "UI_GB_MATURE_SHOW"
+msgid "Show"
+msgstr "Pokaż"
+
 #. Under an installed mod that replaces the game's graphics settings archive (general_format).
 msgctxt "UI_MOD_WARN_GRAPHICS"
 msgid ""
@@ -2372,6 +2671,24 @@ msgid "I understand"
 msgstr "Rozumiem"
 
 #. Under a mod that changes the game's code (its .ips): the game code is built with it.
+msgctxt "UI_MOD_PLUGIN"
+msgid ""
+"Native plugin: runs its own program on your computer alongside the game. Enable it only if you "
+"trust where it comes from"
+msgstr ""
+"Natywna wtyczka: uruchamia własny program na twoim komputerze obok gry. Włącz ją tylko, jeśli "
+"ufasz jej źródłu"
+
+#. A mod's button beside Delete: opens the options page its plugin draws (runtime/ui/launcher/mod_page.cpp).
+msgctxt "UI_MOD_OPTIONS"
+msgid "Options"
+msgstr "Opcje"
+
+#. The options page of a mod whose plugin has none for this system.
+msgctxt "UI_MOD_NO_OPTIONS"
+msgid "This mod has no options"
+msgstr "Ten mod nie ma opcji"
+
 msgctxt "UI_MOD_CODE_REBUILD"
 msgid "code: turning it on or off builds the game code again before you play (a few minutes)"
 msgstr "kod: włączenie lub wyłączenie przebudowuje kod gry przed uruchomieniem (kilka minut)"
@@ -2416,6 +2733,22 @@ msgstr "Masz %s · %d MB do pobrania"
 msgctxt "UI_LAUNCH_UPDATE_NOW"
 msgid "Update"
 msgstr "Zaktualizuj"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARING"
+msgid "Setting up %s in the background. You can keep playing meanwhile."
+msgstr "Przygotowywanie %s w tle. W międzyczasie możesz dalej grać."
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARED"
+msgid "%s is ready"
+msgstr "%s jest gotowa"
+
+msgctxt "UI_LAUNCH_UPDATE_RESTART"
+msgid "Restart with it"
+msgstr "Uruchom ponownie z nią"
+
+msgctxt "UI_LAUNCH_UPDATE_PREPARE_FAILED"
+msgid "It could not be set up in advance (%s): it will be set up when it starts."
+msgstr "Nie udało się przygotować wcześniej (%s): zostanie przygotowana przy uruchomieniu."
 
 #. Opens the release's notes on GitHub.
 msgctxt "UI_LAUNCH_WHATS_NEW"
@@ -2608,6 +2941,18 @@ msgctxt "UI_TOOLS_STEAM_RESTART"
 msgid "Added: restart Steam to see it"
 msgstr "Dodano: uruchom ponownie Steama, żeby to zobaczyć"
 
+#. After Add to Steam, when only some profiles could be updated.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL"
+msgid "Updated %d of %d Steam profiles"
+msgstr "Zaktualizowano %d z %d profili Steam"
+
+#. After Add to Steam, when only some profiles could be updated and Steam is running.
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_TOOLS_STEAM_PARTIAL_RESTART"
+msgid "Updated %d of %d Steam profiles. Restart Steam to see the shortcut."
+msgstr "Zaktualizowano %d z %d profili Steam. Uruchom Steam ponownie, aby zobaczyć skrót."
+
 #. Why Add to Steam failed.
 msgctxt "UI_TOOLS_STEAM_NONE"
 msgid "Steam is not installed for this user"
@@ -2633,6 +2978,11 @@ msgstr "Sprawdź teraz"
 msgctxt "UI_TOOLS_CHECKING"
 msgid "Checking for a new version..."
 msgstr "Szukanie nowej wersji..."
+
+#. The manual update check found no newer version.
+msgctxt "UI_TOOLS_UPDATE_CURRENT"
+msgid "You're up to date."
+msgstr "Masz najnowszą wersję."
 
 #. Tools page row: %s is the version before the last update.
 #. printf format: keep every %... conversion, in the same order.
@@ -3189,3 +3539,56 @@ msgstr ""
 msgctxt "UI_LAUNCH_FOUND_FOLDER"
 msgid "folder"
 msgstr ""
+
+msgctxt "UI_LAUNCH_GPU_NONE"
+msgid "No graphics card here can run the game"
+msgstr "Żadna karta graficzna w tym komputerze nie uruchomi gry"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_OLD"
+msgid "%s: its driver offers %s, and the game needs Vulkan 1.3"
+msgstr "%s: jej sterownik oferuje %s, a gra wymaga Vulkan 1.3"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_EXT"
+msgid "%s (%s): its driver lacks %s, which the game needs"
+msgstr "%s (%s): jej sterownikowi brakuje %s, którego wymaga gra"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_QUEUE"
+msgid "%s: it has no queue that does both graphics and compute"
+msgstr "%s: nie ma kolejki, która robi jednocześnie grafikę i obliczenia"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SKIPPED"
+msgid "%s: not the one chosen in Settings, Screen, Graphics card"
+msgstr "%s: to nie ta wybrana w Ustawienia, Ekran, Karta graficzna"
+
+#. printf format: keep every %... conversion, in the same order.
+msgctxt "UI_LAUNCH_GPU_SOFTWARE"
+msgid "%s draws on the processor, not on a graphics card: far too slow to play"
+msgstr "%s rysuje procesorem, nie kartą graficzną: zdecydowanie za wolno, by grać"
+
+msgctxt "UI_LAUNCH_GPU_NO_DRIVER"
+msgid "No Vulkan driver was found."
+msgstr "Nie znaleziono żadnego sterownika Vulkan."
+
+msgctxt "UI_LAUNCH_GPU_HELP"
+msgid ""
+"The game needs Vulkan 1.3. On AMD and Intel that is Mesa 22.0 or newer, newer than Debian 11 and "
+"Ubuntu 20.04 ship; on NVIDIA, its driver 510 or newer. Some older graphics cards cannot have it "
+"at all. The setup can run now: the game starts once the driver is updated."
+msgstr ""
+"Gra wymaga Vulkan 1.3. Na AMD i Intel to Mesa 22.0 lub nowsza, nowsza niż w Debianie 11 i Ubuntu "
+"20.04; na NVIDIA sterownik 510 lub nowszy. Niektóre starsze karty graficzne w ogóle go nie "
+"obsługują. Konfigurację można zrobić już teraz: gra uruchomi się po aktualizacji sterownika."
+
+msgctxt "UI_LAUNCH_GPU_HELP_WIN"
+msgid ""
+"The game needs Vulkan 1.3: install the latest driver from your graphics card's maker (AMD, Intel "
+"or NVIDIA; on NVIDIA, 510 or newer). Some older graphics cards cannot have it at all. The setup "
+"can run now: the game starts once the driver is updated."
+msgstr ""
+"Gra wymaga Vulkan 1.3: zainstaluj najnowszy sterownik od producenta karty graficznej (AMD, Intel "
+"lub NVIDIA; na NVIDIA 510 lub nowszy). Niektóre starsze karty graficzne w ogóle go nie obsługują. "
+"Konfigurację można zrobić już teraz: gra uruchomi się po aktualizacji sterownika."

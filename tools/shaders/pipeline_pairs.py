@@ -14,9 +14,14 @@ with NVN's alpha test, and the prewarm also builds its fragment library with the
 6 165 recorded pipelines (17/11/2026) the test was on in 32, all with GREATER or GEQUAL and all with one of 4 fragment
 programs, three of exefs/main and one of a Layout archive (91 fragment programs in those sources).
 
+Every compute program goes in too, flagged, in the vertex slot with no fragment stage: the prewarm builds its compute
+pipeline, which the game otherwise made on the drawing thread at its first dispatch, waiting for it (18/11/2026); so do
+the mesh programs ("tes?" in index.csv), which the runtime runs as compute too.
+
 Usage: python tools/shaders/pipeline_pairs.py [--shaders build/shaders] [--out build/pipeline-pairs.bin]
-Layout: "MKW_PAIR", u32 version 2, u32 record count, then per record the vertex and the fragment program key (32 bytes
-each; all zero: none) and u32 flags (bit 0: the fragment stage may draw with the alpha test).
+Layout: "MKW_PAIR", u32 version 3, u32 record count, then per record the vertex and the fragment program key (32 bytes
+each; all zero: none) and u32 flags (bit 0: the fragment stage may draw with the alpha test; bit 1: the vertex slot
+holds a compute program).
 """
 
 import argparse
@@ -27,8 +32,8 @@ import struct
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-MAGIC, VERSION = b"MKW_PAIR", 2
-FLAG_ALPHA = 1
+MAGIC, VERSION = b"MKW_PAIR", 3
+FLAG_ALPHA, FLAG_CS = 1, 2
 # extract.py's source column: "<romfs>::Layout/..." from a .nup, "<romfs>/Layout/..." from a folder ("\" on Windows),
 # "<exefs>/main@0x..." for exefs/main
 ALPHA_SOURCE = re.compile(r"(^|[/\\:])Layout[/\\]|(^|[/\\])main@0x")
@@ -43,17 +48,21 @@ def write(shaders: Path, out: Path) -> int:
     with (shaders / "pairs.csv").open() as f:
         rows = [(r["vs"], r["ps"]) for r in csv.DictReader(f)]
     with (shaders / "index.csv").open() as f:
-        index = [r for r in csv.DictReader(f) if r["stage"] in ("vs", "ps")]
+        everything = list(csv.DictReader(f))
+    index = [r for r in everything if r["stage"] in ("vs", "ps")]
+    # extract.py names a mesh program "tes?" (SPH type 3): the runtime runs it as compute, so it goes in flagged too
+    compute = [r["sha1"] for r in everything if r["stage"] in ("cs", "tes?")]
     stages = [(r["sha1"], r["stage"]) for r in index]
     alpha = {r["sha1"] for r in index if r["stage"] == "ps" and ALPHA_SOURCE.search(r["source"])}
     paired = {s for r in rows for s in r}
     rows += [(s, "") if st == "vs" else ("", s) for s, st in stages if s not in paired]
     keys = {s: program_key(shaders, s) for r in rows for s in r if s} | {"": bytes(32)}
     body = b"".join(keys[v] + keys[f] + struct.pack("<I", FLAG_ALPHA if f in alpha else 0) for v, f in rows)
+    body += b"".join(program_key(shaders, c) + bytes(32) + struct.pack("<I", FLAG_CS) for c in compute)
     tmp = out.with_suffix(".tmp")
-    tmp.write_bytes(MAGIC + struct.pack("<II", VERSION, len(rows)) + body)
+    tmp.write_bytes(MAGIC + struct.pack("<II", VERSION, len(rows) + len(compute)) + body)
     tmp.replace(out)
-    return len(rows)
+    return len(rows) + len(compute)
 
 
 def main() -> None:

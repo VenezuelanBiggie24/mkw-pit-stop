@@ -1,8 +1,12 @@
 # Adapted from LAS Recomp tools/gen.py @ da35b83 (MIT, Copyright (c) 2026 Peiikai).
 """Generate C for the ExeFS modules: function discovery, then parallel emission into chunked C files.
 
-Usage: gen.py --exefs build/extracted/v121/exefs --out generated/v121 [--modules main,subsdk0,sdk] [--jobs N]
-              [--limit N] [--chunk-fns N] [--chunk-bytes B] [--big-fn B] [--patches FILE]
+Usage: gen.py --exefs game/exefs [--out build/generated-180] [--jobs N]
+              [--modules main,subsdk0,sdk] [--limit N] [--chunk-fns N] [--chunk-bytes B] [--big-fn B]
+              [--patches FILE]
+
+--out and --patches default to the dump's version (recomp/versions.py: 1.0.0 writes build/generated with
+patches-mkw.txt, 1.8.0 writes build/generated-180 with patches-mkw-180.txt).
 
 Output, under --out:
   layout.h, layout.json        module bases (recomp/layout.py)
@@ -50,6 +54,7 @@ from layout import DEFAULT, INCOMPLETE, PLACEMENTS, check_output_profile, layout
 from layout import write as write_layout  # noqa: E402
 from lifter import hx  # noqa: E402
 from module import Module  # noqa: E402
+from versions import detect, gen_dir_for  # noqa: E402  (the dump's version: --out and --patches defaults)
 
 # Written into every generated file: a commit check can refuse anything carrying it (game-derived code).
 GENERATED_MARKER = 'MKW_RECOMP_' + 'GENERATED_FROM_GAME_CODE'
@@ -757,7 +762,8 @@ def remove_stale(moddir, name, nchunks, errors):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--exefs', type=Path, required=True)
-    ap.add_argument('--out', type=Path, required=True)
+    ap.add_argument('--out', type=Path, default=None,
+                    help='where the C goes (default: the dump’s version: build/generated, build/generated-180)')
     ap.add_argument('--guest-layout', choices=PLACEMENTS, default=DEFAULT, help='guest address placement')
     ap.add_argument('--modules', default='', help='comma-separated; default: every module of the ExeFS')
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
@@ -766,7 +772,8 @@ def main():
     ap.add_argument('--chunk-bytes', type=int, default=3000000, help='estimated bytes of C per chunk')
     ap.add_argument('--big-fn', type=int, default=300000, help='estimated bytes of C from which a function gets '
                                                                'its own chunk')
-    ap.add_argument('--patches', type=Path, help='code patch table (recomp/patches.py)')
+    ap.add_argument('--patches', type=Path, default=None,
+                    help='code patch table (recomp/patches.py; default: the dump\u2019s version)')
     ap.add_argument('--mods', type=Path,
                     help='mods with code patches (<mod>/mod.json "patches", merged into the table; default: '
                          'the mods/ beside --exefs when there is one)')
@@ -784,6 +791,17 @@ def main():
                     help='a compiler barrier on every loop without calls, as before recomp/loops.py (for telling a '
                          'hang it causes from one in the game)')
     args = ap.parse_args()
+    version = None
+    if args.out is None or args.patches is None:
+        try:
+            version = detect(args.exefs)
+        except (FileNotFoundError, ValueError) as e:
+            raise SystemExit(f'cannot detect the game version of {args.exefs}: {e}') from None
+    if args.out is None:
+        args.out = gen_dir_for(version)
+        print(f'{version.name}: writing {args.out} with {version.patches.name}', file=sys.stderr)
+    if args.patches is None:
+        args.patches = version.patches
     try:
         args.out.mkdir(parents=True, exist_ok=True)
         with output_lock(args.out):
@@ -805,7 +823,7 @@ def generate(args, mods):
     elif (args.exefs.parent / 'mods').is_dir():
         patches.load_mods(table, args.exefs.parent / 'mods', bases)
     image = patches.load_image(table, args.image) if args.image else {}
-    write_if_changed(args.out / 'patches.h', patches.header_text(table, GENERATED_MARKER))
+    write_if_changed(args.out / 'patches.h', patches.header_text(table, GENERATED_MARKER, args.patches))
     want = args.modules.split(',') if args.modules else [n for n, _, _ in mods]
     unknown = set(want) - {n for n, _, _ in mods}
     if unknown:

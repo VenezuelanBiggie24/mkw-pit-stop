@@ -14,15 +14,18 @@
 #include "ui/menu/option_rows.h"
 #include "ui/glyphs/glyphs.h"
 #include "ui/menu/settings_tabs.h"
+#include "plugin/plugin.h"
 
 extern "C" {
 #include "cfg.h"
 #include "fs.h"
+#include "gfx.h"
 #include "input.h"
 #include "input_map.h"
 #include "platform/platform.h"
 #include "sysinfo.h"
 #include "ui/menu/menu.h"
+#include "sdk/ov/ov_lanif.h"
 #include "ui_text.h"
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 }
@@ -116,8 +119,9 @@ static void row_game_lang(void) {
         {"nl", UI_MENU_LANGNAME_NL}, {"pt", UI_MENU_LANGNAME_PT}, {"pt-BR", UI_MENU_LANGNAME_PT_BR},
         {"ru", UI_MENU_LANGNAME_RU},
         {"zh-CN", UI_MENU_LANGNAME_ZH_HANS}, {"zh-TW", UI_MENU_LANGNAME_ZH_HANT}, {"ko", UI_MENU_LANGNAME_KO},
-        // ours, rebuilt over the game's Spanish (tools/i18n/game_texts.py)
+        // ours, rebuilt over the game's Spanish and British English (tools/i18n/game_texts.py)
         {"ca", UI_MENU_LANGNAME_CA}, {"gl", UI_MENU_LANGNAME_GL}, {"eu", UI_MENU_LANGNAME_EU},
+        {"tr", UI_MENU_LANGNAME_TR},
         // added by updates (Polish 1.5.0, Thai 1.7.0): listed only when this copy of the game ships them
         {"pl", UI_MENU_LANGNAME_PL}, {"th", UI_MENU_LANGNAME_TH},
     };
@@ -166,6 +170,8 @@ static const char *present_note(void) {
 #endif
 
 // ---- the tabs
+static void hdr_rows(void);   // after the HDR row, below
+
 // The window and the picture's shape on it. On the PS5 only how the picture fits the TV: the console has one screen
 // and no window, one graphics device, VideoOut's own vsynced present (no mailbox or tearing mode), the TV's 16:9 output
 // (the ultrawide aspects and "fit the window" have nothing to fit) and an SDR swapchain (ps5_window.c wsys_hdr).
@@ -186,11 +192,17 @@ static void rows_screen(void) {
         const char *names[5] = {"16:9", menu_text(UI_MENU_ASPECT_WINDOW), "21:9", "32:9", "48:9"};
         opt_choice_list("MKW_ASPECT", UI_MENU_ASPECT, vals, names, 5, UI_MENU_ASPECT_DESC);
     }
+    {   // the race HUD in the middle 16:9 of a wider or taller picture, or at its edges (core/boot/patches.c), at start
+        static const char *const vals[] = {"16:9", "edges"};
+        const char *names[2] = {menu_text(UI_MENU_HUD_POSITION_16X9), menu_text(UI_MENU_HUD_POSITION_EDGES)};
+        opt_choice_list("MKW_HUD_POSITION", UI_MENU_HUD_POSITION, vals, names, 2, UI_MENU_HUD_POSITION_DESC);
+    }
     {   // the game's own HDR picture on an HDR display (gfx/nvn/host/gfx_hdr.c), live
         static const char *const vals[] = {"auto", "off"};
         const char *names[2] = {menu_text(UI_MENU_FPS_AUTO), menu_text(UI_MENU_PERF_OFF)};
         opt_choice_list("MKW_HDR", UI_MENU_HDR, vals, names, 2, UI_MENU_HDR_DESC);
     }
+    hdr_rows();
 #endif
 }
 
@@ -198,6 +210,41 @@ static void tab_screen(float scale) {
     opt_begin("##screen", scale);
     rows_screen();
     opt_end();
+}
+
+// The HDR rows after HDR: the tone mapper (gfx_shader.c; its programs come from tools/shaders/renodx.py, so without
+// them the row is greyed out) and the peak and paper white the game is told (gfx_hdr.c), all only while HDR is on, and
+// the two values only with PsychoV35 (with the game's curve the console's system values hold).
+static void hdr_rows(void) {
+    uint16_t peak, white;
+    const bool on = gfx_hdr_output(&peak, &white) != 0;
+    {
+        static const char *const vals[] = {"vanilla", "psychov"};
+        const char *names[2] = {menu_text(UI_MENU_HDR_TONEMAP_VANILLA), menu_text(UI_MENU_HDR_TONEMAP_PSYCHOV)};
+        static int have = -1;
+        if (have < 0) {
+            char p[1200];
+            const char *sp = cfg_get("MKW_SPIRV");
+            if (sp && *sp) snprintf(p, sizeof p, "%s-renodx", sp);   // gfx_shader.c tonemap_dir
+            else snprintf(p, sizeof p, "%s/spirv-renodx", cfg_game_dir());
+            have = plat_dir_exists(p);
+        }
+        if (!have) opt_disable_next(UI_MENU_HDR_TONEMAP_MISSING);
+        else if (!on) opt_disable_next(UI_MENU_HDR_DESC);
+        opt_choice_list("MKW_HDR_TONEMAP", UI_MENU_HDR_TONEMAP, vals, names, 2, UI_MENU_HDR_TONEMAP_DESC);
+    }
+    // 1 nit a step (ten held); automatic below the lowest, right from it starts at the system's value
+    char fmt[32];
+    snprintf(fmt, sizeof fmt, menu_text(UI_MENU_HDR_NITS), "%d");
+    unsigned sp = 1000, sw = 203;
+    sscanf(cfg_value("MKW_HDR_SYSTEM"), "%u/%u", &sp, &sw);
+    const bool psychov = !strcmp(cfg_value("MKW_HDR_TONEMAP"), "psychov");
+    if (!on) opt_disable_next(UI_MENU_HDR_DESC);
+    else if (!psychov) opt_disable_next(UI_MENU_HDR_NEEDS_PSYCHOV);
+    opt_slider_auto("MKW_HDR_PEAK", UI_MENU_HDR_PEAK, 100, 10000, UI_MENU_HDR_PEAK_DESC, fmt, menu_text(UI_MENU_FPS_AUTO), (int)sp);
+    if (!on) opt_disable_next(UI_MENU_HDR_DESC);
+    else if (!psychov) opt_disable_next(UI_MENU_HDR_NEEDS_PSYCHOV);
+    opt_slider_auto("MKW_HDR_WHITE", UI_MENU_HDR_WHITE, 40, 1000, UI_MENU_HDR_WHITE_DESC, fmt, menu_text(UI_MENU_FPS_AUTO), (int)sw);
 }
 
 // The Quality presets: the values each one gives the four rows below it, in the order
@@ -303,6 +350,13 @@ static void auto_undo(void) {
 
 // What the graphics card draws and how much, each row the console's by default: the preset first with the four rows it
 // sets hanging under it, then the resolution, then how fast frames come.
+// Under an upscaler, frame generation engine or Reflex row: its value applies after a restart (1), or this PC cannot
+// run it (2: the game's own picture and pacing stay)
+static void engine_note(int state) {
+    if (state == 1) opt_text(UI_MENU_AFTER_RESTART, true);
+    else if (state == 2) opt_text(UI_MENU_NOT_AVAILABLE, true);
+}
+
 static void rows_graphics(void) {
 #ifndef MKW_PS5_NATIVE
     static bool auto_test = getenv("MKW_LAUNCHER_AUTOSET") != nullptr;   // (test) once, as the button does
@@ -341,6 +395,24 @@ static void rows_graphics(void) {
     opt_choice("MKW_UPSCALER", UI_MENU_UPSCALER, up, 2, UI_MENU_UPSCALER_DESC);
     if (strcmp(cfg_value("MKW_UPSCALER"), "fsr")) opt_disable_next(UI_MENU_SHARPNESS_FSR_ONLY);   // FSR's own pass
     opt_slider("MKW_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
+    {   // DLSS or FSR 3.1 in the place of the game's upscale (gfx/vk/exec/vk_temporal.c): the engine live, the quality
+        // at the next start
+        static const char *const vals[] = {"off", "dlss", "fsr3"};
+        const char *names[3] = {menu_text(UI_MENU_PERF_OFF), "NVIDIA DLSS", "AMD FSR 3.1"};
+        opt_choice_list("MKW_TEMPORAL", UI_MENU_TEMPORAL, vals, names, 3, UI_MENU_TEMPORAL_DESC);
+        engine_note(vk_tmp_menu_state("MKW_TEMPORAL"));
+        static const char *const qv[] = {"native", "quality", "balanced", "performance", "ultra"};
+        const char *qn[5] = {menu_text(UI_MENU_TQ_NATIVE), menu_text(UI_MENU_TQ_QUALITY), menu_text(UI_MENU_TQ_BALANCED),
+                              menu_text(UI_MENU_TQ_PERFORMANCE), menu_text(UI_MENU_TQ_ULTRA)};
+        opt_choice_list("MKW_TEMPORAL_QUALITY", UI_MENU_TEMPORAL_QUALITY, qv, qn, 5, UI_MENU_TEMPORAL_QUALITY_DESC);
+        static const char *const pv[] = {"default", "j", "k", "l", "m"};
+        const char *pn[5] = {menu_text(UI_MENU_DLSS_PRESET_DEFAULT), "J", "K", "L", "M"};
+        opt_choice_list("MKW_DLSS_PRESET", UI_MENU_DLSS_PRESET, pv, pn, 5, UI_MENU_DLSS_PRESET_DESC);
+        static const char *const cv[] = {"off", "on"};   // CAS on the upscaler's picture (vk_temporal.c), live
+        const char *cn[2] = {menu_text(UI_MENU_PERF_OFF), menu_text(UI_MENU_ON)};
+        opt_choice_list("MKW_CAS", UI_MENU_CAS, cv, cn, 2, UI_MENU_CAS_DESC);
+        opt_slider("MKW_CAS_SHARPNESS", UI_MENU_CAS_SHARPNESS, 0, 100, UI_MENU_CAS_SHARPNESS_DESC, 5, "%.0f %%");
+    }
     static const UiTextId mode[] = {UI_MENU_MODE_DOCKED, UI_MENU_MODE_HANDHELD};
     opt_choice("MKW_OPERATION_MODE", UI_MENU_OPERATION_MODE, mode, 2, UI_MENU_OPERATION_MODE_DESC);
     opt_group(UI_MENU_GROUP_PERFORMANCE);
@@ -349,13 +421,30 @@ static void rows_graphics(void) {
         const char *names[5] = {menu_text(UI_MENU_FPS_AUTO), "60", "30", "20", "15"};
         opt_choice_list("MKW_FPS", UI_MENU_FPS, vals, names, 5, UI_MENU_FPS_DESC);
     }
+    {   // game steps a second (core/boot/game.c frame_logic_hz), read at start
+        static const char *const vals[] = {"60", "120", "144", "240"};
+        const char *names[4] = {"60 Hz", "120 Hz", "144 Hz", "240 Hz"};
+        opt_choice_list("MKW_LOGIC_HZ", UI_MENU_LOGIC_HZ, vals, names, 4, UI_MENU_LOGIC_HZ_DESC);
+    }
     {   // frames made between the game's (gfx/vk/device/vk_framegen.c), live
         static const char *const vals[] = {"off", "auto", "2", "3", "4", "120"};
         const char *names[6] = {menu_text(UI_MENU_PERF_OFF), menu_text(UI_MENU_FPS_AUTO), "2x", "3x", "4x", "120 fps"};
         opt_choice_list("MKW_FRAMEGEN", UI_MENU_FRAMEGEN, vals, names, 6, UI_MENU_FRAMEGEN_DESC);
         if (vk_fg_uneven()) opt_text(UI_MENU_FRAMEGEN_UNEVEN, true);   // a fixed factor that judders on this screen
     }
-#ifndef MKW_PS5_NATIVE   // VideoOut runs at the TV's fixed rate here
+#ifndef MKW_PS5_NATIVE   // VideoOut runs at the TV's fixed rate here; DLSS, FSR 3.1 and Reflex are PC engines
+    {   // who makes those frames (gfx/vk/device/vk_framegen.c, gfx/vk/exec/vk_temporal.c), live
+        static const char *const vals[] = {"flow", "dlss", "fsr3"};
+        const char *names[3] = {"MKW Recomp", "NVIDIA DLSS", "AMD FSR 3.1"};
+        opt_choice_list("MKW_FG_ENGINE", UI_MENU_FG_ENGINE, vals, names, 3, UI_MENU_FG_ENGINE_DESC);
+        engine_note(vk_tmp_menu_state("MKW_FG_ENGINE"));
+    }
+    {   // NVIDIA Reflex (gfx/vk/device/vk_reflex_frame.c), live
+        static const char *const vals[] = {"off", "on", "boost"};
+        const char *names[3] = {menu_text(UI_MENU_PERF_OFF), menu_text(UI_MENU_ON), menu_text(UI_MENU_REFLEX_BOOST)};
+        opt_choice_list("MKW_REFLEX", UI_MENU_REFLEX, vals, names, 3, UI_MENU_REFLEX_DESC);
+        engine_note(vk_rfx_menu_state());
+    }
     opt_toggle("MKW_VRR", UI_MENU_VRR, UI_MENU_VRR_DESC);   // gfx/vk/device/vk_framegen.c fits, live
 #endif
     opt_toggle("MKW_LOW_LATENCY", UI_MENU_LOW_LATENCY, UI_MENU_LOW_LATENCY_DESC);   // core/boot/frame_jit.c, live
@@ -409,9 +498,10 @@ static const char *button_icons_note(void) {
 }
 
 #ifndef MKW_PS5_NATIVE
-// Each player's controller and its battery (input/input_power.c), over the settings (discussion #516).
+// Each player's controller and its battery (input/input_power.c), over the settings (discussion #516). On the start
+// screen the gamepads start on first use and follow hotplug through input_hotplug (the main page keeps its own list).
 static void pad_rows(void) {
-    if (!input_gamepads_running()) return;   // the start screen shows them on its main page (launcher.cpp pad_row)
+    if (!input_gamepads_running()) return;
     opt_group(UI_MENU_PADS);
     int shown = 0;
     for (int p = 0; p < INPUT_MAX_PLAYERS; p++) {
@@ -427,6 +517,15 @@ static void pad_rows(void) {
 }
 #endif
 
+#ifndef MKW_PS5_NATIVE
+// Under the Menu shortcut description while Guide is picked: Steam's overlay opens on it too (as does the
+// Xbox Game Bar on Windows), so the game may never see it.
+static const char *shortcut_guide_note(void) {
+    if (strcmp(cfg_value("MKW_MENU_SHORTCUT"), "guide")) return nullptr;
+    return menu_text(UI_MENU_SHORTCUT_STEAM_NOTE);
+}
+#endif
+
 static void rows_controls(void) {
     static const UiTextId layout[] = {UI_MENU_PAD_LAYOUT_AUTO, UI_MENU_PAD_LAYOUT_NINTENDO, UI_MENU_PAD_LAYOUT_XBOX};
     opt_choice("MKW_PAD_LAYOUT", UI_MENU_PAD_LAYOUT, layout, 3, UI_MENU_PAD_LAYOUT_DESC, pad_layout_note());
@@ -439,6 +538,9 @@ static void rows_controls(void) {
 #endif
     opt_choice("MKW_BUTTON_ICONS", UI_MENU_BUTTON_ICONS, icons, n_icons, UI_MENU_BUTTON_ICONS_DESC, button_icons_note());
 #ifndef MKW_PS5_NATIVE
+    static const UiTextId shortcut[] = {UI_MENU_SHORTCUT_MINUS_PLUS, UI_MENU_SHORTCUT_GUIDE};
+    opt_choice("MKW_MENU_SHORTCUT", UI_MENU_MENU_SHORTCUT, shortcut, 2, UI_MENU_MENU_SHORTCUT_DESC, nullptr,
+               shortcut_guide_note());
     opt_toggle("MKW_MOTION", UI_MENU_MOTION, UI_MENU_MOTION_DESC);
 #endif
     opt_slider("MKW_RUMBLE_STRENGTH", UI_MENU_RUMBLE_STRENGTH, 0, 300, UI_MENU_RUMBLE_STRENGTH_DESC, 10, "%.0f %%");
@@ -450,6 +552,7 @@ static void rows_controls(void) {
 #endif
     opt_slider("MKW_STICK_DEADZONE", UI_MENU_STICK_DEADZONE, 0, 40, UI_MENU_STICK_DEADZONE_DESC, 1, "%.0f %%");   // input.c
 #ifndef MKW_PS5_NATIVE
+    opt_toggle("MKW_KEYBOARD_MOUSE", UI_MENU_KEYBOARD_MOUSE, UI_MENU_KEYBOARD_MOUSE_DESC);   // input.c, live
     opt_slider("MKW_MOUSE_SENS", UI_MENU_MOUSE_SENS, 0, 10, UI_MENU_MOUSE_SENS_DESC, 0.1f, "%.1f");
     static const char *kb_vals[] = {"shared", "own"};
     const char *kb_names[] = {menu_text(UI_MENU_KEYBOARD_SHARED), menu_text(UI_MENU_KEYBOARD_OWN)};
@@ -469,6 +572,24 @@ static void tab_controls(float scale) {
     binds_after_page();
 }
 
+// The network LAN play uses (MKW_LAN_IP): Automatic, then each address of a local network with its adapter's name, so
+// a player on ZeroTier or N2N picks theirs instead of writing the address in mkw.ini (#707). The list is read again
+// every two seconds (listing the adapters is slow on Windows). A set address that is not in it any more (the VPN is
+// down) stays shown as it is.
+static void row_lan_network(void) {
+    static OvLanIf ifs[16];
+    static int n;
+    static uint64_t read_at;
+    if (!read_at || plat_now_ns() - read_at > 2000000000ull) n = ov_lan_list(ifs, 16), read_at = plat_now_ns();
+    static char labels[16][80];
+    const char *vals[17] = {""}, *names[17] = {menu_text(UI_MENU_AUTO)};
+    for (int i = 0; i < n; i++) {
+        snprintf(labels[i], sizeof labels[i], "%s (%s)", ifs[i].ip, ifs[i].name);
+        vals[i + 1] = ifs[i].ip, names[i + 1] = labels[i];
+    }
+    opt_choice_list("MKW_LAN_IP", UI_MENU_LAN_NET, vals, names, n + 1, UI_MENU_LAN_NET_DESC);
+}
+
 // The languages, LAN play and the update check: the Game and Menu tabs of before, two rows each.
 static void rows_general(void) {
     row_game_lang();
@@ -484,6 +605,7 @@ static void rows_general(void) {
     opt_choice("MKW_MENU_LANG", UI_MENU_MENU_LANG, langs, sizeof langs / sizeof *langs, UI_MENU_MENU_LANG_DESC);
     opt_toggle("MKW_LAN", UI_MENU_LAN, UI_MENU_LAN_DESC);   // sdk/ov/ov_socket.c, the lan set of recomp/patches-mkw.txt
 #ifndef MKW_PS5_NATIVE
+    row_lan_network();   // sdk/ov/ov_lanaddr.c
     opt_toggle("MKW_UPDATE_CHECK", UI_MENU_UPDATE_CHECK, UI_MENU_UPDATE_CHECK_DESC);   // ui/launcher/launcher_update.cpp
     static const UiTextId start[] = {UI_MENU_AUTO, UI_MENU_START_ALWAYS, UI_MENU_START_SKIP};
     opt_choice("MKW_START_SCREEN", UI_MENU_START_SCREEN, start, 3, UI_MENU_START_SCREEN_DESC);   // launcher.cpp console_start
@@ -713,6 +835,15 @@ void settings_opened(void) {
     g_modal = false;
 }
 
+// The in-game menu opened (discussion #577): no row takes the cursor, layout_menu focuses "Continue" instead, so a
+// stray D-pad deflection on open cannot retune a setting. A pending tab request survives: tab switches in
+// settings_tabs still focus the new page's first row, and the test hook's settings_select(0) keeps its screenshots
+// on the first row.
+void settings_opened_menu(void) {
+    g_focus_page = -1;
+    g_modal = false;
+}
+
 bool settings_modal(void) { return g_modal || binds_modal(); }
 
 // Pit Stop (pit_stop.cpp) draws the same rows as the tabs, one category per page. Returns true when the Advanced page's
@@ -742,24 +873,47 @@ void settings_pit_quick(void) {
 
 void settings_reset_all(void) { reset_all(); }
 
+// The tabs in their order: the players' (Screen to General), the mods' (MkwPluginApi.settings_tab: ids from TAB_MOD,
+// in the game only), then Advanced and Hacks. Returns how many.
+enum { TAB_MOD = 100 };
+static int tab_order(int *out) {
+    int n = 0;
+    for (int k = TAB_SCREEN; k <= TAB_GENERAL; k++) out[n++] = k;
+    for (int i = 0; i < plugins_tab_count(); i++) out[n++] = TAB_MOD + i;
+    out[n++] = TAB_ADVANCED;
+    out[n++] = TAB_HACKS;
+    out[n++] = TAB_MULTI;
+    return n;
+}
+
 void settings_tabs(float scale, float bottom) {
+    int order[TAB_COUNT + 16], ntabs = tab_order(order);
     int step = settings_modal()                                                                          ? 0
              : ImGui::IsKeyPressed(ImGuiKey_GamepadR1, false) || ImGui::IsKeyPressed(ImGuiKey_E, false) ? 1
              : ImGui::IsKeyPressed(ImGuiKey_GamepadL1, false) || ImGui::IsKeyPressed(ImGuiKey_Q, false) ? -1
                                                                                                          : 0;
-    if (step) g_tab_request = (g_tab + step + TAB_COUNT) % TAB_COUNT;
+    if (step) {
+        int at = 0;
+        for (int i = 0; i < ntabs; i++)
+            if (order[i] == g_tab) at = i;
+        g_tab_request = order[(at + step + ntabs) % ntabs];
+    }
     if (g_tab_request >= 0) g_focus_page = g_tab_request;   // the new page's first row takes the cursor
 
     if (ImGui::BeginTabBar("##tabs", ImGuiTabBarFlags_NoTabListScrollingButtons)) {
-        for (int k = 0; k < TAB_COUNT; k++) {
+        for (int at = 0; at < ntabs; at++) {
+            int k = order[at];
             char label[128];
-            snprintf(label, sizeof label, "  %s  ###tab%d", menu_text(kTabNames[k]), k);   // the id stays per language
+            snprintf(label, sizeof label, "  %s  ###tab%d", k >= TAB_MOD ? plugins_tab_title(k - TAB_MOD)
+                                                                          : menu_text(kTabNames[k]),
+                     k);   // the id stays per language
             // the testing and shortcut tabs in the dim colour: the ones most players need come first and stand out
-            bool quiet = k >= TAB_ADVANCED && k != g_tab;
+            bool quiet = k >= TAB_ADVANCED && k < TAB_MOD && k != g_tab;
             if (quiet) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
             bool open = ImGui::BeginTabItem(label, nullptr, g_tab_request == k ? ImGuiTabItemFlags_SetSelected : 0);
             if (quiet) ImGui::PopStyleColor();
             if (!open) continue;
+            if (k >= TAB_MOD && g_tab != k) plugins_tab_shown(k - TAB_MOD);   // its page's first frame again
             g_tab = k;
             if (g_focus_page == k) {
                 opt_focus_first();
@@ -779,6 +933,7 @@ void settings_tabs(float scale, float bottom) {
             case TAB_ADVANCED: tab_advanced(scale); break;
             case TAB_HACKS: tab_hacks(scale); break;
             case TAB_MULTI: tab_multi(scale); break;
+            default: plugins_tab_draw(k - TAB_MOD, scale); break;   // a mod's (MkwPage)
             }
             ImGui::EndTabItem();
         }

@@ -343,6 +343,46 @@ void tex_zero_tail_recheck(uint64_t frame) {
     plat_mutex_unlock(&zt_lock);
 }
 
+// The deswizzle of an upload, over the texture workers (tex_par.c): each level and layer in bands of block rows, so the
+// first level (three quarters of the bytes) spreads too. It ran serially on the replay thread, ~44 ms of the course
+// load's 1.5 s peak (tl-fp1, 16/11/2026), at memcpy speed (16-25 GB/s on an i7-14700F, tex_bl_copy); the bands write
+// apart, so the staging bytes are the same. Storage that has no row split (linear, or no CPU layout) is one item.
+// Measured on replays of four captures (RX 6700 XT, i7-14700F, 17/11/2026; MKW_TEX_PAR=0 against 1, same images):
+// textures of 512 KiB or more 16.0-17.0 -> 7.9-8.4 ms per capture (title, tt8, photo: 2x with 8 threads), the
+// smaller ones left on the caller (5-11 ms over 400-900 uploads of ~140 KiB: waking the workers for each would cost
+// what it saves). gp397's whole deswizzle: 19.7 -> 15.4 ms with this threshold, 19.5 -> 16.0 with 1 MiB.
+#define UP_BAND (128u << 10)        // bytes of a band
+#define UP_PAR_MIN (512ull << 10)   // a smaller texture deswizzles on the caller
+typedef struct {
+    uint8_t *dst, *tmp;            // where its rows go (tmp: the CPU decodes' input, freed by upload)
+    size_t pitch;
+    uint32_t level, layer;
+    uint32_t band, first;          // block rows per item (0: one nvn_deswizzle), its first item
+    int bad;                       // no CPU layout: uploaded as zeros
+} UpPart;
+typedef struct {
+    const nvn_texdesc *d;
+    const void *mem;
+    UpPart *pt;
+    uint32_t n;
+} UpJob;
+
+static void up_deswizzle(void *ctx, uint32_t i) {
+    const UpJob *J = ctx;
+    uint32_t lo = 0, hi = J->n - 1;   // the last part whose first item is at most i
+    while (lo < hi) {
+        uint32_t mid = (lo + hi + 1) / 2;
+        if (J->pt[mid].first <= i) lo = mid; else hi = mid - 1;
+    }
+    UpPart *q = &J->pt[lo];
+    if (!q->band) {
+        q->bad = nvn_deswizzle(J->d, q->level, q->layer, J->mem, q->dst, q->pitch) != 0;
+        return;
+    }
+    uint32_t r0 = (i - q->first) * q->band;
+    nvn_deswizzle_rows(J->d, q->level, q->layer, J->mem, q->dst, q->pitch, r0, r0 + q->band, NULL);
+}
+
 // 1 uploaded (or nothing to upload); 0 deferred for want of staging memory (e->up_pending: tried again next frame).
 static int upload(Tex *e) {
     static volatile int32_t n_bad, n_undecoded;
@@ -356,8 +396,8 @@ static int upload(Tex *e) {
     int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
     if (!bpb || !t->mem) return 1;
     uint64_t p0 = perf_begin(), u0 = kern_now_ns();
-    uint64_t ph[UPH_N] = {0}, pt = u0;   // phase times (MKW_TRACE=perf)
-#define UP_PHASE(i) do { uint64_t now_ = kern_now_ns(); ph[i] += now_ - pt; pt = now_; } while (0)
+    uint64_t ph[UPH_N] = {0}, ph_t = u0;   // phase times (MKW_TRACE=perf)
+#define UP_PHASE(i) do { uint64_t now_ = kern_now_ns(); ph[i] += now_ - ph_t; ph_t = now_; } while (0)
     int linear = nvn_tex_is_linear(d), is3d = d->target == NVN_TEXTURE_TARGET_3D, one_d = e->pub.type == VK_IMAGE_TYPE_1D;
     uint32_t levels = linear ? 1 : e->pub.levels, layers = linear ? 1 : e->pub.layers;
     int astc = e->f.astc_bw != 0, rgb = e->f.expand_rgb;
@@ -401,14 +441,52 @@ static int upload(Tex *e) {
         return 0;
     }
     uint8_t *rmap = acheck ? vk_staging(decoded, &rbuf, &ralloc) : NULL;
+    UpPart *pt = calloc(n, sizeof *pt);
+    uint32_t items = 0;
+    uint64_t raw_all = 0;
+    k = 0;
+    for (uint32_t lv = 0; lv < levels; lv++)
+        for (uint32_t ly = 0; ly < layers; ly++, k++) {
+            uint32_t w = rg[k].imageExtent.width, h = rg[k].imageExtent.height, sl = rg[k].imageExtent.depth;
+            uint32_t rb = (w + bw - 1) / bw * (uint32_t)bpb, rows = (h + bh - 1) / bh, all = 0;
+            size_t raw = (size_t)rb * rows * sl;
+            UpPart *q = &pt[k];
+            q->level = lv + drop, q->layer = ly, q->pitch = rb, q->first = items;
+            q->tmp = (astc && !agpu) || rgb ? malloc(raw) : NULL;
+            q->dst = q->tmp ? q->tmp : stg + rg[k].bufferOffset;
+            if (!nvn_deswizzle_rows(d, q->level, ly, t->mem, q->dst, rb, 0, 0, &all) && all)
+                q->band = UP_BAND / rb ? UP_BAND / rb : 1;
+            items += q->band ? (all + q->band - 1) / q->band : 1;
+            raw_all += raw;
+        }
+    UpJob job = {d, t->mem, pt, n};
+    uint64_t dz0 = plat_now_ns();
+    if (raw_all >= UP_PAR_MIN) tex_par_for(items, up_deswizzle, &job);
+    else for (uint32_t i = 0; i < items; i++) up_deswizzle(&job, i);
+    if (vk_pool_diag_on()) {   // MKW_MEM_POOL_LABELS: read from a CPU_NO_ACCESS pool's game pages?
+        const pool_t *p = nvn_pool_find(e->pub.addr, 1);
+        if (p) vk_pool_diag_note(p->flags, 1, raw_all);
+        if (p && astc) vk_pool_diag_note(p->flags, 3, raw_all);
+    }
+    if (rt_trace & RT_TRACE_PERF) {   // MKW_TRACE=perf: the deswizzle's wall time on this thread, split and not
+        static volatile int64_t dz_ns[2], dz_bytes[2];
+        static volatile int32_t dz_n;
+        int split = raw_all >= UP_PAR_MIN;
+        __atomic_add_fetch(&dz_ns[split], (int64_t)(plat_now_ns() - dz0), __ATOMIC_RELAXED);
+        __atomic_add_fetch(&dz_bytes[split], (int64_t)raw_all, __ATOMIC_RELAXED);
+        if (plat_inc32(&dz_n) % 256 == 0)
+            rt_log("perf: upload deswizzle: %d uploads; over the texture workers %.1f MiB in %.1f ms, on the caller "
+                   "(under %llu KiB) %.1f MiB in %.1f ms", dz_n, dz_bytes[1] / 1048576.0, dz_ns[1] / 1e6,
+                   UP_PAR_MIN >> 10, dz_bytes[0] / 1048576.0, dz_ns[0] / 1e6);
+    }
     k = 0;
     for (uint32_t lv = 0; lv < levels; lv++)
         for (uint32_t ly = 0; ly < layers; ly++, k++) {
             uint32_t w = rg[k].imageExtent.width, h = rg[k].imageExtent.height, sl = rg[k].imageExtent.depth;
             uint32_t rb = (w + bw - 1) / bw * (uint32_t)bpb, rows = (h + bh - 1) / bh;
             size_t raw = (size_t)rb * rows * sl;
-            uint8_t *dst = stg + rg[k].bufferOffset, *tmp = (astc && !agpu) || rgb ? malloc(raw) : NULL;
-            if (nvn_deswizzle(d, lv + drop, ly, t->mem, tmp ? tmp : dst, rb)) {
+            uint8_t *dst = stg + rg[k].bufferOffset, *tmp = pt[k].tmp;
+            if (pt[k].bad) {
                 log_limited(&n_bad, "texture %#llx fmt %#x target %d: level %u layer %u has no CPU layout; uploaded as zeros",
                             (unsigned long long)e->pub.addr, d->format, d->target, lv, ly);
                 memset(tmp ? tmp : dst, 0, raw);
@@ -435,6 +513,7 @@ static int upload(Tex *e) {
             }
             free(tmp);
         }
+    free(pt);
     UP_PHASE(UPH_DESWIZZLE);
     static int bcc = -1;   // MKW_ASTC_BC_CHECK (bc_check)
     if (bcc < 0) bcc = cfg_get("MKW_ASTC_BC_CHECK") ? atoi(cfg_get("MKW_ASTC_BC_CHECK")) : 0;
@@ -974,11 +1053,58 @@ static int watch_span(const Tex *e, uint64_t *lo, uint64_t *hi) {
 }
 
 // vk_mem_changed over the watch pages wholly inside e's storage (all of its pages when it fills none): a neighbour that
-// shares the first or last page does not count as a write to e.
+// shares the first or last page does not count as a write to e. Storage that fills no page is judged by its bytes
+// instead (rewritten_since_gpu).
 int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now) {
     uint64_t lo, hi;
     if (!watch_span(e, &lo, &hi)) lo = e->pub.addr, hi = e->pub.addr + e->t.L.size;
     return vk_mem_changed(lo, hi - lo, since, now);
+}
+
+// Storage that fills no whole page (1.8.0: a 16x1 R16F pitch target, 128 bytes, two of them rendered on alternate
+// frames) shares its page with other data, and the page's write watch cannot tell a write to the texture from a write
+// to its neighbours: any CPU write on that page counted as a rewrite of the storage, and the GPU's texels were never
+// written back. In three Grand Prix races (drop2, RX 6700 XT, 21/11/2026) the page alone dropped 36 864 renders of two
+// such textures, ~0.6 a frame, and in every one the texture's own bytes were still those of the GPU write. For such
+// storage the bytes are kept at the GPU write and compared instead; under two pages, so at most 8 KiB copied on the
+// replay thread (128 bytes for those two).
+static int fills_no_page(const Tex *e) {
+    uint64_t lo = (e->pub.addr + 0xfff) & ~0xfffull, hi = (e->pub.addr + e->t.L.size) & ~0xfffull;
+    return hi <= lo && e->t.L.size <= 0x2000;
+}
+
+// MKW_TEX_WB_BYTES (default 1; 0: the page decides, as before 21/11/2026; --probe-vkexec's pitch page part fails then)
+static int wb_bytes(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *c = cfg_get("MKW_TEX_WB_BYTES");
+        on = !c || !*c || atoi(c) != 0;
+    }
+    return on;
+}
+
+void gpu_base_note(Tex *e) {
+    if (!fills_no_page(e)) return;
+    if (!e->gpu_base && !(e->gpu_base = malloc(0x2000))) rt_fatal("vk: out of memory for a texture's storage copy");
+    mem_copy_out(e->gpu_base, e->pub.addr, e->t.L.size);
+}
+
+int gpu_base_kept(const Tex *e) {
+    if (!fills_no_page(e) || !e->gpu_base) return -1;
+    uint8_t now[0x2000];
+    mem_copy_out(now, e->pub.addr, e->t.L.size);
+    return !memcmp(now, e->gpu_base, e->t.L.size);
+}
+
+int rewritten_since_gpu(const Tex *e) {
+    uint32_t now;
+    if (storage_rewritten(e, e->gpu_gen, &now) != 1) return 0;
+    if (!wb_bytes() || gpu_base_kept(e) != 1) return 1;
+    static volatile int32_t n_kept;
+    log_limited(&n_kept, "texture %#llx %ux%u format %#x (%llu bytes, its page shared): a neighbour was written, its own "
+                "bytes were not, so the GPU render goes back (MKW_TEX_WB_BYTES)", (unsigned long long)e->pub.addr,
+                e->t.d.width, e->t.d.height, e->t.d.format, (unsigned long long)e->t.L.size);
+    return 0;
 }
 
 // Without a write watch (vk_mem_changed -1: a kernel without userfaultfd, as the Odin 2's SteamOS ARM 7.2) every check
@@ -1028,7 +1154,8 @@ int tex_has_gpu_content(const Tex *e) {
     if (!e->pub.gpu_owned) return 0;
     if (!e->pub.mirrored) return 1;
     uint32_t now;
-    return e->gpu_dirty && !storage_rewritten(e, e->gpu_gen, &now);
+    (void)now;
+    return e->gpu_dirty && !rewritten_since_gpu(e);   // a neighbour on a shared page is not a rewrite (#740)
 }
 
 void gpu_baseline(Tex *e) {

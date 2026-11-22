@@ -59,7 +59,7 @@ Adrià 对《马力欧赛车 世界》（*Mario Kart World*，Nintendo Switch 2�
 - **游戏内 Pit Stop 覆盖菜单。** 随时按 **Options + 触控板按下** 打开 **Pit Stop**：一个为手柄设计的设置菜单，包含快捷行
   （**Master volume**、**Vibration strength**、**Performance HUD**）、所有设置分类以及实时 DualSense 按键重映射，保存到
   `/app0/mkw.ini`。
-- **已知问题（[docs/project/roadmap.md](../../docs/project/roadmap.md)）：**
+- **已知问题（[docs/ps5/roadmap.md](../../docs/ps5/roadmap.md)）：**
   - *长时间游玩：* 由于游戏会保留之前赛道的数据，可用内存会一场比赛接一场比赛地减少；内存不足时，纹理可能损坏或缺失。若出现这种
     情况，请在几场比赛后重启本作。
   - *稀疏图块：* 从启动开始就有少量稀疏纹理图块未加载：起跑线附近有轻微纹理错误，比赛开场画面为黑白。
@@ -231,7 +231,7 @@ build/mkw
 的基准比赛。菜单、计时赛、分屏、长时间游玩和其他赛道尚未在新的默认值下游玩过。
 
 约 2% 的比赛帧超过 20 ms：它们出现在赛道加载新纹理的地方，决定了 1% 低帧和轻微的慢动作。已测量的内容和尚待处理的问题见
-[docs/project/roadmap.md](../../docs/project/roadmap.md) 和 [docs/ps5/ps5.md](../../docs/ps5/ps5.md#frame-rate)；电脑上的数据见
+[docs/ps5/roadmap.md](../../docs/ps5/roadmap.md) 和 [docs/ps5/ps5.md](../../docs/ps5/ps5.md#frame-rate)；电脑上的数据见
 [docs/project/performance.md](../../docs/project/performance.md)。
 
 ## 报告问题

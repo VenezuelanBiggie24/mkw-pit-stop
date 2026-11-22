@@ -25,7 +25,8 @@
 //                 census of just that window (Adrià, 01/11/2026: 20 s of race are enough; runs waited minutes past it)
 //   MKW_SEQ_CTL=<n>:<cmd>[;<n>:<cmd>...]   with MKW_SEQ_UNTIL: the ctl command (ctl.c: shot, dump...) n presents after
 //                 its event, counted here: at.sh reads the log and lagged up to 10 frames, so a fault of five frames
-//                 (the white square of the countdown, sq1-sq4, 06/11/2026) was missed again and again
+//                 (the white square of the countdown, sq1-sq4, 06/11/2026) was missed again and again. t<n>: n 60 Hz
+//                 ticks of game time instead of presents, the same instant of the game at any MKW_LOGIC_HZ or interval
 //   MKW_FN_WATCH=main+<hex>[,...]   with MKW_SEQ_WATCH: "fn: main+X obj O vt main+V from main+L frame N" each time
 //                 one of these functions runs on another object than its previous call, so a menu cursor's move is one
 //                 line (menus driven by the log, not by screenshots). The watch goes off with
@@ -86,7 +87,8 @@ static int nuntil, until_at;               // until_at: the next event of the ch
 static uint64_t exit_ns;                   // MKW_SEQ_EXIT, in ns
 static volatile uint64_t window_end;       // when the run ends (kern_now_ns), 0 before MKW_SEQ_UNTIL's node started
 #define SEQ_CTL_MAX 128
-static struct { uint64_t n; char cmd[200]; } seq_ctl[SEQ_CTL_MAX];   // MKW_SEQ_CTL
+static struct { uint64_t n; int ticks; char cmd[200]; } seq_ctl[SEQ_CTL_MAX];   // MKW_SEQ_CTL
+static volatile uint64_t window_ticks;     // frame_step_ticks at MKW_SEQ_UNTIL's event
 static int nseq_ctl, seq_ctl_at;
 static volatile uint64_t window_frame;     // the present count at MKW_SEQ_UNTIL's event + 1, 0 before
 static volatile uint64_t window_t0;        // kern_now_ns at MKW_SEQ_UNTIL's event, 0 before: the A/B world clock
@@ -127,11 +129,18 @@ void seqwatch_init(void) {
     if ((!on || !*on || *on == '0') && !quick_on) return;
     // Each version's own table: another's offsets would watch unrelated code (1.8.0 had none, so MKW_SEQ_EXIT
     // never ended its runs; 13/11/2026)
-    char own[48];
+    // The setup writes it into the game folder (tools/prepare/seqnodes.py); a source checkout's build/ has
+    // tools/analisis/bin/seq_nodes.py's. Only build/ was read, so a player's Straight to never pressed (18/11/2026).
+    char own[48], setup[PLAT_PATH_MAX + 32];
     snprintf(own, sizeof own, "build/seq_nodes-%d.tsv", rt_version()->number);
+    snprintf(setup, sizeof setup, "%s/seq_nodes-%d.tsv", cfg_game_dir(), rt_version()->number);
     const char *path = cfg_get("MKW_SEQ_NODES");
-    if (!path || !*path) path = rt_version()->number == 100 ? "build/seq_nodes.tsv" : own;
-    FILE *f = fopen(path, "r");
+    FILE *f = NULL;
+    if (!path || !*path) {
+        if ((f = fopen(setup, "r"))) path = setup;
+        else path = rt_version()->number == 100 ? "build/seq_nodes.tsv" : own;
+    }
+    if (!f) f = fopen(path, "r");
 #ifdef __PROSPERO__
     char app[64];
     if (!f) {   // the title's own copy (tools/ps5/build_game.py puts the version's table in /app0)
@@ -140,7 +149,8 @@ void seqwatch_init(void) {
         f = fopen(path, "r");
     }
 #endif
-    if (!f) { rt_log("seq: no %s (uv run tools/analisis/bin/seq_nodes.py): watch off", path); return; }
+    if (!f) { rt_log("seq: no %s nor %s (Set up again, or uv run tools/analisis/bin/seq_nodes.py): watch off", setup, path); return; }
+    rt_log("seq: phases from %s", path);
     char line[256];
     while (fgets(line, sizeof line, f) && nnodes < MAX_NODES) {
         unsigned long long getter, slot;
@@ -185,11 +195,12 @@ void seqwatch_init(void) {
     for (const char *p = cfg_get("MKW_SEQ_CTL"); p && *p && nseq_ctl < SEQ_CTL_MAX;) {   // in order of n
         size_t n = strcspn(p, ";");
         char *colon;
-        uint64_t at = strtoull(p, &colon, 10);
+        int ticks = *p == 't';
+        uint64_t at = strtoull(p + ticks, &colon, 10);
         if (*colon == ':' && colon < p + n) {
-            seq_ctl[nseq_ctl].n = at;
+            seq_ctl[nseq_ctl].n = at, seq_ctl[nseq_ctl].ticks = ticks;
             snprintf(seq_ctl[nseq_ctl++].cmd, sizeof seq_ctl[0].cmd, "%.*s", (int)(p + n - colon - 1), colon + 1);
-        } else rt_log("seq: MKW_SEQ_CTL: %.*s is not <n>:<command>", (int)n, p);
+        } else rt_log("seq: MKW_SEQ_CTL: %.*s is not [t]<n>:<command>", (int)n, p);
         p += n + (p[n] == ';');
     }
     for (const char *p = cfg_get("MKW_FN_WATCH"); p && *p && nfnw < FN_MAX;) {
@@ -249,6 +260,7 @@ static void set_active(int k, uint8_t on, uint64_t frame, const char *why) {
             rt_fnprof_set(impcensus_on || g_fn_sampling || listw_on);   // the other users keep the hook on
             __atomic_store_n(&window_t0, kern_now_ns(), __ATOMIC_RELEASE);
             hostfn_time_window(frame);   // the census starts here
+            window_ticks = frame_step_ticks();
             __atomic_store_n(&window_frame, frame + 1, __ATOMIC_RELEASE);
             for (int i = 0; i < nprobes; i++)
                 if (probes[i].node == PROBE_UNTIL) __atomic_store_n(&probes[i].from, frame + probes[i].n, __ATOMIC_RELEASE);
@@ -340,9 +352,12 @@ void seqwatch_frame(uint64_t frame) {
         plat_exit(0);
     }
     uint64_t w = __atomic_load_n(&window_frame, __ATOMIC_ACQUIRE);
-    while (w && seq_ctl_at < nseq_ctl && frame >= w - 1 + seq_ctl[seq_ctl_at].n) {
-        rt_log("seq: MKW_SEQ_CTL +%llu (frame %llu): %s", (unsigned long long)seq_ctl[seq_ctl_at].n,
-               (unsigned long long)frame, seq_ctl[seq_ctl_at].cmd);
+    while (w && seq_ctl_at < nseq_ctl &&
+           (seq_ctl[seq_ctl_at].ticks ? frame_step_ticks() >= window_ticks + seq_ctl[seq_ctl_at].n
+                                      : frame >= w - 1 + seq_ctl[seq_ctl_at].n)) {
+        rt_log("seq: MKW_SEQ_CTL +%s%llu (frame %llu, tick %llu): %s", seq_ctl[seq_ctl_at].ticks ? "t" : "",
+               (unsigned long long)seq_ctl[seq_ctl_at].n, (unsigned long long)frame,
+               (unsigned long long)(frame_step_ticks() - window_ticks), seq_ctl[seq_ctl_at].cmd);
         ctl_run(seq_ctl[seq_ctl_at++].cmd);
     }
     for (int k = 0; k < nnodes; k++)

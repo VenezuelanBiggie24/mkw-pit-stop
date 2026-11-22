@@ -15,7 +15,6 @@
 #include "platform/platform.h"
 
 #define MAX_HOSTFN 4096   // dispatch.c holds HOST_CAP / 2 host functions
-#define MAX_ADDED 64
 
 #ifdef _WIN32
 // PE/COFF: the linker sorts .ovr$a < .ovr$m (entries, host.h) < .ovr$z by the text after '$'.
@@ -55,9 +54,10 @@ typedef struct {
 } Slot;
 static Slot slots[MAX_HOSTFN];
 static int nslots;
-static RtHostEntry added[MAX_ADDED];
-static int nadded;
-static RtHostEntry added_obs[MAX_ADDED];
+#define MAX_ADDED 64   // observers from extensions (an override list grows)
+static RtHostEntry *added;   // overrides from probes, plugins (plugin/plugin.c) and extensions (core/ext), any number
+static int nadded, cap_added;
+static RtHostEntry added_obs[MAX_ADDED];   // observers from extensions
 static int nadded_obs;
 static int sealed;
 
@@ -68,14 +68,21 @@ static GuestFn table_find(const RtHostEntry *start, const RtHostEntry *stop, con
     return NULL;
 }
 
+// The latest added override of name wins (a plugin loaded later over an earlier one), then the linked table.
 GuestFn hostfn_override(const char *name) {
-    for (int i = 0; i < nadded; i++)
+    for (int i = nadded - 1; i >= 0; i--)
         if (!strcmp(added[i].name, name)) return added[i].fn;
     return table_find(ovr_start, ovr_stop, name);
 }
 
-// An override added from outside the table (an extension, runtime/core/ext) replaces the symbol outright, so a linked
-// observer of the same symbol steps aside; an added observer comes before a linked one.
+// The runtime's own handler of name (a linked override or observer), whatever was added over it.
+GuestFn hostfn_stock(const char *name) {
+    GuestFn f = table_find(ovr_start, ovr_stop, name);
+    return f ? f : table_find(obs_start, obs_stop, name);
+}
+
+// An override added from outside the table (an extension, runtime/core/ext, or a plugin) replaces the symbol outright,
+// so a linked observer of the same symbol steps aside; an added observer comes before a linked one.
 GuestFn hostfn_observer(const char *name) {
     for (int i = 0; i < nadded; i++)
         if (!strcmp(added[i].name, name)) return NULL;
@@ -103,7 +110,10 @@ const char *hostfn_table_name(int observers, int i) {
 
 void hostfn_add_override(const char *name, GuestFn fn) {
     if (ldr_count()) rt_fatal("hostfn_add_override(%s) after ldr_load", name);
-    if (nadded == MAX_ADDED) rt_fatal("hostfn_add_override: more than %d", MAX_ADDED);
+    if (nadded == cap_added) {
+        cap_added = cap_added ? cap_added * 2 : 64;
+        if (!(added = realloc(added, (size_t)cap_added * sizeof *added))) rt_fatal("hostfn_add_override: out of memory");
+    }
     added[nadded++] = (RtHostEntry){name, fn};
 }
 

@@ -22,22 +22,38 @@
 #include "platform/platform.h"
 #include "vk_pipe_internal.h"
 
-#define PAIRS_VERSION 2
+#define PAIRS_VERSION 3
 #define PAIR_ALPHA 1u           // PairRec.flags: the fragment stage may draw with NVN's alpha test (pipeline_pairs.py)
+#define PAIR_CS 2u              // PairRec.flags: vs holds a compute program, fs is none (pipeline_pairs.py)
+#define JOB_CS (-1)             // PairJob.kind of a compute pipeline (vk_pipeline_compute_warm)
 #define PAIRS_STALL_MS 20000u   // as PREWARM_STALL_MS: this long without a library finished and the boot goes on
 
 typedef struct { char magic[8]; uint32_t version, count; } PairsHeader;
 typedef struct { uint8_t vs[32], fs[32]; uint32_t flags; } PairRec;
-typedef struct { int kind; Lib *b; Layout *l; VkPipeState s; GKey k; } PairJob;
+typedef struct { int kind; Lib *b; Layout *l; VkPipeState s; GKey k; const GfxShader *cs; uint32_t first; } PairJob;
 
 // finished: every library built, no thread left reading SPIR-V (vk_pipeline_prewarm releases it then)
-static struct { PairJob *j; size_t n; volatile int64_t next, done; int no_stall, finished; } PJ;
+static struct { PairJob *j; size_t n; volatile int64_t next, done, cs_failed; int no_stall, finished, low; } PJ;
 
 // The alpha test functions the game draws with (pipeline_pairs.py: GREATER and GEQUAL in every recorded pipeline with
 // the test on), as GKey.alpha_func: VkCompareOp + 1. The reference is no part of a pipeline (spirv_alpha_test).
 static const uint8_t alpha_funcs[] = {VK_COMPARE_OP_GREATER + 1, VK_COMPARE_OP_GREATER_OR_EQUAL + 1};
 
 static int id_cmp(const void *x, const void *y) { return memcmp(x, y, 32); }
+
+// A library stays alive as a VkPipeline until the game ends: about 1 MB each on Intel ANV, 13 684 of them (#733: 26 GB
+// and the OOM killer on a 32 GB machine). Below this much free RAM (the larger of 2 GiB and 1/8 of the total) the
+// prewarm (the game's and mkw --prewarm) stops and the rest is built as the game draws.
+static int pairs_low_ram(void) {
+    float used, total, proc;
+    plat_mem_info(&used, &total, &proc);
+    if (total < 0) return 0;
+    float need = total / 8 > 2048 ? total / 8 : 2048;
+    if (total - used >= need) return 0;
+    static int logged;
+    if (!logged++) rt_log("vk_pipeline: pairs prewarm: only %.0f MB of RAM free; the rest is built as the game draws", total - used);
+    return 1;
+}
 
 static void pairs_worker(void *arg) {
     plat_thread_background();   // off the frame's fast cores (MKW_FAST_CORES)
@@ -46,7 +62,17 @@ static void pairs_worker(void *arg) {
     plat_mutex_lock(&P.lock);
     for (int64_t i; (i = plat_inc64(&PJ.next) - 1) < (int64_t)PJ.n;) {
         PairJob *j = &PJ.j[i];
-        if (j->b->building && !j->b->job) lib_build(j->b, j->kind, &j->s, &j->k, j->l);   // releases P.lock
+        if (j->kind == JOB_CS) {
+            if (!vk_pipeline_compute_warm(j->cs, j->first)) plat_inc64(&PJ.cs_failed);   // releases P.lock
+        } else if (j->b->building && !j->b->job) {
+            if (!PJ.low && (i & 31) == 0 && pairs_low_ram()) PJ.low = 1;   // the rest is built as the game draws
+            if (PJ.low) {
+                lib_drop(j->b);
+                plat_inc64(&PJ.done);
+                continue;
+            }
+            lib_build(j->b, j->kind, &j->s, &j->k, j->l);   // releases P.lock
+        }
         plat_inc64(&PJ.done);
     }
     plat_mutex_unlock(&P.lock);
@@ -150,10 +176,12 @@ static int pair_shaders(const PairRec *r, const uint8_t (*ids)[32], size_t u, co
 }
 
 void pairs_prewarm(void) {
-    if (!P.gpl || !P.indep) return;   // without the pipeline library the records' prewarm is all there is
+    // without the pipeline library only the compute pipelines: the graphics records' prewarm is all there is for draws
+    int libs = P.gpl && P.indep;
     char path[sizeof K.path + 32];
     size_t n = 0;
     PairRec *r = pairs_read(&n, path, sizeof path);
+    PJ.finished = 1;   // until threads start: what the shader preload loaded is released after the prewarm
     if (!r || !n) {
         if (!r) rt_log("vk_pipeline: no %s: shader libraries are built as the game draws", path);
         free(r);
@@ -178,13 +206,18 @@ void pairs_prewarm(void) {
     // vertex shader entered would not be a draw's.
     // At most one library per shader and per variant, and per alpha-tested record a fragment one per function for its
     // shader and its variant: lib_find takes the repeats.
-    size_t nalpha = 0;
-    for (size_t i = 0; i < n; i++) nalpha += (r[i].flags & PAIR_ALPHA) != 0;
-    size_t cap = 2 * u + 2 * sizeof alpha_funcs * nalpha;
+    size_t nalpha = 0, ncs = 0;
+    for (size_t i = 0; i < n; i++) nalpha += (r[i].flags & PAIR_ALPHA) != 0, ncs += (r[i].flags & PAIR_CS) != 0;
+    // A task or mesh program runs as compute (its .cs.spv, gfx_shader_cs_variant): its pipeline too. cs-warm1 on the
+    // Windows PC (18/11/2026): with the compute records alone, the 18 the race drew were still built at their dispatch.
+    const GfxShader **mesh_cs = calloc(u, sizeof *mesh_cs);
+    size_t nmesh = 0;
+    for (size_t i = 0; mesh_cs && i < u; i++) nmesh += (mesh_cs[i] = sh[i] ? gfx_shader_cs_variant(sh[i]) : NULL) != NULL;
+    size_t cap = 2 * u + 2 * sizeof alpha_funcs * nalpha + 3 * ncs + nmesh;   // a compute program: its pipeline and two splits
     const GfxShader **var = calloc(u, sizeof *var);
     PairJob *jobs = malloc(cap * sizeof *jobs);
-    if (!var || !jobs) {
-        free(r), free(ids), free(sh), free(var), free(jobs);
+    if (!var || !jobs || !mesh_cs) {
+        free(r), free(ids), free(sh), free(var), free(jobs), free(mesh_cs);
         return;
     }
     gfx_shader_spirv_quiet(1);   // the variants, unions and layouts below read SPIR-V as the workers do
@@ -196,6 +229,7 @@ void pairs_prewarm(void) {
     }
     for (size_t i = 0; i < n; i++) {
         const GfxShader *vs, *fs, *vv, *fv;
+        if (r[i].flags & PAIR_CS || !libs) continue;
         if (!pair_shaders(&r[i], (const uint8_t(*)[32])ids, u, sh, var, &vs, &fs, &vv, &fv)) {
             dropped++;
             continue;
@@ -207,8 +241,26 @@ void pairs_prewarm(void) {
     }
     size_t nj = 0;
     plat_mutex_lock(&P.lock);
+    uint32_t cs_queued = 0;
     for (size_t i = 0; i < n; i++) {
         const GfxShader *vs, *fs, *vv, *fv;
+        if (r[i].flags & PAIR_CS) {   // as a dispatch builds it (vk_exec_ops.c), with first_store_pre's two splits
+            const uint8_t (*c)[32] = bsearch(r[i].vs, ids, u, 32, id_cmp);
+            const GfxShader *cs = c ? sh[c - ids] : NULL;
+            if (c && mesh_cs[c - ids]) {   // a mesh program (pipeline_pairs.py): its compute form, queued below
+                used++;
+                continue;
+            }
+            if (!cs || gfx_shader_stage(cs) != GFX_STAGE_CS) {
+                dropped++;
+                continue;
+            }
+            for (uint32_t first = 0; first < (gfx_shader_first_store(cs) ? 3u : 1u) && nj < cap; first++)
+                jobs[nj++] = (PairJob){.kind = JOB_CS, .cs = cs, .first = first}, cs_queued++;
+            used++;
+            continue;
+        }
+        if (!libs) continue;
         if (!pair_shaders(&r[i], (const uint8_t(*)[32])ids, u, sh, var, &vs, &fs, &vv, &fv)) continue;
         // the shaders and their variants; a pre-rasterization key holds no fragment shader, one fragment key no vertex
         // shader: their repeats are found built
@@ -247,10 +299,12 @@ void pairs_prewarm(void) {
             }
         }
     }
+    for (size_t i = 0; i < u; i++)   // a task/mesh draw dispatches its compute form whole (vk_exec_ops.c)
+        if (mesh_cs[i] && nj < cap) jobs[nj++] = (PairJob){.kind = JOB_CS, .cs = mesh_cs[i]}, cs_queued++;
     plat_mutex_unlock(&P.lock);
-    free(ids), free(sh), free(r), free(var);
+    free(ids), free(sh), free(r), free(var), free(mesh_cs);
 
-    PJ.j = jobs, PJ.n = nj, PJ.next = PJ.done = 0;
+    PJ.j = jobs, PJ.n = nj, PJ.next = PJ.done = PJ.cs_failed = 0;
     PlatThread *t[64];
     int nt = 0, cpus = (int)plat_cpu_count();
     const char *pt = cfg_get("MKW_PAIRS_THREADS");   // diagnosis: 1 makes the last MKW_PIPE_TRACE line a crash's library
@@ -280,8 +334,10 @@ void pairs_prewarm(void) {
         free(jobs);
     }
     rt_log("vk_pipeline: pairs prewarm: %zu records in %s (%u used, %u dropped), %zu shaders and %u integer "
-           "variants; %zu shader libraries on %d threads; shaders %.0f ms, libraries %.0f ms",
-           n, path, used, dropped, u, variants, nj, nt, t1 - t0, (double)plat_now_ns() / 1e6 - t1);
+           "variants; %zu shader libraries and compute pipelines (%u compute, %lld failed) on %d threads; shaders %.0f ms, "
+           "libraries %.0f ms",
+           n, path, used, dropped, u, variants, nj, cs_queued, (long long)PJ.cs_failed, nt, t1 - t0,
+           (double)plat_now_ns() / 1e6 - t1);
 }
 
 // After the whole prewarm: the SPIR-V only the pairs prewarm read is freed (gfx_shader_spirv_release), unless its

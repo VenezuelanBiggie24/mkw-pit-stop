@@ -14,6 +14,7 @@
 #include "nvn_api.h"
 #include "nvn_hmap.h"
 #include "tex.h"
+#include "vk_temporal.h"
 #include "vk.h"
 #include "vk_draw_internal.h"
 #include "vk_exec.h"
@@ -31,7 +32,7 @@ static void *grow(void *p, int *cap, size_t elem) {
 // ---- resources of one command buffer, freed by its completion callback
 
 typedef struct { VkBuffer buf; VmaAllocation alloc; uint8_t *map; uint64_t size, used; } Chunk;
-typedef struct { uint64_t addr, size; } Range;
+typedef struct { uint64_t addr, size; int own; } Range;   // own: reported at the fence here (vk_exec_written.c)
 struct CbRes {
     Chunk *chunks;
     int nchunks, cchunks;
@@ -61,10 +62,23 @@ void vk_exec_cb_dpool_stats(int *live_pools, int *spare_pools, int *live_chunks,
     if (spare_chunks) *spare_chunks = __atomic_load_n(&nspare_chunk, __ATOMIC_RELAXED);
 }
 
+static void written_one(void *ctx, int i) {
+    const CbRes *r = ctx;
+    if (r->written[i].own) vk_gpu_written(r->written[i].addr, r->written[i].size);
+}
+
 static void cb_done(void *arg) {   // completion thread
     CbRes *r = arg;
     VkCtx *c = vk_ctx();
-    for (int i = 0; i < r->nwritten; i++) vk_gpu_written(r->written[i].addr, r->written[i].size);
+    // MKW_WB_PAR: a callback with enough bytes to compare shares its ranges out (vk_wb_par.c)
+    uint64_t wbytes = 0;
+    int nown = 0;
+    for (int i = 0; i < r->nwritten; i++)
+        if (r->written[i].own) wbytes += r->written[i].size, nown++;
+    if (nown >= 4 && wbytes >= (256u << 10)) vk_wb_par(r->nwritten, written_one, r);
+    else
+        for (int i = 0; i < r->nwritten; i++)
+            if (r->written[i].own) vk_gpu_written(r->written[i].addr, r->written[i].size);
     for (int i = 0; i < r->npools; i++) {
         vkResetDescriptorPool(c->device, r->pools[i], 0);
         plat_mutex_lock(&spare_lock);
@@ -188,9 +202,18 @@ void note_written(VkExec *ex, uint64_t addr, uint64_t size) {
         memset(r->wslot, 0xff, sizeof *r->wslot * 2 * (size_t)r->cwritten);
         for (int i = 0; i < r->nwritten; i++) wslot_put(r, i);
     }
-    r->written[r->nwritten++] = (Range){addr, size};
+    int own = vk_exec_wshare_owner(ex->fence, addr, size);   // kept either way: the lookup above skips it next time
+    r->written[r->nwritten++] = (Range){addr, size, own};
     wslot_put(r, r->nwritten - 1);
-    vk_mem_gpu_pending(addr, size);
+    if (own) vk_mem_gpu_pending(addr, size);
+}
+
+void vk_exec_written_share(VkExec *ex) {
+    vk_exec_wshare_set(ex->fence);
+    CbRes *cur = vk_rt.cb_cur;
+    if (cur && vk_rt.cb_cur_fence == ex->fence)   // what this thread noted of the submission before its chunks
+        for (int i = 0; i < cur->nwritten; i++)
+            if (cur->written[i].own) vk_exec_wshare_owner(ex->fence, cur->written[i].addr, cur->written[i].size);
 }
 
 VkDescriptorSet alloc_set(VkExec *ex, VkDescriptorSetLayout layout) {
@@ -266,9 +289,11 @@ void record_fixed(VkExec *ex) {
     if (ex->dirty & VK_EXEC_DIRTY_VIEWPORT) {
         float x = 0, y = 0, w = (float)ex->pass_w, h = (float)ex->pass_h;
         if (ex->has_vp) x = ex->vp[0][0], y = ex->vp[0][1], w = ex->vp[0][2], h = ex->vp[0][3];
+        if (ex->has_vp) vk_tmp_scale_rect(ex, &x, &y, &w, &h);   // a pass moved to the output's size (vk_temporal.c)
         if (w < 1) w = 1;
         if (h < 1) h = 1;
         VkViewport v = {x, y + h, w, -h, ex->depth_range[0], ex->depth_range[1]};   // the y flip: negative height
+        vk_tmp_viewport(ex, &v);   // the temporal upscalers' jitter on the scene's draws (vk_temporal.c)
         vkCmdSetViewportWithCount(cb, 1, &v);
         ex->recorded++;
     }

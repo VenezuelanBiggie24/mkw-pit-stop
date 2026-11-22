@@ -1,21 +1,25 @@
-"""The compile step of prepare.py: the generated C into mkwgame.so / mkwgame.dll with the package's zig (or clang).
+"""The compile step of prepare.py: the generated C into mkwgame.so / mkwgame.dll with the package's zig (or clang), its
+chunks on LLVM's own clang when the package has it (fastcc.py).
 
 Why apart: prepare.py holds the order of the steps and their keys; this step is the largest and has its own reuse of
 earlier objects. Not run on its own.
 """
 
 import hashlib
+import os
+import re
 import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePath
 
 ROOT = Path(__file__).resolve().parents[2]  # the repository, or the package's setup/src
 sys.path.insert(0, str(ROOT / "tools/build"))
 import build  # (GEN_FLAGS, gen_modules, module_glue, game_id: the same game code as build.py --dist)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fastcc
 from machine import Failed, crt_link, emit, package_dir
 
 # The compiler's messages as text: zig writes UTF-8 (paths with "Área de Trabalho" in it), which the locale's code page
@@ -28,6 +32,13 @@ class DamagedSource(Failed):
     """A generated C file with NUL bytes in it (#434: `uint6<NUL>_t` in main_0203.c, on Windows): the write that made it
     did not reach the disk whole (a crash or power cut after the size grew). Generate's key still matches, so every retry
     reused it and failed the same; prepare.py regenerates once on this."""
+
+
+def cache_failure() -> str:
+    cache = os.environ.get("ZIG_GLOBAL_CACHE_DIR")
+    folder = f" ({cache})" if cache else ""
+    return (f"the compiler could not use its cache folder{folder}, as on a network share or a drive a "
+            "compatibility layer maps. Move the cache to a local drive, or set ZIG_GLOBAL_CACHE_DIR to a folder on one.")
 
 
 def damaged(src: Path) -> bool:
@@ -47,6 +58,19 @@ def write_link_response(rsp: Path, objects: list[Path], windows_quoting: bool) -
     rsp.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def cpu_level() -> str:
+    """The x86-64 level the game code is built for: v3 (AVX2, FMA, BMI2: build.py ARCH_FLAGS) or v2 (SSE4.2), for CPUs
+    without AVX2 (an AMD FX, an Intel Core before Haswell): MKW_SETUP_CPU=v2, or the package's own `setup/cpu-level`
+    file (the -noavx2 package, release.py), which the environment overrides. Each level has its own object keys (the
+    flags are in them)."""
+    marker = Path(__file__).resolve().parents[3] / "cpu-level"
+    packaged = marker.read_text().strip() if marker.is_file() else "v3"
+    level = os.environ.get("MKW_SETUP_CPU", packaged)
+    if level not in ("v2", "v3"):
+        sys.exit(f"MKW_SETUP_CPU={level}: v2 or v3")
+    return level
+
+
 def compile_game(
     game: Path, exefs: Path, work: Path, cc: list[str], target: str, jobs: int, dest: Path | None = None
 ) -> None:
@@ -55,13 +79,16 @@ def compile_game(
     gen, obj = work / "generated", work / "obj"
     windows = target == "windows"
     flags = [*build.GEN_FLAGS, *([] if windows else ["-fPIC"])]
+    v2 = cpu_level() == "v2"
+    if v2:
+        flags = [f.replace("-march=x86-64-v3", "-march=x86-64-v2") for f in flags]
     if Path(cc[0]).stem == "zig":
         # zig cc turns -O1 into -O2 with both vectorizers, keeps frame pointers, adds debug info and UBSan, and spells
         # the CPU its own way: 182 126 instructions on a chunk clang -O1 makes in 150 969. With these, 150 745 (the
         # rest is LLVM 22 against 23), as SavageWindRecomp's GAMELIB_ZIGFLAGS (runtime/gamebuild.c, MIT).
         # AArch64: zig ignores -ffixed-x18 without a word (mkwgame.so used x18 73 079 times and crashed at the first
         # preemption, Odin 2, 10/11/2026); its CPU feature reserve_x18 keeps the register out.
-        flags = [f.replace("-march=x86-64-v3", "-mcpu=x86_64_v3")
+        flags = [f.replace("-march=x86-64-v3", "-mcpu=x86_64_v3").replace("-march=x86-64-v2", "-mcpu=x86_64_v2")
                  .replace("-march=armv8.2-a+fp16+rcpc+dotprod+crc",
                           "-mcpu=generic+v8_2a+fullfp16+rcpc+dotprod+crc+reserve_x18")
                  for f in flags if f != "-ffixed-x18"]  # fmt: skip
@@ -76,7 +103,10 @@ def compile_game(
     inc = [f"-I{d}" for d in sorted({p.parent for p in (ROOT / "runtime").rglob("*.h")})] + [f"-I{gen}"]
     cpu = ROOT / "runtime/cpu"
     jobs_c = [(src, obj / f"{src.parent.name}_{src.stem}.o", [*flags, f"-I{cpu}"]) for src in srcs]
+    if v2:  # the FMADDs and the RECPS/RSQRTS steps become fma/fmaf calls: correctly rounded ones, not the C runtime's
+        jobs_c.append((cpu / "fma.c", obj / "cpu_fma.o", [*flags, f"-I{cpu}"]))
     jobs_c.append((obj / "modules.c", obj / "modules.o", [*flags, gid, *inc]))
+    cc1 = fastcc.setup(cc, package_dir(game), obj, [jobs_c[0][2], jobs_c[-1][2]])
     jobs_c.sort(key=lambda j: -j[0].stat().st_size)  # the largest first: no 10 MB main_table.c alone at the end
     total, done = len(jobs_c) + 1, 0  # the link is the last unit: a progress bar full before it hid it (issue #2)
     extra = [str(package_dir(game) / "lib/libmkw.dll.a")] if windows else ["-Wl,-z,noexecstack"]
@@ -87,16 +117,29 @@ def compile_game(
     base_cpu = common_key(cc, sorted(cpu.rglob("*.h")))
     gen_headers = sorted(gen.rglob("*.h"))
     compiled: list[Path] = []
+    legacy = legacy_compilers(cc, game)
+    old_all = [common_key(cc, sorted((ROOT / "runtime").rglob("*.h")) + gen_headers, compiler=c) for c in legacy]
+    old_cpu = [common_key(cc, sorted(cpu.rglob("*.h")), compiler=c) for c in legacy]
 
     def one(job: tuple[Path, Path, list[str]]) -> str:
         src, out, f = job
         key = object_key(base_all if src.parent == obj else chunk_base(cc, base_cpu, gen_headers, src), src, f, gen)
         stamp = out.with_suffix(".key")
-        if out.is_file() and stamp.is_file() and stamp.read_text() == key:
+        if out.is_file() and stamp.is_file() and (had := stamp.read_text()) == key:
+            return ""
+        if (
+            out.is_file()
+            and stamp.is_file()
+            and any(
+                had == object_key(a if src.parent == obj else chunk_base(cc, c, gen_headers, src), src, f, gen)
+                for a, c in zip(old_all, old_cpu, strict=True)
+            )
+        ):
+            stamp.write_text(key)  # an object of the same compiler under its key before 0.1.14
             return ""
         compiled.append(src)  # list.append is atomic across the pool's threads
         stamp.unlink(missing_ok=True)
-        return compile_one(cc, f, src, out, stamp, key)
+        return compile_one(cc, f, src, out, stamp, key, cc1.cmd(f, src, out) if cc1 else None)
 
     lib = dest / ("mkwgame.dll" if windows else "mkwgame.so")
     part = lib.with_name(lib.name + ".part")
@@ -127,15 +170,20 @@ def compile_game(
         raise Failed(f"linking the game code took over {LINK_TIMEOUT // 60} min: {tail_of(e.stderr)}") from None
     print(f"link: {time.monotonic() - t0:.1f} s, rc {r.returncode}\n{r.stderr}", file=sys.stderr)
     if r.returncode:
+        if "checking cache failed" in r.stderr:
+            raise Failed(f"linking the game code failed: {cache_failure()}")
         raise Failed(f"linking the game code failed: {r.stderr.strip()[-300:]}")
     part.replace(lib)
     emit("progress", total, total)
     (dest / "mkwgame.id").write_text(build.game_id())  # runtime/core/boot/gamelib.c rt_game_present
 
 
-def compile_one(cc: list[str], flags: list[str], src: Path, out: Path, stamp: Path, key: str) -> str:
-    """One object: "" when built, else the error for the player; a damaged source raises DamagedSource instead."""
-    cmd = [*cc, "-std=gnu11", *flags, "-c", str(src), "-o", str(out)]
+def compile_one(
+    cc: list[str], flags: list[str], src: Path, out: Path, stamp: Path, key: str, cmd: list[str] | None = None
+) -> str:
+    """One object: "" when built, else the error for the player; a damaged source raises DamagedSource instead.
+    cmd: the command instead of cc's (fastcc.py's -cc1 line)."""
+    cmd = cmd or [*cc, "-std=gnu11", *flags, "-c", str(src), "-o", str(out)]
     r = subprocess.run(cmd, capture_output=True, **UTF8, check=False)
     if r.returncode and crashed(r.stderr):
         # A compiler crash (ICE) on a chunk that compiles everywhere else is the machine, not the source (#506: a
@@ -147,6 +195,8 @@ def compile_one(cc: list[str], flags: list[str], src: Path, out: Path, stamp: Pa
         if damaged(src):
             raise DamagedSource(f"compiling the game code failed: {src.name} has NUL bytes (a damaged write)")
         print(f"compile: {src.name} failed:\n{r.stderr.strip()[:3000]}", file=sys.stderr)
+        if "checking cache failed" in r.stderr:  # #406: zig cannot use its cache folder
+            return f"{src.name}: {cache_failure()}"
         return f"{src.name}: {r.stderr.strip()[-300:]}"
     stamp.write_text(key)
     return ""
@@ -164,14 +214,40 @@ def chunk_base(cc: list[str], base_cpu: str, gen_headers: list[Path], src: Path)
     return common_key(cc, named, base_cpu) if named else base_cpu
 
 
-def common_key(cc: list[str], headers: list[Path], base: str = "") -> str:
+def compiler_id(cc: list[str]) -> str:
+    """The compiler as far as its objects go: its version and its arguments, without the paths. `--version` also prints
+    InstalledDir (the package's folder: the AppImage mounts it at a new /tmp/.mount_* each start) and, for zig, a
+    Target with the host's kernel and glibc: in the key, every update on Linux compiled all ~360 chunks again
+    (18/11/2026: the update from 0.1.13 to main, with 357 of its 358 chunks' C unchanged)."""
+    out = subprocess.run([*cc, "--version"], capture_output=True, **UTF8, check=False).stdout
+    keep = [ln for ln in out.splitlines() if not ln.startswith(("InstalledDir:", "Target:"))]
+    return "\n".join([*keep, *cc[1:]])
+
+
+def legacy_compilers(cc: list[str], game: Path) -> list[str]:
+    """The compiler as releases up to 0.1.13 keyed it (its whole `--version`, InstalledDir and all), for each folder
+    the played version's zig could have run from: the game folder's setup/ and this package's. A player's first
+    update to the new key (dacd613) reuses the objects of the same compiler instead of compiling all ~360 chunks
+    once more (9 min on the 6-thread Windows PC). Only Windows matches: the AppImage's mount there was a new
+    /tmp/.mount_* each run. Drop it once 0.1.13 is no longer updated from."""
+    out = subprocess.run([*cc, "--version"], capture_output=True, **UTF8, check=False).stdout
+    if "InstalledDir:" not in out:
+        return []
+    exe = "zig.exe" if Path(cc[0]).name.endswith(".exe") else "zig"
+    dirs = {s for d in (game / "setup/zig", package_dir(game) / "zig") if (d / exe).is_file() for s in installed_dirs(d)}
+    return [re.sub(r"(?m)^InstalledDir: .*$", lambda _, d=d: f"InstalledDir: {d}", out) for d in sorted(dirs)]
+
+
+def installed_dirs(d: PurePath) -> set[str]:
+    """How `--version` may spell a folder in InstalledDir: zig on Windows writes C:/upd/x/setup/zig, with forward
+    slashes (18/11/2026: the backslash form alone matched no 0.1.13 object, and the update compiled all ~360 again)."""
+    return {str(d), d.as_posix()}
+
+
+def common_key(cc: list[str], headers: list[Path], base: str = "", compiler: str = "") -> str:
     """What an object depends on besides its own C and flags: the compiler (or `base`, a key that already holds it)
-    and every header it can include."""
-    h = hashlib.sha256(
-        base.encode()
-        if base
-        else subprocess.run([*cc, "--version"], capture_output=True, **UTF8, check=False).stdout.encode()
-    )
+    and every header it can include. `compiler`: that compiler's id instead of compiler_id(cc)."""
+    h = hashlib.sha256(base.encode() if base else (compiler or compiler_id(cc)).encode())
     for p in headers:
         h.update(p.relative_to(p.parents[1]).as_posix().encode() + p.read_bytes())
     return h.hexdigest()

@@ -180,6 +180,7 @@ void vk_texture_census(VkTexCensus *s) {
     uint32_t idle = tex_evict_idle();
     memset(s, 0, sizeof *s);
     lock();
+    s->epoch = submit_epoch;
     for (uint32_t i = 0; i < by_key.cap; i++) {
         const Tex *e = by_key.vals[i];
         if (!e) continue;
@@ -220,6 +221,19 @@ void vk_texture_census(VkTexCensus *s) {
                     if (same_but_swizzle(&head->key, &e->key)) s->dup_swz_n++, s->dup_swz_bytes += bytes;
                     else s->dup_other_n++, s->dup_other_bytes += bytes;
                 }
+            }
+            if (bytes && !(e->pub.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT))) {
+                VkFormat vf = e->f.vk;
+                int k = vf >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && vf <= VK_FORMAT_BC1_RGBA_SRGB_BLOCK ? 0
+                        : vf == VK_FORMAT_BC7_UNORM_BLOCK || vf == VK_FORMAT_BC7_SRGB_BLOCK ? 1
+                        : vf >= VK_FORMAT_BC2_UNORM_BLOCK && vf <= VK_FORMAT_BC6H_SFLOAT_BLOCK ? 2 : 3;
+                s->cls_bytes[k] += bytes, s->cls_n[k]++;
+                uint32_t side = e->t.d.width > e->t.d.height ? e->t.d.width : e->t.d.height;
+                int z = side < 512 ? 0 : side < 1024 ? 1 : 2;
+                s->size_bytes[z] += bytes, s->size_n[z]++;
+                uint32_t unseen = submit_epoch - e->seen;
+                for (int j = 0; j < 3; j++)
+                    if (unseen > (64u << (3 * j))) s->idle_bytes[j] += bytes, s->idle_n[j]++;
             }
             if (bytes > (64ull << 20)) s->big_bytes += bytes;
         }

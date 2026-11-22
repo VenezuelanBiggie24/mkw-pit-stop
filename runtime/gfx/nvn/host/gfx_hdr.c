@@ -12,6 +12,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cfg.h"
@@ -26,6 +27,42 @@ static volatile int32_t g_on;              // the swapchain is HDR10
 static volatile uint32_t g_peak, g_white;  // nits, as told to the game
 static char g_cfg[8];                      // the MKW_HDR the swapchain was made with
 
+// Everything below that differs from the console's HDR (the player's peak and paper white, MKW_HDR_SYSTEM) is the
+// RenoDX tone mapper's (MKW_HDR_TONEMAP=psychov, gfx_shader.c): a player who keeps the game's curve gets the system's
+// values in the game and the metadata, and nothing written to mkw.ini.
+static int tonemap_on(void) { return !strcmp(cfg_value("MKW_HDR_TONEMAP"), "psychov"); }
+
+// MKW_HDR_PEAK, MKW_HDR_WHITE: the player's nits in place of the system's ("auto"). Windows gives the SDR content
+// brightness slider as paper white, often 400-500 nits on a bright screen: with a 1000-1200 nit peak that leaves the
+// game's highlights little more than a stop above white (log 18/11/2026: peak 1200, paper white 480).
+static uint32_t nits_setting(const char *key, uint32_t system) {
+    int v = atoi(cfg_value(key));
+    return v > 0 ? (uint32_t)v : system;
+}
+
+// The peak and paper white of the given system values as the game and the metadata get them: the system's as they are
+// unless the tone mapper is on; then the player's over them, the peak never under paper white.
+static void effective_of(uint32_t sys_peak, uint32_t sys_white, uint32_t *peak, uint32_t *white) {
+    if (!tonemap_on()) {
+        *peak = sys_peak, *white = sys_white;
+        return;
+    }
+    uint32_t w = nits_setting("MKW_HDR_WHITE", sys_white), p = nits_setting("MKW_HDR_PEAK", sys_peak);
+    *white = w, *peak = p < w ? w : p;
+}
+
+static void effective(uint32_t *peak, uint32_t *white) { effective_of(g_peak, g_white, peak, white); }
+
+// MKW_HDR_SYSTEM: the system's values, for gfx_hdr_headroom at the next start (the tone mapper's programs load before
+// the window). Only with the tone mapper on: from the swapchain, and from the menu's reads once the player picks it,
+// so the first restart after picking it already has them.
+static void remember_system(void) {
+    if (!__atomic_load_n(&g_on, __ATOMIC_ACQUIRE) || !tonemap_on()) return;
+    char seen[24];
+    snprintf(seen, sizeof seen, "%u/%u", g_peak, g_white);
+    if (strcmp(cfg_value("MKW_HDR_SYSTEM"), seen)) cfg_set("MKW_HDR_SYSTEM", seen), cfg_save();
+}
+
 int gfx_hdr_output(uint16_t *peak, uint16_t *white) {
     static int fake = -1;
     if (fake < 0) fake = rt_knob("HDR_FAKE", "0");
@@ -34,8 +71,16 @@ int gfx_hdr_output(uint16_t *peak, uint16_t *white) {
         *peak = PEAK_DEFAULT, *white = WHITE_DEFAULT;
         return 1;
     }
-    *peak = on ? (uint16_t)g_peak : 0;
-    *white = on ? (uint16_t)g_white : WHITE_DEFAULT;
+    uint32_t p, w;
+    effective(&p, &w);
+    remember_system();
+    static uint32_t logged_p, logged_w;
+    if (on && (p != logged_p || w != logged_w) && (p != g_peak || w != g_white)) {
+        logged_p = p, logged_w = w;
+        rt_log("gfx: HDR to the game: peak %u nits, paper white %u (system %u, %u)", p, w, g_peak, g_white);
+    }
+    *peak = on ? (uint16_t)p : 0;
+    *white = on ? (uint16_t)w : WHITE_DEFAULT;
     return on;
 }
 
@@ -66,7 +111,20 @@ int gfx_hdr_pick(const VkSurfaceFormatKHR *fmts, uint32_t n, VkSurfaceFormatKHR 
                     " (no VK_EXT_swapchain_colorspace)");
     }
     __atomic_store_n(&g_on, found, __ATOMIC_RELEASE);
+    remember_system();
     return found;
+}
+
+float gfx_hdr_headroom(void) {
+    uint32_t p, w;
+    if (__atomic_load_n(&g_on, __ATOMIC_ACQUIRE)) {
+        effective(&p, &w);
+    } else {   // before the swapchain: the system's of the last run, with the player's choices over them
+        unsigned sp = 0, sw = 0;
+        if (sscanf(cfg_value("MKW_HDR_SYSTEM"), "%u/%u", &sp, &sw) != 2 || !sp || !sw) return 0.0f;
+        effective_of(sp, sw, &p, &w);
+    }
+    return w ? (float)p / (float)w : 0.0f;
 }
 
 void gfx_hdr_metadata(VkSwapchainKHR sc) {
@@ -76,11 +134,13 @@ void gfx_hdr_metadata(VkSwapchainKHR sc) {
     if (!set) set = (PFN_vkSetHdrMetadataEXT)vkGetDeviceProcAddr(c->device, "vkSetHdrMetadataEXT");
     if (!set) return;
     // Rec.2020 primaries and D65, as HDR10; the content as bright as the display's peak, the frame average at paper white
+    uint32_t peak, white;
+    effective(&peak, &white);
     VkHdrMetadataEXT m = {.sType = VK_STRUCTURE_TYPE_HDR_METADATA_EXT,
                           .displayPrimaryRed = {0.708f, 0.292f}, .displayPrimaryGreen = {0.170f, 0.797f},
                           .displayPrimaryBlue = {0.131f, 0.046f}, .whitePoint = {0.3127f, 0.3290f},
-                          .maxLuminance = (float)g_peak, .minLuminance = 0.0f,
-                          .maxContentLightLevel = (float)g_peak, .maxFrameAverageLightLevel = (float)g_white};
+                          .maxLuminance = (float)peak, .minLuminance = 0.0f,
+                          .maxContentLightLevel = (float)peak, .maxFrameAverageLightLevel = (float)white};
     set(c->device, 1, &sc, &m);
 }
 

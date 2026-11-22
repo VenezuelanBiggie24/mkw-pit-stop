@@ -52,6 +52,9 @@ typedef struct PoolRec {
     uint32_t mgen;                     // gen_lock: every page write stamped up to this generation is in the mirror
                                        // (or in a copy queued before its next use)
     uint64_t fl_lo, fl_hi;             // flush_lock: nvnMemoryPoolFlushMappedRange bytes not copied yet (fl_hi 0: none)
+    uint32_t mm_sub;                   // vk_mem_mmerge.c, mm_lock: the submission whose merge jobs mm_head lists
+    int mm_head, mm_hit;               // its newest job (each links the one before); the last that covered a note
+    int mm_idx;                        // its place in the merge sets' arrays (-1: copied whole)
     // Shadow storage (POOL_IMPORT in shadow mode, "shadow storage" below): buf is a host-visible copy of the guest pages.
     VmaAllocation salloc;
     uint8_t *smap;                     // its mapping; offsets as in buf (from import_lo)
@@ -71,6 +74,7 @@ typedef struct PoolRec {
     uint8_t lazy;                      // POOL_IMPORT whose GPU storage is made at its first resolve (lazy_back)
     uint64_t lazy_retry;               // lazy_back failed: tried again from this submission on (vk_replay_submit)
     uint64_t census_backed;            // backed bytes at the last memory census (diagnosis; written under pool_lock shared)
+    uint32_t born_ms;                  // plat_now_ms at vk_pool_init (vk_mem_spill.c: how long it has been there)
 } PoolRec;
 
 // vk_memory.c: the pool index
@@ -92,6 +96,9 @@ int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size);
 int lazy_on(void);
 void lazy_back(PoolRec *r);
 void destroy_rec(VkCtx *c, PoolRec *r);
+
+// vk_mem_spill.c: MKW_MEM_SPILL's sweep thread, started at the first pool
+void vk_mem_spill_start(void);
 
 // vk_mem_gen.c: page write generations and write-watch snapshots
 #define GEN_CHUNK_SHIFT 28
@@ -125,6 +132,7 @@ void dirty_frame(uint64_t frame);
 
 // vk_mem_shadow.c: shadow storage
 extern int shadow_on, read_traps, wb_defer;
+extern int shadow_live;   // the shadow machinery runs: shadow_on, or a pool that took a shadow when its import failed
 extern int64_t s_live_n, s_live_bytes;
 int shadow_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size);
 void shadow_touch(PoolRec *r);
@@ -224,6 +232,18 @@ void mirror_retiring(PoolRec *r);   // vk_pool_fini: kept until mirror_retire (o
 void mirror_retire(void *arg);      // completion thread: destroys a finalized mirrored pool's record
 int retiring_count(void);
 void mirror_log(uint64_t frame);
+// vk_mem_mmerge.c: the mirror's write-back merged by bytes on the GPU (MKW_MIRROR_MERGE)
+extern int mmerge_mode, mmerge_all;   // MKW_MIRROR_MERGE, MKW_MIRROR_MERGE_ALL
+void mmerge_init(VkCtx *c);                                    // replay thread, at the first mirrored submission
+void mmerge_shutdown(VkCtx *c);
+int mmerge_ready(void);                                        // on for the submission starting ("ab" decides now)
+void mmerge_note(PoolRec *r, uint64_t off, uint64_t size);     // use_lock: the submission's GPU work writes it
+int mmerge_pending(void);                                      // base copies for the next prologue
+int mmerge_prologue(VkCommandBuffer cb, int after_uploads);    // records them; returns the commands
+int mmerge_end(VkCommandBuffer cb, uint64_t fence, uint64_t *bytes);   // the merges, at the submission's end
+void mmerge_log(char *out, size_t n, double frames);
+int mmerge_time_begin(VkCommandBuffer cb);                     // MKW_MIRROR_MERGE_TIME: -1 off
+void mmerge_time_end(VkCommandBuffer cb, int slot, uint64_t fence, int kind);   // 0 whole copy, 1 merge, 2 bases
 void mirror_reset(VkCtx *c);
 
 // vk_mem_log.c: census, VRAM summary and the memory mode

@@ -191,6 +191,8 @@ int vk_pool_init(pool_t *p) {
     r->flags = p->flags;
     r->lo = (uintptr_t)p->mem;
     r->size = p->size;
+    r->born_ms = plat_now_ms();
+    vk_mem_spill_start();
     int ok;
     if (p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) {
         r->kind = POOL_VIRT;
@@ -535,7 +537,7 @@ int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out) {
         out->pool = h->pool;
         if (h->alloc) out->alloc_offset = out->offset;
         if (vk_guard_on() && h->pool) vk_guard_note(&((PoolRec *)h->pool)->use);
-        if (shadow_on && h->pool && ((PoolRec *)h->pool)->smap && !((PoolRec *)h->pool)->stouched) shadow_touch(h->pool);
+        if (shadow_live && h->pool && ((PoolRec *)h->pool)->smap && !((PoolRec *)h->pool)->stouched) shadow_touch(h->pool);
         if (race_on > 0 && h->pool && ((PoolRec *)h->pool)->smap) race_note(h->pool, addr, end);
         if (resolve_check_on()) {
             VkMemSpan s;
@@ -684,7 +686,7 @@ void vk_mem_stats(VkMemStats *s) {
         else s->virtual_pools++;
     }
     plat_mutex_unlock_shared(&pool_lock);
-    s->import_failures = (uint64_t)n_import_failures;
+    s->import_failures = (uint64_t)__atomic_load_n(&n_import_failures, __ATOMIC_RELAXED);
     s->upload_batches = upload_batches();
     plat_mutex_lock(&phys_lock);
     s->phys_host_chunks = (uint64_t)phys_host_n, s->phys_failed_chunks = (uint64_t)phys_failed_n;

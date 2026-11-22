@@ -211,13 +211,27 @@ int ensure_init(void) {
     P.dyn_vi = dv_on && c->has_vertex_input_dynamic_state && PROC(set_vi, "vkCmdSetVertexInputEXT");
     if (!dv_on && c->has_vertex_input_dynamic_state)
         rt_log("vk_pipeline: dynamic vertex input off (%s)", dv && *dv ? "MKW_VK_DYN_VERTEX=0" : "Intel's older Windows driver draws nothing with it");
+    // Ellesmere's legacy AMD Windows driver stipples transparent UI with dynamic alpha-to-coverage, even when the
+    // command sets it false. On RX 570, baking only this state fixes the character-select capture (zero VVL errors,
+    // byte-identical to baking all optional EDS3 states). Keep a2c in the pipeline key: enabled coverage still works.
+    // MKW_VK_DYN_A2C=0/1 selects static/dynamic explicitly, including testing a newer driver.
+    int legacy_a2c = 0;
+#ifdef _WIN32
+    legacy_a2c = c->props.vendorID == 0x1002 && c->props.deviceID == 0x67df &&
+                 vk_caps.driver_id == VK_DRIVER_ID_AMD_PROPRIETARY;
+#endif
+    const char *da = cfg_get("MKW_VK_DYN_A2C");
+    int da_on = da && *da ? strcmp(da, "0") != 0 : !legacy_a2c;
     if (c->has_eds3) {
         P.dyn_clamp = e3.extendedDynamicState3DepthClampEnable && P.f_depth_clamp && PROC(set_clamp, "vkCmdSetDepthClampEnableEXT");
         P.dyn_poly = e3.extendedDynamicState3PolygonMode && PROC(set_poly, "vkCmdSetPolygonModeEXT");
         P.dyn_blend_en = e3.extendedDynamicState3ColorBlendEnable && PROC(set_blend_en, "vkCmdSetColorBlendEnableEXT");
         P.dyn_blend_eq = e3.extendedDynamicState3ColorBlendEquation && PROC(set_blend_eq, "vkCmdSetColorBlendEquationEXT");
         P.dyn_wmask = e3.extendedDynamicState3ColorWriteMask && PROC(set_wmask, "vkCmdSetColorWriteMaskEXT");
-        P.dyn_a2c = e3.extendedDynamicState3AlphaToCoverageEnable && PROC(set_a2c, "vkCmdSetAlphaToCoverageEnableEXT");
+        P.dyn_a2c = da_on && e3.extendedDynamicState3AlphaToCoverageEnable && PROC(set_a2c, "vkCmdSetAlphaToCoverageEnableEXT");
+        if (!da_on && e3.extendedDynamicState3AlphaToCoverageEnable)
+            rt_log("vk_pipeline: alpha-to-coverage baked into pipelines (%s)",
+                   da && *da ? "MKW_VK_DYN_A2C=0" : "AMD Ellesmere Windows driver");
     }
 #undef PROC
     static const VkDynamicState core[] = {
@@ -1251,7 +1265,21 @@ static void autosave_once(void) {
     if (!P.ready) return;
     uint64_t now = plat_now_ms();
     if (*(volatile uint32_t *)&K.pend_n && now - last_keys >= 2000) last_keys = now, keys_flush();
-    if (now - last_ms < 20000) return;
+    // MKW_PIPE_AUTOSAVE_S (perf-deck, default 20; 0 = never while running): each save copies the whole driver cache
+    // (92 MB on the Deck after a few races) under the driver's cache lock and writes it out, ~1 s hitches there.
+    static int64_t ivl = -1;
+    if (ivl < 0) {
+        const char *e = cfg_get("MKW_PIPE_AUTOSAVE_S");
+        char *end = NULL;
+        long s = e && *e ? strtol(e, &end, 10) : 20;
+        if (e && *e && (*end || s < 0)) {   // atoi made a typo ("off") mean 0, the save turned off silently
+            rt_log("vk_pipeline: MKW_PIPE_AUTOSAVE_S='%s' is not a number of seconds: default 20", e);
+            s = 20;
+        }
+        ivl = (int64_t)s * 1000;
+        if (ivl != 20000) rt_log("vk_pipeline: autosave %s (MKW_PIPE_AUTOSAVE_S)", ivl > 0 ? e : "off while running");
+    }
+    if (ivl <= 0 || now - last_ms < (uint64_t)ivl) return;
     // Not in a race (#533, perf-deck: 0.3-1.1 s hitches mid-race on the Deck): the copy holds the driver's cache lock,
     // which the replay's fast links wait on. The keys above still go every 2 s; the cache follows at the next menu.
     if (race_scene_on()) return;

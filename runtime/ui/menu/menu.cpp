@@ -20,6 +20,7 @@
 #include "ui/menu/menu_notice.h"
 #include "ui/menu/settings_tabs.h"
 #include "ui/menu/option_rows.h"
+#include "ui/menu/text_entry.h"
 
 extern "C" {
 #include "cfg.h"
@@ -32,6 +33,7 @@ extern "C" {
 #include "sysinfo.h"
 #include "ui/menu/menu.h"
 #include "ui_text.h"
+#include "plugin/plugin.h"
 // host.h and vk.h pull in cpu.h, which is C only: the functions the menu needs from them, as declared there.
 void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void vk_queue_lock(void);
@@ -67,14 +69,15 @@ static void set_open(int open) { change_open(open); }
 static int g_failed_flag();
 extern "C" int menu_is_open(void) { return g_open.load(std::memory_order_relaxed); }
 extern "C" void menu_toggle(void) {
-    if (!g_failed_flag()) change_open(-1);
+    if (!g_failed_flag() && !text_entry_up()) change_open(-1);   // the number pad is modal, as the applet
 }
 extern "C" void menu_set_placeholder(MenuPlaceholderDraw fn, void *ctx) {
     g_placeholder_ctx = ctx;
     g_placeholder_fn.store(fn, std::memory_order_release);
 }
 
-// ---- events from the window adapter, queued while the menu is open; the present path hands them to ImGui
+// ---- events from the window adapter, queued while the menu or the number pad is up; the present path hands them to
+// ImGui
 enum { EV_KEY, EV_POS, EV_BUTTON, EV_WHEEL, EV_FOCUS, EV_MAX = 256 };
 struct Ev { int type, a, b; float x, y; };
 static PlatMutex ev_lock = PLAT_MUTEX_INIT;
@@ -82,7 +85,7 @@ static Ev ev_q[EV_MAX];
 static int ev_n;
 
 static void push(Ev e) {
-    if (!menu_is_open()) return;
+    if (!menu_is_open() && !text_entry_up()) return;
     plat_mutex_lock(&ev_lock);
     if (e.type == EV_POS && ev_n && ev_q[ev_n - 1].type == EV_POS) ev_q[ev_n - 1] = e;   // only the newest position
     else if (ev_n < EV_MAX) ev_q[ev_n++] = e;
@@ -112,6 +115,51 @@ static void drain_events(ImGuiIO &io) {
         case EV_FOCUS: io.AddFocusEvent(e.a != 0); break;
         }
     }
+}
+
+// ---- gamepad navigation for the on-screen number pad (text_entry.cpp; Pit Stop reads input_menu_pad itself): the
+// physical buttons (input_menu_pad) to ImGui's gamepad keys. The button the game reads as A activates (ImGui's FaceDown),
+// the other face button of that pair cancels (FaceRight); Start is the number pad's OK.
+static const struct { int pad; ImGuiKey key; } pad_keys[] = {
+    {PAD_WEST, ImGuiKey_GamepadFaceLeft}, {PAD_NORTH, ImGuiKey_GamepadFaceUp}, {PAD_L, ImGuiKey_GamepadL1},
+    {PAD_R, ImGuiKey_GamepadR1}, {PAD_ZL, ImGuiKey_GamepadL2}, {PAD_ZR, ImGuiKey_GamepadR2},
+    {PAD_DPAD_LEFT, ImGuiKey_GamepadDpadLeft}, {PAD_DPAD_UP, ImGuiKey_GamepadDpadUp},
+    {PAD_DPAD_RIGHT, ImGuiKey_GamepadDpadRight}, {PAD_DPAD_DOWN, ImGuiKey_GamepadDpadDown},
+    {PAD_START, ImGuiKey_GamepadStart},
+};
+static uint32_t pad_prev;   // buttons at the last frame; a button held when the pad opened counts once released
+static int stick_dir = -1;  // the D-pad position the left stick holds, -1 none
+
+// The left stick moves the cursor as the D-pad does (ImGui's own stick handling only scrolls the page): past half way
+// it holds the D-pad direction of its larger axis, kept until that axis falls under 0.35; ImGui repeats a held one.
+static int stick_to_dpad(int32_t lx, int32_t ly) {
+    float x = lx / 32767.0f, y = ly / 32767.0f;   // y up
+    float along = stick_dir == PAD_DPAD_LEFT ? -x : stick_dir == PAD_DPAD_RIGHT ? x : stick_dir == PAD_DPAD_UP ? y
+                : stick_dir == PAD_DPAD_DOWN ? -y : 0;
+    if (stick_dir >= 0 && along > 0.35f) return stick_dir;
+    if (fmaxf(fabsf(x), fabsf(y)) < 0.5f) return -1;
+    return fabsf(x) > fabsf(y) ? (x < 0 ? PAD_DPAD_LEFT : PAD_DPAD_RIGHT) : (y > 0 ? PAD_DPAD_UP : PAD_DPAD_DOWN);
+}
+
+static void pad_events(ImGuiIO &io, int reset) {
+    InputMenuPad mp = {};
+    input_menu_pad(&mp);
+    if (mp.connected) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+    else io.BackendFlags &= ~ImGuiBackendFlags_HasGamepad;
+    uint32_t b = mp.buttons;
+    stick_dir = stick_to_dpad(mp.lx, mp.ly);
+    if (stick_dir >= 0) b |= 1u << stick_dir;
+    if (reset) {
+        pad_prev = b;
+        return;
+    }
+    int ok = mp.east_confirm ? PAD_EAST : PAD_SOUTH, back = mp.east_confirm ? PAD_SOUTH : PAD_EAST;
+    const struct { int pad; ImGuiKey key; } face[2] = {{ok, ImGuiKey_GamepadFaceDown}, {back, ImGuiKey_GamepadFaceRight}};
+    for (const auto &k : face)
+        if ((b ^ pad_prev) & (1u << k.pad)) io.AddKeyEvent(k.key, (b & (1u << k.pad)) != 0);
+    for (const auto &k : pad_keys)
+        if ((b ^ pad_prev) & (1u << k.pad)) io.AddKeyEvent(k.key, (b & (1u << k.pad)) != 0);
+    pad_prev = b;
 }
 
 // ---- ImGui and its Vulkan back end (present path)
@@ -527,6 +575,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     if (!g_test.parsed) test_parse();
     if (g_test.next_set < g_test.n_sets && frame >= g_test.sets[g_test.next_set].frame) test_apply_sets(frame);
     perf_tick(plat_now_ns(), frame, t);
+    text_entry_test(frame);
     classic_poll();   // MKW_CLASSIC_GP or _VS changed: the cups and routes in the game's memory (core/hacks/classic.c)
     MenuPlaceholderDraw placeholder = g_placeholder_fn.load(std::memory_order_acquire);
     void *placeholder_ctx = g_placeholder_ctx;
@@ -538,7 +587,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
             g_test.page = 0;
             set_open(1);
             open = true;
-        } else if (!g_perf_mode && !menu_notice_shown()) {
+        } else if (!g_perf_mode && !menu_notice_shown() && !text_entry_up() && !plugins_overlay_wanted()) {
             return 0;
         }
     }
@@ -574,6 +623,17 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     io.DeltaTime = (float)(dt < 1e-4 ? 1e-4 : dt > 0.1 ? 0.1 : dt);
     g_last_ns = t0;
     InputMenuPad pad = {};
+    // upstream's number pad (text_entry.cpp) navigates with ImGui's gamepad keys: while it is up, pad_events feeds them
+    bool entry = text_entry_up();
+    int entry_new = text_entry_opened();   // what was held or queued before the pad went up does not press its keys
+    if (entry_new && !reset) {
+        io.ClearInputKeys();
+        io.ClearInputMouse();
+    }
+    if (entry && !open && g_test.page < 0) {
+        drain_events(io);
+        pad_events(io, reset || entry_new);
+    }
     if (reset || g_test.page >= 0) {
         plat_mutex_lock(&ev_lock);
         ev_n = 0;
@@ -586,6 +646,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
     ImGui_ImplVulkan_NewFrame();
     ui_id_check("in-game menu");
     ImGui::NewFrame();
+    plugins_overlay_draw((float)t->width, (float)t->height, scale);
     if (placeholder) {
         placeholder((float)t->width, (float)t->height, placeholder_ctx);
     } else if (open) {
@@ -599,6 +660,7 @@ extern "C" int menu_overlay_frame(uint64_t frame, const MenuTarget *t, const cha
         perf_draw(t, scale);
     }
     menu_notice_draw((float)t->width, scale);
+    text_entry_draw((float)t->width, (float)t->height, scale);
     ImGui::Render();
     if (open) g_save_pending = opt_save_tick(0);
     g_cost_ns += plat_now_ns() - t0;

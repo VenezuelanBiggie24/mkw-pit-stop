@@ -8,6 +8,7 @@
 enum { OE_MSG_FOCUS_STATE_CHANGED = 15, OE_MSG_OPERATION_MODE_CHANGED = 30, OE_MSG_PERFORMANCE_MODE_CHANGED = 31 };
 void oe_push_message(uint32_t message);                   // ov_system.c
 void oe_set_focus(int in_focus);                          // ov_system.c: GetCurrentFocusState; MKW_ASSUME_FOCUS pins 1
+int oe_hold_focus(int out, int suspend);                  // ov_system.c: a plugin holds the game out of focus; 1 suspended
 typedef struct { uint64_t alloc, free, realloc, user; } OvNvAllocator;
 typedef struct { OvNvAllocator graphics, devtools; uint64_t memory, memory_size; int initialized; } OvNvState;
 const OvNvState *ov_nv_state(void);                        // ov_gfx.c
@@ -23,9 +24,15 @@ void gfx_window_placeholder_present(void);                 // presents the PS5 p
 // One boot screen frame (ui/menu/boot_screen.cpp) over black; 0, presenting nothing, once the game has presented.
 int gfx_window_boot_present(void);
 void gfx_vsync_bind(uint64_t system_event);                // nn::vi vsync event; signalled at 60 Hz
+float gfx_hdr_headroom(void);   // peak over paper white for the RenoDX programs (gfx_hdr.c); 0: unknown
+int gfx_rdx_patch(uint32_t *w, uint64_t n, uint32_t id, float v);   // a RenoDX program's constant (gfx_rdx.c)
 int gfx_hdr_output(uint16_t *peak, uint16_t *white);       // 1: the window shows HDR10 (peak, paper white nits)
 void gfx_hdr_to_srgb8(const uint8_t *in, uint8_t *out, size_t px, int a2r);   // 10-bit PQ to sRGB bytes at paper white
 int gfx_window_focused(void);
+void gfx_swapchain_lock(void);     // the present path's swapchain lock (Reflex's calls, vk_reflex_frame.c)
+void gfx_swapchain_unlock(void);
+int gfx_window_focus_hold(int out, int suspend);   // MkwPluginApi.focus_set: out of focus and silent while held; 1 suspended
+int gfx_window_focus_held(void);
 int gfx_window_lines(void);   // lines of the picture the window will show (monitor in fullscreen); 0 unknown
 int gfx_window_shape(int *w, int *h);   // its width and lines; 0 unknown (w and h then untouched)
 
@@ -64,7 +71,12 @@ const uint8_t *gfx_shader_input_id(const GfxShader *s);     // the 32-byte id in
 const GfxShader *gfx_shader_load_input(const uint8_t iid[32]);
 // Boot prewarm of the pipeline key records' shaders into out[i]; off with prepared SPIR-V (all NULL, gfx_shader.c).
 void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **out);
+// Every program of spirv/shaders.pack loaded on a thread of its own, while the boot prewarm creates the device; join
+// before the next gfx_shader_prewarm (one at a time). start returns NULL when there is no pack or no thread.
+struct PlatThread *gfx_shader_preload_start(void);
+void gfx_shader_preload_join(struct PlatThread *t);
 const uint32_t *gfx_shader_spirv(const GfxShader *s, uint64_t *words);
+uint64_t gfx_shader_spirv_fnv(const GfxShader *s);          // FNV-1a 64 of the SPIR-V bytes, kept on the shader
 // The calling thread's reads of SPIR-V are the prewarm's (1) or a use (0, the default): only a use keeps a shader's
 // SPIR-V in memory when gfx_shader_spirv_release, after the prewarm, frees the others'. Returns the bytes freed.
 void gfx_shader_spirv_quiet(int on);
@@ -139,6 +151,9 @@ typedef struct {
     void (*write_texels)(const tex_t *t, const view_t *v, const NVNcopyRegion *r, const uint8_t *src, uint64_t row, uint64_t img);
     void (*guest_written)(uint64_t addr, uint64_t size);   // host wrote pool storage (3.2)
     void (*guest_read)(uint64_t addr, uint64_t size);      // the CPU reads pool storage: GPU-written texels go there first
+    // Optional (NULL: guest_written alone). The host rewrote the storage at addr on purpose (a plugin's native image,
+    // nvn2.c): textures there take its bytes again even where the GPU rendered into them before.
+    void (*host_rewrote)(uint64_t addr, uint64_t size);
     // The CPU waited for fence: small render targets and pitch textures written by work up to it go to their storage
     // (vk_texture.c vk_texture_write_back_small).
     void (*cpu_synced)(uint64_t fence);

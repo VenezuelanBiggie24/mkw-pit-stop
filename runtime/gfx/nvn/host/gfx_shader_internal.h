@@ -33,6 +33,7 @@ struct GfxShader {
     const struct GfxShader *variant_of;                    // gfx_shader_variant: the generic shader; NULL for one
     struct GfxShader *cs_variant;                          // task/mesh: the compute form (gfx_shader_cs_variant)
     int cs_of_mesh;                                        // this is the compute form of a task or mesh program
+    uint64_t spirv_fnv;   // gfx_shader_spirv_fnv, 0 until first asked for; last: gfx_shader_variant copies up to it
 };
 
 #define PATH_CAP 1024                                      // bytes of a UTF-8 path
@@ -48,4 +49,10 @@ void gfx_shader_reflect(GfxShader *s);
 GfxShader *gfx_shader_find(const uint8_t key[32]);
 GfxShader *gfx_shader_insert(GfxShader *s);
 void gfx_shader_key_hex(const uint8_t key[32], char out[65]);
+
+// spirv/shaders.pack (gfx_shader_pack.c): opened once with the prepared folder; a program's file of kind 0 .spv,
+// 1 .res.json, 2 .cs.spv. read returns 0 when the loose file is to be read instead.
+void gfx_shader_pack_open(const char *dir);
+int gfx_shader_pack_read(const uint8_t key[32], int kind, uint8_t **out, uint64_t *size);
+size_t gfx_shader_pack_keys(uint8_t (**keys)[32]);   // a malloc'd copy of the pack's keys; 0 (and NULL) without one
 #endif

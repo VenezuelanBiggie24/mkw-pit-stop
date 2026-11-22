@@ -13,5 +13,6 @@ Each folder holds the tests of one part of the repo, with the C sources they bui
 | [widescreen/](widescreen/README.md) | Window aspect, FOV and UI fitting |
 | [github/](github/README.md) | The issue moderation bot |
 | [ps5/](ps5/README.md) | The PS5 port: the builder, `.nup` reader and receiver, DualSense mapping, memory backing and loader models |
+| [docs/](docs/README.md) | The pre-commit hook's own checks reading UTF-8 on a legacy code page |
 
 Usage: `uv run pytest tests` (one worker per core through pytest-xdist; `-n 0` runs them in series)

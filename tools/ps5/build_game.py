@@ -9,7 +9,7 @@ build with `tools/build/build.py --pgo-gen`, same generated tree): objects in `g
 build without it keeps its own, and the clang warnings about functions whose profile is missing or out of date
 are summed up at the end (a generator change since the profile shows there).
 `--gen-opt O2` compiles the generated C at -O2 instead of -O1 (objects in `lift-O2` / `lift-pgo-O2`): plain -O2 lost
-to -O1 (more instructions and memory operands in the hottest functions, docs/project/roadmap.md), but with a profile clang
+to -O1 (more instructions and memory operands in the hottest functions, docs/ps5/roadmap.md), but with a profile clang
 optimizes only the hot code and keeps the cold paths small, so -O2 is meant to be measured together with --pgo-use.
 """
 
@@ -28,6 +28,7 @@ from pathlib import Path
 from build_smoke import (APP_SDK, GLM, MESA, ROOT, TEMPLATE, VULKAN, png, require_checkout,
                          require_radv, write_changed)
 from build import game_id, module_glue, port_version
+import hud_layouts  # noqa: E402  (recomp/, on the path through build: patches.c's screen-edge HUD table)
 from ext_glue import ext_sources, ext_table
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "i18n"))
@@ -40,7 +41,7 @@ TITLE_ID = "PPSA99193"
 TITLE_NAME = "Mario Kart World: Pit Stop"
 ICON = ROOT / "docs/images/icon0.png"
 # param.json flexibleMemorySize, MiB. Flexible and direct memory share the app's budget on the PS5: 1024 left 11,712
-# MiB of direct memory, which long sessions ran out of (docs/project/roadmap.md section 4), while flexible memory peaked at
+# MiB of direct memory, which long sessions ran out of (docs/ps5/roadmap.md section 4), while flexible memory peaked at
 # ~460-490 MiB in use ("flex free 562 MiB" in run pack1, 16/11/2026; task 38's report). 640 keeps ~150 MiB of that
 # spare and should give the direct memory ~384 MiB more; the census line's "dmem free N of M MiB" shows M.
 FLEXIBLE_MIB = 640
@@ -125,6 +126,7 @@ def compile_objects(sdk: Path, template: Path, includes: list[Path], env: dict[s
     out = WORK / ("game-objects" if generated else "inventory-objects")
     out.mkdir(parents=True, exist_ok=True)
     write_changed(out / "guest_layout.h", ("#pragma once\n" + placement_defines(PROFILE)).encode())
+    write_changed(out / "hud_layouts.h", hud_layouts.header_text().encode())   # as build.py writes it in rt/
     ident = game_id(PROFILE)
     common = ["-march=znver2", "-fPIC", "-fno-strict-aliasing", "-ffunction-sections", "-fdata-sections"]
     include_dirs = sorted({RUNTIME, *(p.parent for p in RUNTIME.rglob("*.h"))})

@@ -7,6 +7,7 @@
 // Reflection: every shader that enters the cache goes through gfx_shader_reflect (gfx_shader_refl.c); the gfx.h
 // accessors are at the end of the file.
 #include <ctype.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -117,12 +118,14 @@ static void prepared_init(void *param) {
     if (pack_is(pk) && (prepared_pack = pack_open(pk)))
         prepared_count = pack_entries(prepared_pack, PACK_ROMFS, &prepared_entries);
     rt_log("gfx_shader: prepared SPIR-V from %s%s", prepared_dir, prepared_pack ? ".nup" : "");
+    gfx_shader_pack_open(prepared_dir);
 }
 
 static int entry_named(const void *name, const void *e) { return strcmp(name, ((const PackEntry *)e)->name); }
 
-// A prepared file, from the package or the directory; malloc'd with a NUL after its bytes, as plat_file_read's.
-static uint8_t *prepared_read(const char *name, uint64_t *size) {
+// A prepared file by name (<key><suffix>), from the directory or its .nup package (the PS5 title's); malloc'd with a
+// NUL after its bytes, as plat_file_read's.
+static uint8_t *prepared_file(const char *name, uint64_t *size) {
     *size = 0;
     if (!prepared_pack) {
         char p[PATH_CAP + 80];
@@ -146,18 +149,86 @@ static void prepared_paths(void) {
     plat_once(&once, prepared_init, NULL);
 }
 
-static GfxShader *prepared_load(const uint8_t key[32], const uint8_t *control) {
+// A program's prepared file of kind 0 .spv, 1 .res.json, 2 .cs.spv: from spirv/shaders.pack, else <key><suffix> (from
+// the directory or its .nup package, prepared_file).
+static uint8_t *prepared_read(const uint8_t key[32], int kind, uint64_t *size) {
+    static const char *const suffix[] = {".spv", ".res.json", ".cs.spv"};
+    uint8_t *b;
+    if (gfx_shader_pack_read(key, kind, &b, size)) return b;
     char hex[65], p[96];
     gfx_shader_key_hex(key, hex);
+    snprintf(p, sizeof p, "%s%s", hex, suffix[kind]);
+    return prepared_file(p, size);
+}
+
+// MKW_HDR_TONEMAP=psychov: the game's final tone curve programs as tools/shaders/renodx.py rewrote them (RenoDX's
+// PsychoV35 in their HDR mode), from <spirv>-renodx (beside spirv/, so its shaders.pack stays current); NULL for the
+// game's own. Read once: the pipelines keep the programs they were built with, so it takes effect after a restart.
+static char tonemap_path[PATH_CAP + 16];
+static void tonemap_init(void *param) {
+    (void)param;
+    if (strcmp(cfg_value("MKW_HDR_TONEMAP"), "psychov")) return;
+    snprintf(tonemap_path, sizeof tonemap_path, "%s-renodx", prepared_dir);
+    rt_log("gfx_shader: HDR tone mapper PsychoV35 (%s)", tonemap_path);
+}
+static const char *tonemap_dir(void) {
+    static PlatOnce once = PLAT_ONCE_INIT;
+    plat_once(&once, tonemap_init, NULL);
+    return tonemap_path[0] ? tonemap_path : NULL;
+}
+
+// The display's headroom for those programs: peak over paper white as the game is told them (gfx_hdr_headroom), 0
+// when unknown (the programs then keep the game's own 1.5). Taken once, at the first program: a program read again
+// after its SPIR-V was released (spirv_reload) gets the same words as the first time.
+static float headroom_v;
+static void headroom_init(void *param) {
+    (void)param;
+    headroom_v = gfx_hdr_headroom();
+    rt_log("gfx_shader: RenoDX headroom %.2f (peak over paper white)", headroom_v);
+}
+static float rdx_headroom(void) {
+    static PlatOnce once = PLAT_ONCE_INIT;
+    plat_once(&once, headroom_init, NULL);
+    return headroom_v;
+}
+
+// The constants renodx.py declares (gfx_rdx_patch, gfx_rdx.c). RDX_SPLIT_ID: MKW_RDX_SPLIT=<pixels>, the picture left
+// of it keeps the game's curve, to compare the two in one frame.
+enum { RDX_HEADROOM_ID = 30000, RDX_SPLIT_ID = 30001 };
+
+// A program's SPIR-V as the runtime uses it: the RenoDX one with its constants set when the tone mapper is on and
+// renodx.py made one (the same bindings and interface as the game's: it edits only the end), else the prepared one.
+// prepared_load and spirv_reload both read through here, so a released program comes back with the same words.
+static uint8_t *prepared_spv(const uint8_t key[32], uint64_t *size, int log) {
+    const char *tm = tonemap_dir();
+    if (tm) {
+        char hex[65], p[PATH_CAP + 96];
+        gfx_shader_key_hex(key, hex);
+        snprintf(p, sizeof p, "%s/%s.spv", tm, hex);
+        uint8_t *spv = read_file(p, size);
+        if (spv && *size % 4 == 0) {
+            float h = rdx_headroom();
+            int ok = gfx_rdx_patch((uint32_t *)spv, *size / 4, RDX_HEADROOM_ID, h);
+            const char *split = cfg_get("MKW_RDX_SPLIT");
+            if (split && *split) gfx_rdx_patch((uint32_t *)spv, *size / 4, RDX_SPLIT_ID, (float)atof(split));
+            if (log) rt_log("gfx_shader: %s from RenoDX, headroom %.2f%s", hex, h, ok ? "" : " (no constant to set)");
+            return spv;
+        }
+        free(spv);
+        snprintf(p, sizeof p, "%s/%s.none", tm, hex);
+        if (log && plat_file_exists(p)) rt_log("gfx_shader: %s is a tone curve renodx.py could not edit: the game's", hex);
+    }
+    return prepared_read(key, 0, size);
+}
+
+static GfxShader *prepared_load(const uint8_t key[32], const uint8_t *control) {
     uint64_t spv_size = 0, res_size = 0;
-    snprintf(p, sizeof p, "%s.res.json", hex);
-    uint8_t *res = prepared_read(p, &res_size);
+    uint8_t *res = prepared_read(key, 1, &res_size);
     if (!res || !reflection_valid((const char *)res, res_size)) {
         free(res);
         return NULL;
     }
-    snprintf(p, sizeof p, "%s.spv", hex);
-    uint8_t *spv = prepared_read(p, &spv_size);
+    uint8_t *spv = prepared_spv(key, &spv_size, 1);
     uint32_t magic = 0;
     if (spv && spv_size >= 20) memcpy(&magic, spv, 4);
     if (!spv || spv_size % 4 || magic != 0x07230203 || !spirv_complete((const uint32_t *)spv, spv_size / 4)) {
@@ -272,6 +343,31 @@ void gfx_shader_prewarm(const uint8_t (*iids)[32], size_t n, const GfxShader **o
            (long long)PW.miss, nt + 1);
 }
 
+// ---- every program of shaders.pack, loaded while the boot prewarm creates the device (vk_pipe_keys.c prewarm_run):
+// the pairs prewarm reads them all, and they need no device. pack-boot2 (18/11/2026, file cache cold, Windows PC): the
+// device took 7.2 s and the load 2.7 s more after it.
+static struct { uint8_t (*ids)[32]; const GfxShader **out; size_t n; } PL;
+
+static void preload_main(void *arg) {
+    (void)arg;
+    gfx_shader_prewarm((const uint8_t(*)[32])PL.ids, PL.n, PL.out);
+}
+
+PlatThread *gfx_shader_preload_start(void) {
+    prepared_paths();
+    PL.n = gfx_shader_pack_keys(&PL.ids);
+    PL.out = PL.n ? calloc(PL.n, sizeof *PL.out) : NULL;
+    PlatThread *t = PL.out ? plat_thread_new(preload_main, NULL, "shader preload") : NULL;
+    if (!t) free(PL.ids), free(PL.out), PL.ids = NULL, PL.out = NULL;
+    return t;
+}
+
+void gfx_shader_preload_join(PlatThread *t) {
+    if (!t) return;
+    plat_thread_join(t);
+    free(PL.ids), free(PL.out), PL.ids = NULL, PL.out = NULL;
+}
+
 // ---- SPIR-V released after the prewarm
 // The pairs prewarm (vk_pipe_pairs.c) loads every program of the copy, 306 MiB of SPIR-V on the 660M (pk-mem,
 // 17/11/2026), to build their libraries; most are never drawn in a session. Those the prewarm alone read are freed
@@ -284,12 +380,13 @@ void gfx_shader_spirv_quiet(int on) { spirv_quiet = on; }
 static void spirv_reload(GfxShader *s) {
     plat_mutex_lock(&spirv_lock);
     if (__atomic_load_n(&s->spirv_state, __ATOMIC_ACQUIRE) == SPIRV_RELEASED) {
-        char hex[65], p[96];
-        gfx_shader_key_hex(s->key, hex);
-        snprintf(p, sizeof p, "%s.spv", hex);
         uint64_t n = 0;
-        uint8_t *spv = prepared_read(p, &n);   // from the directory or its .nup package
-        if (!spv || n != s->words * 4) rt_fatal("gfx_shader: %s changed or went missing since it was loaded", p);
+        uint8_t *spv = prepared_spv(s->key, &n, 0);
+        if (!spv || n != s->words * 4) {
+            char hex[65];
+            gfx_shader_key_hex(s->key, hex);
+            rt_fatal("gfx_shader: %s/%s.spv changed or went missing since it was loaded", prepared_dir, hex);
+        }
         s->spirv = (uint32_t *)spv;
         __atomic_store_n(&s->spirv_state, SPIRV_KEPT, __ATOMIC_RELEASE);
     }
@@ -303,6 +400,21 @@ const uint32_t *gfx_shader_spirv(const GfxShader *cs, uint64_t *words) {
     if (st == SPIRV_PREPARED && !spirv_quiet) st = plat_cas32(&s->spirv_state, SPIRV_KEPT, SPIRV_PREPARED);
     if (st == SPIRV_RELEASED) spirv_reload(s);
     return s->spirv;
+}
+
+// FNV-1a 64 of the SPIR-V bytes, computed on the first call and kept on the shader: vk_temporal.c identifies the game's
+// SMAA and upscale programs by it on every draw. It was a 512-slot table keyed by pointer, and with the boot prewarm's
+// ~4700 shaders (or an unlucky heap layout) its collisions rehashed whole programs on the replay thread: +1 ms a frame
+// in the race (pf-fast/pf-slow sampled profiles, 16/11/2026). Concurrent first calls store the same value.
+uint64_t gfx_shader_spirv_fnv(const GfxShader *s) {
+    uint64_t h = __atomic_load_n(&s->spirv_fnv, __ATOMIC_RELAXED);
+    if (h) return h;
+    h = 0xcbf29ce484222325ull;
+    uint64_t words = 0;
+    const uint8_t *b = (const uint8_t *)gfx_shader_spirv(s, &words);   // read back if the prewarm's release freed it
+    for (uint64_t k = 0; b && k < words * 4; k++) h = (h ^ b[k]) * 0x100000001b3ull;
+    __atomic_store_n(&((GfxShader *)s)->spirv_fnv, h, __ATOMIC_RELAXED);
+    return h;
 }
 
 // Frees the SPIR-V of every prepared shader nothing but the prewarm has read. The caller has joined the prewarm's
@@ -374,10 +486,12 @@ const GfxShader *gfx_shader_variant(const GfxShader *s, const uint32_t *val, con
         free(w);
         return NULL;
     }
-    GfxShader *v = malloc(sizeof *v);
+    GfxShader *v = calloc(1, sizeof *v);
     if (!v) rt_fatal("gfx_shader: out of memory");
-    *v = *s;
-    v->next = NULL, v->spirv = w, v->spirv_state = SPIRV_KEPT, v->variant_of = s;
+    // Another replay worker can memoize the generic program's hash while this
+    // variant is made. Do not read that atomic memo through a whole-struct copy.
+    memcpy(v, s, offsetof(GfxShader, spirv_fnv));
+    v->next = NULL, v->spirv = w, v->spirv_state = SPIRV_KEPT, v->variant_of = s, v->spirv_fnv = 0;   // its own SPIR-V
     size_t n = 32 + (size_t)s->nspec * 5;
     uint8_t *buf = malloc(n);
     if (!buf) rt_fatal("gfx_shader: out of memory");
@@ -445,7 +559,7 @@ const GfxShader *gfx_shader_cs_variant(const GfxShader *s) {
         gfx_shader_key_hex(s->key, hex);
         snprintf(p, sizeof p, "%s.cs.spv", hex);
         uint64_t n = 0;
-        uint8_t *spv = prepared_read(p, &n);
+        uint8_t *spv = prepared_read(s->key, 2, &n);
         uint32_t magic = 0;
         if (spv && n >= 20) memcpy(&magic, spv, 4);
         char *res = malloc(s->reflection_size + 1);

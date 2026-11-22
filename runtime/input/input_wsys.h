@@ -13,4 +13,4 @@ void ikb_cursor_update(void);                 // what input_cursor_allowed says 
 void ikb_menu_closed(void);                   // the menu closed: a capture that Esc gave up comes back
 
 // ---- what input.c provides the back end
-int input_cursor_allowed(void);               // no text entry or menu open, the mouse camera on, input not disabled
+int input_cursor_allowed(void);               // no text entry or menu open, the mouse camera and the keyboard and mouse on, input not disabled

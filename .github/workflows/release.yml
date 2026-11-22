@@ -52,6 +52,10 @@ jobs:
         run: uv run tools/build/sysroot.py
       - name: Runtime and launcher
         run: uv run tools/build/build.py --dist --runtime-only --sysroot build/sysroot
+      - uses: actions/cache@v6
+        with:
+          path: build/dist/dl/llvm-*
+          key: llvm-clang-${{ github.job }}-${{ hashFiles('tools/build/llvm_clang.py') }}
       - name: Setup tools
         run: uv run tools/build/dist.py --target linux
       - name: AppImage
@@ -106,7 +110,7 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Tools
-        run: pacman -Syu --noconfirm --needed git ccache ninja cmake binutils uv python
+        run: pacman -Syu --noconfirm --needed git ccache ninja cmake binutils uv python 7zip
       - uses: actions/checkout@v7
       - name: ccache in the checkout, kept between runs (build.py compiles through it when installed)
         run: echo "CCACHE_DIR=$PWD/.ccache" >> "$GITHUB_ENV"
@@ -125,14 +129,33 @@ jobs:
         with:
           path: build/dist/dl
           key: dist-dl-windows-${{ hashFiles('tools/build/dist.py') }}
+          restore-keys: dist-dl-windows-   # a stale cache still has the downloads: each is checked by sha256 before use
       - name: llvm-mingw and the Windows libraries
         run: uv run tools/build/windeps.py
       - name: mkw.exe
         run: uv run tools/build/build.py --target windows --dist --runtime-only
+      - name: mkw.exe for CPUs without AVX2 (x86-64-v2, #82)
+        run: uv run tools/build/build.py --target windows --dist --runtime-only --cpu noavx2
+      - name: The -noavx2 mkw.exe holds no AVX2, BMI or FMA instruction
+        run: |
+          llvm=$(ls -d build/dist/dl/llvm-mingw*/bin | head -1)
+          "$llvm/llvm-objdump" -d --no-show-raw-insn build/dist/windows-noavx2/mkw.exe \
+            | awk '/^[0-9a-f]+ <.*>:/ {f=$2} f !~ /^<_?(vpx|vp8|vp9)/ && $2 ~ /^(v[a-z0-9]+|andn|bextr|blsi|blsr|blsmsk|bzhi|mulx|pdep|pext|rorx|sarx|shlx|shrx)$/ {print f, $0; n++} END {if (n) {print n " forbidden instructions (libvpx picks its AVX2 code by CPU, so it is skipped)"; exit 1}}'
+      - uses: actions/cache@v6
+        with:
+          path: build/dist/dl/llvm-*
+          key: llvm-clang-${{ github.job }}-${{ hashFiles('tools/build/llvm_clang.py') }}
       - name: Setup tools
         run: uv run tools/build/dist.py --target windows
       - name: Zip
-        run: uv run tools/build/release.py --target windows --version "${GITHUB_REF_NAME#v}"
+        run: |
+          # the two zips are independent and deflate-bound: one process each (in series the step took 2x)
+          uv run tools/build/release.py --target windows --version "${GITHUB_REF_NAME#v}" & a=$!
+          uv run tools/build/release.py --target windows --cpu noavx2 --version "${GITHUB_REF_NAME#v}" & b=$!
+          ra=0; rb=0
+          wait $a || ra=$?
+          wait $b || rb=$?
+          exit $((ra | rb))
       - uses: actions/upload-artifact@v7
         with:
           name: windows
