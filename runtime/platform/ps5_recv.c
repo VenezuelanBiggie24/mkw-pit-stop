@@ -1079,6 +1079,110 @@ int ps5_game_files_ready(const char *root_dir, const char *expected_game_id, cha
     return 1;
 }
 
+// ---- after a ProsperoStore update
+// ProsperoStore (github.com/darkxex/ProsperoStore, src/install/transaction.cpp at 0e1f031, keep_previous) installs a
+// clean update by replacing the app's whole folder with the release zip, and moves the old folder to
+// <drive>/prosperostore/previous/<TITLEID>. Our folder holds what the PC builder sent (romfs.nup, 23 GB; spirv.nup;
+// exefs/), the saves (profile/) and mkw.ini, none of which is in the zip: without this the player would build and send
+// everything again and lose their saves. Its "quick update" lays the zip over the folder instead and needs nothing.
+
+// The store's drive for an install location (its system::drive_root): /data, /mnt/ext0-1 or /mnt/usb0-7.
+static int store_drive(const char *location, const char *store_root, char *out, size_t cap) {
+    static const char *const drives[] = {"/data", "/mnt/ext0", "/mnt/ext1", "/mnt/usb0", "/mnt/usb1", "/mnt/usb2",
+                                         "/mnt/usb3", "/mnt/usb4", "/mnt/usb5", "/mnt/usb6", "/mnt/usb7"};
+    char base[512];
+    // store_root's parent is the internal drive (/data on the console; a scratch folder in the host test)
+    snprintf(base, sizeof base, "%s", store_root);
+    char *slash = strrchr(base, '/');
+    if (slash && slash != base) *slash = 0;
+    size_t n = strlen(base);
+    if (!strncmp(location, base, n) && (location[n] == '/' || !location[n])) return snprintf(out, cap, "%s", base) < (int)cap;
+    for (size_t i = 0; i < sizeof drives / sizeof *drives; i++) {
+        n = strlen(drives[i]);
+        if (!strncmp(location, drives[i], n) && (location[n] == '/' || !location[n]))
+            return snprintf(out, cap, "%s", drives[i]) < (int)cap;
+    }
+    return 0;
+}
+
+// "location" from the store's receipt for our title: the folder it installed us in, such as /data/homebrew.
+static int store_location(const char *receipt, char *out, size_t cap) {
+    char buf[4096];
+    FILE *f = fopen(receipt, "rb");
+    if (!f) return 0;
+    size_t len = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[len] = 0;
+    const char *p = strstr(buf, "\"location\":\"");
+    if (!p) return 0;
+    p += strlen("\"location\":\"");
+    const char *end = strchr(p, '"');
+    // a plain absolute path only: an escaped character (\") or a .. would need a real JSON parser to trust
+    if (!end || p[0] != '/' || memchr(p, '\\', (size_t)(end - p)) || (size_t)(end - p) >= cap) return 0;
+    memcpy(out, p, (size_t)(end - p));
+    out[end - p] = 0;
+    return strstr(out, "/..") == NULL;
+}
+
+// lstat fails on paths that exist from inside the title (console test, 22/11/2026: the restore saw none of the new
+// folder's entries and renamed the old eboot.bin over the new one), so stat answers too, as in ps5_sys.c
+static int path_exists(const char *path) {
+    struct stat st;
+    return lstat(path, &st) == 0 || stat(path, &st) == 0;
+}
+
+static int same_file(const char *a, const char *b) {
+    struct stat x, y;
+    // /app0 is ShadowMountPlus's mount of the folder: the device differs, the size and modification time do not
+    return stat(a, &x) == 0 && stat(b, &y) == 0 && x.st_size == y.st_size && x.st_mtime == y.st_mtime;
+}
+
+int ps5_store_restore(const char *store_root, const char *title_id, const char *app_dir) {
+    char receipt[640], location[512], drive[512], target[768], kept[768], p[1024];
+    snprintf(receipt, sizeof receipt, "%s/receipts/%s.json", store_root, title_id);
+    if (!store_location(receipt, location, sizeof location)) return 0;   // not installed by the store
+    if (!store_drive(location, store_root, drive, sizeof drive)) return 0;
+    snprintf(target, sizeof target, "%s/%s", location, title_id);
+    snprintf(kept, sizeof kept, "%s/prosperostore/previous/%s", drive, title_id);
+    // the receipt's folder must be the one running (a copy installed by hand elsewhere is not ours to fill)
+    char a[1024];
+    snprintf(p, sizeof p, "%s/eboot.bin", target);
+    snprintf(a, sizeof a, "%s/eboot.bin", app_dir);
+    if (!same_file(p, a)) return 0;
+    // only a folder fresh from the zip: anything the builder, the game or the player puts there means it is in use,
+    // and what the previous folder still holds stays for the player to look at
+    static const char *const used[] = {".pitstop-manifest.tsv", "profile", "mkw.ini", "exefs", "romfs", "romfs.nup",
+                                       "spirv", "spirv.nup", "pitstop-game-dirs.txt", "pitstop-game.id"};
+    for (size_t i = 0; i < sizeof used / sizeof *used; i++) {
+        snprintf(p, sizeof p, "%s/%s", target, used[i]);
+        if (path_exists(p)) return 0;
+    }
+    // the release's own entries: never taken from the old folder, whatever a check of the new one says
+    static const char *const release[] = {"eboot.bin", "sce_sys", "sce_module", "licenses", "LEGAL.txt",
+                                          "pitstop-runtime.json"};
+    DIR *d = opendir(kept);
+    if (!d) return 0;
+    int moved = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char from[1024], to[1024];
+        if (snprintf(from, sizeof from, "%s/%s", kept, e->d_name) >= (int)sizeof from ||
+            snprintf(to, sizeof to, "%s/%s", target, e->d_name) >= (int)sizeof to)
+            continue;
+        int own = 0;
+        for (size_t i = 0; i < sizeof release / sizeof *release; i++) own |= !strcmp(e->d_name, release[i]);
+        // what the new release brings is the new version's
+        if (own || path_exists(to)) continue;
+        // the same drive, so a rename: the 23 GB romfs.nup moves at once, nothing is copied
+        if (rename(from, to) == 0) moved++;
+        else fprintf(stderr, "ps5 store restore: %s -> %s failed (%s)\n", from, to, strerror(errno));
+    }
+    closedir(d);
+    if (moved) fprintf(stderr, "ps5 store restore: moved %d entries back from %s to %s\n", moved, kept, target);
+    return moved;
+}
+
 int ps5_recv_start(const char *root_dir, uint16_t port, const char *port_version, const char *rt_game_id,
                    int has_game_code) {
     if (g_started) return 1;

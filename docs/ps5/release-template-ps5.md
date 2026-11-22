@@ -48,6 +48,8 @@ If the PS5 stays on **Waiting for connection**, check the IP and that the PC and
 
 Unpack the new builder over your folder (or pass the same `--work` directory) and build again (**Build for PS5** on Windows, `prepare_ps5.py` on Linux): steps whose inputs have not changed (such as `romfs/` and unchanged shaders) are skipped, and only updated parts are rebuilt and uploaded. Saves and `mkw.ini` settings on the console are kept.
 
+**Installed from ProsperoStore:** the store's update installs the new placeholder only. Then build again from the PC as above, while the title shows **Game files missing**. The game files, saves and `mkw.ini` the update put aside (in `prosperostore/previous/PPSA99193`) move back on the title's first start, so only the new game code and changed shaders are sent.
+
 ## Known issues
 
 {known}

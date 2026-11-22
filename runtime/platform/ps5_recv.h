@@ -60,6 +60,12 @@ const char *ps5_game_dir(const char *root_dir, char *why, size_t why_cap);
 // The RomFS of a game folder (ps5_game_dir's): dir/romfs.nup when there, else dir/romfs; 0 when neither exists.
 int ps5_game_romfs(const char *dir, char *out, size_t cap);
 
+// After a clean ProsperoStore update (the app's folder replaced by the release zip, the old one moved to
+// <drive>/prosperostore/previous/<title_id>), move back every entry of the old folder the new one lacks: the game files
+// the PC builder sent, the saves and mkw.ini. Only when store_root/receipts/<title_id>.json names the folder running as
+// app_dir and that folder is fresh from the zip. Returns the number of entries moved (0: nothing to do).
+int ps5_store_restore(const char *store_root, const char *title_id, const char *app_dir);
+
 // Start the receiver listener thread on 0.0.0.0:port (0 selects PS5_RECV_PORT or MKW_PS5_RECV_PORT).
 // Returns 1 on success, 0 on bind/listen/thread failure.
 int ps5_recv_start(const char *root_dir, uint16_t port, const char *port_version, const char *rt_game_id,

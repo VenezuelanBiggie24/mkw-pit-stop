@@ -83,6 +83,10 @@ int main(int argc, char **argv) {
         ps5_recv_stop();
         return st.pc_failed ? 0 : 3;
     }
+    if (argc >= 5 && !strcmp(argv[1], "restore")) {   // after a ProsperoStore update: store root, title id, app dir
+        printf("%d\\n", ps5_store_restore(argv[2], argv[3], argv[4]));
+        return 0;
+    }
     return 9;
 }
 """,
@@ -450,3 +454,69 @@ def test_ps5_send_order_and_modes(tmp_path: Path) -> None:
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+def _store_layout(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """A console after ProsperoStore's clean update: the zip's folder in homebrew/, the old one in previous/."""
+    data = tmp_path / "data"
+    store = data / "prosperostore"
+    target = data / "homebrew" / "PPSA99193"
+    kept = store / "previous" / "PPSA99193"
+    (store / "receipts").mkdir(parents=True)
+    (store / "receipts" / "PPSA99193.json").write_text(
+        json.dumps({"schema": 1, "titleId": "PPSA99193", "location": str(data / "homebrew"),
+                    "contentVersion": "01.002.001"}, separators=(",", ":")) + "\n", encoding="utf-8")
+    for root, eboot in ((target, b"new placeholder"), (kept, b"old built game")):
+        (root / "sce_sys").mkdir(parents=True)
+        (root / "eboot.bin").write_bytes(eboot)
+        (root / "sce_sys" / "param.json").write_text(eboot.decode(), encoding="utf-8")
+    (kept / "romfs.nup").write_bytes(b"romfs")
+    (kept / "spirv.nup").write_bytes(b"spirv")
+    (kept / "exefs").mkdir()
+    (kept / "exefs" / "main").write_bytes(b"main")
+    (kept / "profile").mkdir()
+    (kept / "profile" / "save.dat").write_bytes(b"save")
+    (kept / "mkw.ini").write_text("fps = 60\n", encoding="utf-8")
+    (kept / ".pitstop-manifest.tsv").write_text("", encoding="utf-8")
+    return store, target, kept, tmp_path / "app0"
+
+
+@pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
+def test_ps5_store_restore(tmp_path: Path) -> None:
+    exe = _compile_helper(tmp_path)
+    store, target, kept, app0 = _store_layout(tmp_path / "c")
+    app0.symlink_to(target)   # the running title's /app0, ShadowMountPlus's view of the same folder
+
+    def restore(app: Path) -> int:
+        out = subprocess.run([str(exe), "restore", str(store), "PPSA99193", str(app)],
+                             check=True, capture_output=True, text=True)
+        return int(out.stdout)
+
+    assert restore(app0) == 6
+    for name in ("romfs.nup", "spirv.nup", "exefs/main", "profile/save.dat", "mkw.ini", ".pitstop-manifest.tsv"):
+        assert (target / name).exists() and not (kept / name).exists(), name
+    # the new release's own files stay; the old ones are left in previous/
+    assert (target / "eboot.bin").read_bytes() == b"new placeholder"
+    assert (kept / "eboot.bin").read_bytes() == b"old built game"
+    assert (kept / "sce_sys" / "param.json").exists()
+    assert restore(app0) == 0   # a folder in use is never filled again
+
+    # the release's own entries never come from the old folder, even where the new one lacks them (on the console lstat
+    # missed the new eboot.bin and the old one was renamed over it)
+    store, target, kept, app0 = _store_layout(tmp_path / "own")
+    (kept / "LEGAL.txt").write_text("old", encoding="utf-8")
+    (kept / "pitstop-runtime.json").write_text("old", encoding="utf-8")
+    app0.symlink_to(target)
+    assert restore(app0) == 6
+    assert not (target / "LEGAL.txt").exists() and not (target / "pitstop-runtime.json").exists()
+    assert (kept / "LEGAL.txt").exists() and (kept / "eboot.bin").read_bytes() == b"old built game"
+
+    # a folder that is not the running one (installed by hand elsewhere) and a title the store did not install
+    store, target, kept, app0 = _store_layout(tmp_path / "other")
+    other = tmp_path / "other" / "hand"
+    other.mkdir()
+    (other / "eboot.bin").write_bytes(b"a hand-installed copy")
+    assert restore(other) == 0 and (kept / "romfs.nup").exists()
+    (store / "receipts" / "PPSA99193.json").unlink()
+    app0.symlink_to(target)
+    assert restore(app0) == 0 and (kept / "romfs.nup").exists()
