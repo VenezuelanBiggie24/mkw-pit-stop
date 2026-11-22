@@ -20,9 +20,10 @@ Before publishing:
 
 - On a base PS5, a clean ProsperoStore update done by hand over FTP (the old folder moved to `/data/prosperostore/previous/PPSA99193`, the 0.2.1 placeholder put in its place and a store receipt written): on its first start the placeholder moved 25 entries back, among them `updates/`, `spirv.nup`, `profile/`, `mkw.ini` and `mods/`, and kept its own `eboot.bin`. The first try of this test found that `lstat` on the console does not see files in the title's folder, so the old `eboot.bin` was moved over the new one; the release has the fix.
 - On Linux: the receiver's tests, with the move back after a store update (`tests/ps5/test_ps5_recv.py`), and the `contentVersion` numbering (`tests/ps5/test_ps5_builder.py`). The changed C files compile with the PS5 toolchain.
-- The 0.2.1 placeholder zip passes the release's no-game-content check, and its `param.json` says `01.002.001`.
+- The placeholder and both builder packages pass the release's no-game-content check and match `SHA256SUMS`; the placeholder's `param.json` says `01.002.001`.
+- Both builder packages, unpacked into clean folders, pass `prepare_ps5.py --check-only` on a 1.8.0 console dump (the Windows one through its own Python, on Windows).
 
-Not run: an update through ProsperoStore itself, and a whole title build from the 0.2.1 builder packages.
+Not run: an update through ProsperoStore itself, and a whole title build and send from the 0.2.1 builder packages.
 
 ### Known issues
 
