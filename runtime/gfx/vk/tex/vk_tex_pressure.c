@@ -24,7 +24,7 @@
 // The idle line is long on purpose: dropping the released textures at the budget (windows win5, 06/11/2026) took
 // GPU frames from 17-19 to 47-50 ms on a GTX 1050 Ti, as the game asked for them again within frames and each one
 // was made and uploaded anew. MKW_TEX_PRESSURE=<submits> sets that line (default 1800, ~10 s at ~3 submits a frame),
-// 0 turns it off, "ab" switches it with the A/B blocks.
+// 0 turns it off, "ab" switches it with the A/B blocks. On by default in the PS5 profile (cfg.c PS5, issue 11).
 // Off unless set: on a GTX 1050 Ti (windows prsC, 23/11/2026, 25 min of races) the textures outside VRAM were never
 // idle enough to go (all 7.9 GB it evicted were in VRAM; they came and went with the game, 31-476 MiB), and the frame rate
 // held at 23-26 fps from start to end; the runs without it (prsA, prsB) slowed only on that PC's disk (pipeline
