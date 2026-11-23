@@ -467,6 +467,11 @@ static Ps5PadSample ps5_sample_of(const struct pad_reading *raw) {
     };
 }
 
+// Player 1's latest raw DualSense reading, intercepted ones too (input_ps5_raw_held): the start's update check reads
+// L1 + R1 from it, as buttons held through the launch reach the title only as intercepted readings (23/11/2026).
+static uint32_t ps5_raw_held0;
+static int ps5_raw_connected0;
+
 static void pads_update(void) {
     struct pad ignored = {0};
     pad_poll(&ignored);
@@ -485,6 +490,7 @@ static void pads_update(void) {
         }
         if (count > 0) {
             const struct pad_reading *latest = &readings[count - 1];
+            if (p == 0) ps5_raw_held0 = latest->buttons, ps5_raw_connected0 = latest->connected;
             Ps5PadSample raw = ps5_sample_of(latest);
             input_ps5_update(sample, (connected & (1u << p)) && latest->connected, &raw);
         } else {
@@ -750,6 +756,16 @@ void input_menu_pad(InputMenuPad *sample) {
     *sample = (InputMenuPad){bits, menu_pad_generation, sl[0], sl[1], connected, east_confirm};
     plat_mutex_unlock(&lock);
 }
+
+#ifdef MKW_PS5_NATIVE
+uint32_t input_ps5_raw_held(int *connected) {
+    plat_mutex_lock(&lock);
+    uint32_t held = ps5_raw_held0;
+    if (connected) *connected = ps5_raw_connected0;
+    plat_mutex_unlock(&lock);
+    return held;
+}
+#endif
 
 uint16_t rumble_motor(float a, float curve, float strength) {
     if (!(a > 0) || !(strength > 0)) return 0;

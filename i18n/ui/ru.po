@@ -3492,6 +3492,11 @@ msgctxt "UI_BOOT_FOOT"
 msgid "Mario Kart World: Pit Stop is getting ready · %d s"
 msgstr "Mario Kart World: Pit Stop готовится к запуску · %d с"
 
+#. The PS5 controller's buttons: OPTIONS and a click of the touchpad, held together, open the Pit Stop settings.
+msgctxt "UI_BOOT_MENU_HINT"
+msgid "Tip: press OPTIONS + touchpad in game to open Pit Stop settings"
+msgstr ""
+
 #. printf format: keep every %... conversion, in the same order.
 msgctxt "UI_SETUP_ERR_SPACE"
 msgid ""

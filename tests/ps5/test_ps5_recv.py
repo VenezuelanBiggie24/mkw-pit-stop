@@ -263,6 +263,41 @@ def test_ps5_recv_builder_status(tmp_path: Path) -> None:
             proc.kill()
 
 
+def test_ps5_recv_info_lists_game_copies(tmp_path: Path) -> None:
+    """PIT1I names each game copy in the title folder and its exefs/main build id (the builder tells the player what
+    the console holds: an upgrade keeps it); a main that is not an NSO has no id, a folder without a RomFS is no copy."""
+    exe = _compile_helper(tmp_path)
+    title = tmp_path / "PPSA99193"
+
+    def nso(build_id: str) -> bytes:
+        return b"NSO0" + bytes(0x3C) + bytes.fromhex(build_id) + bytes(8)
+
+    (title / "exefs").mkdir(parents=True)
+    (title / "exefs/main").write_bytes(nso("9e244438c3d8ef1c"))
+    (title / "romfs.nup").write_bytes(b"n")
+    (title / "updates/917504/exefs").mkdir(parents=True)
+    (title / "updates/917504/exefs/main").write_bytes(nso("d00e4f399e411d06"))
+    (title / "updates/917504/romfs").mkdir()
+    (title / "updates/1/exefs").mkdir(parents=True)
+    (title / "updates/1/exefs/main").write_bytes(b"x")   # no RomFS beside it: not a copy
+    port_file = tmp_path / "port.txt"
+    proc = subprocess.Popen([str(exe), "serve", str(title), str(port_file)], stdout=subprocess.PIPE, text=True,
+                            env=dict(os.environ, MKW_PS5_RECV_PORT="0"))
+    try:
+        for _ in range(200):
+            if port_file.is_file() and port_file.read_text().strip():
+                break
+            time.sleep(0.01)
+        port = int(port_file.read_text().strip())
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as s:
+            s.sendall(b"PIT1I")
+            info = json.loads(_recv_exact(s, struct.unpack("<I", _recv_exact(s, 4))[0]).decode("utf-8"))
+        assert info["games"] == [{"dir": "updates/917504", "build_id": "d00e4f399e411d06"},
+                                 {"dir": "", "build_id": "9e244438c3d8ef1c"}]
+    finally:
+        proc.kill()
+
+
 @pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
 def test_ps5_send_reports_phases(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """send_directory says what it is doing before the bytes flow (checksums, the PS5's answer), then the transfer,

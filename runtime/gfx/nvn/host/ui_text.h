@@ -333,6 +333,7 @@ typedef enum {
     // index has found ("%s files", the count with thousands separators) and the footer ("%d s": seconds since start)
     UI_BOOT_TITLE, UI_BOOT_CODE, UI_BOOT_SHADERS, UI_BOOT_FILES, UI_BOOT_GAME,
     UI_BOOT_WAITING, UI_BOOT_WORKING, UI_BOOT_READY, UI_BOOT_FILES_COUNT, UI_BOOT_FOOT,
+    UI_BOOT_MENU_HINT,   // PS5: how to open Pit Stop in game
     UI_SETUP_ERR_SPACE,   // "... %s ...": what the setup needs and what is free, where (tools/prepare/gamecopy.py)
     // General tab: the start screen at start (launcher.cpp console_start), its choices after Automatic
     UI_MENU_START_SCREEN, UI_MENU_START_SCREEN_DESC, UI_MENU_START_ALWAYS, UI_MENU_START_SKIP,

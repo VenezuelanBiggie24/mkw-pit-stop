@@ -517,7 +517,7 @@ PitResult pit_frame(float width, float height, const InputMenuPad &pad, int test
 // The boot screen's page: Pit Stop's backdrop and heading over an opaque base (no game image behind it yet), one row
 // per boot task styled as Pit Stop's option rows, the running one in the focus colour with its bar along the bottom.
 void pit_loading_frame(float width, float height, const char *title, const PitLoadingRow *rows, int n,
-                       const char *foot) {
+                       const char *foot, const char *hint) {
     Geometry g = geometry(width, height);
     const float s = g.scale;
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -573,7 +573,14 @@ void pit_loading_frame(float width, float height, const char *title, const PitLo
     }
 
     dl->AddLine(ImVec2(g.left, g.foot), ImVec2(g.right, g.foot), kPitLine, 2 * s);
-    if (foot && *foot) dl->AddText(font, 21 * s, ImVec2(g.left, g.foot + 25 * s), kPitIce, foot);
+    float foot_w = foot && *foot ? font->CalcTextSizeA(21 * s, FLT_MAX, 0, foot).x : 0;
+    if (foot_w) dl->AddText(font, 21 * s, ImVec2(g.left, g.foot + 25 * s), kPitIce, foot);
+    if (hint && *hint) {   // at the right of the footer line; under it when both do not fit side by side
+        float hint_w = font->CalcTextSizeA(21 * s, FLT_MAX, 0, hint).x;
+        bool beside = g.left + foot_w + 40 * s + hint_w <= g.right;
+        ImVec2 at = beside ? ImVec2(g.right - hint_w, g.foot + 25 * s) : ImVec2(g.left, g.foot + 52 * s);
+        dl->AddText(font, 21 * s, at, kPitFocus, hint);
+    }
     ImGui::End();
     ImGui::PopStyleVar();
 }

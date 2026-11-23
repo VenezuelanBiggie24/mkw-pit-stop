@@ -57,7 +57,14 @@ static void draw_boot(float width, float height, void *) {
     }
     char foot[160];
     snprintf(foot, sizeof foot, menu_text(UI_BOOT_FOOT), (int)((plat_now_ns() - g_t0) / 1000000000ull));
-    pit_loading_frame(width, height, menu_text(UI_BOOT_TITLE), rows, BOOT_TASK_COUNT, foot);
+    // players did not know the overlay was there: say how to open it while they wait (the PS5's chord, input.c
+    // input_menu_chord: Options with the touchpad click); the desktop's F1 is on the launcher already
+#ifdef MKW_PS5_NATIVE
+    const char *hint = menu_text(UI_BOOT_MENU_HINT);
+#else
+    const char *hint = nullptr;
+#endif
+    pit_loading_frame(width, height, menu_text(UI_BOOT_TITLE), rows, BOOT_TASK_COUNT, foot, hint);
 }
 
 static void boot_main(void *) {
