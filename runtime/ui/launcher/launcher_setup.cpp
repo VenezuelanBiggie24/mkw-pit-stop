@@ -108,6 +108,18 @@ static void on_line(FILE *logf, char *line) {
                 if (line[1] == 'k') g_state.done[i] = 2;
                 else g_state.step = i, g_state.progress = g_state.total = 0, g_state.note[0] = 0;
             }
+    } else if (!strcmp(line, "info") && arg) {
+        char *text = strchr(arg, ' ');
+        if (text) {
+            *text++ = 0;
+            int i = 0;
+            while (i < g_state.info_count && strcmp(g_state.info_key[i], arg)) i++;
+            if (i < SETUP_INFO_MAX) {
+                if (i == g_state.info_count) g_state.info_count++;
+                snprintf(g_state.info_key[i], sizeof g_state.info_key[i], "%s", arg);
+                snprintf(g_state.info[i], sizeof g_state.info[i], "%s", text);
+            }
+        }
     } else if (!strcmp(line, "note") && arg) {
         snprintf(g_state.note, sizeof g_state.note, "%s", arg);
     } else if (!strcmp(line, "progress") && arg) {

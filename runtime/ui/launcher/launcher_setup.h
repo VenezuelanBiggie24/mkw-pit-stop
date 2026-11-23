@@ -5,6 +5,8 @@
 enum { SETUP_MAX_STEPS = 12, SETUP_STEPS = 8, SETUP_PS5_STEPS = 9 };
 enum { SETUP_MODE_DESKTOP = 0, SETUP_MODE_PS5 = 1 };
 
+#define SETUP_INFO_MAX 6
+
 typedef struct {
     int running;
     int mode;                   // SETUP_MODE_DESKTOP or SETUP_MODE_PS5
@@ -18,6 +20,11 @@ typedef struct {
     char error[512];            // the detail: a folder, a build id, a tool's English message...
     char note[200];             // the running step's own line (prepare_ps5.py's 'note': which phase, speed, time left)
     unsigned generation;        // incremented at each start, including a setup completed between launcher frames
+    // prepare_ps5.py's 'info KEY TEXT' lines, kept after it ends: the dump it found, what the PS5 holds already and
+    // whether this is a first install or an upgrade (and how much is sent); a key seen again replaces its row
+    int info_count;
+    char info_key[SETUP_INFO_MAX][16];
+    char info[SETUP_INFO_MAX][512];   // the console line ran past 320 and lost its end ("each file's siz")
 } SetupState;
 
 int setup_available(const char *exe_dir);       // the Python and the script are there
