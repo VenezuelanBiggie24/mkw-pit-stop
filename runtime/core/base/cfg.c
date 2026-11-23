@@ -255,6 +255,7 @@ static const CfgRow rows[] = {
     K("BIND_STATS"),
     K("BIND_XF"),
     K("BLACK_CHECK"),
+    K("SNAP_SCOPED"),
     K("COMPUTE_WRITTEN"),
     K("CORE_DIAG"),
     K("CORE_HANDOFF"),

@@ -411,6 +411,8 @@ static int mem_state_unlocked(uint64_t addr, uint64_t limit, uint64_t *end) {
     return v == PS_FREE ? PLAT_MEM_FREE : v == PS_RESERVED ? PLAT_MEM_RESERVED : v - PS_NONE;
 }
 
+// MKW_SNAP_SCOPED (memory.c mem_written_any): no peek here, so always "may be written" (the caller queries).
+int plat_mem_written_any(uint64_t addr, uint64_t n) { (void)addr, (void)n; return 1; }
 uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t max, int reset) {
     if (!max || !n) return 0;
     if (linux_prot_watch_on()) return prot_watch_written(addr, n, pages, max, reset, NULL);

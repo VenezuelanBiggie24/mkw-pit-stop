@@ -265,6 +265,66 @@ int vk_mem_changed_snap(uint64_t addr, uint64_t size, uint32_t since, uint32_t e
     return untracked ? -1 : changed;
 }
 
+int mem_written_any(uint64_t addr, uint64_t size);   // memory.c (MKW_SNAP_SCOPED)
+
+// MKW_SNAP_SCOPED (default 0; "ab"): a texture's check looks at its own span only. Its pages' generations newer than
+// since (a GPU write, a host write, an earlier query) say changed; then the write watch is peeked over the span
+// (mem_written_any, nothing protected): a page that may hold an unreported write sends the check to vk_mem_changed,
+// which queries and re-arms only the span before the texels are read; otherwise every page is armed and unwritten,
+// so a write from now on faults and is seen by the next check, as with the snapshot. Why: the snapshot queried and
+// re-armed whole 2 MiB regions, and of the written pages it re-armed 98 % (normal frames) and 65 % (the precheck's
+// spikes) lay in no texture the precheck looked up: 0.7 ms of sceKernelMprotect a frame, 2-9 ms in spikes, on the
+// replay thread under tex_lock (MKW_BURST_PROBE runs, PS5, 24/11/2026). Pages no texture covers stay written and
+// writable: nothing re-arms them, and the game's writes to them stop faulting. The peek and the generations are read
+// under gen_lock shared, so no query (exclusive) can report and re-arm a page between them. In-race A/B, two races
+// (MKW_AB=6, plain and inverted): sceKernelMprotect arms 0.77 -> 0.24-0.28 ms a frame, the game's write faults
+// 13-14 -> 2.7-4.2, uploads unchanged, precheck spikes (> 4 ms) 11.0 -> 4.8 % and 6.9 -> 2.9 % of frames, the frame
+// -0.28 / -0.14 ms and busy -0.55 / -0.84 ms (scoped-1p, 24/11/2026). Off by default until checked on screen: a
+// missed write would only show as a stale texture.
+int vk_mem_changed_scoped(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
+    if (!size) { *now = since; return 0; }
+    uint64_t lo = addr & ~0xfffull, hi = (addr + size + 0xfff) & ~0xfffull;
+    uint64_t r0 = lo >> REG_SHIFT, r1 = (hi - 1) >> REG_SHIFT;
+    if (r1 >= SNAP_REGIONS) return vk_mem_changed(addr, size, since, now);
+    gen_lock_s();
+    uint32_t g = gen_now;
+    int changed = 0;
+    for (uint64_t r = r0; r <= r1 && !changed; r++) {
+        if (reg_max[r] <= since) continue;
+        uint64_t a = r << REG_SHIFT > lo ? r << REG_SHIFT : lo, b = (r + 1) << REG_SHIFT < hi ? (r + 1) << REG_SHIFT : hi;
+        for (; a < b && !changed; a += 1ull << GEN_PAGE_SHIFT) {
+            uint32_t *s = gen_slot(a, 0);
+            if (s && *s > since) changed = 1;
+        }
+    }
+    int w = mem_written_any(lo, hi - lo);
+    plat_mutex_unlock_shared(&gen_lock);
+    if (w < 0) return vk_mem_changed(addr, size, since, now);   // not watched: it answers -1, the hash decides
+    if (!w) {
+        *now = g;
+        return changed;
+    }
+    // May hold an unreported write: query and re-arm the span rounded out to whole native pages (a query leaves a
+    // page it covers only in part written and unarmed, prot_watch_written's sub_partial, so a span that began or ended
+    // inside a 16 KiB page found it written at every check and uploaded again each time: 13 uploads a frame instead of
+    // 1.2 in the first A/B, 24/11/2026), then judge only the span's own pages.
+    uint64_t wp = plat_mem_watch_page();
+    uint64_t nlo = lo & ~(wp - 1), nhi = (hi + wp - 1) & ~(wp - 1);
+    gen_lock_x();
+    uint32_t g2 = ++gen_now;
+    int tracked = 1, frozen = 1;
+    for (uint64_t a = nlo & ~((1ull << REG_SHIFT) - 1); a < nhi && frozen; a += 1ull << REG_SHIFT) frozen = mem_frozen(a);
+    if (!frozen) tracked = query_stamp(nlo, nhi, g2);
+    changed = 0;
+    for (uint64_t a = lo; tracked && a < hi && !changed; a += 1ull << GEN_PAGE_SHIFT) {
+        uint32_t *s = gen_slot(a, 0);
+        if (s && *s > since) changed = 1;
+    }
+    plat_mutex_unlock(&gen_lock);
+    *now = g2;
+    return tracked ? changed : -1;
+}
+
 // Per-subresource dirty check against the page generation table already populated by vk_mem_changed / vk_mem_changed_snap:
 // takes gen_lock_s() once for all subresources of a re-uploaded texture so unchanged mip levels / array layers are skipped.
 void vk_mem_ranges_written_since(uint64_t base, const uint64_t *offs, const uint64_t *sizes, uint8_t *dirty, uint32_t n,

@@ -607,6 +607,16 @@ uint64_t mem_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, uint64
     return written_pages(addr, size, pages, max, 1);
 }
 
+// MKW_SNAP_SCOPED (vk_mem_gen.c): whether a page of the range may hold an unreported write (plat_mem_written_any:
+// 1 may, 0 none, -1 not watched). Declared where it is used, as plat_mem_written_any is here, to keep host.h and
+// platform.h (which the generated code includes) as they are.
+int plat_mem_written_any(uint64_t addr, uint64_t n);
+int mem_written_any(uint64_t addr, uint64_t size) {
+    if (!size) return 0;
+    if (!watched(addr, size)) return -1;
+    return plat_mem_written_any(addr, size);
+}
+
 uint64_t mem_written_peek(uint64_t addr, uint64_t size, uint64_t *pages, uint64_t max) {
     return written_pages(addr, size, pages, max, 0);
 }

@@ -552,6 +552,43 @@ uint64_t prot_watch_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t
     return got;
 }
 
+// Whether any page of [addr, addr + n) may hold a write the watch has not reported: written, held, being protected or
+// faulted, early-read watched, or writable and not armed (never armed, so a write would not fault). 1 such a page, 0
+// none (every page armed and unwritten: a write from now on faults), -1 not watched. A peek: nothing changes, nothing
+// is protected. A chunk whose hint says nothing was written or unarmed since its last clean query is skipped, as the
+// query skips it. MKW_SNAP_SCOPED (vk_mem_gen.c vk_mem_changed_scoped) checks a texture's own span with it instead of
+// querying and re-arming its whole 2 MiB region.
+int prot_watch_dirty(uint64_t addr, uint64_t n) {
+    if (!n) return 0;
+    if (!pw_page_size || n > UINT64_MAX - addr) return -1;
+    uint64_t lo = addr & ~(uint64_t)(PW_GUEST_PAGE - 1);
+    uint64_t hi = (addr + n + PW_GUEST_PAGE - 1) & ~(uint64_t)(PW_GUEST_PAGE - 1);
+    if (!pw_range_covered(lo, hi)) return -1;
+    uint64_t p = lo & ~(uint64_t)(pw_page_size - 1);
+    while (p < hi) {
+        size_t cidx = (size_t)(p >> PW_CHUNK_SHIFT);
+        uint32_t *c = __atomic_load_n(&pw_chunks[cidx], __ATOMIC_ACQUIRE);
+        uint64_t chunk_end = (p & ~(uint64_t)(PW_CHUNK_SIZE - 1)) + PW_CHUNK_SIZE;
+        uint64_t scan_end = chunk_end < hi ? chunk_end : hi;
+        if (!c) {   // no page of the chunk was ever tracked: a writable one is unseen
+            for (; p < scan_end; p += pw_page_size)
+                if (pw_state_fn(p) == PLAT_PROT_RW) return 1;
+            continue;
+        }
+        uint32_t ch0 = __atomic_load_n(&pw_chunk_hint[cidx], __ATOMIC_ACQUIRE);
+        if (!(ch0 & (PW_CH_WRITTEN | PW_CH_UNARMED))) {
+            p = scan_end;
+            continue;
+        }
+        for (; p < scan_end; p += pw_page_size) {
+            uint32_t v = __atomic_load_n(&c[pw_slot_idx(p)], __ATOMIC_ACQUIRE);
+            if (v & (PW_WRITTEN | PW_HOLD_MASK | PW_PROTECTING | PW_FAULT_MASK | PW_EARLY)) return 1;
+            if (!(v & PW_ARMED) && pw_state_fn(p) == PLAT_PROT_RW) return 1;
+        }
+    }
+    return 0;
+}
+
 void prot_watch_gpu_import(uint64_t addr, uint64_t n, int on) {
     if (!pw_page_size || !n || addr > UINT64_MAX - n) return;
     uint64_t lo = addr & ~(uint64_t)(pw_page_size - 1);

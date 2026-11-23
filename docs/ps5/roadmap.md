@@ -152,6 +152,15 @@ the race at full speed on a busier course. The items below are what 60, heavier 
   a race) and makes the probe only when out of memory. In-race A/B (two races): making textures 9.5-10.3 -> 6.1-6.9 ms
   per 60 frames, the frame -0.21 / +0.21 ms (medians -0.01 / -0.02). Letting waiters into the precheck's hold
   (tried, not kept) did not move the frame either: the texture lock's waiters are not on the critical path.
+- **Done, off until checked on screen: texture checks without the 2 MiB snapshot** (24/11/2026, PS5 1.0.0). The
+  precheck's spikes (8-14 ms, ~1 % of race frames) were its write-watch snapshot re-arming whole 2 MiB regions with
+  `sceKernelMprotect` (~2 us per written page found), and 98 % of those pages (65 % in spikes) lay in no texture it
+  looked up. `MKW_SNAP_SCOPED` (default 0) checks each texture's own pages: their generations, then a peek of the
+  write watch (`prot_watch_dirty`, nothing protected); only a span that may hold an unreported write is queried and
+  re-armed, rounded out to whole native pages. In-race A/B, two races: arms 0.77 -> 0.24-0.28 ms a frame, the game's
+  write faults 13-14 -> 2.7-4.2, uploads unchanged, precheck spikes 11.0 -> 4.8 % and 6.9 -> 2.9 % of frames, the
+  frame -0.28 / -0.14 ms, busy -0.55 / -0.84. Next: a race watched on screen with it on (a missed write shows only as a
+  stale texture), then default 1.
 - **Done, no frame gain: the zero scan skips what it already read.** Each hard pass read every frozen unit for zero
   pages (~1.5 GB, 9.3 ms a pass on the governor's thread, freeing almost nothing). `MKW_ZERO_SCAN_CACHE` (default 1)
   skips a unit found not all zero earlier in the same freeze (`mem_frozen` now returns the freeze's number). A/B on

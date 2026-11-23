@@ -1206,6 +1206,8 @@ uint64_t plat_mem_written(uint64_t address, uint64_t bytes, uint64_t *pages, uin
     return got;
 }
 
+// MKW_SNAP_SCOPED (memory.c mem_written_any): a peek of the write watch, nothing protected (prot_watch_dirty).
+int plat_mem_written_any(uint64_t address, uint64_t bytes) { return prot_watch_dirty(address, bytes); }
 uint64_t plat_mem_write_watch_faults(int reset) { return prot_watch_faults(reset); }
 uint64_t plat_mem_write_watch_repeats(int reset) { return prot_watch_repeat_faults(reset); }
 uint64_t plat_mem_write_watch_hot_skips(int reset) { return prot_watch_hot_skips(reset); }

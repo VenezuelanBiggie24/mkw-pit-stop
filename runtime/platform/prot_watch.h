@@ -20,6 +20,7 @@ int prot_watch_is_armed(uint64_t addr);
 void prot_watch_set_early(uint64_t addr, int on);
 int prot_watch_is_early(uint64_t addr);
 int prot_watch_fault(uint64_t addr);
+int prot_watch_dirty(uint64_t addr, uint64_t n);   // 1 a page may hold an unreported write, 0 none, -1 not watched
 uint64_t prot_watch_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t max, int reset, int *did_protect);
 void prot_watch_gpu_import(uint64_t addr, uint64_t n, int on);
 int prot_watch_has_gpu(uint64_t addr, uint64_t n);
