@@ -49,6 +49,14 @@ int ps5_mem_commit(Ps5MemBlock *backing, Ps5MemCommitReport *report) {
     return 0;
 }
 
+// The real one (ps5_memory.c) writes the unit's first contents through a private mapping before the unit is mapped at
+// its address; here the unit is committed as above and fill writes it in place. A fill's nonzero result is returned.
+int ps5_mem_commit_fill(Ps5MemBlock *backing, Ps5MemCommitReport *report, int (*fill)(void *ctx, void *unit), void *ctx) {
+    int result = ps5_mem_commit(backing, report);
+    if (!result && fill) result = fill(ctx, (void *)backing->address);
+    return result;
+}
+
 int ps5_mem_protect_native(Ps5MemBlock *backing, size_t offset, size_t bytes, Ps5MemProt protection) {
     assert(backing->committed && bytes && !(offset % PS5_MEM_PAGE) && !(bytes % PS5_MEM_PAGE));
     assert(offset < PS5_MEM_UNIT && bytes <= PS5_MEM_UNIT - offset);

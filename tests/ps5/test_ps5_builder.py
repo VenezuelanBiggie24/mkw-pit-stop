@@ -98,9 +98,12 @@ def test_elf64_symbol_and_ar_readers(tmp_path: Path) -> None:
     assert "ps5_localeconv" in syms
 
 
-def test_copy_to_usb_updates_in_place(tmp_path: Path, capsys) -> None:
+def test_copy_to_usb_updates_in_place(tmp_path: Path, capsys, monkeypatch) -> None:
     """--usb writes DRIVE/homebrew/PPSA99193 (where ShadowMountPlus looks), copies only what changed, removes another
     build's leftovers in exefs/ and spirv/, and keeps the player's mkw.ini and saves on the drive."""
+    # The drive is a temporary folder: on Windows that is NTFS, which copy_to_usb rightly refuses (the PS5 reads exFAT
+    # and FAT32); its filesystem check is not what this tests.
+    monkeypatch.setattr(prepare_ps5, "drive_filesystem", lambda drive: "exFAT")
     stage, drive = tmp_path / "stage", tmp_path / "drive"
     for rel, data in {"eboot.bin": "e1", "exefs/main": "m", "spirv/a.spv": "s"}.items():
         (stage / rel).parent.mkdir(parents=True, exist_ok=True)
