@@ -136,7 +136,7 @@ SOURCES = ["recomp", "sm86", "tools/build/build.py", "tools/build/icon.py", "too
            "tools/shaders/extract.py", "tools/shaders/translate.py", "tools/shaders/shaderc_lib.py",
            "tools/ps5/prepare_ps5.py", "tools/ps5/ps5_prepare_common.py", "tools/ps5/nup_reader.py",
            "tools/ps5/nup_writer.py",
-           "tools/ps5/send_ps5.py", "tools/ps5/deploy.py",
+           "tools/ps5/send_ps5.py", "tools/ps5/deploy.py", "tools/ps5/console_probe.py",
            "tools/shaders/pipeline_pairs.py", "tools/shaders/pack.py", "tools/shaders/renodx.py",
            "runtime/cpu",
            "runtime/core/boot/gamelib.h",

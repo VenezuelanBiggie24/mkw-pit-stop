@@ -26,6 +26,7 @@ Usage: python3 tools/ps5/prepare_ps5.py --source DUMP_OR_NUP [--out DIR] [--work
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -49,8 +50,14 @@ from layout import output_lock, read_checked  # noqa: E402
 from machine import Failed, default_cc, default_glslc, mem_gb, own_children, shader_jobs, tool_env  # noqa: E402
 from nup_reader import NupError, NupReader, is_nup  # noqa: E402
 from nup_writer import write_nup  # noqa: E402
-from ps5_prepare_common import EMIT_HOOKS, check, copy_tree, emit, remove_stale, run, sm86_spec  # noqa: E402
-from send_ps5 import StatusNotifier, TransferError, default_ftp_ports, send_directory  # noqa: E402
+from ps5_prepare_common import (  # noqa: E402
+    EMIT_HOOKS, check, copy_tree, emit, find_games, remove_stale, run, sm86_spec, version_of,
+)
+from send_ps5 import (  # noqa: E402
+    FTP_RECORD_NAME, StatusNotifier, TransferError, _ftp_listing, default_ftp_ports, ftp_server, ftp_title_folder,
+    parse_host_port, query_info, receiver_up, send_directory, send_directory_ftp,
+)
+from versions import VERSIONS  # noqa: E402
 
 TITLE_ID = "PPSA99193"
 PROFILE = "ps5-high144"
@@ -695,6 +702,104 @@ def drive_filesystem(path: Path) -> str:
     return name.value if ok else ""
 
 
+# ---- what the player sees before the build: the dump, what the PS5 holds, a first install or an upgrade
+# Each is an 'info KEY TEXT' line the launcher keeps on the build page (launcher_setup.cpp), and the log's too. A
+# player who built 1.8.0 from a renamed updates.old/ (23/11/2026) could not tell which version was built, nor whether
+# their 23 GB on the console would be sent again.
+
+
+def info(key: str, text: str) -> None:
+    emit("info", key, text)
+
+
+def gib(n: int) -> str:
+    return f"{n / 2**30:.1f} GB" if n >= 2**30 else f"{n / 2**20:.0f} MB"
+
+
+def version_name(build_id: str) -> str:
+    v = next((v for v in VERSIONS if v.main_build_id == build_id), None)
+    return v.name if v else f"an unknown version (build id {build_id or '?'})"
+
+
+def dump_line(src: Path, exefs: Path, version, from_nup: bool) -> str:
+    """The version found, from where, and the other versions the dump holds that are not built."""
+    where = f".nup file {src}" if from_nup else f"folder {src}"
+    line = f"Your dump: Mario Kart World {version.name} (build id {version.main_build_id}) from the {where}"
+    if not from_nup and exefs.parent != src:
+        line += f", in {exefs.parent.relative_to(src).as_posix()}"
+    if not from_nup:
+        others = []
+        for ex, _ in find_games(src):
+            try:
+                v = version_of((ex / "main").read_bytes()[:0x48], str(ex / "main"))
+            except Exception:   # noqa: BLE001 - a copy check() skipped: not worth naming
+                continue
+            if v.name != version.name and v.name not in others:
+                others.append(v.name)
+        if others:
+            line += (f". It also holds {', '.join(others)}, not built: {version.name} is preferred (to build "
+                     f"{others[0]}, choose a folder without updates/)")
+    return line
+
+
+def ftp_console_line(host: str) -> str | None:
+    """When the receiver does not answer: what the console's FTP server shows (the title folder, an install there or
+    not), for an install by FTP (send_ps5.send_directory_ftp); None when no FTP server answers either."""
+    found = ftp_server(host, default_ftp_ports())
+    if not found:
+        return None
+    ftp, port = found
+    try:
+        folder, exists = ftp_title_folder(ftp)
+        listing = _ftp_listing(ftp, folder) if exists else {}
+    finally:
+        with contextlib.suppress(Exception):
+            ftp.quit()
+    # the game copies where the title looks: the folder itself ("exefs/main") or updates/<version>/exefs/main
+    games = sorted({r[: -len("exefs/main")].rstrip("/") or "the title folder" for r in listing
+                    if r == "exefs/main" or r.endswith("/exefs/main")})
+    if "eboot.bin" in listing and games:
+        what = f"Pit Stop is installed with game files ({', '.join(games)}): an upgrade, unchanged files stay"
+    elif "eboot.bin" in listing:
+        what = "Pit Stop's placeholder is there without game files: they all go"
+    else:
+        what = f"Pit Stop is not installed yet: a first install into {folder}"
+    return (f"No Pit Stop receiver at {host}; installing over its FTP server (port {port}). {what}. Close Pit Stop on "
+            "the PS5 first. Nothing shows on the TV, and the PS5 checks only each file's size")
+
+
+def console_line(info_json: dict | None, version, host: str, ftp_line: str | None = None) -> str:
+    """What the PS5 holds already (PIT1I) and what this build does with it."""
+    if info_json is None:
+        return ftp_line or (f"PS5 {host}: no answer yet. Open Mario Kart World: Pit Stop there and leave its screen "
+                            "open (on a working install, hold L1 + R1 while it starts), or start an FTP server on it")
+    title = (f"Pit Stop {info_json.get('port_version') or '?'}" if info_json.get("has_game_code")
+             else "the Pit Stop placeholder")
+    games = info_json.get("games")
+    if games is None:   # a receiver older than this list: only whether the files are complete
+        if info_json.get("game_files_ready"):
+            return (f"Upgrade: the PS5 runs {title} with its game files in place. They stay, with your saves and "
+                    "settings; only what changed is sent")
+        return f"The PS5 runs {title}. Files it does not hold yet are sent"
+    if not games:
+        return f"First install: the PS5 runs {title} and holds no game files yet, so all of them are sent"
+    held = ", ".join(f"{version_name(g.get('build_id', ''))} in {g.get('dir') or 'the title folder'}" for g in games)
+    if any(g.get("build_id") == version.main_build_id for g in games):
+        return (f"Upgrade: the PS5 runs {title} and holds Mario Kart World {held}. Your game files, saves and "
+                "settings stay; only what changed is sent")
+    return (f"The PS5 runs {title} and holds Mario Kart World {held}. This build is {version.name}, so its game "
+            "files are sent too; your saves and settings stay")
+
+
+def plan_line(files: int, size: int, kept_files: int, kept: int, where: str) -> str:
+    """The send's plan once the files are compared: what goes and what is there already."""
+    if not kept_files:
+        return f"First install: {files} files, {gib(size)}, go to {where}"
+    if not files:
+        return f"Nothing changed: all {kept_files} files on {where} are up to date"
+    return f"Upgrade: {files} of {files + kept_files} files changed, {gib(size)} to send; {gib(kept)} on {where} stay"
+
+
 def title_game_rel(exefs: Path) -> Path:
     """Where the game of a dump's exefs/ goes under the title folder: updates/<version>/ when the dump keeps it in one
     (find_games), else the title folder itself."""
@@ -751,6 +856,8 @@ def copy_to_usb(stage: Path, drive: Path) -> Path:
             todo.append((src, dst, st.st_size))
         report.phase("hash", i, len(files))   # (shown as checking the files)
     need = sum(n for _, _, n in todo)
+    sizes = sum(p.stat().st_size for p in files)
+    info("plan", plan_line(len(todo), need, len(files) - len(todo), sizes - need, str(drive)))
     fs = drive_filesystem(drive)
     if fs and fs.upper() not in ("EXFAT", "FAT32", "FAT"):
         raise Failed(f"{drive} is {fs}: the PS5 reads exFAT and FAT32 drives only (format it as exFAT)")
@@ -850,6 +957,15 @@ def main() -> int:
         emit("version", version.name)
         print(f"prepare_ps5: Mario Kart World {version.name} from {exefs_checked}", file=sys.stderr)
         from_nup = is_nup(src)
+        info("dump", dump_line(src, exefs_checked, version, from_nup))
+        if args.send:
+            host = parse_host_port(args.send)[0]
+            try:
+                console = query_info(*parse_host_port(args.send), timeout=3.0)
+            except (OSError, TransferError, ValueError):
+                console = None
+            ftp_line = ftp_console_line(host) if console is None and default_ftp_ports() else None
+            info("console", console_line(console, version, host, ftp_line))
 
         bundle = find_bundle(args.bundle)
         layout = resolve_bundle_layout(bundle)
@@ -898,6 +1014,10 @@ def main() -> int:
         drop_other_games(out_dir, game_out)
 
         dirs_txt = out_dir / "pitstop-game-dirs.txt"
+        if args.console_game:
+            info("game", f"Game files: already on the PS5 in {args.console_game}; only the game code and shaders go")
+        else:
+            info("game", f"Game files go to PPSA99193/{game_rel.as_posix() + '/' if game_rel.parts else ''} on the PS5")
         if args.console_game:
             # the copy is on the console already: the title looks there (ps5_recv.c ps5_game_dir); none is staged here,
             # and an earlier build's copy goes, or it would be sent
@@ -1025,17 +1145,28 @@ def main() -> int:
             emit("step", "deploy")
             cache_tsv = work / "send-sha256.tsv"
             transfer = TransferReport()
+            plan = lambda f, b, kf, kb: info("plan", plan_line(f, b, kf, kb, "the PS5"))  # noqa: E731
+            # the receiver first (it checks every file's SHA-256 and shows the send on the TV); without it, as on a
+            # working install that started the game or a console with no placeholder yet, the FTP server
+            by_ftp = not receiver_up(args.send) and bool(default_ftp_ports())
             try:
-                sent, skipped, total_bytes = send_directory(
-                    args.send,
-                    out_dir,
-                    cache_path=cache_tsv,
-                    on_progress=transfer.progress,
-                    on_phase=transfer.phase,
-                    ftp_ports=default_ftp_ports(),   # romfs.nup by the console's FTP server when it runs one
-                )
+                if by_ftp:
+                    sent, skipped, total_bytes = send_directory_ftp(
+                        args.send, out_dir, cache_path=cache_tsv, on_progress=transfer.progress,
+                        on_phase=transfer.phase, on_plan=plan, ftp_ports=default_ftp_ports(),
+                        record_path=work / FTP_RECORD_NAME)  # fmt: skip
+                else:
+                    sent, skipped, total_bytes = send_directory(
+                        args.send,
+                        out_dir,
+                        cache_path=cache_tsv,
+                        on_progress=transfer.progress,
+                        on_phase=transfer.phase,
+                        on_plan=plan,
+                        ftp_ports=default_ftp_ports(),   # romfs.nup by the console's FTP server when it runs one
+                    )
             except (TransferError, OSError) as e:
-                raise Failed(f"sending to PS5 {args.send} failed: {e}") from None
+                raise Failed(f"sending to PS5 {args.send}{' by FTP' if by_ftp else ''} failed: {e}") from None
             print(f"deploy: sent {sent} files ({total_bytes / (1024**2):.1f} MiB), skipped {skipped} unchanged",
                   file=sys.stderr)
         elif args.usb:
