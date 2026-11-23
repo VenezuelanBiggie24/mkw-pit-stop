@@ -241,6 +241,81 @@ void vk_texture_census(VkTexCensus *s) {
     unlock();
 }
 
+// Issue 11 (diagnosis): GPU-owned images by shape. 1.0.0's third race (Race_Coaster_A_00) died with GPU-owned textures
+// at 1569 MiB against 870-905 MiB the rest of the Grand Prix, while 34 GiB of released images were written over in
+// 1500 frames (4 GiB per 3000 frames on 1.8.0, same course). Which shapes those are and how fast they are made: own
+// images made by shape since the last line (tex_shape_made, at creation) beside the live GPU-owned ones, logged when
+// the live GPU-owned bytes pass their high mark by 128 MiB (MKW_TRACE=perf) and at the OOM census.
+#define SHAPES 64
+typedef struct { int32_t fmt; uint32_t w, h, layers, levels; uint64_t made_n, made_b, n, b, shared; } Shape;
+static Shape shapes[SHAPES];
+static int nshapes;
+static PlatMutex shape_lock = PLAT_MUTEX_INIT;
+static uint64_t shape_high;
+
+static Shape *shape_of(int32_t fmt, uint32_t w, uint32_t h, uint32_t layers, uint32_t levels) {
+    for (int i = 0; i < nshapes; i++)
+        if (shapes[i].fmt == fmt && shapes[i].w == w && shapes[i].h == h && shapes[i].layers == layers &&
+            shapes[i].levels == levels)
+            return &shapes[i];
+    if (nshapes == SHAPES) {   // the smallest made-since one goes
+        int k = 0;
+        for (int i = 1; i < SHAPES; i++) if (shapes[i].made_b < shapes[k].made_b) k = i;
+        shapes[k] = shapes[--nshapes];
+    }
+    Shape *s = &shapes[nshapes++];
+    memset(s, 0, sizeof *s);
+    s->fmt = fmt, s->w = w, s->h = h, s->layers = layers, s->levels = levels;
+    return s;
+}
+
+void tex_shape_made(int32_t fmt, uint32_t w, uint32_t h, uint32_t layers, uint32_t levels, uint64_t bytes) {
+    plat_mutex_lock(&shape_lock);
+    Shape *s = shape_of(fmt, w, h, layers, levels);
+    s->made_n++, s->made_b += bytes;
+    plat_mutex_unlock(&shape_lock);
+}
+
+static int by_live(const void *a, const void *b) {
+    uint64_t x = ((const Shape *)a)->b + ((const Shape *)a)->made_b, y = ((const Shape *)b)->b + ((const Shape *)b)->made_b;
+    return (x < y) - (x > y);
+}
+
+void vk_texture_gpu_shapes(const char *why, uint64_t gpu_owned_bytes) {
+    if (gpu_owned_bytes && gpu_owned_bytes < shape_high + (128ull << 20)) return;
+    if (gpu_owned_bytes > shape_high) shape_high = gpu_owned_bytes;
+    VkCtx *c = vk_ctx();
+    lock();   // before shape_lock: image creation holds the texture lock when it calls tex_shape_made
+    plat_mutex_lock(&shape_lock);
+    for (int i = 0; i < nshapes; i++) shapes[i].n = shapes[i].b = shapes[i].shared = 0;
+    for (uint32_t i = 0; i < by_key.cap; i++) {
+        const Tex *e = by_key.vals[i];
+        if (!e || e->released || !e->alloc || !e->pub.gpu_owned || !c) continue;
+        VmaAllocationInfo ai;
+        vmaGetAllocationInfo(c->vma, e->alloc, &ai);
+        Shape *s = shape_of(e->t.d.format, e->pub.width, e->pub.height, e->pub.layers, e->pub.levels);
+        s->n++, s->b += ai.size;
+        int at = 0;
+        for (const Tex *p = nvn_hm_get(&by_addr, &e->key.addr); p && at < 2; p = p->next_at) at++;
+        s->shared += at > 1;
+    }
+    Shape top[SHAPES];
+    int n = nshapes;
+    memcpy(top, shapes, sizeof(Shape) * (size_t)n);
+    for (int i = 0; i < nshapes; i++) shapes[i].made_n = shapes[i].made_b = 0;
+    plat_mutex_unlock(&shape_lock);
+    unlock();
+    qsort(top, (size_t)n, sizeof *top, by_live);
+    rt_log("mem: gpu-owned by shape (%s, high %.0f MiB): live n/MiB (sharing an address), made since the last line n/MiB",
+           why, shape_high / 1048576.0);
+    for (int i = 0; i < n && i < 14; i++)
+        if (top[i].b || top[i].made_b)
+            rt_log("mem:   fmt %#x %ux%u layers %u levels %u: live %llu %.1f MiB (%llu shared), made %llu %.1f MiB",
+                   top[i].fmt, top[i].w, top[i].h, top[i].layers, top[i].levels, (unsigned long long)top[i].n,
+                   top[i].b / 1048576.0, (unsigned long long)top[i].shared, (unsigned long long)top[i].made_n,
+                   top[i].made_b / 1048576.0);
+}
+
 void vk_texture_range_census(uint64_t lo, uint64_t hi, VkTexRange *s) {
     VkCtx *c = vk_ctx();
     uint32_t idle = tex_evict_idle();

@@ -196,6 +196,8 @@ void rel_append(Tex *e);
 void rel_unlink(Tex *e);
 Tex *rel_oldest(void);   // the oldest released entry not pinned; NULL when none
 void sweep_released(void);
+int drop_overwritten_live(void);   // issue 11: live GPU-owned images written over and idle go; how many
+void tex_gpu_made(uint64_t bytes);   // a GPU-owned image of bytes made: drop_overwritten_live every 64 MiB
 
 // vk_tex_upload.c: uploads and the freshness checks
 void make_fresh(Tex *e);

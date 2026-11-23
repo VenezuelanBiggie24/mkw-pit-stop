@@ -771,6 +771,10 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
             vk_mem_collect();
             r = vma_image(c, &ci, &ai, &img, &e->alloc);
         }
+        if (can_fit && r == VK_ERROR_OUT_OF_DEVICE_MEMORY && drop_overwritten_live()) {   // issue 11
+            vk_mem_collect();
+            r = vma_image(c, &ci, &ai, &img, &e->alloc);
+        }
         if (can_fit && r == VK_ERROR_OUT_OF_DEVICE_MEMORY) r = evict_idle(c, &ci, &ai, &img, &e->alloc);
         // Last: what the releases and evictions above left waiting for the open upload batch or the GPU (tt6a,
         // 09/11/2026: 23 images not made at the time trial's load right after 256 evictions).
@@ -800,6 +804,8 @@ Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     if (e->alloc) {
         VmaAllocationInfo vi;
         vmaGetAllocationInfo(c->vma, e->alloc, &vi);
+        tex_shape_made(d->format, w, h, layers, levels, vi.size);   // issue 11 (vk_texture_gpu_shapes)
+        if (!tex_mirrored(t)) tex_gpu_made(vi.size);   // issue 11: old live copies a newer write covered go
         if (vi.size >= (64ull << 20))   // what fills the heap (run110: 1 571 MiB in images over 64 MiB)
             rt_log("vk: large image %.0f MiB: addr %#llx nvn fmt %#x %ux%ux%u target %d levels %u layers %u flags %#x%s",
                    vi.size / 1048576.0, (unsigned long long)k->addr, d->format, w, h, depth, d->target, levels, layers,

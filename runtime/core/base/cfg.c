@@ -438,6 +438,7 @@ static const CfgRow rows[] = {
     K("TEMPORAL_KART_DEPTH"),
     K("TEMPORAL_NGX"),
     K("TEX_EVICT_IDLE"),
+    K("TEX_LIVE_DROP_IDLE"),
     K("TEX_LOCK_SPIN"),
     K("TEX_GPU_DESW"),
     K("TEX_MAKE_FAST"),
