@@ -380,6 +380,14 @@ static uint64_t pack_step(uint64_t avail) {
 void vk_mem_governor(int force) {
     static uint32_t idle_logs;
     if (!force) plat_mem_pack_collect();   // the blobs of units unpacked since: freed here, not in the fault handler
+    // MKW_COLD_CENSUS=1 (count only, off by default): how much of the game's memory stays unwritten, per 64 KiB unit,
+    // and what packing it would give back (ps5_guest_memory.c plat_mem_cold_census_step); 20 ms of hashing a tick.
+    static int cold_census = -1;
+    if (cold_census < 0) cold_census = rt_knob("COLD_CENSUS", "0");
+    if (!force && cold_census > 0) {
+        char line[768];
+        if (plat_mem_cold_census_step(20000, line, sizeof line)) rt_log("mem: cold census: %s", line);
+    }
     // MKW_SHADOW_TRIM_TEST=1 (a test; with MKW_SHADOW_TRIM=1): every tick trims the cold shadows whatever the memory, so
     // Linux, whose dmem never runs low, drops and rebuilds them as the PS5's governor does (task 28's magenta check).
     static int trim_test = -1;

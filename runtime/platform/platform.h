@@ -353,6 +353,9 @@ void plat_mem_pack_collect(void);                  // frees the blobs of units u
 // One line for the census: what is packed now, and the packs, unpacks and skips since the last call (which resets
 // them); "" when nothing was ever packed.
 void plat_mem_pack_summary(char *out, size_t cap);
+// MKW_COLD_CENSUS (count only): hashes the game's committed 64 KiB units in turn for at most budget_us; 1 when a walk
+// over them all ends, with its line in out (time unchanged per unit, what packing the cold ones would give back).
+int plat_mem_cold_census_step(uint32_t budget_us, char *out, size_t cap);
 // When the region holding addr was frozen (memory.c mem_frozen_ms: plat_now_ms at the freeze, | 1), 0 not frozen.
 void plat_mem_frozen_ms_hook(uint32_t (*fn)(uint64_t addr));
 // Committed pages' contents dropped from RAM, their state and protection kept: they read zero when made accessible

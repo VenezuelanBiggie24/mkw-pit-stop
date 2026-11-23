@@ -443,6 +443,29 @@ static void test_pack(uint64_t addr) {
          "whole decommit honoured");
 }
 
+// MKW_COLD_CENSUS: counts only. 8 text units, 2 zero and 2 unreadable (PROT_NONE): the first walk sees the text
+// ones for the first time, the second finds them unchanged (<30 s), and after a write one of them changed again.
+static void test_cold_census(uint64_t addr) {
+    enum { TEXT = 8, ZERO = 2, NONE = 2, ALL = TEXT + ZERO + NONE };   // the model has 16 units
+    static uint8_t buf[UNIT];
+    assert(plat_mem_commit(addr, ALL * UNIT) && plat_mem_back(addr, ALL * UNIT));
+    for (int u = 0; u < TEXT; u++) fill_text(buf, u), memcpy((void *)(uintptr_t)(addr + u * UNIT), buf, UNIT);
+    memset((void *)(uintptr_t)(addr + TEXT * UNIT), 0, (ZERO + NONE) * UNIT);
+    unsigned before = allocations;
+    assert(plat_mem_protect(addr + (TEXT + ZERO) * UNIT, NONE * UNIT, PLAT_PROT_NONE));
+    char line[1024];
+    while (!plat_mem_cold_census_step(1000000, line, sizeof line)) {}
+    assert(strstr(line, "new 0.5, all zero 0.1, unreadable 0.1"));
+    while (!plat_mem_cold_census_step(1000000, line, sizeof line)) {}
+    assert(strstr(line, "<30 s 0.5 MiB") && strstr(line, "new 0.0,"));
+    ((volatile uint8_t *)(uintptr_t)addr)[17] ^= 0xff;   // one unit written
+    while (!plat_mem_cold_census_step(1000000, line, sizeof line)) {}
+    assert(strstr(line, "<30 s 0.5 MiB") && allocations == before);   // nothing backed, released or packed by it
+    assert(plat_mem_protect(addr + (TEXT + ZERO) * UNIT, NONE * UNIT, PLAT_PROT_RW));
+    assert(plat_mem_decommit(addr, ALL * UNIT));
+    puts("cold census: new, zero and unreadable units counted, unchanged ones aged, nothing backed or released");
+}
+
 static void test_memory(void) {
     uint64_t boundary = sample + UNIT, tail = boundary - PAGE;
     uint64_t alias_end = RT_ALIAS_BASE + RT_ALIAS_SIZE;
@@ -454,6 +477,7 @@ static void test_memory(void) {
     test_early_batch(RT_ALIAS_BASE);
     test_backing_release(RT_ALIAS_BASE + 4 * UNIT);
     test_pack(RT_ALIAS_BASE + 8 * UNIT);
+    test_cold_census(RT_ALIAS_BASE + 32 * UNIT);
     assert(!allocations && !plat_mem_reserve(sample, UNIT, 0));
     assert(!plat_mem_reserve(hint, UNIT, 0));
     assert(!plat_mem_reserve(unexpected, UNIT, 0) && !plat_mem_commit(unexpected, PAGE));

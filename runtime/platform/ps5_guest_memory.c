@@ -1549,6 +1549,136 @@ void plat_mem_pack_summary(char *out, size_t cap) {
 #undef L
 }
 
+// ---- MKW_COLD_CENSUS: how much of the game's memory sits unwritten, by 64 KiB unit (count only, nothing changes)
+// MKW_PACK packs only units of a frozen 2 MiB region (mem_frozen), and freeze candidates come only from the regions the
+// replay checks for live textures and buffers (vk_mem_gen.c snap_regions): in four 1.8.0 Grand Prix runs (24/11/2026)
+// it never found a frozen unit, while ~1.2 GiB of one pool is earlier courses' data (memgrow2, 16/11/2026). This
+// measures what a unit-level cold tracker could pack before one is written: each committed unit of the heap and alias
+// ranges is hashed in turn on the governor's thread (no page protection, so neither the game nor the write watch sees
+// it), and a unit whose hash did not change for N seconds counts as cold for N. A sample of the cold ones is compressed
+// as plat_mem_pack would (ZSTD level 1, PK_MAX_PCT) to estimate what packing them would give back. Reads are not seen:
+// a cold unit the game still reads would unpack on its first read.
+enum { CC_BUCKETS = 5, CC_SAMPLE_EVERY = 16 };
+static const uint32_t cc_bucket_s[CC_BUCKETS] = {0, 30, 60, 120, 300};   // age at least this many seconds
+static uint64_t cc_cursor;
+static uint64_t cc_cycle_t0;
+static uint64_t cc_units[3][CC_BUCKETS], cc_new[3], cc_zero[3], cc_skip[3], cc_packed[3];
+static uint64_t cc_s_units, cc_s_raw, cc_s_comp, cc_s_fit, cc_ns, cc_cycles;
+
+static uint64_t cc_hash(const uint64_t *q) {   // four independent lanes: ~1 byte a cycle less than a serial chain
+    uint64_t a = 0x9e3779b97f4a7c15ull, b = 0xc2b2ae3d27d4eb4full, c = 0x165667b19e3779f9ull, d = 0x27d4eb2f165667c5ull;
+    for (size_t k = 0; k < PS5_MEM_UNIT / sizeof *q; k += 4) {
+        a = (a ^ q[k]) * 0x100000001b3ull, b = (b ^ q[k + 1]) * 0x100000001b3ull;
+        c = (c ^ q[k + 2]) * 0x100000001b3ull, d = (d ^ q[k + 3]) * 0x100000001b3ull;
+    }
+    return a ^ (b >> 1) ^ (c << 3) ^ (d >> 5);
+}
+
+// One unit, its lock held: 1 when it was read (*h its hash, *zero), 0 when it cannot be read without a fault or a thaw.
+static int cc_read_locked(Ps5MixedBlock *u, uint64_t a, uint64_t *h, bool *zero, bool sample) {
+    if (!u->backing.committed || !u->live_pages || prot_watch_has_gpu(a, PS5_MEM_UNIT)) return 0;
+    for (size_t p = 0; p < PS5_MEM_UNIT / PAGE; ++p)
+        if (u->pages[p] < PS5_GUEST_READ || prot_watch_is_early(a + p * PAGE)) return 0;
+    const uint64_t *q = (const uint64_t *)(uintptr_t)u->backing.address;
+    *zero = true;
+    for (size_t k = 0; k < PS5_MEM_UNIT / sizeof *q && *zero; ++k) *zero = !q[k];
+    *h = *zero ? 0 : cc_hash(q);
+    if (sample && !*zero) memcpy(pk_copy, q, PS5_MEM_UNIT);
+    return 1;
+}
+
+static void cc_unit(Ps5MixedBlock *u, RangeKind kind, uint64_t a, uint32_t now_ms) {
+    if (__atomic_load_n(&u->pack, __ATOMIC_ACQUIRE)) { cc_packed[kind]++; return; }
+    if (!__atomic_load_n(&u->backing.committed, __ATOMIC_ACQUIRE)) return;
+    int32_t d = u->cc_changed_ms ? (int32_t)(now_ms - u->cc_changed_ms) : 0;   // signed: a stored | 1 can be 1 ms ahead
+    uint32_t age_s = d > 0 ? (uint32_t)d / 1000u : 0;
+    bool sample = u->cc_changed_ms && age_s >= cc_bucket_s[1] && !((a / PS5_MEM_UNIT) % CC_SAMPLE_EVERY);
+    uint64_t h = 0;
+    bool zero = false;
+    unit_lock(u);
+    int ok = cc_read_locked(u, a, &h, &zero, sample);
+    unit_unlock(u);
+    if (!ok) { cc_skip[kind]++; return; }
+    if (zero) { cc_zero[kind]++; return; }
+    uint32_t h32 = (uint32_t)(h ^ h >> 32) | 1;
+    if (!u->cc_changed_ms || u->cc_hash != h32) {   // first sight, or written since the last
+        if (!u->cc_changed_ms) cc_new[kind]++;
+        else cc_units[kind][0]++;
+        u->cc_hash = h32, u->cc_changed_ms = now_ms | 1;
+        return;
+    }
+    int b = CC_BUCKETS - 1;
+    while (b > 0 && age_s < cc_bucket_s[b]) b--;
+    cc_units[kind][b]++;
+    if (sample) {
+        size_t c = ZSTD_compressCCtx(pk_cctx, pk_cbuf, pk_cbound, pk_copy, PS5_MEM_UNIT, 1);
+        if (!ZSTD_isError(c)) {
+            cc_s_units++, cc_s_raw += PS5_MEM_UNIT, cc_s_comp += c;
+            if (c * 100 <= (size_t)PS5_MEM_UNIT * PK_MAX_PCT) cc_s_fit++;
+        }
+    }
+}
+
+static void cc_summary(char *out, size_t cap, uint64_t cycle_ns) {
+    const double M = (double)PS5_MEM_UNIT / 1048576.0;
+    uint64_t cold[CC_BUCKETS] = {0}, all = 0;
+    for (int k = 1; k < 3; k++)
+        for (int b = 0; b < CC_BUCKETS; b++) cold[b] += cc_units[k][b], all += cc_units[k][b];
+    // MiB unchanged for at least 30 s; what packing those would free at the sample's ratio, units that fit counted only
+    double c30 = 0;
+    for (int b = 1; b < CC_BUCKETS; b++) c30 += (double)cold[b] * M;
+    double fit = cc_s_units ? (double)cc_s_fit / (double)cc_s_units : 0.0;
+    double ratio = cc_s_raw ? (double)cc_s_comp / (double)cc_s_raw : 0.0;
+    uint64_t heap30 = 0, alias30 = 0;
+    for (int b = 1; b < CC_BUCKETS; b++) heap30 += cc_units[RANGE_HEAP][b], alias30 += cc_units[RANGE_ALIAS][b];
+    snprintf(out, cap,
+             "cycle %llu in %.1f s (%.1f ms of hashing); heap+alias units by time unchanged: <30 s %.1f MiB, "
+             "30-60 s %.1f, 60-120 s %.1f, 120-300 s %.1f, >=300 s %.1f MiB (heap %.1f / alias %.1f MiB >=30 s); "
+             "new %.1f, all zero %.1f, unreadable %.1f, packed %.1f MiB; cold sample %llu units: %.0f%% compress to "
+             "<=%d%%, ratio %.2f -> packing the >=30 s ones would free ~%.1f MiB",
+             (unsigned long long)cc_cycles, cycle_ns / 1e9, cc_ns / 1e6, cold[0] * M, cold[1] * M, cold[2] * M,
+             cold[3] * M, cold[4] * M, heap30 * M, alias30 * M, (cc_new[1] + cc_new[2]) * M,
+             (cc_zero[1] + cc_zero[2]) * M, (cc_skip[1] + cc_skip[2]) * M, (cc_packed[1] + cc_packed[2]) * M,
+             (unsigned long long)cc_s_units, fit * 100.0, PK_MAX_PCT, ratio, c30 * fit * (1.0 - ratio));
+    (void)all;
+    memset(cc_units, 0, sizeof cc_units), memset(cc_new, 0, sizeof cc_new), memset(cc_zero, 0, sizeof cc_zero);
+    memset(cc_skip, 0, sizeof cc_skip), memset(cc_packed, 0, sizeof cc_packed);
+    cc_s_units = cc_s_raw = cc_s_comp = cc_s_fit = cc_ns = 0;
+}
+
+int plat_mem_cold_census_step(uint32_t budget_us, char *out, size_t cap) {
+    if (!pk_init()) return 0;
+    uint64_t t0 = plat_now_ns(), deadline = t0 + (uint64_t)budget_us * 1000ull;
+    if (!cc_cycle_t0) cc_cycle_t0 = t0;
+    uint32_t now_ms = (uint32_t)plat_now_ms();
+    unsigned n = 0;
+    int done = 1;   // the walk reached the end: a cycle is complete
+    for (VmRange *r = __atomic_load_n(&ranges, __ATOMIC_ACQUIRE); r && done;
+         r = __atomic_load_n(&r->next, __ATOMIC_ACQUIRE)) {
+        if (r->end <= cc_cursor || r->host || !r->chunks || (r->kind != RANGE_HEAP && r->kind != RANGE_ALIAS)) continue;
+        for (size_t c = 0; c < r->chunk_count && done; ++c) {
+            uint64_t cbase = r->base + ((uint64_t)c << CHUNK_SHIFT);
+            if (cbase + CHUNK_SIZE <= cc_cursor) continue;
+            Ps5MixedBlock *chunk = __atomic_load_n(&r->chunks[c], __ATOMIC_ACQUIRE);
+            if (!chunk) continue;
+            for (size_t i = 0; i < CHUNK_UNITS; ++i) {
+                uint64_t a = cbase + (uint64_t)i * PS5_MEM_UNIT;
+                if (a < cc_cursor) continue;
+                if (a >= r->end) break;
+                if (!(++n & 15) && plat_now_ns() > deadline) { cc_cursor = a, done = 0; break; }
+                cc_unit(&chunk[i], r->kind, a, now_ms);
+            }
+        }
+    }
+    cc_ns += plat_now_ns() - t0;
+    if (!done) return 0;
+    uint64_t now = plat_now_ns();
+    cc_cycles++;
+    cc_summary(out, cap, now - cc_cycle_t0);
+    cc_cursor = 0, cc_cycle_t0 = now;
+    return 1;
+}
+
 uint64_t plat_mem_backed_bytes(uint64_t addr, uint64_t size) {
     if (!size || size > UINT64_MAX - addr) return 0;
     uint64_t end = addr + size;
