@@ -4,6 +4,7 @@
 #include "prot_watch.h"
 
 #include <ps5platform/kernel.h>
+#include <stdlib.h>
 #include <string.h>
 
 _Static_assert(PS5_MEM_PAGE == PS5_KERNEL_PAGE_SIZE, "unexpected PS5 protection page");
@@ -230,4 +231,36 @@ int ps5_mem_release(Ps5MemBlock *block) {
     int result = release_physical(block);
     if (!result) *block = (Ps5MemBlock){0};
     return result;
+}
+
+void *ps5_mem_map_host(size_t bytes, size_t align, int64_t *physical) {
+    if (!bytes || bytes % PS5_MEM_UNIT || !align || align % PS5_MEM_UNIT) return NULL;
+#ifdef __PROSPERO__
+    int64_t phys = 0;
+    if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), bytes, PS5_MEM_UNIT,
+                                      PS5_KERNEL_DIRECT_TYPE_CPU, &phys))
+        return NULL;
+    void *at = NULL;
+    if (sceKernelMapDirectMemory(&at, bytes, cpu_rw, 0, phys, align) || !at) {
+        sceKernelReleaseDirectMemory(phys, bytes);
+        return NULL;
+    }
+    *physical = phys;
+    return at;
+#else
+    *physical = -1;
+    return aligned_alloc(align, bytes);
+#endif
+}
+
+int ps5_mem_unmap_host(void *at, size_t bytes, int64_t physical) {
+#ifdef __PROSPERO__
+    int result = sceKernelMunmap(at, bytes);
+    if (result) return result;   // still mapped: the memory stays ours
+    return sceKernelReleaseDirectMemory(physical, bytes);
+#else
+    (void)bytes, (void)physical;
+    free(at);
+    return 0;
+#endif
 }

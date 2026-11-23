@@ -349,6 +349,7 @@ static const CfgRow rows[] = {
     K("ODD_CHECK_WAR"),
     K("ONE_PER_CORE"),
     K("PACK_COLD_S"),
+    K("PACK_FEED_S"),
     K("PACK_STORE_MIB"),
     K("PACK_VERIFY"),
     K("PASS_HAZARDS"),

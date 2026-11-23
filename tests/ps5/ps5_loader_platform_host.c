@@ -396,7 +396,9 @@ static void test_pack(uint64_t addr) {
     char line[1024];
     plat_mem_pack_summary(line, sizeof line);                    // nothing yet: no pass ran
     assert(!line[0]);
-    assert(plat_mem_pack(&pp) == 2 * UNIT && allocations == 2);
+    // Two units' backing released; the pool gets back only the zero one's: with MKW_PACK_VERIFY the packed one's store
+    // slots (its blob and a whole copy) take more than the unit.
+    assert(plat_mem_pack(&pp) == UNIT && allocations == 2);
     plat_mem_pack_summary(line, sizeof line);
     assert(strstr(line, "1 units, 0.1 MiB") && strstr(line, "1 packed") && strstr(line, "1 zero released"));
     assert(strstr(line, "4 frozen units, skipped gpu 1") && strstr(line, "ratio 1 "));
@@ -418,7 +420,7 @@ static void test_pack(uint64_t addr) {
     assert(strstr(line, "young 1") && strstr(line, "(+1 known)"));
     // Released by the GPU: packs; a page decommitted while packed reads zero once committed again, the rest unpacks.
     plat_mem_gpu_import(addr + 3 * UNIT, UNIT, 0);
-    assert(plat_mem_pack(&pp) == UNIT && allocations == 2);
+    assert(plat_mem_pack(&pp) == 0 && allocations == 2);   // packed (backing released), nothing net with the copy
     assert(plat_mem_decommit(addr + 3 * UNIT + PAGE, PAGE) && plat_mem_commit(addr + 3 * UNIT + PAGE, PAGE));
     assert(plat_mem_back(addr + 3 * UNIT, UNIT) && allocations == 3);   // a runtime path unpacks too
     memset(want[3] + PAGE, 0, PAGE);
@@ -430,7 +432,7 @@ static void test_pack(uint64_t addr) {
     PlatPackParams young = pp;
     young.cold_ms = 0;
     plat_sleep_ns(3000000);   // the unpack times are made odd, up to 1 ms ahead
-    assert(plat_mem_pack(&young) >= UNIT);
+    plat_mem_pack(&young);   // with the verify copy, packing gives nothing net back (counted 0)
     plat_mem_pack_summary(line, sizeof line);
     assert(strstr(line, "1 packed"));
     assert(plat_mem_decommit(addr, 4 * UNIT));
@@ -443,27 +445,41 @@ static void test_pack(uint64_t addr) {
          "whole decommit honoured");
 }
 
-// MKW_COLD_CENSUS: counts only. 8 text units, 2 zero and 2 unreadable (PROT_NONE): the first walk sees the text
-// ones for the first time, the second finds them unchanged (<30 s), and after a write one of them changed again.
+static int feed_n;
+static uint64_t feed_at;
+static int feed_stub(uint64_t a) { return feed_n++, feed_at = a, 1; }
+
+// MKW_COLD_CENSUS: counts only. 8 text units, 2 zero and 2 unreadable text ones (PROT_NONE): the first walk sees the
+// text ones for the first time, the second finds them unchanged (<30 s), and after a write one of them changed again.
 static void test_cold_census(uint64_t addr) {
     enum { TEXT = 8, ZERO = 2, NONE = 2, ALL = TEXT + ZERO + NONE };   // the model has 16 units
     static uint8_t buf[UNIT];
     assert(plat_mem_commit(addr, ALL * UNIT) && plat_mem_back(addr, ALL * UNIT));
     for (int u = 0; u < TEXT; u++) fill_text(buf, u), memcpy((void *)(uintptr_t)(addr + u * UNIT), buf, UNIT);
-    memset((void *)(uintptr_t)(addr + TEXT * UNIT), 0, (ZERO + NONE) * UNIT);
+    memset((void *)(uintptr_t)(addr + TEXT * UNIT), 0, ZERO * UNIT);
+    for (int u = TEXT + ZERO; u < ALL; u++)
+        fill_text(buf, 100 + u), memcpy((void *)(uintptr_t)(addr + u * UNIT), buf, UNIT);
     unsigned before = allocations;
     assert(plat_mem_protect(addr + (TEXT + ZERO) * UNIT, NONE * UNIT, PLAT_PROT_NONE));
     char line[1024];
-    while (!plat_mem_cold_census_step(1000000, line, sizeof line)) {}
+    while (!plat_mem_cold_census_step(1000000, 60, NULL, line, sizeof line)) {}
     assert(strstr(line, "new 0.5, all zero 0.1, unreadable 0.1"));
-    while (!plat_mem_cold_census_step(1000000, line, sizeof line)) {}
+    while (!plat_mem_cold_census_step(1000000, 60, NULL, line, sizeof line)) {}
     assert(strstr(line, "<30 s 0.5 MiB") && strstr(line, "new 0.0,"));
     ((volatile uint8_t *)(uintptr_t)addr)[17] ^= 0xff;   // one unit written
-    while (!plat_mem_cold_census_step(1000000, line, sizeof line)) {}
+    while (!plat_mem_cold_census_step(1000000, 60, NULL, line, sizeof line)) {}
     assert(strstr(line, "<30 s 0.5 MiB") && allocations == before);   // nothing backed, released or packed by it
+    // The cold feed (MKW_PACK): a 2 MiB region is offered only when none of its units is unreadable or changed. The
+    // unreadable units made readable are new in the next walk, so the region goes in the one after.
     assert(plat_mem_protect(addr + (TEXT + ZERO) * UNIT, NONE * UNIT, PLAT_PROT_RW));
+    feed_n = 0;
+    while (!plat_mem_cold_census_step(1000000, 0, feed_stub, line, sizeof line)) {}
+    assert(!feed_n && strstr(line, "0 regions frozen"));
+    while (!plat_mem_cold_census_step(1000000, 0, feed_stub, line, sizeof line)) {}
+    assert(feed_n == 1 && feed_at == (addr & ~((2ull << 20) - 1)) && strstr(line, "1 regions frozen, 0 refused"));
     assert(plat_mem_decommit(addr, ALL * UNIT));
-    puts("cold census: new, zero and unreadable units counted, unchanged ones aged, nothing backed or released");
+    puts("cold census: new, zero and unreadable units counted, unchanged ones aged, nothing backed or released; "
+         "a region offered to the feed once all its units are unchanged");
 }
 
 static void test_memory(void) {

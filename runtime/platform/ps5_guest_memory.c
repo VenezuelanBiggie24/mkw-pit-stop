@@ -242,7 +242,70 @@ typedef struct PackBlob {
     uint8_t data[];
 } PackBlob;
 
-enum { PK_DCTX = 4, PK_THREADS = 16, PK_MAX_PCT = 75, PK_FLEX_FLOOR_MIB = 128 };
+enum { PK_DCTX = 4, PK_THREADS = 16, PK_MAX_PCT = 75 };
+
+// The store: blobs and verify copies in direct memory, not the C heap. The C heap is the payload's flexible memory,
+// 640 MiB that the rest of the runtime fills (24 MiB free all through a 1.8.0 Grand Prix, cold-census-20261124), and
+// the census found ~1.3 GiB to give back by packing (~3.4 GiB unwritten for 30 s, ~45 % of it as stored bytes), so the
+// store takes its own memory from the pool it frees. 1 MiB slabs mapped at 1 MiB, one size class per 4 KiB; the slab's
+// first slot holds its header, so a slot finds its slab by rounding its address down. The governor's thread only: blobs
+// are made by plat_mem_pack and freed by plat_mem_pack_collect (the fault handler and decommits hand them over by
+// pk_drop).
+enum { PKS_SLAB = 1 << 20, PKS_STEP = 4096, PKS_CLASSES = 2 * PS5_MEM_UNIT / PKS_STEP + 1 };
+typedef struct PksSlab {
+    struct PksSlab *next, *prev;   // slabs of the class with a free slot
+    int64_t physical;
+    uint32_t cls, used, cap, bump;   // slot size cls * PKS_STEP; slots 1..cap; bump: the next never used
+    void *free;                      // freed slots, linked through their first word
+} PksSlab;
+_Static_assert(sizeof(PksSlab) <= PKS_STEP, "a slab's header fits its first slot");
+static PksSlab *pks_open[PKS_CLASSES];
+static uint64_t pks_slabs, pks_slot_bytes;   // slabs mapped; bytes of the slots in use (the store's size)
+
+static void pks_unlink(PksSlab *sl) {
+    if (sl->prev) sl->prev->next = sl->next;
+    else pks_open[sl->cls] = sl->next;
+    if (sl->next) sl->next->prev = sl->prev;
+    sl->next = sl->prev = NULL;
+}
+
+static void pks_link(PksSlab *sl) {
+    sl->prev = NULL, sl->next = pks_open[sl->cls];
+    if (sl->next) sl->next->prev = sl;
+    pks_open[sl->cls] = sl;
+}
+
+static void *pks_alloc(size_t bytes, uint32_t *slot_bytes) {
+    uint32_t cls = (uint32_t)((bytes + PKS_STEP - 1) / PKS_STEP);
+    if (!cls || cls >= PKS_CLASSES) return NULL;
+    PksSlab *sl = pks_open[cls];
+    if (!sl) {
+        int64_t phys = 0;
+        sl = ps5_mem_map_host(PKS_SLAB, PKS_SLAB, &phys);
+        if (!sl) return NULL;
+        *sl = (PksSlab){.physical = phys, .cls = cls, .cap = PKS_SLAB / (cls * PKS_STEP) - 1, .bump = 1};
+        pks_link(sl);
+        pks_slabs++;
+    }
+    void *p = sl->free;
+    if (p) sl->free = *(void **)p;
+    else p = (uint8_t *)sl + (size_t)sl->bump++ * cls * PKS_STEP;
+    if (++sl->used == sl->cap) pks_unlink(sl);
+    *slot_bytes = cls * PKS_STEP;
+    pks_slot_bytes += *slot_bytes;
+    return p;
+}
+
+static void pks_free(void *p) {
+    if (!p) return;
+    PksSlab *sl = (PksSlab *)((uintptr_t)p & ~(uintptr_t)(PKS_SLAB - 1));
+    pks_slot_bytes -= sl->cls * PKS_STEP;
+    if (sl->used-- == sl->cap) pks_link(sl);   // it was full: open again
+    *(void **)p = sl->free, sl->free = p;
+    if (sl->used) return;
+    pks_unlink(sl);
+    if (ps5_mem_unmap_host(sl, PKS_SLAB, sl->physical) == 0) pks_slabs--;
+}
 static struct { volatile int lock; ZSTD_DCtx *d; } pk_dctx[PK_DCTX];   // shared by the fault handlers, made up front
 static PackBlob *volatile pk_free;                                     // unpacked blobs, freed by plat_mem_pack_collect
 static size_t packed_units[3];
@@ -1389,14 +1452,14 @@ static int pk_unit(Ps5MixedBlock *u, RangeKind kind, const PlatPackParams *pp, i
             __atomic_store_n(&u->pk_fail_freeze, fz, __ATOMIC_RELAXED);
             return pk_skip(SK_RATIO), 0;
         }
-        b = malloc(sizeof *b + c);
-        uint8_t *raw = pp->verify ? malloc(PS5_MEM_UNIT) : NULL;
+        uint32_t bslot = 0, rslot = 0;
+        b = pks_alloc(sizeof *b + c, &bslot);
+        uint8_t *raw = pp->verify && b ? pks_alloc(PS5_MEM_UNIT, &rslot) : NULL;
         if (!b || (pp->verify && !raw)) {
-            free(b), free(raw);
+            pks_free(b), pks_free(raw);
             return pk_skip(SK_STORE), 1;
         }
-        *b = (PackBlob){.raw = raw, .csize = (uint32_t)c,
-                        .bytes = (uint32_t)(sizeof *b + c + (raw ? PS5_MEM_UNIT : 0))};
+        *b = (PackBlob){.raw = raw, .csize = (uint32_t)c, .bytes = bslot + rslot};
         memcpy(b->data, pk_cbuf, c);
         if (raw) memcpy(raw, pk_copy, PS5_MEM_UNIT);
     }
@@ -1420,10 +1483,11 @@ static int pk_unit(Ps5MixedBlock *u, RangeKind kind, const PlatPackParams *pp, i
     }
     unit_unlock(u);
     if (!done) {
-        if (b) free(b->raw), free(b);
+        if (b) pks_free(b->raw), pks_free(b);
         return pk_skip(why >= 0 ? why : SK_OTHER), 0;
     }
-    *freed += PS5_MEM_UNIT;
+    // What the pool got back: the unit less the store's slots for it (with MKW_PACK_VERIFY's copy, nothing).
+    *freed += !b ? PS5_MEM_UNIT : b->bytes < PS5_MEM_UNIT ? PS5_MEM_UNIT - b->bytes : 0;
     if (b) {
         __atomic_add_fetch(&pk_packs, 1, __ATOMIC_RELAXED);
         __atomic_add_fetch(&pk_raw_in, PS5_MEM_UNIT, __ATOMIC_RELAXED);
@@ -1472,16 +1536,11 @@ uint64_t plat_mem_pack(const PlatPackParams *pp) {
     memset(pk_pass_skip, 0, sizeof pk_pass_skip);
     pk_pass_frozen = 0;
     uint64_t freed = 0, t0 = plat_now_ns(), deadline = pp->budget_us ? t0 + pp->budget_us * 1000ull : UINT64_MAX;
-    // The store is the C heap, the payload's flexible memory: a floor kept for everything else that allocates there.
-    size_t flex = 0;
-    if (sceKernelAvailableFlexibleMemorySize(&flex) == 0 && flex < ((size_t)PK_FLEX_FLOOR_MIB << 20)) {
-        pk_pass_skip[SK_STORE]++;
-    } else {
-        uint64_t start = pk_cursor;
-        if (!pk_walk(start, UINT64_MAX, pp, frozen_fn, since_fn, deadline, &freed) &&
-            !pk_walk(0, start, pp, frozen_fn, since_fn, deadline, &freed))
-            pk_cursor = 0;
-    }
+    // The store is direct memory (pks_alloc), so no floor of flexible memory holds the pass back any more.
+    uint64_t start = pk_cursor;
+    if (!pk_walk(start, UINT64_MAX, pp, frozen_fn, since_fn, deadline, &freed) &&
+        !pk_walk(0, start, pp, frozen_fn, since_fn, deadline, &freed))
+        pk_cursor = 0;
     for (int i = 0; i < PK_SKIPS; i++) __atomic_store_n(&pk_last_skip[i], pk_pass_skip[i], __ATOMIC_RELAXED);
     __atomic_store_n(&pk_last_frozen, pk_pass_frozen, __ATOMIC_RELAXED);
     __atomic_add_fetch(&pk_passes, 1, __ATOMIC_RELAXED);
@@ -1492,8 +1551,8 @@ void plat_mem_pack_collect(void) {
     for (PackBlob *b = __atomic_exchange_n(&pk_free, NULL, __ATOMIC_ACQUIRE), *next; b; b = next) {
         next = b->next;
         __atomic_sub_fetch(&pk_store_bytes, b->bytes, __ATOMIC_RELAXED);
-        free(b->raw);
-        free(b);
+        pks_free(b->raw);
+        pks_free(b);
     }
 }
 
@@ -1504,9 +1563,11 @@ static void pk_backed_note(char *out, size_t cap) {
     size_t units = 0, flex = 0;
     for (int i = 0; i < 3; i++) units += __atomic_load_n(&packed_units[i], __ATOMIC_RELAXED);
     int frc = sceKernelAvailableFlexibleMemorySize(&flex);
-    snprintf(out, cap, ", packed %zu MiB in %.1f MiB (store %.1f MiB; flex free %zu MiB)", (units * PS5_MEM_UNIT) >> 20,
-             __atomic_load_n(&pk_packed_bytes, __ATOMIC_RELAXED) / 1048576.0,
-             __atomic_load_n(&pk_store_bytes, __ATOMIC_RELAXED) / 1048576.0, frc == 0 ? flex >> 20 : 0);
+    snprintf(out, cap,
+             ", packed %zu MiB in %.1f MiB (store %.1f MiB in %llu direct-memory slabs of 1 MiB; flex free %zu MiB)",
+             (units * PS5_MEM_UNIT) >> 20, __atomic_load_n(&pk_packed_bytes, __ATOMIC_RELAXED) / 1048576.0,
+             __atomic_load_n(&pk_store_bytes, __ATOMIC_RELAXED) / 1048576.0,
+             (unsigned long long)__atomic_load_n(&pks_slabs, __ATOMIC_RELAXED), frc == 0 ? flex >> 20 : 0);
 }
 
 void plat_mem_pack_summary(char *out, size_t cap) {
@@ -1558,7 +1619,7 @@ void plat_mem_pack_summary(char *out, size_t cap) {
 // it), and a unit whose hash did not change for N seconds counts as cold for N. A sample of the cold ones is compressed
 // as plat_mem_pack would (ZSTD level 1, PK_MAX_PCT) to estimate what packing them would give back. Reads are not seen:
 // a cold unit the game still reads would unpack on its first read.
-enum { CC_BUCKETS = 5, CC_SAMPLE_EVERY = 16 };
+enum { CC_BUCKETS = 5, CC_SAMPLE_EVERY = 16, CC_FEED_PER_STEP = 32 };   // regions frozen a tick at most
 static const uint32_t cc_bucket_s[CC_BUCKETS] = {0, 30, 60, 120, 300};   // age at least this many seconds
 static uint64_t cc_cursor;
 static uint64_t cc_cycle_t0;
@@ -1587,9 +1648,13 @@ static int cc_read_locked(Ps5MixedBlock *u, uint64_t a, uint64_t *h, bool *zero,
     return 1;
 }
 
-static void cc_unit(Ps5MixedBlock *u, RangeKind kind, uint64_t a, uint32_t now_ms) {
-    if (__atomic_load_n(&u->pack, __ATOMIC_ACQUIRE)) { cc_packed[kind]++; return; }
-    if (!__atomic_load_n(&u->backing.committed, __ATOMIC_ACQUIRE)) return;
+// What cc_unit found: the cold feed freezes a 2 MiB region only when none of its units is CC_HOT or CC_SKIP.
+enum { CC_NONE, CC_PACKED, CC_SKIP, CC_ZERO, CC_HOT, CC_COLD };
+
+// One unit; cold for the feed when unchanged for at least freeze_s seconds.
+static int cc_unit(Ps5MixedBlock *u, RangeKind kind, uint64_t a, uint32_t now_ms, uint32_t freeze_s) {
+    if (__atomic_load_n(&u->pack, __ATOMIC_ACQUIRE)) return cc_packed[kind]++, CC_PACKED;
+    if (!__atomic_load_n(&u->backing.committed, __ATOMIC_ACQUIRE)) return CC_NONE;
     int32_t d = u->cc_changed_ms ? (int32_t)(now_ms - u->cc_changed_ms) : 0;   // signed: a stored | 1 can be 1 ms ahead
     uint32_t age_s = d > 0 ? (uint32_t)d / 1000u : 0;
     bool sample = u->cc_changed_ms && age_s >= cc_bucket_s[1] && !((a / PS5_MEM_UNIT) % CC_SAMPLE_EVERY);
@@ -1598,14 +1663,14 @@ static void cc_unit(Ps5MixedBlock *u, RangeKind kind, uint64_t a, uint32_t now_m
     unit_lock(u);
     int ok = cc_read_locked(u, a, &h, &zero, sample);
     unit_unlock(u);
-    if (!ok) { cc_skip[kind]++; return; }
-    if (zero) { cc_zero[kind]++; return; }
+    if (!ok) return cc_skip[kind]++, CC_SKIP;
+    if (zero) return cc_zero[kind]++, CC_ZERO;
     uint32_t h32 = (uint32_t)(h ^ h >> 32) | 1;
     if (!u->cc_changed_ms || u->cc_hash != h32) {   // first sight, or written since the last
         if (!u->cc_changed_ms) cc_new[kind]++;
         else cc_units[kind][0]++;
         u->cc_hash = h32, u->cc_changed_ms = now_ms | 1;
-        return;
+        return CC_HOT;
     }
     int b = CC_BUCKETS - 1;
     while (b > 0 && age_s < cc_bucket_s[b]) b--;
@@ -1617,6 +1682,26 @@ static void cc_unit(Ps5MixedBlock *u, RangeKind kind, uint64_t a, uint32_t now_m
             if (c * 100 <= (size_t)PS5_MEM_UNIT * PK_MAX_PCT) cc_s_fit++;
         }
     }
+    return age_s >= freeze_s ? CC_COLD : CC_HOT;
+}
+
+// The cold feed (MKW_PACK): the 2 MiB region the walk is in, judged once the walk leaves it.
+static uint64_t cc_reg = UINT64_MAX;
+static int cc_reg_cold, cc_reg_bad;
+static uint64_t cc_feed_frozen, cc_feed_refused, cc_feed_capped;
+
+static void cc_region_end(int (*freeze_fn)(uint64_t), unsigned *budget) {
+    if (cc_reg != UINT64_MAX && freeze_fn && cc_reg_cold && !cc_reg_bad) {
+        int (*frozen_fn)(uint64_t) = __atomic_load_n(&g_frozen_hook, __ATOMIC_ACQUIRE);
+        int already = frozen_fn && frozen_fn(cc_reg);
+        if (!already && !*budget) cc_feed_capped++;   // the next walk offers it again
+        else if (!already) {
+            (*budget)--;
+            if (freeze_fn(cc_reg)) cc_feed_frozen++;
+            else cc_feed_refused++;
+        }
+    }
+    cc_reg = UINT64_MAX, cc_reg_cold = cc_reg_bad = 0;
 }
 
 static void cc_summary(char *out, size_t cap, uint64_t cycle_ns) {
@@ -1635,23 +1720,28 @@ static void cc_summary(char *out, size_t cap, uint64_t cycle_ns) {
              "cycle %llu in %.1f s (%.1f ms of hashing); heap+alias units by time unchanged: <30 s %.1f MiB, "
              "30-60 s %.1f, 60-120 s %.1f, 120-300 s %.1f, >=300 s %.1f MiB (heap %.1f / alias %.1f MiB >=30 s); "
              "new %.1f, all zero %.1f, unreadable %.1f, packed %.1f MiB; cold sample %llu units: %.0f%% compress to "
-             "<=%d%%, ratio %.2f -> packing the >=30 s ones would free ~%.1f MiB",
+             "<=%d%%, ratio %.2f -> packing the >=30 s ones would free ~%.1f MiB; cold feed: %llu regions frozen, %llu "
+             "refused, %llu left for the next walk",
              (unsigned long long)cc_cycles, cycle_ns / 1e9, cc_ns / 1e6, cold[0] * M, cold[1] * M, cold[2] * M,
              cold[3] * M, cold[4] * M, heap30 * M, alias30 * M, (cc_new[1] + cc_new[2]) * M,
              (cc_zero[1] + cc_zero[2]) * M, (cc_skip[1] + cc_skip[2]) * M, (cc_packed[1] + cc_packed[2]) * M,
-             (unsigned long long)cc_s_units, fit * 100.0, PK_MAX_PCT, ratio, c30 * fit * (1.0 - ratio));
+             (unsigned long long)cc_s_units, fit * 100.0, PK_MAX_PCT, ratio, c30 * fit * (1.0 - ratio),
+             (unsigned long long)cc_feed_frozen, (unsigned long long)cc_feed_refused,
+             (unsigned long long)cc_feed_capped);
+    cc_feed_frozen = cc_feed_refused = cc_feed_capped = 0;
     (void)all;
     memset(cc_units, 0, sizeof cc_units), memset(cc_new, 0, sizeof cc_new), memset(cc_zero, 0, sizeof cc_zero);
     memset(cc_skip, 0, sizeof cc_skip), memset(cc_packed, 0, sizeof cc_packed);
     cc_s_units = cc_s_raw = cc_s_comp = cc_s_fit = cc_ns = 0;
 }
 
-int plat_mem_cold_census_step(uint32_t budget_us, char *out, size_t cap) {
+int plat_mem_cold_census_step(uint32_t budget_us, uint32_t freeze_s, int (*freeze_fn)(uint64_t), char *out,
+                              size_t cap) {
     if (!pk_init()) return 0;
     uint64_t t0 = plat_now_ns(), deadline = t0 + (uint64_t)budget_us * 1000ull;
     if (!cc_cycle_t0) cc_cycle_t0 = t0;
     uint32_t now_ms = (uint32_t)plat_now_ms();
-    unsigned n = 0;
+    unsigned n = 0, feed = CC_FEED_PER_STEP;
     int done = 1;   // the walk reached the end: a cycle is complete
     for (VmRange *r = __atomic_load_n(&ranges, __ATOMIC_ACQUIRE); r && done;
          r = __atomic_load_n(&r->next, __ATOMIC_ACQUIRE)) {
@@ -1666,12 +1756,16 @@ int plat_mem_cold_census_step(uint32_t budget_us, char *out, size_t cap) {
                 if (a < cc_cursor) continue;
                 if (a >= r->end) break;
                 if (!(++n & 15) && plat_now_ns() > deadline) { cc_cursor = a, done = 0; break; }
-                cc_unit(&chunk[i], r->kind, a, now_ms);
+                if (a >> 21 != cc_reg >> 21) cc_region_end(freeze_fn, &feed), cc_reg = a & ~((1ull << 21) - 1);
+                int k = cc_unit(&chunk[i], r->kind, a, now_ms, freeze_s);
+                if (k == CC_COLD) cc_reg_cold++;
+                else if (k == CC_HOT || k == CC_SKIP) cc_reg_bad = 1;
             }
         }
     }
     cc_ns += plat_now_ns() - t0;
     if (!done) return 0;
+    cc_region_end(freeze_fn, &feed);
     uint64_t now = plat_now_ns();
     cc_cycles++;
     cc_summary(out, cap, now - cc_cycle_t0);

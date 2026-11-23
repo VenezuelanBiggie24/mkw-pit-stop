@@ -63,5 +63,10 @@ Ps5ProtBatch *ps5_mem_batch_swap(Ps5ProtBatch *batch);   // the fault handler: p
 int ps5_mem_protect(Ps5MemBlock *block, size_t offset, size_t bytes, bool writable);
 int ps5_mem_decommit(Ps5MemBlock *block);
 int ps5_mem_release(Ps5MemBlock *block);
+// Direct memory for the runtime's own use (MKW_PACK's store) at an OS-chosen address aligned to align: bytes and align
+// multiples of PS5_MEM_UNIT. NULL when the memory or the map fails (nothing kept). The host model (not __PROSPERO__)
+// takes it from the C heap, so its tests' direct-memory counts stay those of the guest.
+void *ps5_mem_map_host(size_t bytes, size_t align, int64_t *physical);
+int ps5_mem_unmap_host(void *at, size_t bytes, int64_t physical);
 
 #endif

@@ -124,6 +124,7 @@ uint32_t *gen_slot(uint64_t page_addr, int create);
 int query_stamp(uint64_t lo, uint64_t hi, uint32_t g);
 uint64_t snap_regions(uint64_t r0, uint64_t r1, uint32_t epoch);
 void freeze_pass(void);
+int vk_mem_cold_freeze(uint64_t a);   // MKW_PACK's cold feed: freezes the 2 MiB region at a, 1 when frozen
 void ww_log(uint64_t frame);
 void gen_reset(void);
 
