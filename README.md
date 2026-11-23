@@ -99,7 +99,13 @@ The placeholder of step 1 is not needed for this; if it is installed, remove `/d
 only one copy of the title is registered. Building again updates only what changed on the drive.
 
 If the PS5 stays on **Waiting for connection**, check the address and that both are on the same network; a failed
-build is explained in `logs/setup.log` beside `mkw.exe`. To update, unpack the new builder and build again.
+build is explained in `logs/setup.log` beside `mkw.exe`.
+
+**Updating:** hold **L1 + R1** while you launch the title on the PS5: it opens the receiver screen (**Ready to receive
+an update**) instead of the game. Then unpack the new builder over the old folder and build again; only the new game
+code and changed shaders are sent, and your game files, saves and settings stay. A title built before this option
+existed needs the new release's placeholder uploaded over it by FTP once instead (or the update from ProsperoStore);
+the release notes' **Updating** section has the steps. On a USB drive, just build to the drive again.
 
 ## Installing and updating on PS5 (Linux or WSL2)
 
@@ -126,9 +132,11 @@ builder and your own dump:
    `/user/app/PPSA99193/sce_sys`.
 4. Launch **Mario Kart World: Pit Stop** from the PS5 home screen.
 
-**Updating:** unpack the newer builder and run `prepare_ps5.py` with the same `--work` and `--out` directories. Steps
-whose inputs did not change (such as `romfs/` and unchanged shaders) are skipped, and your saves (`profile/`) and
-settings (`mkw.ini`) on the console are kept.
+**Updating:** hold **L1 + R1** while you launch the title on the PS5, so it opens the receiver screen instead of the
+game (a title built before this option existed: upload the new placeholder over it by FTP first). Then unpack the
+newer builder and run `prepare_ps5.py --send <PS5_IP>` with the same `--work` and `--out` directories. Steps whose
+inputs did not change (such as `romfs/` and unchanged shaders) are skipped, and your saves (`profile/`) and settings
+(`mkw.ini`) on the console are kept.
 
 ## Pit Stop settings overlay
 
