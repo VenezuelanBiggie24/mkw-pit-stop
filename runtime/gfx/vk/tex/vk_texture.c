@@ -189,6 +189,9 @@ void vk_texture_census(VkTexCensus *s) {
             VmaAllocationInfo ai;
             vmaGetAllocationInfo(c->vma, e->alloc, &ai);
             bytes = ai.size;
+            if (ai.memoryType < c->mem_props.memoryTypeCount &&
+                !(c->mem_props.memoryTypes[ai.memoryType].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
+                s->host_n++, s->host_bytes += bytes;
         }
         if (e->released) s->released++, s->own_released += e->alloc != NULL, s->bytes_released += bytes;
         else {

@@ -446,6 +446,7 @@ static const CfgRow rows[] = {
     K("TEX_REUP_PARTIAL"),
     K("TEX_OVERWRITTEN"),
     K("TEX_PAR"),
+    K("TEX_PRESSURE"),
     K("TEX_READBACK"),
     K("TEX_RELEASED_MIB"),
     K("TEX_UP_DUMP"),

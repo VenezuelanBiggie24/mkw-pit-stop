@@ -199,6 +199,9 @@ void sweep_released(void);
 int drop_overwritten_live(void);   // issue 11: live GPU-owned images written over and idle go; how many
 void tex_gpu_made(uint64_t bytes);   // a GPU-owned image of bytes made: drop_overwritten_live every 64 MiB
 
+// vk_tex_pressure.c: idle recreatable textures out when VMA's blocks near the live VRAM budget (MKW_TEX_PRESSURE)
+void tex_pressure(void);   // each submit, the texture lock held
+
 // vk_tex_upload.c: uploads and the freshness checks
 void make_fresh(Tex *e);
 // MKW_ASTC_BC1_ALPHA: ASTC bytes going into a BC1 image checked for alpha below 1 (vk_tex_image.c)
