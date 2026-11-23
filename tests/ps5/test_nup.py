@@ -250,6 +250,27 @@ def test_console_dump_with_update_builds_180(tmp_path: Path, monkeypatch: pytest
         prepare.check(mixed)
 
 
+def test_dump_search_skips_renamed_updates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A player renamed updates/ to updates.old/ to build 1.0.0 and got 1.8.0 from it, staged where the title never
+    looked (23/11/2026): only src, its base/ and their updates/<version>/ are searched, as the title does."""
+    small = tuple(type(v)(v.name, v.number, v.main_build_id, 4, v.patches) for v in prepare.PS5_VERSIONS)
+    monkeypatch.setattr(prepare, "PS5_VERSIONS", small)
+    monkeypatch.setattr(prepare, "detect_id", lambda got: next(v for v in small if v.main_build_id == got))
+    top = tmp_path / "dump"
+    _dump(top / "base", "9e244438c3d8ef1c", 100, 4)
+    _dump(top / "base/updates.old/917504", "d00e4f399e411d06", 180, 4)
+    _dump(top / "copy/updates/917504", "d00e4f399e411d06", 180, 4)   # beside base/: not searched from top
+    exefs, _, v = prepare.check(top)
+    assert (v.name, exefs) == ("1.0.0", top / "base/exefs")
+    assert prepare.check(top / "base")[2].name == "1.0.0"
+    _dump(top / "base/Updates/917504", "d00e4f399e411d06", 180, 4)
+    assert prepare.check(top)[:2] == (top / "base/Updates/917504/exefs", top / "base/Updates/917504/romfs")
+    assert prepare.check(top / "copy")[2].name == "1.8.0"
+    _dump(top / "other/backup/917504", "d00e4f399e411d06", 180, 4)
+    with pytest.raises(prepare.Failed, match="no exefs/main"):
+        prepare.check(top / "other")
+
+
 def test_remove_stale(tmp_path: Path) -> None:
     src, dst = tmp_path / "src", tmp_path / "dst"
     (src / "a").mkdir(parents=True)

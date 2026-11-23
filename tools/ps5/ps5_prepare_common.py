@@ -26,7 +26,8 @@ from versions import ROMFS_PRODUCT, VERSIONS, Version, build_id_of, detect_id, r
 
 # The versions the PS5 build takes, the preferred first: a dump holding several (a console dump with its update in
 # updates/<title version>/, as G:/Downloads/base on the dev PC: 1.0.0 at the top, 1.8.0 in updates/917504) builds the
-# first found. 1.8.0 is the release's version (user's choice, 17/11/2026); 1.0.0 is what the port ran on until then.
+# first found; to build 1.0.0 from such a dump, choose a folder without updates/ (find_games). 1.8.0 is the release's
+# version (user's choice, 17/11/2026); 1.0.0 is what the port ran on until then.
 PS5_VERSIONS = tuple(sorted(VERSIONS, key=lambda v: -v.number))
 ROMFS_MARGIN = 0.95  # a few short still passes: some dumping tools skip empty files
 STEPS = ("check", "exefs", "romfs", "generate", "compile", "shaders", "warm", "cleanup")
@@ -51,22 +52,33 @@ def known_names() -> str:
     return ", ".join(v.name for v in reversed(PS5_VERSIONS))
 
 
+def _subdir(d: Path, name: str) -> Path | None:
+    """d's folder named name, in any case (a dump copied from Windows can say Updates/ or BASE/)."""
+    try:
+        return next((e for e in sorted(d.iterdir()) if e.name.lower() == name and e.is_dir()), None)
+    except OSError:
+        return None
+
+
 def find_games(src: Path) -> list[tuple[Path, Path]]:
-    """Every exefs/ + romfs/ pair in src or up to two levels below it (a console dump's updates/<version>/), never
-    looking inside an exefs/ or romfs/ (a glob into the RomFS's 200,000 files took minutes on a USB drive)."""
-    found, level = [], [src]
-    for _ in range(3):
-        below = []
-        for d in level:
-            if (d / "exefs/main").is_file() and (d / "romfs").is_dir():
-                found.append((d / "exefs", d / "romfs"))
+    """The exefs/ + romfs/ pairs where a dump keeps them: src itself, its base/, and the updates/<version>/ below
+    either, the same places the title looks (ps5_recv.c add_game_tree). Other folders are not searched: a player who
+    renamed updates/ to updates.old/ to build 1.0.0 got 1.8.0 from it, staged where the title never looked (23/11/2026),
+    and the old two-level search never looked inside an exefs/ or romfs/ either (a glob into the RomFS's 200,000 files
+    took minutes on a USB drive)."""
+    tops = [src] + [b for b in (_subdir(src, "base"),) if b]
+    dirs = []
+    for top in tops:
+        dirs.append(top)
+        up = _subdir(top, "updates")
+        if up:
             try:
-                below += sorted(e for e in d.iterdir() if e.is_dir() and e.name.lower() not in ("exefs", "romfs"))
+                dirs += sorted(e for e in up.iterdir() if e.is_dir())
             except OSError:
                 pass
-        level = below
+    found = [(d / "exefs", d / "romfs") for d in dirs if (d / "exefs/main").is_file() and (d / "romfs").is_dir()]
     if not found:
-        raise Failed(f"no exefs/main and romfs/ in {src}")
+        raise Failed(f"no exefs/main and romfs/ in {src}, its base/ or their updates/<version>/")
     return found
 
 

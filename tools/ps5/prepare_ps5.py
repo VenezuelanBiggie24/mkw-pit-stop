@@ -695,6 +695,37 @@ def drive_filesystem(path: Path) -> str:
     return name.value if ok else ""
 
 
+def title_game_rel(exefs: Path) -> Path:
+    """Where the game of a dump's exefs/ goes under the title folder: updates/<version>/ when the dump keeps it in one
+    (find_games), else the title folder itself."""
+    d = exefs.parent
+    return Path("updates", d.name) if d.parent.name.lower() == "updates" else Path()
+
+
+def drop_other_games(out_dir: Path, keep: Path) -> None:
+    """The game copies an earlier build staged under out_dir anywhere but keep (another version, or a folder the title
+    never looked in such as base/ or updates.old/917504): left there, each would be sent or copied to the drive again.
+    Only their exefs/, romfs/ and romfs.nup go; the title's own folders are not searched."""
+    own = {"exefs", "romfs", "spirv", "sce_sys", "sce_module", "licenses", "radv-shader-cache"}
+    dirs, level = [], [out_dir]
+    for _ in range(3):
+        below = []
+        for d in level:
+            dirs.append(d)
+            try:
+                below += sorted(e for e in d.iterdir() if e.is_dir() and not e.is_symlink() and e.name.lower() not in own)
+            except OSError:
+                pass
+        level = below
+    for d in dirs:
+        if d.resolve() == keep.resolve() or not (d / "exefs").is_dir():
+            continue
+        print(f"prepare_ps5: removing an earlier build's game copy in {d.relative_to(out_dir) or '.'}", file=sys.stderr)
+        for name in ("exefs", "romfs"):
+            shutil.rmtree(d / name, ignore_errors=True)
+        (d / "romfs.nup").unlink(missing_ok=True)
+
+
 def copy_to_usb(stage: Path, drive: Path) -> Path:
     """The staged title into DRIVE/homebrew/PPSA99193: ShadowMountPlus scans /mnt/usb0..7/homebrew/ and /mnt/ext0..1/
     for title folders and registers them (its README, 18/11/2026), so a drive plugged into the PS5 needs no network.
@@ -858,10 +889,13 @@ def main() -> int:
         else:
             emit("skip", "nup")
             exefs_src, romfs_src = exefs_checked, romfs_checked
-        # The title folder keeps the dump's layout (a console dump's 1.8.0 in updates/917504/): the runtime finds the
-        # version there (ps5_recv.c ps5_game_dir), so a dump the player copied to the console by hand is the same.
-        game_rel = Path() if from_nup else exefs_checked.parent.relative_to(src)
+        # The game goes where the title looks (ps5_recv.c ps5_game_dir): updates/<version>/ for a console dump's update
+        # (where earlier builds put it, so a player's copy on the console is not sent again), else the title folder.
+        # Never the dump's own path: one built from base/ or updates.old/917504 landed where the title never looked and
+        # it said "missing exefs/main" (23/11/2026).
+        game_rel = title_game_rel(exefs_checked) if not from_nup else Path()
         game_out = out_dir / game_rel
+        drop_other_games(out_dir, game_out)
 
         dirs_txt = out_dir / "pitstop-game-dirs.txt"
         if args.console_game:
