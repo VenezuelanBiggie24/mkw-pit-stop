@@ -720,6 +720,9 @@ typedef struct {
     // epoch too, so submits per frame can be read). VRAM plan, 21/11/2026.
     uint64_t cls_bytes[4], cls_n[4], idle_bytes[3], idle_n[3];
     uint64_t size_bytes[3], size_n[3];   // sampled images by longest side: <512, 512-1023, >=1024
+    // Live and released entries whose memory is not device-local: VMA's AUTO_PREFER_DEVICE puts an image in the host
+    // heap once the device-local one is at MKW_GPU_MEM_LIMIT's cap, where an allocation does not fail.
+    uint64_t host_n, host_bytes;
     uint32_t epoch;
 } VkTexCensus;
 void vk_texture_census(VkTexCensus *s);

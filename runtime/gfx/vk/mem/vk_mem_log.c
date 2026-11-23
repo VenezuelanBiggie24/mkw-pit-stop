@@ -426,6 +426,23 @@ void vram_log(uint64_t frame) {
            (unsigned long long)os_mib, block_bytes / M, os_mib ? os_mib - block_bytes / M : 0.0,
            (unsigned long long)t.size_n[0], t.size_bytes[0] / M, (unsigned long long)t.size_n[1], t.size_bytes[1] / M,
            (unsigned long long)t.size_n[2], t.size_bytes[2] / M);
+    // VMA by memory type (only those holding blocks), and the textures outside device-local memory: what the host heap's
+    // blocks are, against the driver's heap usage above (a 4 GB card: VMA's host heap at 2.3 GB while the driver counted
+    // 2.2 GB more in heap 0 than VMA's blocks there, prsA 23/11/2026).
+    VmaTotalStatistics ts;
+    vmaCalculateStatistics(c->vma, &ts);
+    char types[400] = "";
+    for (uint32_t i = 0, o = 0; i < c->mem_props.memoryTypeCount && i < VK_MAX_MEMORY_TYPES && o < sizeof types - 60; i++) {
+        const VmaDetailedStatistics *d = &ts.memoryType[i];
+        if (!d->statistics.blockCount) continue;
+        VkMemoryPropertyFlags f = c->mem_props.memoryTypes[i].propertyFlags;
+        o += (uint32_t)snprintf(types + o, sizeof types - o, " type%u heap%u %s%s%s %.0f/%.0f MiB", i,
+                                c->mem_props.memoryTypes[i].heapIndex, f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? "D" : "-",
+                                f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT ? "V" : "-", f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ? "C" : "-",
+                                d->statistics.blockBytes / M, d->statistics.allocationBytes / M);
+    }
+    rt_log("mem: vram by type (blocks/allocated):%s; textures outside device-local memory %llu %.0f MiB", types,
+           (unsigned long long)t.host_n, t.host_bytes / M);
     rt_log("mem: vram textures frame %llu epoch %u: BC1 %llu %.0f MiB, BC7 %llu %.0f MiB, other block %llu %.0f MiB, "
            "uncompressed %llu %.0f MiB; not looked up for >64 submits %llu %.0f MiB, >512 %llu %.0f MiB, >4096 %llu %.0f MiB",
            (unsigned long long)frame, t.epoch, (unsigned long long)t.cls_n[0], t.cls_bytes[0] / M,

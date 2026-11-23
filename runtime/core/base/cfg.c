@@ -447,6 +447,7 @@ static const CfgRow rows[] = {
     K("TEX_REUP_PARTIAL"),
     K("TEX_OVERWRITTEN"),
     K("TEX_PAR"),
+    K("TEX_PRESSURE"),
     K("TEX_READBACK"),
     K("TEX_RELEASED_MIB"),
     K("TEX_UP_DUMP"),
@@ -654,6 +655,13 @@ static const struct { const char *key, *value; } PS5[] = {
     // move (A/B medians -0.06 ms) and the 0.1 % lows were ~1 fps worse. The ASTC alpha scan and decode keep their own
     // pool (astc_mt_for, MKW_TEX_MAKE_FAST).
     {"TEX_PAR", "0"},
+    // Upstream's VRAM pressure eviction (vk_tex_pressure.c, off there): the console's direct memory is one 12,096 MiB
+    // pool the game's pages and the GPU's share, and VMA's device-local blocks sit at ~90-93 % of their budget in a
+    // race, so the idle recreatable textures (decoded ASTC, ~1.1 GiB) go before memory runs out (issue 11). Four 1.8.0
+    // Grand Prix runs (fix180-*, 24/11/2026, with PR #15): lowest free direct memory 130 -> 166 MiB, 10th percentile
+    // 242 -> 318 MiB, census minimum 168 -> 276 MiB; 1,039 textures (370 MiB) out in 4 passes; frame 17.53 -> 17.50 ms,
+    // same 57.1 fps.
+    {"TEX_PRESSURE", "1800"},
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 
