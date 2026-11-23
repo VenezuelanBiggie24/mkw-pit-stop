@@ -32,6 +32,12 @@ typedef struct {
     uint8_t pc_index, pc_count, pc_failed;
     uint32_t pc_progress, pc_total;
     char pc_label[201];
+    // Where a send's time goes, to find why it runs at ~1 MB/s where FTP to the same console is far faster (players,
+    // r/PS5_Jailbreak, 23/11/2026): send_ns since PIT1B; of it, the receiving thread waiting on the network (net_ns) and
+    // for a free buffer while the writer is behind (slot_ns); the writer thread in write() (write_ns) and in SHA-256
+    // (hash_ns). rcvbuf: the receive buffer the console gave the connection (SO_RCVBUF asked 4 MiB).
+    uint64_t send_ns, net_ns, slot_ns, write_ns, hash_ns;
+    int rcvbuf;
 } Ps5RecvStatus;
 
 // Validate a relative path from the builder: must stay strictly inside the title folder.

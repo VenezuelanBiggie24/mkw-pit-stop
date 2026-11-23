@@ -19,6 +19,7 @@
 | `ps5_guest_memory.c`, `ps5_guest_memory.h` | PS5 loader platform memory: exact high144 reservations, sparse direct backing, checked reads and shutdown; `MKW_PACK`'s packing of cold frozen units (zstd, `plat_mem_pack`) and their unpacking when backed again |
 | `ps5_loader_io.c` | PS5 loader file reads, paths, clock and shell exit |
 | `ps5_recv.c`, `ps5_recv.h` | PS5 placeholder TCP receiver (`PIT1` on port 19913), strict path validation under `/app0`, SHA-256 atomic file writes, `.pitstop-manifest.tsv` delta checks, console IP query (`sceNetCtlGetInfo`), and after a clean ProsperoStore update the game files, saves and `mkw.ini` moved back from `prosperostore/previous/PPSA99193` (`ps5_store_restore`) |
+| `ps5_recv.c`, `ps5_recv.h` | PS5 placeholder TCP receiver (`PIT1` on port 19913), strict path validation under `/app0`, SHA-256 atomic file writes, large files the builder uploads by FTP checked and put in place (`PIT1A`), `.pitstop-manifest.tsv` delta checks, and console IP query (`sceNetCtlGetInfo`) |
 | `ps5_mutex.c` | PS5 loader reader and writer locks over pthreads |
 | `ps5_threads.c`, `ps5_fiber.c`, `fiber_x86.h` | PS5 host threads, CPU timing, and System V fibers |
 | `ps5_sys.c` | PS5 POSIX file writes, system/load stubs, and zstd tracer no-ops |

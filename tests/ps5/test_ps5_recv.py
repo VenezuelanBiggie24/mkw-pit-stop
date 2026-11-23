@@ -264,8 +264,9 @@ def test_ps5_recv_builder_status(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
-def test_ps5_send_reports_phases(tmp_path: Path) -> None:
-    """send_directory says what it is doing before the bytes flow (checksums, the PS5's answer), then the transfer."""
+def test_ps5_send_reports_phases(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """send_directory says what it is doing before the bytes flow (checksums, the PS5's answer), then the transfer,
+    and at the end where its time went on both ends (send_ps5.timing_line)."""
     sys.path.insert(0, str(ROOT / "tools/ps5"))
     import send_ps5
 
@@ -290,9 +291,13 @@ def test_ps5_send_reports_phases(tmp_path: Path) -> None:
         assert ("hash", 3, 3) in phases and ("check", 3, 3) in phases and ("send", 0, 60) in phases
         assert [p[0] for p in phases].index("send") == len(phases) - 1
         assert progress[-1] == (60, 60, 3, 3)
+        err = capsys.readouterr().err
+        assert "send timing: 0 MiB in" in err and f"PS5 ({title}): network wait" in err and "receive buffer" in err
     finally:
         if proc.poll() is None:
             proc.kill()
+    older = send_ps5.timing_line(10 << 20, 5.0, 1.0, 4.0, {"title_id": "PPSA99193"})
+    assert older == "send timing: 10 MiB in 5.0 s (2.0 MiB/s); PC: disk reads 1.0 s, sending 4.0 s; PS5: this receiver does not report timing"
 
 
 @pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
@@ -520,3 +525,121 @@ def test_ps5_store_restore(tmp_path: Path) -> None:
     (store / "receipts" / "PPSA99193.json").unlink()
     app0.symlink_to(target)
     assert restore(app0) == 0 and (kept / "romfs.nup").exists()
+
+
+class _FakeFtp:
+    """Stands in for the console's FTP server (send_ps5.open_ftp): writes into `folder` what is stored under `seen`,
+    the title folder as FTP sees it; mount.lnk names `link`. fail_after: an upload breaks after this many bytes."""
+
+    def __init__(self, folder: Path, seen: str, link: str, fail_after: int | None = None) -> None:
+        self.folder, self.seen, self.link, self.fail_after = folder, seen, link, fail_after
+        self.stored: list[str] = []
+
+    def _local(self, remote: str) -> Path:
+        import ftplib
+
+        if not remote.startswith(self.seen + "/"):
+            raise ftplib.error_perm("550 no such folder")
+        return self.folder / remote[len(self.seen) + 1 :]
+
+    def retrlines(self, cmd: str, callback) -> None:
+        callback(self.link)
+
+    def delete(self, remote: str) -> None:
+        import ftplib
+
+        p = self._local(remote)
+        if not p.is_file():
+            raise ftplib.error_perm("550 not there")
+        p.unlink()
+
+    def mkd(self, remote: str) -> None:
+        self._local(remote).mkdir(exist_ok=True)
+
+    def storbinary(self, cmd: str, f, blocksize: int, callback) -> None:
+        import ftplib
+
+        verb, remote = cmd.split(" ", 1)
+        out = self._local(remote)
+        if verb == "STOR" and out.exists():
+            raise ftplib.error_perm("550 exists")   # ftpsrv does not overwrite
+        self.stored.append(remote)
+        n = 0
+        with out.open("ab" if verb == "APPE" else "wb") as o:
+            while block := f.read(blocksize):
+                if self.fail_after is not None and n + len(block) > self.fail_after:
+                    raise ftplib.error_temp("451 transfer aborted")
+                o.write(block)
+                o.flush()
+                n += len(block)
+                callback(block)
+
+    def quit(self) -> None:
+        pass
+
+
+@pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
+@pytest.mark.parametrize("case", ["ftp", "wrong_folder", "upload_breaks", "no_ftp"])
+def test_ps5_send_large_files_by_ftp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str) -> None:
+    """Large files go by the console's FTP server, the receiver checks and places them (PIT1A) and records them so the
+    next send skips them; a folder the receiver does not see, a broken upload or no FTP server fall back to PIT1P."""
+    sys.path.insert(0, str(ROOT / "tools/ps5"))
+    import ftplib
+
+    import send_ps5
+
+    monkeypatch.setattr(send_ps5, "FTP_MIN", 1 << 20)
+    exe = _compile_helper(tmp_path)
+    title, stage, work = tmp_path / "PPSA99193", tmp_path / "stage", tmp_path / "work"
+    title.mkdir()
+    work.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    (title / "eboot.bin").write_bytes(b"the placeholder's")   # same_folder compares it through both paths
+    files = {"romfs.nup": os.urandom(5 << 20), "sub/spirv.nup": os.urandom((2 << 20) + 7), "eboot.bin": b"e" * (3 << 20),
+             "exefs/main": b"m" * 100}  # fmt: skip
+    for rel, data in files.items():
+        (stage / rel).parent.mkdir(parents=True, exist_ok=True)
+        (stage / rel).write_bytes(data)
+    fakes: list[_FakeFtp] = []
+
+    def opener(host: str, port: int) -> _FakeFtp:
+        if case == "no_ftp" or port != 2121:
+            raise ConnectionRefusedError("no FTP server")
+        folder = other if case == "wrong_folder" else title   # FTP's view: the title folder or another one
+        fake = _FakeFtp(folder, str(folder), str(folder), (1 << 20) if case == "upload_breaks" else None)
+        fakes.append(fake)
+        return fake
+
+    port_file = tmp_path / "port.txt"
+    proc = subprocess.Popen([str(exe), "serve", str(title), str(port_file)], env=dict(os.environ, MKW_PS5_RECV_PORT="0"))
+    try:
+        for _ in range(200):
+            if port_file.is_file() and port_file.read_text().strip():
+                break
+            time.sleep(0.01)
+        progress = []
+        sent, skipped, total = send_ps5.send_directory(
+            f"127.0.0.1:{port_file.read_text().strip()}", stage, cache_path=work / "sha.tsv", ftp_opener=opener,
+            on_progress=lambda bd, bt, fd, ft: progress.append((bd, bt, fd, ft)))  # fmt: skip
+        assert proc.wait(timeout=10) == 0
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert (sent, skipped, total) == (4, 0, sum(map(len, files.values())))
+    assert progress[-1] == (total, total, 4, 4)
+    for rel, data in files.items():
+        assert (title / rel).read_bytes() == data, rel
+    assert not list(title.rglob("*.pitstop-ftp")) and not list(title.rglob("*.pitstop.part"))
+    assert not (title / ".pitstop-ftp-probe").exists() and not (work / ".pitstop-ftp-probe").exists()
+    stored = [s for f in fakes for s in f.stored if ".pitstop-ftp-probe" not in s]
+    if case == "ftp":
+        assert sorted(stored) == [f"{title}/romfs.nup.pitstop-ftp", f"{title}/sub/spirv.nup.pitstop-ftp"]
+    elif case == "upload_breaks":
+        assert len(stored) == 2   # tried both, both went by PIT1P after
+    else:
+        assert stored == []   # wrong_folder: refused at PIT1A, before any upload
+        assert not list(other.rglob("*"))
+    manifest = (title / ".pitstop-manifest.tsv").read_text()
+    assert all(f"{rel}\t{len(data)}\t" in manifest for rel, data in files.items())
+    assert ftplib  # imported for _FakeFtp's errors

@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,12 +18,14 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "sha256.h"
 
 #define MANIFEST_NAME ".pitstop-manifest.tsv"
 #define PART_SUFFIX ".pitstop.part"
+#define FTP_SUFFIX ".pitstop-ftp"   // PIT1A: the name the builder uploads a file under by FTP
 #define MAGIC_STR "PIT1"
 #define MAX_BATCH 16384u
 #define IO_BUF_SIZE (256u * 1024u)
@@ -49,6 +52,13 @@ int sceNetCtlGetInfo(int code, SceNetCtlInfo *info);
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static Ps5RecvStatus g_status;
+static uint64_t g_begin_ns;   // PIT1B's time: g_status.send_ns counts from it
+
+static uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 static pthread_t g_thread;
 static int g_started;
 static int g_listen_fd = -1;
@@ -241,6 +251,14 @@ int ps5_recv_validate_path(const char *rel) {
     return 1;
 }
 
+// lstat, else stat: inside the title lstat fails where stat answers (ps5_sys.c does the same). With lstat alone the
+// manifest stayed empty on the console (each received file is recorded after an lstat: .pitstop-manifest.tsv was 0
+// bytes, 23/11/2026), so every send sent everything again, and PIT1A found no upload. Symbolic links are refused by
+// O_NOFOLLOW where files are opened; the S_ISLNK checks keep lstat.
+static int path_stat(const char *path, struct stat *st) {
+    return lstat(path, st) == 0 || stat(path, st) == 0 ? 0 : -1;
+}
+
 static int ensure_parent_dirs(const char *root, const char *rel) {
     char buf[1280];
     if (snprintf(buf, sizeof buf, "%s/%s", root, rel) >= (int)sizeof buf) return 0;
@@ -249,7 +267,7 @@ static int ensure_parent_dirs(const char *root, const char *rel) {
         if (*p != '/') continue;
         *p = 0;
         struct stat st;
-        if (lstat(buf, &st) == 0) {
+        if (path_stat(buf, &st) == 0) {
             if (!S_ISDIR(st.st_mode)) return 0;   // reject symlinks or regular files in directory position
         } else if (mkdir(buf, 0777) != 0 && errno != EEXIST) {
             return 0;
@@ -392,11 +410,22 @@ static int handle_info(int fd) {
     // (18/11/2026) or deleted folders to make room (20/11/2026). A full disk still fails the write with its error.
     if (statvfs(strcmp(g_root, "/app0") ? g_root : "/data", &vfs) == 0)
         free_bytes = (uint64_t)vfs.f_bavail * (uint64_t)vfs.f_frsize;
-    char json[512];
+    pthread_mutex_lock(&g_lock);
+    Ps5RecvStatus t = g_status;
+    pthread_mutex_unlock(&g_lock);
+    char json[1024];
+    // "timing": the current or last send's (Ps5RecvStatus send_ns...), which send_ps5.py asks for before PIT1D and
+    // prints, so a player's log says where the time went
     int n = snprintf(json, sizeof json,
                      "{\"title_id\":\"PPSA99193\",\"port_version\":\"%s\",\"rt_game_id\":\"%s\","
-                     "\"has_game_code\":%d,\"game_files_ready\":%d,\"free_bytes\":%llu,\"free_real\":0,\"status\":1,\"resume\":1,\"remove\":1}",
-                     g_port_ver, g_game_id, g_has_game_code ? 1 : 0, ready ? 1 : 0, (unsigned long long)free_bytes);
+                     "\"has_game_code\":%d,\"game_files_ready\":%d,\"free_bytes\":%llu,\"free_real\":0,\"status\":1,\"resume\":1,\"remove\":1,"
+                     "\"ftp\":1,\"root\":\"%s\",\"timing\":{\"bytes\":%llu,\"send_ms\":%llu,\"net_ms\":%llu,\"slot_ms\":%llu,"
+                     "\"write_ms\":%llu,\"hash_ms\":%llu,\"rcvbuf\":%d}}",
+                     g_port_ver, g_game_id, g_has_game_code ? 1 : 0, ready ? 1 : 0, (unsigned long long)free_bytes,
+                     g_root,
+                     (unsigned long long)t.bytes_done, (unsigned long long)(t.send_ns / 1000000),
+                     (unsigned long long)(t.net_ns / 1000000), (unsigned long long)(t.slot_ns / 1000000),
+                     (unsigned long long)(t.write_ns / 1000000), (unsigned long long)(t.hash_ns / 1000000), t.rcvbuf);
     if (n < 0 || n >= (int)sizeof json) return 0;
     uint8_t hdr[4];
     put_u32le(hdr, (uint32_t)n);
@@ -438,7 +467,7 @@ static int handle_status(int fd) {
 // A file, or a folder with everything in it, never following a symbolic link (lstat; a link itself is removed).
 static int remove_tree(const char *path) {
     struct stat st;
-    if (lstat(path, &st) != 0) return errno == ENOENT;
+    if (lstat(path, &st) != 0) return errno == ENOENT;   // never stat: a link to a folder must not be followed here
     if (!S_ISDIR(st.st_mode)) return unlink(path) == 0;
     DIR *d = opendir(path);
     if (!d) return 0;
@@ -518,7 +547,7 @@ static int handle_stat_batch(int fd) {
         char full[1280];
         if (snprintf(full, sizeof full, "%s/%s", g_root, rel) < (int)sizeof full) {
             struct stat st;
-            if (lstat(full, &st) == 0 && S_ISREG(st.st_mode) && (uint64_t)st.st_size == want_sz) {
+            if (path_stat(full, &st) == 0 && S_ISREG(st.st_mode) && (uint64_t)st.st_size == want_sz) {
                 uint64_t mt = stat_mtime_ns(&st);
                 const ManifestEntry *me = manifest_find(rel);
                 if (me && me->size == want_sz && me->mtime_ns == mt && !memcmp(me->sha256, want_sha, 32)) {
@@ -552,6 +581,11 @@ static int handle_begin(int fd) {
     g_status.bytes_total = bytes;
     g_status.current_file[0] = 0;
     g_status.error[0] = 0;
+    g_status.send_ns = g_status.net_ns = g_status.slot_ns = g_status.write_ns = g_status.hash_ns = 0;
+    int rcvbuf = 0;
+    socklen_t rlen = sizeof rcvbuf;
+    g_status.rcvbuf = getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &rlen) == 0 ? rcvbuf : -1;
+    g_begin_ns = now_ns();
     pthread_mutex_unlock(&g_lock);
     uint8_t ok = 'K';
     return write_exact(fd, &ok, 1);
@@ -583,13 +617,20 @@ static void *pipe_writer(void *arg) {
         pthread_mutex_unlock(&p->m);
         const uint8_t *b = p->buf[slot];
         size_t n = p->len[slot], off = 0;
+        uint64_t t0 = now_ns();
         sha256_update(sha, b, n);
+        uint64_t t1 = now_ns();
         while (!failed && off < n) {
             ssize_t w = write(fd, b + off, n - off);
             if (w < 0 && errno == EINTR) continue;
             if (w <= 0) failed = 1;
             else off += (size_t)w;
         }
+        uint64_t t2 = now_ns();
+        pthread_mutex_lock(&g_lock);
+        g_status.hash_ns += t1 - t0;
+        g_status.write_ns += t2 - t1;
+        pthread_mutex_unlock(&g_lock);
         pthread_mutex_lock(&p->m);
         if (failed) p->err = 1;
         p->tail++;
@@ -722,7 +763,7 @@ static int handle_put(int fd, Pipe *pipe) {
             want_line[strcspn(want_line, "\r\n")] = 0;
         }
         struct stat ps;
-        if (!strcmp(want_line, expect) && lstat(part_path, &ps) == 0 && S_ISREG(ps.st_mode) &&
+        if (!strcmp(want_line, expect) && path_stat(part_path, &ps) == 0 && S_ISREG(ps.st_mode) &&
             (uint64_t)ps.st_size <= fsize) {
             int in_fd = open(part_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
             uint64_t have = 0;
@@ -779,20 +820,33 @@ static int handle_put(int fd, Pipe *pipe) {
             break;
         }
         size_t chunk = rem > PIPE_SLOT_SIZE ? PIPE_SLOT_SIZE : (size_t)rem;
+        uint64_t t0 = now_ns();
         uint8_t *b = pipe_slot(pipe);
+        uint64_t t1 = now_ns();
         if (!read_exact(fd, b, chunk)) {
             io_err = 1;
             break;
         }
+        uint64_t t2 = now_ns();
         pipe_push(pipe, chunk);
         rem -= chunk;
         pthread_mutex_lock(&g_lock);
         g_status.bytes_done += chunk;
+        g_status.slot_ns += t1 - t0;
+        g_status.net_ns += t2 - t1;
+        g_status.send_ns = t2 - g_begin_ns;
         pthread_mutex_unlock(&g_lock);
     }
     // the writer finishes what was received before the file is closed (and, on a broken connection, the .part keeps
     // every byte that came: the resume hashes it again)
-    if (pipe_drain(pipe) && io_err != 1) io_err = 2;
+    uint64_t td = now_ns();
+    int drain_err = pipe_drain(pipe);
+    uint64_t te = now_ns();
+    pthread_mutex_lock(&g_lock);
+    g_status.slot_ns += te - td;   // waiting on the writer, as a full pipe is
+    g_status.send_ns = te - g_begin_ns;
+    pthread_mutex_unlock(&g_lock);
+    if (drain_err && io_err != 1) io_err = 2;
     if (!io_err && !strcmp(rel, "eboot.bin") && fsync(out_fd) != 0) io_err = 2;
     if (close(out_fd) != 0 && !io_err) io_err = 2;
     if (io_err) {
@@ -823,7 +877,7 @@ static int handle_put(int fd, Pipe *pipe) {
         return 0;
     }
     struct stat st;
-    if (lstat(final_path, &st) == 0) manifest_set(rel, fsize, stat_mtime_ns(&st), got_sha);
+    if (path_stat(final_path, &st) == 0) manifest_set(rel, fsize, stat_mtime_ns(&st), got_sha);
 
     pthread_mutex_lock(&g_lock);
     g_status.files_done++;
@@ -834,6 +888,247 @@ static int handle_put(int fd, Pipe *pipe) {
         if (!write_exact(fd, &ok, 1)) return 0;
     }
     return 1;
+}
+
+static int adopt_reply(int fd, char tag, const char *msg) {
+    uint16_t n = (uint16_t)(msg ? strlen(msg) : 0);
+    if (n > 250) n = 250;
+    uint8_t hdr[3] = {(uint8_t)tag, (uint8_t)n, (uint8_t)(n >> 8)};
+    return write_exact(fd, hdr, tag == 'N' ? 3 : 1) && (tag != 'N' || !n || write_exact(fd, msg, n));
+}
+
+// Hashes what the open upload has beyond *done, at most `cap` bytes (into buf, IO_BUF_SIZE). Returns the bytes read,
+// 0 when caught up, -1 on a read error.
+static int64_t adopt_hash_more(int in_fd, Sha256 *sha, uint64_t *done, uint64_t cap, uint8_t *buf) {
+    struct stat st;
+    if (fstat(in_fd, &st) != 0) return -1;
+    uint64_t have = (uint64_t)st.st_size, got = 0;
+    while (*done < have && got < cap) {
+        size_t want = have - *done > IO_BUF_SIZE ? IO_BUF_SIZE : (size_t)(have - *done);
+        ssize_t k = pread(in_fd, buf, want, (off_t)*done);
+        if (k < 0 && errno == EINTR) continue;
+        if (k <= 0) return k < 0 ? -1 : (int64_t)got;
+        sha256_update(sha, buf, (size_t)k);
+        *done += (uint64_t)k;
+        got += (uint64_t)k;
+    }
+    return (int64_t)got;
+}
+
+// The folder FTP wrote into, as the title sees it: a file another process (the FTP server) creates in the title folder
+// never appears under /app0 while the title runs (23/11/2026: the probe uploaded to /data/homebrew/PPSA99193 was not
+// there for /app0 through a whole upload), though what the title writes through /app0 is there at once for FTP. So
+// PIT1A works in that folder by its own path, once it proves to be the title folder: its eboot.bin has the same size
+// and modification time as /app0's. Returns NULL, or why not (into why).
+static const char *same_folder(const char *dir, char *why, size_t cap) {
+    char pa[600], pb[600];
+    struct stat sa, sb, ds;
+    if (dir[0] != '/' || strstr(dir, "/..") || strstr(dir, "//")) {
+        snprintf(why, cap, "%s: not a plain absolute path", dir);
+        return why;
+    }
+    if (stat(dir, &ds) != 0 || !S_ISDIR(ds.st_mode)) {
+        snprintf(why, cap, "%s: no such folder for the title (%s)", dir, strerror(errno));
+        return why;
+    }
+    snprintf(pa, sizeof pa, "%s/eboot.bin", g_root);
+    snprintf(pb, sizeof pb, "%s/eboot.bin", dir);
+    if (stat(pa, &sa) != 0) {
+        snprintf(why, cap, "%s: %s", pa, strerror(errno));
+        return why;
+    }
+    if (stat(pb, &sb) != 0) {
+        snprintf(why, cap, "%s: %s", pb, strerror(errno));
+        return why;
+    }
+    if (sa.st_size != sb.st_size || stat_mtime_ns(&sa) != stat_mtime_ns(&sb)) {
+        snprintf(why, cap, "%s is another folder: eboot.bin %lld bytes, time %llu there, %lld and %llu in %s", dir,
+                 (long long)sb.st_size, (unsigned long long)stat_mtime_ns(&sb), (long long)sa.st_size,
+                 (unsigned long long)stat_mtime_ns(&sa), g_root);
+        return why;
+    }
+    return NULL;
+}
+
+// PIT1A: a large file the builder puts on the console by FTP instead of PIT1P. The title's own writes run at ~20 MiB/s
+// for about 2 GB, then at ~2 MiB/s for the rest of the process's life (measured 23/11/2026: 3 GiB in 554 s, in /app0
+// and in /data alike, one file or two, with or without fsync; the FTP payload, another process, held 20.3 MiB/s), and
+// romfs.nup is 23 GB: some three hours. Here the title only reads.
+// u8 flags (1: a probe, removed once checked), u16 length, the path, u64 size, SHA-256, u16 length and the title
+// folder as FTP wrote into it (same_folder). Answers 'K' (or 'N' as below: not the title folder), then the builder
+// appends to <path>.pitstop-ftp, made here empty, there by FTP while this follows the upload (the screen's progress) and hashes what
+// has arrived; then the builder sends 'U' (uploaded) or 'C' (the upload failed: it sends the file by PIT1P instead).
+// After 'U': 'p' bytes while the rest is hashed, then 'K' (checked, renamed into place, in the manifest) or 'N', u16
+// length, why (nothing changed; the connection goes on, and no error screen: the builder falls back to PIT1P).
+static int handle_adopt(int fd, Pipe *pipe) {
+    uint8_t *buf = pipe->buf[0];   // the writer is idle between files
+    uint8_t hdr[3];
+    if (!read_exact(fd, hdr, 3)) return 0;
+    uint8_t flags = hdr[0];
+    uint16_t plen = get_u16le(hdr + 1);
+    if (plen == 0 || plen >= 512) {
+        send_err(fd, "invalid path length");
+        return 0;
+    }
+    char rel[512];
+    uint8_t meta[40];
+    if (!read_exact(fd, rel, plen) || !read_exact(fd, meta, 40)) return 0;
+    rel[plen] = 0;
+    if (!ps5_recv_validate_path(rel)) {
+        send_err(fd, "rejected path outside title folder");
+        return 0;
+    }
+    uint8_t dl[2];
+    char dir[512];
+    if (!read_exact(fd, dl, 2)) return 0;
+    uint16_t dlen = get_u16le(dl);
+    if (dlen == 0 || dlen >= sizeof dir) {
+        send_err(fd, "invalid folder length");
+        return 0;
+    }
+    if (!read_exact(fd, dir, dlen)) return 0;
+    dir[dlen] = 0;
+    while (dlen > 1 && dir[dlen - 1] == '/') dir[--dlen] = 0;
+    const int probe = flags & 1;
+    const uint64_t fsize = get_u64le(meta);
+    const uint8_t *want_sha = meta + 8;
+    char final_path[1280], staged[1320], msg[300];
+    if (same_folder(dir, msg, sizeof msg)) return adopt_reply(fd, 'N', msg);
+    if (snprintf(final_path, sizeof final_path, "%s/%s", dir, rel) >= (int)sizeof final_path ||
+        snprintf(staged, sizeof staged, "%s%s", final_path, FTP_SUFFIX) >= (int)sizeof staged) {
+        send_err(fd, "path too long");
+        return 0;
+    }
+    struct stat existing;
+    if (lstat(final_path, &existing) == 0 && S_ISLNK(existing.st_mode)) {
+        send_err(fd, "refusing to write through symlink");
+        return 0;
+    }
+    if (!ensure_parent_dirs(dir, rel)) {   // so the FTP upload finds its folder
+        send_err(fd, "could not create target directory");
+        return 0;
+    }
+    // The file is the title's own, made here, empty, and the builder appends to it by FTP (APPE): a file the FTP server
+    // creates stays out of the title's sight, even by the folder's own path (23/11/2026), and it may be another
+    // process's file in the same folder that the title cannot see change. 0777: the FTP server writes it.
+    int in_fd = open(staged, O_RDWR | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0777);
+    if (in_fd < 0) {
+        snprintf(msg, sizeof msg, "%s: making %s failed: %s", rel, staged, strerror(errno));
+        return adopt_reply(fd, 'N', msg);
+    }
+    fchmod(in_fd, 0777);
+    struct stat in_st;
+    fstat(in_fd, &in_st);
+    pthread_mutex_lock(&g_lock);
+    const uint64_t base = g_status.bytes_done;
+    if (!probe) {
+        g_status.state = PS5_RECV_RECEIVING;
+        snprintf(g_status.current_file, sizeof g_status.current_file, "%s (by FTP)", rel);
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (!adopt_reply(fd, 'K', NULL)) return 0;
+
+    Sha256 sha;
+    sha256_init(&sha);
+    uint64_t hashed = 0;
+    char end = 0;
+    while (!end) {
+        struct pollfd pfd = {.fd = fd, .events = POLLIN};
+        int64_t got = 0;
+        if (in_fd < 0 && (in_fd = open(staged, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)) >= 0) fstat(in_fd, &in_st);
+        if (in_fd >= 0) got = adopt_hash_more(in_fd, &sha, &hashed, 64ull << 20, buf);
+        if (got < 0) {   // tried again from where it stopped; on 'U' a failing read is the answer
+            close(in_fd);
+            in_fd = -1;
+            got = 0;
+        }
+        if (!probe && in_fd >= 0) {
+            struct stat now;
+            uint64_t seen = fstat(in_fd, &now) == 0 ? (uint64_t)now.st_size : hashed;
+            pthread_mutex_lock(&g_lock);
+            g_status.bytes_done = base + (seen < fsize ? seen : fsize);
+            g_status.send_ns = now_ns() - g_begin_ns;
+            pthread_mutex_unlock(&g_lock);
+        }
+        int r = poll(&pfd, 1, got > 0 ? 0 : 250);
+        if (r < 0 && errno != EINTR) {
+            if (in_fd >= 0) close(in_fd);
+            return 0;
+        }
+        if (r > 0) {
+            ssize_t k = recv(fd, &end, 1, 0);
+            if (k <= 0) {
+                if (in_fd >= 0) close(in_fd);
+                return 0;   // the builder is gone: its .pitstop-ftp stays for it to remove
+            }
+            if (end != 'U' && end != 'C') {
+                if (in_fd >= 0) close(in_fd);
+                send_err(fd, "bad FTP upload notice");
+                return 0;
+            }
+        }
+    }
+    const char *why = NULL;
+    if (end == 'C') {
+        why = "cancelled";
+    } else {
+        struct stat st;
+        if (path_stat(staged, &st) != 0 || !S_ISREG(st.st_mode)) {
+            snprintf(msg, sizeof msg, "%s: no FTP upload at %s (%s)", rel, staged, strerror(errno));
+            why = msg;
+        } else if ((uint64_t)st.st_size != fsize) {
+            snprintf(msg, sizeof msg, "%s: the FTP upload has %llu bytes, not %llu", rel,
+                     (unsigned long long)st.st_size, (unsigned long long)fsize);
+            why = msg;
+        } else {
+            if (in_fd < 0 || st.st_ino != in_st.st_ino || st.st_dev != in_st.st_dev) {   // replaced: from the start
+                if (in_fd >= 0) close(in_fd);
+                in_fd = open(staged, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+                sha256_init(&sha);
+                hashed = 0;
+            }
+            uint64_t last = now_ns();
+            int64_t got = 1;
+            while (in_fd >= 0 && hashed < fsize && (got = adopt_hash_more(in_fd, &sha, &hashed, 16ull << 20, buf)) > 0) {
+                if (now_ns() - last >= 1000000000ull) {   // the builder waits on a 30 s timeout
+                    last = now_ns();
+                    if (!write_exact(fd, "p", 1)) {
+                        close(in_fd);
+                        return 0;
+                    }
+                }
+            }
+            uint8_t got_sha[32];
+            sha256_final(&sha, got_sha);
+            if (in_fd < 0 || hashed != fsize) {
+                snprintf(msg, sizeof msg, "%s: reading the FTP upload failed: %s", rel, strerror(errno));
+                why = msg;
+            } else if (memcmp(got_sha, want_sha, 32) != 0) {
+                snprintf(msg, sizeof msg, "%s: the FTP upload's SHA-256 differs", rel);
+                why = msg;
+            } else if (rename(staged, final_path) != 0) {
+                snprintf(msg, sizeof msg, "%s: putting the FTP upload in place failed: %s", rel, strerror(errno));
+                why = msg;
+            } else if (probe) {
+                unlink(final_path);
+            } else {
+                if (path_stat(final_path, &st) == 0) manifest_set(rel, fsize, stat_mtime_ns(&st), got_sha);
+                pthread_mutex_lock(&g_lock);
+                g_status.files_done++;
+                g_status.bytes_done = base + fsize;
+                pthread_mutex_unlock(&g_lock);
+            }
+        }
+    }
+    if (in_fd >= 0) close(in_fd);
+    if (why) {
+        unlink(staged);
+        pthread_mutex_lock(&g_lock);
+        if (!probe) g_status.bytes_done = base;   // the file comes again by PIT1P
+        pthread_mutex_unlock(&g_lock);
+        return end == 'C' ? adopt_reply(fd, 'K', NULL) : adopt_reply(fd, 'N', why);
+    }
+    return adopt_reply(fd, 'K', NULL);
 }
 
 static void handle_client(int fd, Pipe *pipe) {
@@ -864,6 +1159,8 @@ static void handle_client(int fd, Pipe *pipe) {
             if (!handle_begin(fd)) break;
         } else if (op == 'P') {
             if (!handle_put(fd, pipe)) break;
+        } else if (op == 'A') {
+            if (!handle_adopt(fd, pipe)) break;
         } else if (op == 'D') {
             manifest_save(g_root);
             refresh_shadowmount_sce_sys(g_root);

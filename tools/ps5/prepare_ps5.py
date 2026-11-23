@@ -50,7 +50,7 @@ from machine import Failed, default_cc, default_glslc, mem_gb, own_children, sha
 from nup_reader import NupError, NupReader, is_nup  # noqa: E402
 from nup_writer import write_nup  # noqa: E402
 from ps5_prepare_common import EMIT_HOOKS, check, copy_tree, emit, remove_stale, run, sm86_spec  # noqa: E402
-from send_ps5 import StatusNotifier, TransferError, send_directory  # noqa: E402
+from send_ps5 import StatusNotifier, TransferError, default_ftp_ports, send_directory  # noqa: E402
 
 TITLE_ID = "PPSA99193"
 PROFILE = "ps5-high144"
@@ -998,6 +998,7 @@ def main() -> int:
                     cache_path=cache_tsv,
                     on_progress=transfer.progress,
                     on_phase=transfer.phase,
+                    ftp_ports=default_ftp_ports(),   # romfs.nup by the console's FTP server when it runs one
                 )
             except (TransferError, OSError) as e:
                 raise Failed(f"sending to PS5 {args.send} failed: {e}") from None

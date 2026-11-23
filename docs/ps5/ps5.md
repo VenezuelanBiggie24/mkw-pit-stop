@@ -438,6 +438,21 @@ A redistributable PS5 package cannot ship the full `eboot.bin` (which statically
   broken send of it goes on from the receiver's `.part` (`PIT1P` flag 2, the part's `.want` naming size and SHA-256;
   only to a receiver with `"resume"`), and `PIT1X` then removes the loose `romfs/` beside it (`"remove"`). The
   manifest is hash-indexed: a lookup that walked the table cost some 2x10^10 string compares over one loose send.
+- **Large files by the console's FTP server**: the title's own writes run at ~20 MiB/s for its first ~2 GB, then
+  at ~2 MiB/s for the rest of the process's life (measured 23/11/2026: 3 GiB in 554 s by `PIT1P`, in `/app0` and in
+  `/data` alike, one file or two, with or without `fsync`; 151 s by FTP to the same console), so a 23 GB `romfs.nup`
+  took some three hours. When an FTP server answers (port 2121, else 1337; `PS5_FTP_PORT`, 0 for none) and the
+  receiver has `"ftp"`, files of 256 MiB and up go by FTP into the title folder named by
+  `/user/app/PPSA99193/mount.lnk`. `PIT1A` names that folder; the receiver checks it is its own (`eboot.bin` alike
+  through it and `/app0`), makes `<path>.pitstop-ftp` there empty, and the builder appends to it (`APPE`). The
+  receiver follows the upload (the screen's progress), hashes it as it arrives, then checks it, renames it into place
+  and records it in the manifest; a 64-byte probe goes first, and anything that fails sends the file by `PIT1P`
+  instead. Measured 23/11/2026: 3 GiB in 161 s (19.1 MiB/s), the check after the upload ~2 s; the next send skipped
+  it. The send log gives each FTP file's rate and, for the rest, where the time went (`PIT1I` `"timing"`, also on the
+  placeholder screen).
+- **`lstat` inside the title**: it fails where `stat` answers (as `ps5_sys.c` already knew), so the receiver uses
+  `lstat`, else `stat` (`path_stat`), except for its symbolic-link checks and `remove_tree`. Before, no received file
+  was recorded: the console's `.pitstop-manifest.tsv` was 0 bytes and every send sent everything again.
 - **The shaders as one file**: `spirv.nup` holds the `.spv`, `.cs.spv` and `.res.json` the title reads
   (`gfx_shader.c` `prepared_read`; the translator's `.done` and `.result` stay on the PC), 23,000 files in place of
   46,000 that went at ~50 a second.
