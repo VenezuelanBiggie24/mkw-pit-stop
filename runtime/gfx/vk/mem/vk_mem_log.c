@@ -280,6 +280,7 @@ void vk_oom_census(const char *what) {
     rt_log("vk: === OOM census (%s) ===", what ? what : "alloc");
     ps5_vk_snap_refresh();
     vram_log_now();
+    vk_texture_gpu_shapes("oom", 0);
     log_mem_census(0, 1);
     plat_mem_census_log("oom");
 }
@@ -372,6 +373,7 @@ void vram_log(uint64_t frame) {
     }
     VkTexCensus t;
     vk_texture_census(&t);
+    if (rt_trace & RT_TRACE_PERF) vk_texture_gpu_shapes("high mark", t.gpu_owned_bytes ? t.gpu_owned_bytes : 1);
     int cb_lp = 0, cb_sp = 0, cb_lc = 0, cb_sc = 0, dc_lp = 0, dc_rp = 0;
     vk_exec_cb_dpool_stats(&cb_lp, &cb_sp, &cb_lc, &cb_sc);
     vk_dcache_dpool_stats(&dc_lp, &dc_rp);

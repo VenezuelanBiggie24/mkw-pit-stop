@@ -157,6 +157,14 @@ unit zeroed bytes 0xd000-0x1d000 of each card (task 32: magenta bands, gone with
 That version gave back 281-328 MiB per census; this one 2.0-2.4 MiB, since the finalized storage holds the game's data
 (548-678 MiB backed in task 32's fix run).
 
+Issue 11 (game 1.0.0 out of direct memory in the third race of a Grand Prix) was the race shadow map. 1.0.0 initializes it (3072x3072, 3 layers of D16, 54 MiB) at a new
+place of the render-buffer pool without finalizing the last one, so on Race_Coaster_A_00 the runtime made it 2,539
+times and held up to 9 live copies, 501 MiB (`mem: gpu-owned by shape`, run issue11-shapes-20261123-210136, which
+finished the Grand Prix by luck); with the guest near 5.3 GiB the next 54 MiB image or a 4 MiB transient buffer
+failed. 1.8.0 finalizes its maps, and released entries written over by a later image were already dropped
+(vk_tex_evict.c). Live GPU-owned images now go by the same rule when idle for `MKW_TEX_LIVE_DROP_IDLE` submissions (default 4; with 64 the drop lagged and 9 maps were live again). Verified on the console (issue11-livedrop4-20261123-215530): the Grand Prix finished, 304 MiB free at worst against 68, no out-of-memory retries against 32, GPU-owned images at 617 MiB at most against 1.1-1.3 GiB, 58.3 fps as before. A hook giving back the guest memory of blocks freed in the game's ExpHeaps was tried and returned under 256 MiB in a Grand Prix: the guest's growth (~5.2 GiB, 1.8.0 alike) is still open
+(`drop_overwritten_live`, every 64 MiB of GPU-owned images made and before an image creation gives up).
+
 `MKW_PACK=1` (default 0 until a console run passes) packs cold guest memory instead of holding it: under memory
 pressure the governor's thread compresses (zstd level 1) each 64 KiB unit frozen for `MKW_PACK_COLD_S` (default 30) and
 not GPU-imported or early-watched, and gives back its direct memory when it shrinks to 75 % or less; a zero unit is

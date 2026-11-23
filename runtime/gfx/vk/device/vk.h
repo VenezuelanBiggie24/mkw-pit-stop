@@ -721,6 +721,8 @@ typedef struct {
     uint32_t epoch;
 } VkTexCensus;
 void vk_texture_census(VkTexCensus *s);
+void vk_texture_gpu_shapes(const char *why, uint64_t gpu_owned_bytes);   // issue 11: GPU-owned images by shape (0: always)
+void tex_shape_made(int32_t fmt, uint32_t w, uint32_t h, uint32_t layers, uint32_t levels, uint64_t bytes);
 // The textures whose storage starts in [lo, hi) (one pool), for the memory census: distinct storage addresses, their
 // guest storage bytes and how many of those are backed, and the device memory of the images made from them, by format
 // (ASTC to BC7, ASTC to RGBA8, other), released, idle past the eviction age, and never uploaded.

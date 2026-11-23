@@ -392,6 +392,83 @@ static void drop_overwritten(void) {
     free(w), free(gone);
 }
 
+// The same rule for entries the game never released (issue 11). 1.0.0 initializes its race shadow map (3072x3072, 3
+// layers of D16, 54 MiB) at a new place of the render-buffer pool without finalizing the last one: on
+// Race_Coaster_A_00 the runtime made it 2 539 times in a few minutes and held up to 9 of them live, 501 MiB, while
+// the dynamic-resolution targets around it moved (issue11-shapes-20261123-210136); with the guest near 5.3 GiB, the
+// next 54 MiB image or a 4 MiB transient buffer found no memory (issue11-100-*, issue11-heaprel-*). On the console
+// those maps are the same pool memory, and once a newer target is written over one, what it held is gone there too.
+// So a live GPU-owned image goes when a later write (newer wr_fence) covers part of its storage and nothing looked
+// it up for MKW_TEX_LIVE_DROP_IDLE submissions (default 4): it has nothing of its own left, and if the game names it
+// again it is made again, as a released one would be. Writers at its own address are left to the alias copies
+// (vk_tex_alias.c). With MKW_TEX_EVICT_IDLE's 64 the drop lagged the remaking: 9 maps live at once again and GPU-owned
+// images at 1.1-1.3 GiB through the race (issue11-livedrop-20261123-212301, which finished with 68 MiB free).
+// Run every 64 MiB of GPU-owned images made (tex_gpu_made), and before an image creation gives up.
+static uint64_t live_dropped_n, live_dropped_bytes, gpu_made_since;
+
+int drop_overwritten_live(void) {
+    VkCtx *c = vk_ctx();
+    if (!c) return 0;
+    Span *w = malloc(sizeof *w * (size_t)(by_key.n + 1));
+    Tex **gone = malloc(sizeof *gone * (size_t)(by_key.n + 1));
+    if (!w || !gone) { free(w), free(gone); return 0; }
+    int nw = 0, ng = 0;
+    for (uint32_t i = 0; i < by_key.cap; i++) {
+        Tex *e = by_key.vals[i];
+        if (e && e->wr_fence && e->t.L.size && e->t.L.size <= WRITER_SPAN)
+            w[nw++] = (Span){e->key.addr, e->key.addr + e->t.L.size, e->wr_fence};
+    }
+    qsort(w, (size_t)nw, sizeof *w, by_lo);
+    static int32_t idle = -1;
+    if (idle < 0) {
+        const char *v = cfg_get("MKW_TEX_LIVE_DROP_IDLE");
+        idle = v && *v && atoi(v) > 0 ? atoi(v) : 4;
+    }
+    uint64_t freed = 0;
+    for (uint32_t i = 0; i < by_key.cap; i++) {
+        Tex *e = by_key.vals[i];
+        if (!e || e->released || !e->alloc || !e->pub.gpu_owned || e->pub.mirrored || e->sparse || e->pin ||
+            !e->wr_fence || !e->t.L.size || (uint32_t)(submit_epoch - e->seen) <= (uint32_t)idle)
+            continue;
+        uint64_t lo = e->key.addr, hi = lo + e->t.L.size, from = lo > WRITER_SPAN ? lo - WRITER_SPAN : 0;
+        int a = 0, b = nw;
+        while (a < b) {
+            int m = (a + b) / 2;
+            if (w[m].lo < from) a = m + 1;
+            else b = m;
+        }
+        for (int k = a; k < nw && w[k].lo < hi; k++)
+            if (w[k].hi > lo && w[k].lo != lo && w[k].fence > e->wr_fence) { gone[ng++] = e; break; }
+    }
+    for (int i = 0; i < ng; i++) {
+        VmaAllocationInfo vi = {0};
+        vmaGetAllocationInfo(c->vma, gone[i]->alloc, &vi);
+        freed += vi.size;
+        destroy_idle(gone[i]);
+    }
+    free(w), free(gone);
+    if (ng) {
+        live_dropped_n += (uint64_t)ng, live_dropped_bytes += freed;
+        static int logs;
+        static uint64_t logged_gib;
+        if (logs++ < 8 || (live_dropped_bytes >> 30) > logged_gib)
+            rt_log("vk: live GPU-owned images written over by a later image and idle: %d dropped (%llu MiB), %llu in "
+                   "all (%llu MiB)", ng, (unsigned long long)(freed >> 20), (unsigned long long)live_dropped_n,
+                   (unsigned long long)(live_dropped_bytes >> 20)),
+                logged_gib = live_dropped_bytes >> 30;
+    }
+    return ng;
+}
+
+void tex_gpu_made(uint64_t bytes) {
+    gpu_made_since += bytes;
+    if (gpu_made_since < (64ull << 20)) return;
+    gpu_made_since = 0;
+    lock();   // recursive: image creation may hold it already
+    drop_overwritten_live();
+    unlock();
+}
+
 void sweep_released(void) {
     for (Tex *r; nreleased > RELEASED_MAX && (r = rel_oldest_droppable());) destroy_idle(r);
     if (released_bytes <= released_cap()) return;
