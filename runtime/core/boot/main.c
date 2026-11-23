@@ -954,8 +954,14 @@ int main(int argc, char **argv) {
         int ready = builtin != NULL && ps5_game_files_ready("/app0", RT_GAME_ID, why, sizeof why);
         if (!builtin && !why[0])
             snprintf(why, sizeof why, "Game-free Pit Stop placeholder (build from PC)");
-        if (!ready) {
-            ps5_placeholder_run("/app0", rt_port_version, RT_GAME_ID, builtin != NULL, why);
+        // a working install starts the game and never listens: L1 + R1 held at start opens the receiver, so a new build
+        // can be sent without first putting the placeholder's eboot.bin back by FTP. mkw.ini first: the pad, opened
+        // here, reads its settings once (MKW_INPUT, MKW_VIRTUAL_PADS), and mem_init's later cfg_init is then a no-op
+        if (ready) cfg_init();
+        int update = ready && ps5_update_requested();
+        if (update) snprintf(why, sizeof why, "L1 + R1 held at start");
+        if (!ready || update) {
+            ps5_placeholder_run("/app0", rt_port_version, RT_GAME_ID, builtin != NULL, why, update);
             plat_exit(0);
         }
     }

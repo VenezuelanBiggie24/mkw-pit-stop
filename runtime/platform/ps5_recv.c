@@ -400,6 +400,40 @@ static void send_err(int fd, const char *msg) {
     set_error(msg);
 }
 
+static int add_game_tree(const char *base, char **cands, int n, int cap);
+
+// The game copies in the title folder (add_game_tree: the folder itself and its updates/<version>/), each with its
+// exefs/main's build id, as JSON for PIT1I: the builder tells the player what the console holds already (an upgrade
+// keeps it, another version is sent beside it). Not ps5_game_dir: that one is cached for the boot and hashes mains.
+static void game_list_json(const char *root, char *out, size_t cap) {
+    char *cands[16];
+    int n = add_game_tree(root, cands, 0, 16);
+    size_t len = (size_t)snprintf(out, cap, "[");
+    size_t rlen = strlen(root);
+    for (int i = 0; i < n; i++) {
+        const char *rel = strncmp(cands[i], root, rlen) ? cands[i] : cands[i] + rlen;
+        while (*rel == '/') rel++;
+        char p[800], hex[17] = "";
+        snprintf(p, sizeof p, "%s/exefs/main", cands[i]);
+        int fd = open(p, O_RDONLY);
+        uint8_t head[0x48];
+        if (fd >= 0) {
+            if (pread(fd, head, sizeof head, 0) == (ssize_t)sizeof head && !memcmp(head, "NSO0", 4))
+                for (int b = 0; b < 8; b++) snprintf(hex + 2 * b, 3, "%02x", head[0x40 + b]);
+            close(fd);
+        }
+        if (!strpbrk(rel, "\"\\") && len + 1 < cap) {
+            size_t was = len;
+            len += (size_t)snprintf(out + len, cap - len, "%s{\"dir\":\"%s\",\"build_id\":\"%s\"}", len > 1 ? "," : "",
+                                    rel, hex);
+            if (len + 2 > cap) len = was;   // no room for this one and the closing bracket: the list stays valid
+        }
+        free(cands[i]);
+    }
+    if (len + 2 > cap) len = cap - 2;
+    snprintf(out + len, cap - len, "]");
+}
+
 static int handle_info(int fd) {
     char why[128];
     int ready = ps5_game_files_ready(g_root, g_game_id, why, sizeof why);
@@ -413,16 +447,18 @@ static int handle_info(int fd) {
     pthread_mutex_lock(&g_lock);
     Ps5RecvStatus t = g_status;
     pthread_mutex_unlock(&g_lock);
-    char json[1024];
+    char games[1400];
+    game_list_json(g_root, games, sizeof games);
+    char json[2048];
     // "timing": the current or last send's (Ps5RecvStatus send_ns...), which send_ps5.py asks for before PIT1D and
     // prints, so a player's log says where the time went
     int n = snprintf(json, sizeof json,
                      "{\"title_id\":\"PPSA99193\",\"port_version\":\"%s\",\"rt_game_id\":\"%s\","
                      "\"has_game_code\":%d,\"game_files_ready\":%d,\"free_bytes\":%llu,\"free_real\":0,\"status\":1,\"resume\":1,\"remove\":1,"
-                     "\"ftp\":1,\"root\":\"%s\",\"timing\":{\"bytes\":%llu,\"send_ms\":%llu,\"net_ms\":%llu,\"slot_ms\":%llu,"
+                     "\"ftp\":1,\"root\":\"%s\",\"games\":%s,\"timing\":{\"bytes\":%llu,\"send_ms\":%llu,\"net_ms\":%llu,\"slot_ms\":%llu,"
                      "\"write_ms\":%llu,\"hash_ms\":%llu,\"rcvbuf\":%d}}",
                      g_port_ver, g_game_id, g_has_game_code ? 1 : 0, ready ? 1 : 0, (unsigned long long)free_bytes,
-                     g_root,
+                     g_root, games,
                      (unsigned long long)t.bytes_done, (unsigned long long)(t.send_ns / 1000000),
                      (unsigned long long)(t.net_ns / 1000000), (unsigned long long)(t.slot_ns / 1000000),
                      (unsigned long long)(t.write_ns / 1000000), (unsigned long long)(t.hash_ns / 1000000), t.rcvbuf);

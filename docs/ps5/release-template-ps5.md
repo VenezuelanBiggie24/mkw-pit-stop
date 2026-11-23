@@ -46,9 +46,32 @@ If the PS5 stays on **Waiting for connection**, check the IP and that the PC and
 
 ## Updating
 
-Unpack the new builder over your folder (or pass the same `--work` directory) and build again (**Build for PS5** on Windows, `prepare_ps5.py` on Linux): steps whose inputs have not changed (such as `romfs/` and unchanged shaders) are skipped, and only updated parts are rebuilt and uploaded. Saves and `mkw.ini` settings on the console are kept.
+A working title starts the game and does not listen for the PC, so it has to be put back on the receiver screen first.
+Your game files (`romfs.nup`, `exefs`, `spirv.nup`), saves and `mkw.ini` stay on the console throughout, and only the
+new game code and changed shaders are sent.
 
-**Installed from ProsperoStore:** the store's update installs the new placeholder only. Then build again from the PC as above, while the title shows **Game files missing**. The game files, saves and `mkw.ini` the update put aside (in `prosperostore/previous/PPSA99193`) move back on the title's first start, so only the new game code and changed shaders are sent.
+**With an FTP server running on the PS5** (ftpsrv or etaHEN's): close Pit Stop on the PS5 and build again on the PC
+(step 2). When the title's receiver does not answer, the builder installs over FTP instead, sending only what changed.
+The receiver is still the better way when you can open it: it checks every file's SHA-256 and shows the progress on the TV.
+
+1. **Open the receiver screen on the PS5**, one of these ways:
+   - **Title built with this release or newer:** hold **L1 + R1** while you launch **Mario Kart World: Pit Stop**. It
+     shows **Ready to receive an update** with the console's IP. (Pressed by mistake? Press **Cross** to close it.)
+   - **Title built with an older release** (it has no L1 + R1 option): upload this release's placeholder over it.
+     Unzip `mkw-pit-stop-<version>-ps5-placeholder-PPSA99193.zip` and upload its `PPSA99193` folder onto
+     `/data/homebrew/PPSA99193` with your FTP client, replacing files. This replaces `eboot.bin`, `sce_sys`,
+     `sce_module` and `licenses`, and leaves your game files, saves and settings alone. Launch the title: it shows
+     **Game files out of date or missing**.
+   - **Installed from ProsperoStore:** update it in the store. The update installs the new placeholder; the game
+     files, saves and `mkw.ini` it put aside (in `prosperostore/previous/PPSA99193`) move back on the title's first
+     start, which then shows **Game files out of date or missing**.
+2. **On the PC:** unpack the new builder over your old builder folder (or pass the same `--work` directory), so its
+   build cache is reused, and build again: **Build for PS5** on Windows, `prepare_ps5.py --send <PS5_IP>` on Linux.
+   Steps whose inputs have not changed are skipped.
+3. When the PS5 shows **Transfer complete!**, press **Cross** and launch the title again.
+
+**Title on a USB drive:** no receiver screen is needed. Plug the drive into the PC and build to it again (**To a USB
+drive**): only the files that changed are copied.
 
 ## Known issues
 

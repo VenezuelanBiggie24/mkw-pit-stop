@@ -434,6 +434,21 @@ A redistributable PS5 package cannot ship the full `eboot.bin` (which statically
   `ps5_game_files_ready("/app0", RT_GAME_ID)` reports missing/outdated files or `pitstop-game.id` mismatch,
   `ps5_placeholder_run()` displays the Pit Stop missing-files screen (console IP from `sceNetCtlGetInfo`, expected
   version, transfer progress) and starts the `PIT1` TCP receiver on port `19913`.
+- **What the builder tells the player first** (`prepare_ps5.py` 'info' lines, kept on the launcher's build page): the
+  dump's version, build id and folder, and the versions it holds but does not build; what the PS5 runs and which game
+  copies it holds (PIT1I `games`: each folder with its `exefs/main` build id), so it says **First install** or
+  **Upgrade** before the build; and once the files are compared, how many changed and how much is sent and kept.
+- **Install by FTP without the receiver** (`send_ps5.py send_directory_ftp`): when nothing answers on 19913, the
+  builder uses the console's FTP server (2121, then 1337) on the title folder (`mount.lnk`'s, else
+  `/data/homebrew/PPSA99193`, made for a first install). ftpsrv 1.16 (23/11/2026) makes files 0777, overwrites on
+  `STOR`, replaces on `RNTO`, and `AVBL` gives the drive's real free space. Each file goes to `<rel>.pitstop-ftp`, its
+  `SIZE` is checked and it is renamed over the old one, `eboot.bin` last; a file is skipped when the builder's
+  `ftp-sent.tsv` or the receiver's manifest has its SHA-256 and `MLSD` shows it unchanged. No SHA-256 on the console
+  and nothing on the TV; only named files are deleted (an `exefs/` module the new version lacks).
+- **Updating a working install**: with the game files ready, **L1 + R1** held at start (`ps5_update_requested`,
+  read from the DualSense's raw reading: held through the launch, the buttons never reach the title as a pad reading; the check takes 11-14 ms, at most 3 s without a reading) opens the same screen as **Ready to receive an
+  update**, so a new build can be sent without uploading the placeholder's `eboot.bin` first. `cfg_init()` runs
+  before it, as the pad reads `mkw.ini` once when it opens. Cross / Circle closes the screen while no send is under way.
 - **Receiver security**: `ps5_recv.c` runs only while the placeholder screen is visible, never starts once the game
   launches, rejects any path leaving the title root (`..`, leading `/`, `\`, symlinks), streams into `.pitstop.part`
   with SHA-256 verification before atomic rename, skips matching files via `.pitstop-manifest.tsv` so runtime updates

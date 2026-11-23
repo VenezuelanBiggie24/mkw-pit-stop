@@ -213,3 +213,27 @@ def test_game_staged_where_the_title_looks(tmp_path: Path) -> None:
     assert (out / "spirv/exefs").is_dir()
     prepare_ps5.drop_other_games(out, out)
     assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()) == ["eboot.bin"]
+
+
+def test_info_lines_say_first_install_or_upgrade(tmp_path: Path) -> None:
+    """What the launcher shows before a build: the dump's version and the ones not built, what the PS5 holds and
+    whether this is a first install or an upgrade (prepare_ps5.py 'info' lines)."""
+    v180 = next(v for v in prepare_ps5.VERSIONS if v.name == "1.8.0")
+    v100 = next(v for v in prepare_ps5.VERSIONS if v.name == "1.0.0")
+    assert prepare_ps5.dump_line(tmp_path / "d.nup", tmp_path / "d.nup", v180, True) == (
+        f"Your dump: Mario Kart World 1.8.0 (build id {v180.main_build_id}) from the .nup file {tmp_path / 'd.nup'}")
+    assert "no answer yet" in prepare_ps5.console_line(None, v180, "192.168.1.5")
+    up = {"has_game_code": 1, "port_version": "ps5-0.2.1", "games": [{"dir": "updates/917504",
+                                                                        "build_id": v180.main_build_id}]}
+    line = prepare_ps5.console_line(up, v180, "h")
+    assert line.startswith("Upgrade: the PS5 runs Pit Stop ps5-0.2.1 and holds Mario Kart World 1.8.0 in updates/917504")
+    other = prepare_ps5.console_line(up, v100, "h")
+    assert other.startswith("The PS5 runs Pit Stop ps5-0.2.1") and "This build is 1.0.0, so its game files are sent" in other
+    fresh = prepare_ps5.console_line({"has_game_code": 0, "games": []}, v100, "h")
+    assert fresh.startswith("First install: the PS5 runs the Pit Stop placeholder")
+    old = prepare_ps5.console_line({"has_game_code": 0, "game_files_ready": 1}, v100, "h")   # no "games": older title
+    assert old.startswith("Upgrade: the PS5 runs the Pit Stop placeholder with its game files in place")
+    assert prepare_ps5.plan_line(44, 23 << 30, 0, 0, "the PS5") == "First install: 44 files, 23.0 GB, go to the PS5"
+    assert prepare_ps5.plan_line(3, 230 << 20, 41, 23 << 30, "the PS5") == (
+        "Upgrade: 3 of 44 files changed, 230 MB to send; 23.0 GB on the PS5 stay")
+    assert prepare_ps5.plan_line(0, 0, 44, 1, "E:\\") == "Nothing changed: all 44 files on E:\\ are up to date"

@@ -50,6 +50,7 @@
 #include "ui/launcher/launcher_players.h"
 #include "ui/launcher/launcher_setup.h"
 #include "ui/launcher/launcher_tools.h"
+#include "ui/launcher/launcher_console.h"
 #include "ui/launcher/launcher_finddumps.h"
 #include "ui/launcher/launcher_lastrun.h"
 #include "ui/launcher/launcher_update.h"
@@ -110,6 +111,9 @@ static struct {
     int ps5_use_usb;                // 1: Build for PS5 writes to ps5_usb instead of sending over the network
     int ps5_on_console;             // 1: the copy is already on the PS5, in ps5_console_dir (ps5-console.txt)
     char ps5_console_dir[512];
+    int wz_page;                    // the PS5 setup wizard's page (WZ_CONNECT...): one question at a time
+    int wz_found_once;              // the console search ran once by itself, at the wizard's first page
+    int wz_checked_once;            // the saved address was checked once by itself
     char shortcut_note[1200];       // what the shortcut button did
     // the last setup's record (read_setup_info): the game version, the port version, the copy and how its RomFS is kept
     char game_version[32], setup_port[48], setup_source[1024], setup_mode[8];
@@ -1247,6 +1251,23 @@ static void step_mark(ImDrawList *dl, ImVec2 c, float r, bool done, bool now) {
 
 // The setup's steps, one per line: its mark, its name and, for the one under way, a bar to the right edge with the
 // count after it (a band going along the bar while the step has no count yet).
+// What each PS5 build step does, for a player who has never built anything (the wizard's build page, under the step
+// that runs): why it takes long and what it makes.
+static const char *const kPs5StepExplain[SETUP_PS5_STEPS] = {
+    "Checking your dump: which Mario Kart World version it is, and that it is complete.",
+    "Unpacking your .nup or .nx file into folders. Only the first time: later builds reuse it.",
+    "Copying the game's program files (exefs) into the PS5 title.",
+    "Packing the game's ~206,000 data files into one file, romfs.nup, which the PS5 reads directly. About 23 GB: a few "
+    "minutes the first time, skipped after.",
+    "Turning the game's Switch 2 program into C code for the PS5. This is a recompilation: nothing is emulated.",
+    "Compiling that code for the PS5's processor. The longest step of a first build: 10 to 20 minutes, depending on "
+    "this PC.",
+    "Linking the game code with Pit Stop's runtime into eboot.bin, the program the PS5 starts.",
+    "Translating the game's 11,561 graphics shaders for the PS5's GPU. The first time, NVIDIA's shader tools are "
+    "downloaded (checked by their SHA-256) to read them.",
+    "Sending the title to your PS5, or copying it to the USB drive. Files already there are skipped.",
+};
+
 static void setup_progress(const SetupState &st) {
     float s = L.scale, lh = ImGui::GetTextLineHeight(), row = lh + 14 * s, r = lh * 0.48f;
     ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -1280,10 +1301,26 @@ static void setup_progress(const SetupState &st) {
             dl->AddRectFilled(ImVec2(fmaxf(a.x, x0), a.y), ImVec2(fminf(b.x, x0 + band), b.y), LOOK_ACCENT, 5 * s);
         }
     }
+    // what the running PS5 step does, in plain words (the wizard is for players who never built anything)
+    if (st.running && st.mode == SETUP_MODE_PS5 && st.step >= 0 && st.step < SETUP_PS5_STEPS) {
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + r * 2 + 14 * s);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + fminf(ImGui::GetContentRegionAvail().x, 900 * s));
+        ImGui::TextColored(col4(LOOK_DIM), "%s", kPs5StepExplain[st.step]);
+        ImGui::PopTextWrapPos();
+    }
     // The running step's own line (a PS5 send: checking files, then the transfer's size, speed and time left)
     if (st.running && st.note[0]) {
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + r * 2 + 14 * s);
         ImGui::TextColored(col4(LOOK_HEADING), "%s", st.note);
+    }
+    // What the builder found (prepare_ps5.py 'info'): the dump, what the PS5 holds, a first install or an upgrade.
+    // The plan of the send in the heading colour, the rest dim; kept once the build ends, so it can be read then.
+    if (st.info_count) ImGui::Spacing();
+    for (int i = 0; i < st.info_count; i++) {
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + r * 2 + 14 * s);
+        ImGui::PushStyleColor(ImGuiCol_Text, col4(!strcmp(st.info_key[i], "plan") ? LOOK_HEADING : LOOK_DIM));
+        ImGui::TextWrapped("%s", st.info[i]);
+        ImGui::PopStyleColor();
     }
 }
 
@@ -1554,35 +1591,296 @@ static void setup_failed_card(const SetupState &st) {
     card_end(LOOK_BAD, with_alpha(LOOK_BAD, 22));
 }
 
-// The game files page. Not set up: what the setup needs and its three steps, which is the start screen then. Set up:
-// what is installed, and the steps folded under Set up again. A setup under way or finished shows its steps' progress
-// first, a failed one its reason with Try again above them.
-static void page_files(float w, float h) {
-    const float act_h = item_height();   // the page's buttons: a target easy to hit, as the main page's
-    float bottom = panel_begin("##files", UI_LAUNCH_FILES, w, h);
-    ImGui::BeginChild("##files_body", ImVec2(0, -bottom), ImGuiChildFlags_NavFlattened);
-    bool ready = rt_game_present();
-    SetupState st = setup_state();
-    ImGui::BeginDisabled(L.picking);
-    char state[160];
-    files_state_text(ready, state, sizeof state);
-    state_line(ready && !files_gone(), state);
-    if (const char *gone = ready ? files_gone() : nullptr) {   // where they were, and what brings them back
-        char help[PLAT_PATH_MAX * 2 + 400];
-        snprintf(help, sizeof help, menu_text(UI_LAUNCH_FILES_GONE_HELP), gone);
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + fminf(ImGui::GetContentRegionAvail().x, 620 * L.scale));
-        ImGui::TextWrapped("%s", help);
-        ImGui::PopTextWrapPos();
+// ---- The PS5 setup wizard (the PS5 builder package's start screen): one question a page, each saying in plain words
+// what it is for, so a player who never built anything gets through it. The console first: everything after depends on
+// it (a first install, an upgrade, or no receiver and the FTP server instead: launcher_console.h). Asked of a player
+// who had built 1.8.0 from a renamed folder and saw "missing exefs/main" on the TV, with nothing on the PC saying why.
+enum { WZ_CONNECT, WZ_DUMP, WZ_REVIEW, WZ_BUILD, WZ_PAGES };
+
+static void wz_text(const char *text, ImU32 colour = LOOK_TEXT) {
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + fminf(ImGui::GetContentRegionAvail().x, 900 * L.scale));
+    ImGui::PushStyleColor(ImGuiCol_Text, col4(colour));
+    ImGui::TextWrapped("%s", text);
+    ImGui::PopStyleColor();
+    ImGui::PopTextWrapPos();
+}
+
+static void wz_heading(int page, const char *title) {
+    static const char *const names[WZ_PAGES] = {"Your PS5", "Your game dump", "Ready to build", "Building"};
+    char crumbs[200] = "";
+    for (int i = 0; i < WZ_PAGES; i++) {
+        size_t n = strlen(crumbs);
+        snprintf(crumbs + n, sizeof crumbs - n, "%s%s%s%s", i ? "   >   " : "", i == page ? "[" : "", names[i],
+                 i == page ? "]" : "");
     }
-    if (gpu_bad()) gpu_card(fminf(ImGui::GetContentRegionAvail().x, 760 * L.scale));
-    update_card(fminf(ImGui::GetContentRegionAvail().x, 620 * L.scale));   // a folder not set up starts on this page
-    if (L.updated[0]) {
-        char note[300];
-        snprintf(note, sizeof note, menu_text(UI_LAUNCH_UPDATED), L.updated);
-        ImGui::TextColored(col4(LOOK_OK), "%s", note);
-    }
-    if (!cfg_last_save_ok()) ImGui::TextColored(col4(LOOK_BAD), "%s", menu_text(UI_MENU_SAVE_FAILED));
+    ImGui::TextColored(col4(LOOK_DIM), "%s", crumbs);
     ImGui::Dummy(ImVec2(0, 4 * L.scale));
+    step_head(page + 1, false, title);
+}
+
+// The dump's version, as the search for copies found it ("" when the search did not see this one: the build checks it)
+static const char *wz_dump_version(void) {
+    static FoundDump f[FOUND_MAX];
+    int n = finddumps_list(f, FOUND_MAX, nullptr);
+    for (int i = 0; i < n; i++)
+        if (!strcmp(f[i].path, L.source) && strcmp(f[i].version, "?")) return f[i].version;
+    return "";
+}
+
+static bool wz_console_ok(const ConsoleState &c) {
+    return !c.checking && c.checked_ip[0] && !strcmp(c.checked_ip, L.ps5_ip) && strcmp(c.kind, "none") && c.kind[0];
+}
+
+static void wz_console_card(const ConsoleState &c) {
+    if (c.checking) {
+        ImGui::TextColored(col4(LOOK_DIM), "Asking %s...", c.checked_ip);
+        return;
+    }
+    if (!c.checked_ip[0] || strcmp(c.checked_ip, L.ps5_ip)) return;
+    bool none = !strcmp(c.kind, "none"), ftp = !strcmp(c.kind, "ftp");
+    ImU32 edge = none ? LOOK_BAD : ftp ? LOOK_WARN : LOOK_OK;
+    card_begin(fminf(ImGui::GetContentRegionAvail().x, 960 * L.scale));
+    ImGui::TextColored(col4(edge), "%s", none ? "Not found" : ftp ? "Found your PS5 (FTP)" : "Connected to Pit Stop");
+    for (int i = 0; i < c.line_count; i++) wz_text(c.lines[i]);
+    for (int i = 0; i < c.game_count; i++) {
+        char g[200];
+        snprintf(g, sizeof g, "On the PS5: Mario Kart World %s in %s", c.game_version[i],
+                 strcmp(c.game_dir[i], ".") ? c.game_dir[i] : "the title folder");
+        wz_text(g, LOOK_HEADING);
+    }
+    if (none)
+        wz_text("Check that:\n"
+                "  - Mario Kart World: Pit Stop is open on the PS5 and shows the console's IP (on a working install, "
+                "hold L1 + R1 while it starts), or an FTP server runs on the PS5 (ftpsrv or etaHEN's);\n"
+                "  - the PS5 and this PC are on the same network;\n"
+                "  - the address is the one the PS5 shows (Settings > Network > Connection Status).",
+                LOOK_DIM);
+    card_end(edge, with_alpha(edge, 22));
+}
+
+static void wz_page_connect(const ConsoleState &c, float act_h) {
+    wz_heading(WZ_CONNECT, "Connect to your PS5");
+    wz_text("Pit Stop builds the PS5 title here on your PC from your own copy of the game, then sends it to the "
+            "console. First, find your PS5:");
+    wz_text("On the PS5, start Mario Kart World: Pit Stop and leave it on its screen. A new install shows \"Game files "
+            "missing\" with the console's IP; on an install that already works, hold L1 + R1 while it starts to get "
+            "the same screen. (Without it, an FTP server running on the PS5 also works.)",
+            LOOK_DIM);
+    ImGui::Dummy(ImVec2(0, 6 * L.scale));
+    if (!L.wz_found_once) {
+        L.wz_found_once = 1;
+        console_find_start(L.exe_dir);
+        if (L.ps5_ip[0] && !L.wz_checked_once) L.wz_checked_once = 1, console_check_start(L.exe_dir, L.ps5_ip);
+    }
+    ImGui::BeginDisabled(c.finding);
+    if (ImGui::Button(c.finding ? "Looking on your network..." : "Find my PS5", ImVec2(0, act_h)))
+        console_find_start(L.exe_dir);
+    ImGui::EndDisabled();
+    for (int i = 0; i < c.found_count; i++) {
+        char label[300];
+        snprintf(label, sizeof label, "%s   \xc2\xb7   %s##wzfound%d", c.found[i].ip, c.found[i].what, i);
+        if (ImGui::Selectable(label, !strcmp(L.ps5_ip, c.found[i].ip))) {
+            snprintf(L.ps5_ip, sizeof L.ps5_ip, "%s", c.found[i].ip);
+            console_check_start(L.exe_dir, L.ps5_ip);
+        }
+    }
+    if (!c.finding && L.wz_found_once && !c.found_count)
+        ImGui::TextColored(col4(LOOK_DIM), "Nothing found on this PC's network yet: type the PS5's IP below.");
+    ImGui::Dummy(ImVec2(0, 4 * L.scale));
+    ImGui::TextColored(col4(LOOK_DIM), "%s", menu_text(UI_LAUNCH_PS5_IP));
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(fminf(ImGui::GetContentRegionAvail().x * 0.5f, 320 * L.scale));
+    bool enter = ImGui::InputTextWithHint("##wz_ip", "192.168.1.50", L.ps5_ip, sizeof L.ps5_ip,
+                                          ImGuiInputTextFlags_CharsNoBlank | ImGuiInputTextFlags_EnterReturnsTrue);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!L.ps5_ip[0] || c.checking);
+    if (ImGui::Button("Check", ImVec2(0, ImGui::GetFrameHeight())) || (enter && L.ps5_ip[0]))
+        console_check_start(L.exe_dir, L.ps5_ip);
+    ImGui::EndDisabled();
+    wz_console_card(c);
+    ImGui::Dummy(ImVec2(0, 8 * L.scale));
+    // no network: the title written to a USB drive, which ShadowMountPlus finds on the PS5 (prepare_ps5.py --usb)
+    bool usb = L.ps5_use_usb != 0;
+    if (ImGui::Checkbox("No network? Write the title to a USB drive instead##wzusb", &usb)) L.ps5_use_usb = usb;
+    if (L.ps5_use_usb) {
+        ImGui::TextColored(col4(L.ps5_usb[0] ? LOOK_TEXT : LOOK_DIM), "%s", L.ps5_usb[0] ? L.ps5_usb : "No drive chosen yet");
+        ImGui::SameLine();
+        if (ImGui::Button("Choose drive", ImVec2(0, ImGui::GetFrameHeight()))) {
+            L.picking = 1;
+            SDL_ShowOpenFolderDialog(picked, (void *)L.ps5_usb, L.win, L.ps5_usb[0] ? L.ps5_usb : nullptr, false);
+        }
+        wz_text("The title goes to homebrew\\PPSA99193 on the drive (exFAT, about 25 GB free). Plug it into the PS5 "
+                "and ShadowMountPlus finds it. Remove /data/homebrew/PPSA99193 from the PS5 first if it is there, so "
+                "only one copy is registered.",
+                LOOK_DIM);
+    }
+}
+
+static void wz_page_dump(const ConsoleState &c, float act_h) {
+    wz_heading(WZ_DUMP, "Choose your game dump");
+    wz_text("Your own copy of Mario Kart World, dumped from your Switch 2 (decrypted): a folder with exefs and romfs in "
+            "it, or a .nup or .nx file. Nothing of the game comes with Pit Stop: it is built from your copy. Version "
+            "1.8.0 is preferred; 1.0.0 works too.");
+    ImGui::Dummy(ImVec2(0, 6 * L.scale));
+    ImGui::TextColored(col4(L.source[0] ? LOOK_TEXT : LOOK_DIM), "%s", L.source[0] ? L.source : menu_text(UI_LAUNCH_NO_SOURCE));
+    if (ImGui::Button(menu_text(UI_LAUNCH_PICK), ImVec2(0, act_h))) {
+        L.picking = 1;
+        SDL_ShowOpenFolderDialog(picked, nullptr, L.win, nullptr, false);
+    }
+    ImGui::SameLine();
+    static const SDL_DialogFileFilter kPack[] = {{"Switch 2 package (.nup, .nx)", "nup;nx"}};
+    if (ImGui::Button(menu_text(UI_LAUNCH_PICK_NUP), ImVec2(0, act_h))) {
+        L.picking = 1;
+        SDL_ShowOpenFileDialog(picked, nullptr, L.win, kPack, 1, nullptr, false);
+    }
+    found_copies();
+    if (!L.source[0]) return;
+    ImGui::Dummy(ImVec2(0, 6 * L.scale));
+    const char *v = wz_dump_version();
+    char line[400];
+    if (v[0]) snprintf(line, sizeof line, "This dump is Mario Kart World %s.", v);
+    else snprintf(line, sizeof line, "Its version is checked when the build starts.");
+    wz_text(line, LOOK_HEADING);
+    wz_text("A dump that holds the 1.8.0 update in updates\\ builds 1.8.0. To build 1.0.0 from it, choose a folder "
+            "without updates\\ in it.",
+            LOOK_DIM);
+    if (!L.ps5_use_usb && wz_console_ok(c) && v[0]) {
+        bool same = false;
+        for (int i = 0; i < c.game_count; i++) same = same || !strcmp(c.game_version[i], v);
+        if (same) snprintf(line, sizeof line, "Your PS5 has %s already: only the new game code and changed shaders go.", v);
+        else if (c.game_count)
+            snprintf(line, sizeof line, "Your PS5 has Mario Kart World %s; this builds %s, so its game files (about 23 "
+                     "GB) are sent too. Your saves and settings stay.", c.game_version[0], v);
+        else snprintf(line, sizeof line, "Your PS5 has no game files yet: all of them are sent (about 23 GB).");
+        wz_text(line, same ? LOOK_OK : LOOK_TEXT);
+    }
+}
+
+static void wz_page_review(const ConsoleState &c, float act_h) {
+    wz_heading(WZ_REVIEW, "Ready to build");
+    char line[1400];
+    const char *v = wz_dump_version();
+    snprintf(line, sizeof line, "Your dump: %s%s%s%s", L.source, v[0] ? " (Mario Kart World " : "", v,
+             v[0] ? ")" : "");
+    wz_text(line);
+    if (L.ps5_use_usb) snprintf(line, sizeof line, "The title goes to: the USB drive %s", L.ps5_usb);
+    else
+        snprintf(line, sizeof line, "The title goes to: your PS5 at %s%s", L.ps5_ip,
+                 !strcmp(c.kind, "ftp") ? ", over its FTP server" : "");
+    wz_text(line);
+    ImGui::Dummy(ImVec2(0, 6 * L.scale));
+    bool upgrade = !L.ps5_use_usb && wz_console_ok(c) && c.game_count > 0;
+    wz_text(upgrade
+                ? "This is an update. Steps that did not change since the last build are skipped, and only the new "
+                  "game code and changed shaders are sent: usually a few hundred MB. Your game files, saves and "
+                  "settings on the PS5 stay."
+                : "What happens: this PC builds the title (15 to 30 minutes the first time, depending on the PC; much "
+                  "less after), then about 23 GB go to the PS5. You can follow every step on the next page, and on "
+                  "the TV while Pit Stop's screen is open.",
+            LOOK_HEADING);
+    if (!strcmp(c.kind, "ftp") && !L.ps5_use_usb)
+        wz_text("Close Mario Kart World: Pit Stop on the PS5 before the send starts: its files are replaced while the "
+                "build sends them.",
+                LOOK_WARN);
+    ImGui::Dummy(ImVec2(0, 6 * L.scale));
+    if (ImGui::CollapsingHeader("Advanced##wzadv")) {
+        bool on = L.ps5_on_console != 0;
+        if (ImGui::Checkbox("My game files are already on the PS5 in another folder##wzon", &on)) L.ps5_on_console = on;
+        if (L.ps5_on_console) {
+            ImGui::SetNextItemWidth(fminf(ImGui::GetContentRegionAvail().x, 420 * L.scale));
+            ImGui::InputTextWithHint("##wz_console_dir", "/data/mkw", L.ps5_console_dir, sizeof L.ps5_console_dir);
+            wz_text("The folder on the PS5 with exefs and romfs (or romfs.nup) in it, or in its updates\\<version>. "
+                    "Only the game code and shaders are sent then.",
+                    LOOK_DIM);
+        }
+    }
+    ImGui::Dummy(ImVec2(0, 6 * L.scale));
+    bool ok = L.source[0] && (L.ps5_use_usb ? L.ps5_usb[0] != 0 : L.ps5_ip[0] != 0) &&
+              (!L.ps5_on_console || L.ps5_console_dir[0] == '/');
+    ImGui::BeginDisabled(!ok);
+    if (accent_button(menu_text(UI_LAUNCH_PS5_BUILD), ImVec2(0, act_h))) {
+        save_ps5_ip();
+        save_ps5_usb();
+        save_ps5_console();
+        setup_ps5_start(L.exe_dir, L.source, L.ps5_ip, L.ps5_use_usb ? L.ps5_usb : nullptr, ps5_console_arg());
+        L.wz_page = WZ_BUILD;
+    }
+    ImGui::EndDisabled();
+}
+
+static void wz_page_build(const SetupState &st, float act_h) {
+    wz_heading(WZ_BUILD, st.running ? "Building" : st.finished > 0 ? "Done" : st.finished < 0 ? "The build stopped"
+                                                                                            : "Building");
+    if (st.finished < 0) setup_failed_card(st);
+    if (st.finished > 0) {
+        card_begin(fminf(ImGui::GetContentRegionAvail().x, 960 * L.scale));
+        ImGui::TextColored(col4(LOOK_OK), "%s", menu_text(UI_LAUNCH_PS5_DONE));
+        wz_text(L.ps5_use_usb
+                    ? "Plug the drive into the PS5 and start Mario Kart World: Pit Stop from the home screen."
+                    : "On the PS5: press Cross if it shows \"Transfer complete!\", then start Mario Kart World: Pit Stop "
+                      "again from the home screen.");
+        wz_text("In game, OPTIONS + touchpad opens the Pit Stop settings at any time.");
+        wz_text("To update later: hold L1 + R1 while Pit Stop starts on the PS5 (or just close it, if its FTP server "
+                "runs), then come back here with the new builder.",
+                LOOK_DIM);
+        card_end(LOOK_OK, with_alpha(LOOK_OK, 22));
+    }
+    if (st.running || st.finished) {
+        setup_progress(st);
+        if (st.running && ImGui::Button(menu_text(UI_LAUNCH_CANCEL), ImVec2(0, act_h))) setup_cancel();
+    }
+}
+
+static void ps5_wizard(const SetupState &st, float act_h) {
+    ConsoleState c = console_state();
+    static bool test_page = [] {   // (test) MKW_LAUNCHER_WZ_PAGE=0..3: that page, for a shot
+        const char *e = getenv("MKW_LAUNCHER_WZ_PAGE");
+        if (e && *e >= '0' && *e < '0' + WZ_PAGES) L.wz_page = *e - '0';
+        return true;
+    }();
+    (void)test_page;
+    if (st.running) L.wz_page = WZ_BUILD;   // a build under way is shown, whatever page the player was on
+    ImGui::BeginDisabled(L.picking);
+    switch (L.wz_page) {
+    case WZ_CONNECT: wz_page_connect(c, act_h); break;
+    case WZ_DUMP: wz_page_dump(c, act_h); break;
+    case WZ_REVIEW: wz_page_review(c, act_h); break;
+    default: wz_page_build(st, act_h); break;
+    }
+    // Back and Next, at the end of each page (Build for PS5 is the review page's own button)
+    ImGui::Dummy(ImVec2(0, 10 * L.scale));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, 4 * L.scale));
+    bool can_next = L.wz_page == WZ_CONNECT ? (L.ps5_use_usb ? L.ps5_usb[0] != 0 : wz_console_ok(c) || L.ps5_ip[0])
+                  : L.wz_page == WZ_DUMP    ? L.source[0] != 0
+                                            : false;
+    if (L.wz_page != WZ_CONNECT) {   // the first page has nothing before it
+        ImGui::BeginDisabled(st.running);
+        if (ImGui::Button("Back##wzback", ImVec2(0, act_h))) L.wz_page = L.wz_page == WZ_BUILD ? WZ_REVIEW : L.wz_page - 1;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+    }
+    if (L.wz_page < WZ_REVIEW) {
+        ImGui::BeginDisabled(!can_next);
+        if (accent_button("Next##wznext", ImVec2(0, act_h))) {
+            if (L.wz_page == WZ_CONNECT && !L.ps5_use_usb) save_ps5_ip();
+            L.wz_page++;
+        }
+        ImGui::EndDisabled();
+        if (L.wz_page == WZ_CONNECT && !L.ps5_use_usb && L.ps5_ip[0] && !wz_console_ok(c) && !c.checking) {
+            ImGui::SameLine();
+            ImGui::TextColored(col4(LOOK_DIM), "(not checked: you can go on, the build asks the PS5 again)");
+        }
+    }
+    if (L.wz_page == WZ_BUILD && st.finished && !st.running) {
+        ImGui::SameLine();
+        if (ImGui::Button("Start over##wzagain", ImVec2(0, act_h))) L.wz_page = WZ_CONNECT;
+    }
+    ImGui::EndDisabled();
+}
+
+// The files page under its state lines: a setup's failure, progress and steps (the desktop package's start screen).
+static void files_setup_body(const SetupState &st, bool ready, float act_h) {
     if (st.finished < 0) setup_failed_card(st);
     if (st.finished > 0)
         ImGui::TextColored(col4(LOOK_OK), "%s",
@@ -1612,6 +1910,39 @@ static void page_files(float w, float h) {
         ImGui::Dummy(ImVec2(0, 8 * L.scale));
         setup_steps(st, ready, act_h);
     }
+}
+
+// The game files page. Not set up: what the setup needs and its three steps, which is the start screen then. Set up:
+// what is installed, and the steps folded under Set up again. A setup under way or finished shows its steps' progress
+// first, a failed one its reason with Try again above them.
+static void page_files(float w, float h) {
+    const float act_h = item_height();   // the page's buttons: a target easy to hit, as the main page's
+    float bottom = panel_begin("##files", UI_LAUNCH_FILES, w, h);
+    ImGui::BeginChild("##files_body", ImVec2(0, -bottom), ImGuiChildFlags_NavFlattened);
+    bool ready = rt_game_present();
+    SetupState st = setup_state();
+    ImGui::BeginDisabled(L.picking);
+    char state[160];
+    files_state_text(ready, state, sizeof state);
+    state_line(ready && !files_gone(), state);
+    if (const char *gone = ready ? files_gone() : nullptr) {   // where they were, and what brings them back
+        char help[PLAT_PATH_MAX * 2 + 400];
+        snprintf(help, sizeof help, menu_text(UI_LAUNCH_FILES_GONE_HELP), gone);
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + fminf(ImGui::GetContentRegionAvail().x, 620 * L.scale));
+        ImGui::TextWrapped("%s", help);
+        ImGui::PopTextWrapPos();
+    }
+    if (gpu_bad()) gpu_card(fminf(ImGui::GetContentRegionAvail().x, 760 * L.scale));
+    update_card(fminf(ImGui::GetContentRegionAvail().x, 620 * L.scale));   // a folder not set up starts on this page
+    if (L.updated[0]) {
+        char note[300];
+        snprintf(note, sizeof note, menu_text(UI_LAUNCH_UPDATED), L.updated);
+        ImGui::TextColored(col4(LOOK_OK), "%s", note);
+    }
+    if (!cfg_last_save_ok()) ImGui::TextColored(col4(LOOK_BAD), "%s", menu_text(UI_MENU_SAVE_FAILED));
+    ImGui::Dummy(ImVec2(0, 4 * L.scale));
+    if (L.ps5_tools && L.tools) ps5_wizard(st, act_h);   // the PS5 builder package: one question at a time
+    else files_setup_body(st, ready, act_h);
     ImGui::EndDisabled();
     ImGui::EndChild();
     // Not set up: this page is the start screen (decided 06/11/2026), its bottom button quits; set up, it goes back.

@@ -10,6 +10,7 @@
 #include "ui/menu/menu_look.h"
 
 extern "C" {
+void rt_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 #include "gfx/nvn/host/gfx.h"
 #include "input/input.h"
 #include "input/input_map.h"
@@ -24,6 +25,7 @@ struct PlaceholderView {
     const char *rt_game_id;
     const char *reason;
     int has_game_code;
+    int update;
     char console_ip[64];
     int recv_started;
 };
@@ -67,7 +69,9 @@ static void draw_placeholder(float width, float height, void *raw_ctx) {
             ImGui::SetWindowFontScale(1.0f);
             ImGui::Spacing();
 
-            const char *heading = ctx->has_game_code ? "Game files out of date or missing" : "Game files missing";
+            const char *heading = ctx->update          ? "Ready to receive an update"
+                                  : ctx->has_game_code ? "Game files out of date or missing"
+                                                       : "Game files missing";
             ImGui::TextColored(ImVec4(0.92f, 0.94f, 0.98f, 1.0f), "%s", heading);
             if (ctx->reason && ctx->reason[0]) {
                 ImGui::TextColored(ImVec4(0.68f, 0.74f, 0.84f, 1.0f), "Reason: %s", ctx->reason);
@@ -102,7 +106,8 @@ static void draw_placeholder(float width, float height, void *raw_ctx) {
             } else {
                 ImGui::TextWrapped(
                     "Open the Pit Stop launcher on your PC (Windows or Linux), select your Mario Kart World dump "
-                    "folder or .nup file (version 1.8.0), enter this console's IP below, and click Build for PS5.");
+                    "folder or .nup file (version 1.8.0 or 1.0.0), enter this console's IP below, and click Build for PS5.");
+                if (ctx->update) ImGui::TextDisabled("Your game files are fine: press Cross / A to close without updating.");
                 ImGui::Spacing();
 
                 ImGui::SetWindowFontScale(1.35f);
@@ -166,12 +171,13 @@ static void draw_placeholder(float width, float height, void *raw_ctx) {
 }
 
 void ps5_placeholder_run(const char *root_dir, const char *port_version, const char *rt_game_id, int has_game_code,
-                         const char *reason) {
+                         const char *reason, int update) {
     PlaceholderView view = {};
     view.port_version = port_version;
     view.rt_game_id = rt_game_id;
     view.reason = reason;
     view.has_game_code = has_game_code;
+    view.update = update;
     ps5_console_ip(view.console_ip, sizeof view.console_ip);
     view.recv_started = ps5_recv_start(root_dir, 0, port_version, rt_game_id, has_game_code);
 
@@ -191,7 +197,10 @@ void ps5_placeholder_run(const char *root_dir, const char *port_version, const c
         input_menu_pad(&pad);
         uint32_t pressed = pad.buttons & ~prev_buttons;
         prev_buttons = pad.buttons;
-        if ((st.state == PS5_RECV_DONE || st.state == PS5_RECV_ERROR) && (pressed & exit_mask)) break;
+        // an update screen also closes before a send starts: the player's files are fine, they may have held L1 + R1
+        // by mistake
+        int idle = st.state != PS5_RECV_RECEIVING && !st.pc_count;
+        if ((st.state == PS5_RECV_DONE || st.state == PS5_RECV_ERROR || (update && idle)) && (pressed & exit_mask)) break;
 
         plat_sleep_ns(16666667ull);
     }
@@ -199,4 +208,43 @@ void ps5_placeholder_run(const char *root_dir, const char *port_version, const c
     ps5_recv_stop();
     menu_set_placeholder(nullptr, nullptr);
     gfx_window_release_vk();
+}
+
+// Buttons held through the launch do not reach the title as a pad reading: input.c drops the start's readings while
+// they are held (marked intercepted, or not yet a connected player), and 300 ms, then 3 s of waiting saw nothing
+// (24/11/2026, console log: "no pad reading in 3002 ms"; without buttons the first reading came after 11 ms). The raw
+// reading has them: "L1 + R1 held after 14 ms (raw 0xc00)". So L1 + R1 are taken from the raw reading, intercepted or
+// not, and a plain reading without them starts the game at once. At most this long without either.
+enum { UPDATE_WAIT_MS = 3000 };
+
+int ps5_update_requested(void) {
+    const uint32_t raw_combo = 0x400u | 0x800u;   // the SDK's L1 and R1 (input.c PS5_PAD_L1, PS5_PAD_R1)
+    const uint32_t combo = (1u << PAD_L) | (1u << PAD_R);
+    InputMenuPad pad = {};
+    const uint64_t t0 = plat_now_ns();
+    uint32_t raw_seen = 0;
+    for (;;) {
+        input_menu_pad(&pad);
+        int connected = 0;
+        uint32_t raw = input_ps5_raw_held(&connected);
+        int ms = (int)((plat_now_ns() - t0) / 1000000u);
+        if (connected) raw_seen |= raw;
+        if (connected && (raw & raw_combo) == raw_combo) {
+            rt_log("ps5 update check: L1 + R1 held after %d ms (raw 0x%x%s): opening the receiver", ms, (unsigned)raw,
+                   raw & 0x80000000u ? ", intercepted" : "");
+            return 1;
+        }
+        if (pad.connected) {
+            int yes = (pad.buttons & combo) == combo;
+            rt_log("ps5 update check: first pad reading after %d ms, buttons 0x%x: %s", ms, (unsigned)pad.buttons,
+                   yes ? "L1 + R1 held, opening the receiver" : "starting the game");
+            return yes;
+        }
+        if (ms >= UPDATE_WAIT_MS) {
+            rt_log("ps5 update check: no pad reading in %d ms (raw buttons seen 0x%x): starting the game", ms,
+                   (unsigned)raw_seen);
+            return 0;
+        }
+        plat_sleep_ns(10000000ull);
+    }
 }

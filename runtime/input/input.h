@@ -38,6 +38,11 @@ typedef struct {
     int connected, east_confirm;
 } InputMenuPad;
 void input_menu_pad(InputMenuPad *sample);
+#ifdef MKW_PS5_NATIVE
+// Player 1's latest raw DualSense buttons (the SDK's bits: L1 0x400, R1 0x800, intercepted 0x80000000), as
+// input_menu_pad last polled them, intercepted readings included; *connected whether that reading was.
+uint32_t input_ps5_raw_held(int *connected);
+#endif
 // Start/Back held together (down bits 0 and 1). Latches until both are released. Returns 1 on the opening edge.
 int input_menu_chord(int *held, unsigned down);
 int input_overlay_gate(int *held, uint64_t *buttons);   // L3+R3: 1 in the poll both go down

@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import calendar
 import contextlib
 import ftplib
 import hashlib
@@ -368,11 +369,14 @@ def send_directory(
     on_progress: Callable[[int, int, int, int], None] | None = None,
     timeout: float = 30.0,
     on_phase: Callable[[str, int, int], None] | None = None,
+    on_plan: Callable[[int, int, int, int], None] | None = None,
     ftp_ports: tuple[int, ...] = FTP_PORTS,
     ftp_opener: Callable[[str, int], ftplib.FTP] = open_ftp,
 ) -> tuple[int, int, int]:
     """Send staged package files to the Pit Stop placeholder TCP receiver.
 
+    on_plan(files, bytes, kept_files, kept_bytes) says, once the console's files are compared, what goes and what
+    stays (prepare_ps5.py tells the player whether this is a first install or an upgrade).
     on_phase(phase, done, total) reports the steps before the bytes flow, which took minutes in silence on a first
     send (18/11/2026): "hash" (files checksummed here, each 23 GB first time, cached after), "check" (files the PS5
     was asked about), then "send" once with the bytes to go (on_progress follows the transfer).
@@ -430,6 +434,8 @@ def send_directory(
 
         send_files = len(need)
         send_bytes = sum(item[2] for item in need)
+        if on_plan:   # (files to send, their bytes, files the console has already, their bytes): an upgrade or not
+            on_plan(send_files, send_bytes, skipped, sum(e[2] for e in entries) - send_bytes)
         # a package replaces the loose folder an earlier send left beside it (romfs/: 23 GB kept twice otherwise)
         def remove_loose() -> None:
             nonlocal sock
@@ -561,6 +567,261 @@ def send_directory(
         if on_progress:
             on_progress(send_bytes, send_bytes, send_files, send_files)
         return send_files, skipped, send_bytes
+
+
+# ---- The whole title by FTP, when the receiver is not running
+# A working install starts the game and never listens, and a first install needed the placeholder uploaded by hand: the
+# console's FTP server (ftpsrv 2121, etaHEN 1337) runs either way, so the builder installs over it instead. What the
+# receiver did that FTP cannot: SHA-256 on the console (here only each file's size is checked after upload; TCP's own
+# checksums guard the bytes) and the TV's progress screen. ftpsrv (1.16, 23/11/2026) makes files and folders 0777,
+# overwrites on STOR, replaces on RNTO, and AVBL answers the drive's real free space (230 GB, where the title's statvfs
+# says 16 GiB). Never a folder deleted, never a delete by pattern (the 22/11/2026 incident): only named files, ours
+# (.pitstop-ftp uploads) or stale ones in an exefs/ we are replacing (1.0.0 has no subsdk1: one left would be loaded).
+
+FTP_RECORD_NAME = "ftp-sent.tsv"   # beside the send cache: what this builder put on which console, to skip it next time
+FTP_DEFAULT_TITLE = "/data/homebrew/PPSA99193"
+REGISTERED_SCE_SYS = "/user/app/PPSA99193/sce_sys"   # ShadowMountPlus's copy the home screen reads (deploy.py)
+
+
+def receiver_up(host_spec: str, timeout: float = 3.0) -> bool:
+    """Whether the Pit Stop receiver answers (the title on its receiver screen)."""
+    try:
+        query_info(*parse_host_port(host_spec), timeout=timeout)
+        return True
+    except (OSError, TransferError, ValueError):
+        return False
+
+
+def ftp_server(host: str, ports: tuple[int, ...] = FTP_PORTS,
+               opener: Callable[[str, int], ftplib.FTP] = open_ftp) -> tuple[ftplib.FTP, int] | None:
+    for port in ports:
+        try:
+            return opener(host, port), port
+        except (*ftplib.all_errors, OSError):
+            continue
+    return None
+
+
+def _ftp_exists(ftp: ftplib.FTP, path: str) -> bool:
+    try:
+        ftp.sendcmd(f"MLST {path}")
+        return True
+    except ftplib.error_perm:
+        return False
+
+
+def ftp_title_folder(ftp: ftplib.FTP) -> tuple[str, bool]:
+    """(the title folder, whether it exists): mount.lnk's (the registered title's), else the first of TITLE_DIRS that
+    exists, else FTP_DEFAULT_TITLE to create (a first install: ShadowMountPlus registers it once it holds eboot.bin)."""
+    for folder in title_dirs(ftp):
+        if _ftp_exists(ftp, folder):
+            return folder, True
+    return FTP_DEFAULT_TITLE, False
+
+
+def _ftp_listing(ftp: ftplib.FTP, folder: str) -> dict[str, tuple[int, str]]:
+    """rel -> (size, modify UTC 'YYYYMMDDHHMMSS') of the files under folder, by MLSD (one round trip a folder)."""
+    out: dict[str, tuple[int, str]] = {}
+    todo = [""]
+    while todo:
+        rel = todo.pop()
+        try:
+            rows = list(ftp.mlsd(f"{folder}/{rel}".rstrip("/")))
+        except ftplib.error_perm:
+            continue
+        for name, facts in rows:
+            if name in (".", ".."):
+                continue
+            sub = f"{rel}/{name}" if rel else name
+            if facts.get("type") == "dir":
+                todo.append(sub)
+            elif facts.get("type") == "file":
+                out[sub] = (int(facts.get("size", -1)), facts.get("modify", ""))
+    return out
+
+
+def _load_ftp_record(path: Path | None, key: str) -> dict[str, tuple[int, str, str]]:
+    """rel -> (size, sha256 hex, remote modify) of what this builder uploaded to key (host and folder)."""
+    if not path or not path.is_file():
+        return {}
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] != key:
+        return {}
+    out = {}
+    for line in lines[1:]:
+        parts = line.split("\t")
+        if len(parts) == 4 and parts[1].isdigit():
+            out[parts[0]] = (int(parts[1]), parts[2], parts[3])
+    return out
+
+
+def _save_ftp_record(path: Path | None, key: str, record: dict[str, tuple[int, str, str]]) -> None:
+    if not path:
+        return
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(key + "\n" + "".join(f"{r}\t{s}\t{h}\t{m}\n" for r, (s, h, m) in sorted(record.items())),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _console_manifest(ftp: ftplib.FTP, folder: str) -> dict[str, tuple[int, int, str]]:
+    """The receiver's own record (ps5_recv.c .pitstop-manifest.tsv: rel, size, mtime_ns, sha256): files it received
+    and checked, so an install it made is not sent again by FTP."""
+    lines: list[str] = []
+    with contextlib.suppress(*ftplib.all_errors, UnicodeDecodeError):
+        ftp.retrlines(f"RETR {folder}/.pitstop-manifest.tsv", lines.append)
+    out = {}
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) == 4 and parts[1].isdigit() and parts[2].isdigit():
+            out[parts[0]] = (int(parts[1]), int(parts[2]), parts[3])
+    return out
+
+
+def _utc_stamp(seconds: float) -> str:
+    return time.strftime("%Y%m%d%H%M%S", time.gmtime(seconds))
+
+
+def _stamp_seconds(stamp: str) -> float | None:
+    try:
+        return calendar.timegm(time.strptime(stamp[:14], "%Y%m%d%H%M%S"))
+    except ValueError:
+        return None
+
+
+def _site_chmod(ftp: ftplib.FTP, path: str) -> None:
+    """0777, so the title's receiver may replace it later (ftpsrv makes files 0777 already; another server may not)."""
+    with contextlib.suppress(*ftplib.all_errors):
+        ftp.sendcmd(f"SITE CHMOD 777 {path}")
+
+
+def send_directory_ftp(
+    host_spec: str,
+    stage_dir: Path,
+    cache_path: Path | None = None,
+    on_progress: Callable[[int, int, int, int], None] | None = None,
+    on_phase: Callable[[str, int, int], None] | None = None,
+    on_plan: Callable[[int, int, int, int], None] | None = None,
+    ftp_ports: tuple[int, ...] = FTP_PORTS,
+    ftp_opener: Callable[[str, int], ftplib.FTP] = open_ftp,
+    record_path: Path | None = None,
+) -> tuple[int, int, int]:
+    """The staged title to the console's FTP server, without the receiver (see above). A file is skipped when this
+    builder's record (record_path) or the receiver's manifest has its SHA-256 and the server still shows that file
+    unchanged. Each upload goes to <rel>.pitstop-ftp, its size is checked, and it is renamed over the old one;
+    eboot.bin last. Returns (files_sent, files_skipped, bytes_sent) as send_directory does."""
+    host, _ = parse_host_port(host_spec)
+    found = ftp_server(host, ftp_ports, ftp_opener)
+    if not found:
+        raise TransferError(f"no Pit Stop receiver (port {DEFAULT_PORT}) and no FTP server "
+                            f"({', '.join(map(str, ftp_ports)) or 'none'}) answered at {host}")
+    ftp, port = found
+    try:
+        entries = collect_stage_files(stage_dir, cache_path=cache_path,
+                                      on_hash=(lambda d, t: on_phase("hash", d, t)) if on_phase else None)
+        folder, exists = ftp_title_folder(ftp)
+        key = f"{host}:{port}:{folder}"
+        record = _load_ftp_record(record_path, key)
+        listing = _ftp_listing(ftp, folder) if exists else {}
+        manifest = _console_manifest(ftp, folder) if exists else {}
+        need, skipped = [], 0
+        for rel, path, sz, digest in entries:
+            have = listing.get(rel)
+            ours = record.get(rel)
+            theirs = manifest.get(rel)
+            seconds = _stamp_seconds(have[1]) if have else None
+            same = have is not None and have[0] == sz and (
+                (ours is not None and ours[0] == sz and ours[1] == digest.hex() and ours[2] == have[1])
+                or (theirs is not None and theirs[0] == sz and theirs[2] == digest.hex() and seconds is not None
+                    and abs(theirs[1] / 1e9 - seconds) <= 2))
+            if same:
+                skipped += 1
+            else:
+                need.append((rel, path, sz, digest))
+        send_bytes = sum(item[2] for item in need)
+        if on_plan:
+            on_plan(len(need), send_bytes, skipped, sum(e[2] for e in entries) - send_bytes)
+        with contextlib.suppress(*ftplib.all_errors, ValueError):
+            free = int(ftp.sendcmd(f"AVBL {folder.rsplit('/', 1)[0] or '/'}").split()[-1])
+            if send_bytes > free:
+                raise TransferError(_no_space(send_bytes, free))
+        print(f"send_ps5: no receiver at {host}; installing by FTP (port {port}) into {folder}: {len(need)} files, "
+              f"{send_bytes / 2**20:.1f} MiB, {skipped} unchanged", file=sys.stderr)  # fmt: skip
+
+        made: set[str] = set()
+
+        def ensure_dirs(rel: str) -> None:
+            parts = rel.split("/")[:-1]
+            for i in range(-1, len(parts)):
+                d = "/".join([folder] + parts[: i + 1])
+                if d in made:
+                    continue
+                if not _ftp_exists(ftp, d):
+                    ftp.mkd(d)
+                    _site_chmod(ftp, d)
+                made.add(d)
+
+        # a staged exefs/ replaces the console's: a module it does not have goes, by name (1.0.0 has no subsdk1)
+        staged = {rel for rel, *_ in entries}
+        for rel in sorted(listing):
+            parent, _, name = rel.rpartition("/")
+            module = name in ("main", "main.npdm", "rtld", "sdk") or (name.startswith("subsdk") and name[6:].isdigit())
+            if (parent.split("/")[-1] == "exefs" and module and rel not in staged
+                    and any(e.startswith(parent + "/") for e in staged)):
+                with contextlib.suppress(*ftplib.all_errors):
+                    ftp.delete(f"{folder}/{rel}")
+                    print(f"send_ps5: removed {rel} from the PS5 (not in this version's exefs)", file=sys.stderr)
+                record.pop(rel, None)
+
+        if on_phase:
+            on_phase("send", 0, send_bytes)
+        sent_bytes, t0 = 0, time.monotonic()
+        for idx, (rel, path, sz, digest) in enumerate(need, 1):
+            ensure_dirs(rel)
+            tmp, final = f"{folder}/{rel}{FTP_SUFFIX}", f"{folder}/{rel}"
+
+            def counted(block: bytes) -> None:
+                nonlocal sent_bytes
+                sent_bytes += len(block)
+                if on_progress:
+                    on_progress(sent_bytes, send_bytes, idx, len(need))
+
+            try:
+                with path.open("rb") as f:
+                    ftp.storbinary(f"STOR {tmp}", f, blocksize=SEND_CHUNK, callback=counted)
+                got = ftp.size(tmp)
+                if got != sz:
+                    raise TransferError(f"{rel}: {got} bytes arrived on the PS5, {sz} were sent")
+                ftp.rename(tmp, final)
+            except BaseException:
+                with contextlib.suppress(*ftplib.all_errors):
+                    ftp.delete(tmp)
+                raise
+            _site_chmod(ftp, final)
+            stamp = ""
+            with contextlib.suppress(*ftplib.all_errors):
+                reply = ftp.sendcmd(f"MLST {final}")
+                stamp = next((f.split("=", 1)[1] for f in reply.split(";") if f.strip().startswith("modify=")), "")
+            record[rel] = (sz, digest.hex(), stamp[:14])
+            _save_ftp_record(record_path, key, record)   # after each file: a broken send keeps what arrived
+        wall = time.monotonic() - t0
+        if sent_bytes:
+            print(f"send_ps5: by FTP {sent_bytes / 2**20:.0f} MiB in {wall:.1f} s "
+                  f"({sent_bytes / 2**20 / wall if wall else 0:.1f} MiB/s)", file=sys.stderr)  # fmt: skip
+        _save_ftp_record(record_path, key, record)
+        # the home screen reads ShadowMountPlus's copy of param.json and icon0.png (deploy.py refresh_registered_sce_sys)
+        if any(rel.startswith("sce_sys/") for rel, *_ in need) and _ftp_exists(ftp, f"{REGISTERED_SCE_SYS}/param.json"):
+            for name in ("param.json", "icon0.png"):
+                local = stage_dir / "sce_sys" / name
+                if local.is_file():
+                    with contextlib.suppress(*ftplib.all_errors), local.open("rb") as f:
+                        ftp.storbinary(f"STOR {REGISTERED_SCE_SYS}/{name}", f)
+        if on_progress:
+            on_progress(send_bytes, send_bytes, len(need), len(need))
+        return len(need), skipped, send_bytes
+    finally:
+        with contextlib.suppress(*ftplib.all_errors):
+            ftp.quit()
 
 
 # The PC builder's steps as the placeholder shows them (the launcher's names: launcher_setup.cpp kPs5Steps).

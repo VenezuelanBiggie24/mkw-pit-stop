@@ -181,6 +181,7 @@ msgid ""
 "At the next start, goes straight to the same time trial or Grand Prix and lets Smart Steering and "
 "Auto-Accelerate drive. At the end the log gets the frame rate of the races and the game closes. "
 "Turns both assists on in your save if the game saves before the end."
+msgstr ""
 
 msgctxt "UI_MENU_CLASSIC_VS"
 msgid "Classic VS races"
@@ -3519,6 +3520,11 @@ msgstr ""
 
 msgctxt "UI_BOOT_FOOT"
 msgid "Mario Kart World: Pit Stop is getting ready · %d s"
+msgstr ""
+
+#. The PS5 controller's buttons: OPTIONS and a click of the touchpad, held together, open the Pit Stop settings.
+msgctxt "UI_BOOT_MENU_HINT"
+msgid "Tip: press OPTIONS + touchpad in game to open Pit Stop settings"
 msgstr ""
 
 #. printf format: keep every %... conversion, in the same order.
