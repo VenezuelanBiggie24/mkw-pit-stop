@@ -191,3 +191,25 @@ def test_content_version() -> None:
     for bad in ("0.2", "ps5-0.2.1", "0.2.1000"):
         with pytest.raises(ValueError):
             release_ps5.content_version(bad)
+
+
+def test_game_staged_where_the_title_looks(tmp_path: Path) -> None:
+    """The game goes to the title folder or its updates/<version>/ (ps5_recv.c ps5_game_dir), never the dump's own
+    path (base/, updates.old/917504: "missing exefs/main" on the console, 23/11/2026); copies an earlier build staged
+    elsewhere go, so they are not sent or copied to a drive again, and the title's other files stay."""
+    assert prepare_ps5.title_game_rel(tmp_path / "dump/base/exefs") == Path()
+    assert prepare_ps5.title_game_rel(tmp_path / "dump/exefs") == Path()
+    assert prepare_ps5.title_game_rel(tmp_path / "dump/base/Updates/917504/exefs") == Path("updates/917504")
+    out = tmp_path / "PPSA99193"
+    for rel in ("updates.old/917504", "base", "updates/917504", ""):
+        (out / rel / "exefs").mkdir(parents=True)
+        (out / rel / "exefs/main").write_bytes(b"m")
+        (out / rel / "romfs.nup").write_bytes(b"n")
+    (out / "spirv/exefs").mkdir(parents=True)
+    (out / "eboot.bin").write_bytes(b"e")
+    prepare_ps5.drop_other_games(out, out / "updates/917504")
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()) == [
+        "eboot.bin", "updates/917504/exefs/main", "updates/917504/romfs.nup"]
+    assert (out / "spirv/exefs").is_dir()
+    prepare_ps5.drop_other_games(out, out)
+    assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()) == ["eboot.bin"]

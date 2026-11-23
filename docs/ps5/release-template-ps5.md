@@ -10,7 +10,7 @@
 
 ## Requirements
 
-- **Your own game copy:** *Mario Kart World* version 1.8.0 or 1.0.0 (`exefs/` and `romfs/`, decrypted, or a `.nup` file), dumped from your own Nintendo Switch 2; a console dump with the 1.8.0 update in `updates/` is used as it is. Nothing of the game is in this release or repository.
+- **Your own game copy:** *Mario Kart World* version 1.8.0 or 1.0.0 (`exefs/` and `romfs/`, decrypted, or a `.nup` file), dumped from your own Nintendo Switch 2; a console dump with the 1.8.0 update in `updates/` is used as it is (1.8.0 is built; to build 1.0.0, choose a folder without `updates/` in it). Nothing of the game is in this release or repository.
 - **A jailbroken PS5:** running a payload loader (`etaHEN` or `elfldr`), `kstuff`, and **ShadowMountPlus 1.7 Beta 5** or newer to register homebrew titles in `/data/homebrew/`.
 - **A PC with about 30 GB free** to build the title from your dump, on the same network as the PS5:
   - **Windows 10 or 11 (64-bit):** nothing to install; the Windows builder carries its own Python, zig and glslc. No WSL needed.
