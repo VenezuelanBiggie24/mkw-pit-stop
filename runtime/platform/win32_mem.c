@@ -88,6 +88,8 @@ uint64_t plat_mem_populated(uint64_t addr, uint64_t n, uint64_t (*runs)[2], uint
     return got;
 }
 
+// MKW_SNAP_SCOPED (memory.c mem_written_any): no peek here, so always "may be written" (the caller queries).
+int plat_mem_written_any(uint64_t addr, uint64_t n) { (void)addr, (void)n; return 1; }
 uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t max, int reset) {
     if (!max || !n) return 0;
     ULONG_PTR got = (ULONG_PTR)max;
