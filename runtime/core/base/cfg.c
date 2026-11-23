@@ -662,6 +662,12 @@ static const struct { const char *key, *value; } PS5[] = {
     // 242 -> 318 MiB, census minimum 168 -> 276 MiB; 1,039 textures (370 MiB) out in 4 passes; frame 17.53 -> 17.50 ms,
     // same 57.1 fps.
     {"TEX_PRESSURE", "1800"},
+    // Texture checks peek their own pages instead of re-arming the 2 MiB write-watch snapshot (vk_mem_gen.c
+    // vk_mem_changed_scoped). In-race A/B, two 1.0.0 races (24/11/2026): sceKernelMprotect arms 0.77 -> 0.24-0.28 ms a
+    // frame, the game's write faults 13-14 -> 2.7-4.2, precheck spikes 11.0 -> 4.8 % and 6.9 -> 2.9 % of frames, busy
+    // -0.55 / -0.84 ms. A 1.8.0 race with it on was watched by the user: no stale textures. PS5 only: Linux and Windows
+    // have no peek (plat_mem_written_any answers "may be written"), so each check there would query its span.
+    {"SNAP_SCOPED", "1"},
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 
