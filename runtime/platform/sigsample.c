@@ -67,6 +67,8 @@ static uint64_t ctx_rip(void *ctx) {
     ucontext_t *uc = ctx;
 #ifdef __PROSPERO__
     return (uint64_t)uc->uc_mcontext.mc_rip;
+#elif defined(__aarch64__)   // Linux AArch64: the program counter
+    return (uint64_t)uc->uc_mcontext.pc;
 #else
     return (uint64_t)uc->uc_mcontext.gregs[REG_RIP];
 #endif
@@ -80,6 +82,9 @@ static uint64_t ctx_caller(void *ctx, uint64_t rip) {
 #ifdef __PROSPERO__
     uint64_t rsp = (uint64_t)uc->uc_mcontext.mc_rsp;
     uint64_t rbp = (uint64_t)uc->uc_mcontext.mc_rbp;
+#elif defined(__aarch64__)   // Linux AArch64: SP and the frame pointer X29, whose records are laid out as RBP's
+    uint64_t rsp = (uint64_t)uc->uc_mcontext.sp;
+    uint64_t rbp = (uint64_t)uc->uc_mcontext.regs[29];
 #else
     uint64_t rsp = (uint64_t)uc->uc_mcontext.gregs[REG_RSP];
     uint64_t rbp = (uint64_t)uc->uc_mcontext.gregs[REG_RBP];

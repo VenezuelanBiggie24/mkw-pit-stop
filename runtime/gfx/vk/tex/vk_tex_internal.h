@@ -144,7 +144,7 @@ static inline int tex_spin(void) {
     if (!__atomic_load_n(&tex_spin_on, __ATOMIC_RELAXED)) return 0;
     uint64_t t0 = plat_now_ns();
     do {
-        for (int i = 0; i < 16; i++) __builtin_ia32_pause();
+        for (int i = 0; i < 16; i++) plat_pause();   // (x86 pause, AArch64 yield: platform.h)
         if (plat_rmutex_trylock(&tex_lock)) return 1;
     } while (plat_now_ns() - t0 < TEX_SPIN_NS);
     return 0;

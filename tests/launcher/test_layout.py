@@ -73,8 +73,11 @@ def test_synthetic_generation_uses_selected_layout(tmp_path: Path) -> None:
         struct.pack_into("<I", header, 0x60 + i * 4, len(segment))
         header.extend(segment)
     (exefs / "main").write_bytes(header)
+    # No patches: a synthetic main is no known game version, and gen.py detects the version only for this default.
+    patches = tmp_path / "patches.txt"
+    patches.write_text("", encoding="utf-8")
     command = [sys.executable, str(ROOT / "recomp/gen.py"), "--exefs", str(exefs), "--out", str(out),
-               "--modules", "main", "--jobs", "1"]  # fmt: skip
+               "--modules", "main", "--jobs", "1", "--patches", str(patches)]  # fmt: skip
     subprocess.run([*command, "--guest-layout", "ps5-smoke"], check=True)
     base = layout.PLACEMENTS["ps5-smoke"].module_base
     assert layout.read_checked(out, "ps5-smoke") == [("main", base, 0x1000)]

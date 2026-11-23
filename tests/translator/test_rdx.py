@@ -18,6 +18,16 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools/shaders"))
 import renodx  # noqa: E402
 
+
+def guest_layout_dir(d: Path) -> Path:
+    """runtime/core/base/host.h includes guest_layout.h, which the build emits (tools/build/build.py from
+    recomp/layout.py): the desktop one, written into d for this harness."""
+    sys.path.insert(0, str(ROOT / "recomp"))
+    from layout import placement_defines
+
+    (d / "guest_layout.h").write_text("#pragma once\n" + placement_defines("desktop"), encoding="utf-8")
+    return d
+
 # ---- renodx.py
 
 
@@ -150,7 +160,7 @@ def patcher(tmp_path_factory: pytest.TempPathFactory) -> Path:
     if not cc:
         pytest.skip("Clang is required by the runtime headers")
     exe = tmp_path_factory.mktemp("rdx") / "t_rdx.exe"
-    includes = [ROOT / "runtime", ROOT / "runtime/cpu", ROOT / "runtime/core/base",
+    includes = [guest_layout_dir(exe.parent), ROOT / "runtime", ROOT / "runtime/cpu", ROOT / "runtime/core/base",
                 ROOT / "runtime/gfx/nvn/host", ROOT / "runtime/gfx/nvn/api", ROOT / "runtime/gfx/nvn/procs"]  # fmt: skip
     subprocess.run([cc, "-O1", *[f"-I{p}" for p in includes], str(ROOT / "tests/translator/t_rdx.c"),
                     str(ROOT / "runtime/gfx/nvn/host/gfx_rdx.c"), "-o", str(exe)], check=True)  # fmt: skip
