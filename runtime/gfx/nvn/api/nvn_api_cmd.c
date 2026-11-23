@@ -83,7 +83,9 @@ static void cmd_reserve(cmd_t *o, size_t need) {
     if (!cap) cap = 64 << 10;
     while (used + need + OP_RESERVE > cap) cap *= 2;
     uint8_t *b = realloc(o->seg, cap);
-    if (!b) rt_fatal("nvn: command recording buffer of %zu bytes", cap);
+    if (!b)  // a few MiB at most: only a process out of memory refuses it (#749, #773: Windows, RAM and page file used up)
+        rt_fatal("nvn: command recording buffer of %zu bytes: the system is out of memory (turn on the Windows page file "
+                 "or close other programs)", cap);
     o->seg = b;
     o->cur = b + used;
     o->end = b + cap;

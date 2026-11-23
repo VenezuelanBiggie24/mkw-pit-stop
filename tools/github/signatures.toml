@@ -186,6 +186,12 @@ all = ["memory: commit", "failed"]
 what = "Windows refused the game more memory (\"memory: commit … failed\"): RAM plus page file used up"
 
 [[signature]]
+issue = 467
+wiki = "memory-commit--failed-windows-the-game-closes-at-the-intro-or-in-the-menus"
+all = ["FATAL: nvn: command recording buffer of"]
+what = "the game ran out of memory while recording its draws (\"nvn: command recording buffer\"): RAM plus page file used up"
+
+[[signature]]
 issue = 404
 all = ["reading address 0x150", "main+0xb879f0"]
 what = "the game's code at main+0xb879f0 reads a field of a resource that is not there (access violation at 0x150)"
