@@ -5,6 +5,10 @@ Why: FTP requires running a separate FTP server on the PS5 and issuing hundreds 
 checks batches of files against its persistent SHA-256 manifest, streams missing/changed files over one TCP connection
 with SHA-256 verification and atomic renames, and closes the listener immediately on completion.
 
+Large files (romfs.nup) go by FTP when the console runs an FTP server (port 2121, else 1337): the title's own writes
+drop to ~2 MiB/s after its first ~2 GB, the FTP server's do not (measured 23/11/2026). The receiver still checks
+their SHA-256 and puts them in place (PIT1A). Without an FTP server they go over PIT1 as before.
+
 Usage:
     python3 tools/ps5/send_ps5.py --host 192.168.1.50 --stage build/ps5-work/stage/PPSA99193
 """
@@ -13,9 +17,11 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ftplib
 import hashlib
 import json
 import os
+import secrets
 import socket
 import struct
 import sys
@@ -33,6 +39,13 @@ ACK_EVERY_FILES = 128
 ACK_SIZE_THRESHOLD = 256 * 1024
 RESUME_MIN = 64 * 1024 * 1024   # files this large go on where a broken send left them (receivers with "resume")
 CACHE_NAME = ".pitstop-client-sha256.tsv"
+# Files this large go by FTP when the receiver can take them (PIT1A): the title's own writes run at ~20 MiB/s for its
+# first ~2 GB, then at ~2 MiB/s (23/11/2026: 3 GiB in 554 s by PIT1, 151 s by FTP to the same console). eboot.bin,
+# sce_module/ and sce_sys/ stay on PIT1, last (send_rank).
+FTP_MIN = 256 * 1024 * 1024
+FTP_PORTS = (2121, 1337)   # ftpsrv's port, then etaHEN's
+FTP_SUFFIX = ".pitstop-ftp"   # ps5_recv.c FTP_SUFFIX
+TITLE_DIRS = ("/data/homebrew/PPSA99193",)   # where the title folder may be when /user/app/PPSA99193/mount.lnk is not
 
 
 class TransferError(RuntimeError):
@@ -195,6 +208,159 @@ def _no_space(need: int, free: int) -> str:
     return f"not enough free space on PS5 ({need / 2**30:.2f} GiB needed, {max(free, 0) / 2**30:.2f} GiB free)"
 
 
+def timing_line(sent: int, wall: float, t_read: float, t_send: float, info: dict) -> str:
+    """One line on where a send's time went, both ends, for the setup log: players saw ~1 MB/s where FTP to the same
+    console is far faster (r/PS5_Jailbreak, 23/11/2026), and nothing said whether the network, the console's disk or
+    this PC was the cause. On the PS5: waiting on the network, waiting for a free buffer (its disk or hash behind),
+    time in write() and in SHA-256, its receive buffer and the folder it writes into."""
+    mib = sent / 2**20
+    line = (f"send timing: {mib:.0f} MiB in {wall:.1f} s ({mib / wall if wall else 0:.1f} MiB/s); "
+            f"PC: disk reads {t_read:.1f} s, sending {t_send:.1f} s")  # fmt: skip
+    t = info.get("timing")
+    if not t:
+        return line + "; PS5: this receiver does not report timing"
+    return line + (
+        f"; PS5 ({info.get('root', '?')}): network wait {t['net_ms'] / 1000:.1f} s, waiting for its disk"
+        f" {t['slot_ms'] / 1000:.1f} s, write() {t['write_ms'] / 1000:.1f} s, SHA-256 {t['hash_ms'] / 1000:.1f} s,"
+        f" of {t['send_ms'] / 1000:.1f} s; receive buffer {t['rcvbuf'] // 1024} KiB"
+    )
+
+
+class FtpTarget:
+    """The console's FTP server, writing into the title's folder: the folder from /user/app/PPSA99193/mount.lnk (where
+    the PS5 mounts the title from), proven by a probe file the receiver must find there (PIT1A flag 1)."""
+
+    def __init__(self, ftp: ftplib.FTP, folder: str) -> None:
+        self.ftp, self.folder = ftp, folder.rstrip("/")
+
+    def path(self, rel: str) -> str:
+        return f"{self.folder}/{rel}{FTP_SUFFIX}"
+
+    def remove(self, rel: str) -> None:
+        """This builder's own upload of rel, by its name only (never a folder: the 22/11/2026 FTP cleanup incident)."""
+        with contextlib.suppress(ftplib.error_perm):
+            self.ftp.delete(self.path(rel))
+
+    def upload(self, rel: str, path: Path, on_bytes: Callable[[int], None]) -> None:
+        parts = rel.split("/")[:-1]
+        for i in range(len(parts)):   # the receiver made them too (PIT1A); a server may not show them yet
+            with contextlib.suppress(ftplib.error_perm):
+                self.ftp.mkd(f"{self.folder}/{'/'.join(parts[: i + 1])}")
+        with path.open("rb") as f:
+            # APPE into the empty file the receiver made: one the FTP server makes itself, the title does not see
+            # (23/11/2026)
+            self.ftp.storbinary(f"APPE {self.path(rel)}", f, blocksize=SEND_CHUNK, callback=lambda b: on_bytes(len(b)))
+
+    def close(self) -> None:
+        with contextlib.suppress(*ftplib.all_errors):
+            self.ftp.quit()
+
+
+def default_ftp_ports() -> tuple[int, ...]:
+    """FTP_PORTS, or PS5_FTP_PORT's one port as deploy.py reads it (0: large files go by PIT1 too)."""
+    env = os.environ.get("PS5_FTP_PORT", "").strip()
+    if env.isdigit():
+        return (int(env),) if int(env) else ()
+    return FTP_PORTS
+
+
+def open_ftp(host: str, port: int, timeout: float = 5.0) -> ftplib.FTP:
+    f = ftplib.FTP()
+    f.connect(host, port, timeout=timeout)
+    f.login()
+    f.voidcmd("TYPE I")
+    f.timeout = 60.0   # the data connections of a 23 GB upload: the console's disk may pause
+    f.sock.settimeout(60.0)
+    return f
+
+
+def title_dirs(ftp: ftplib.FTP) -> list[str]:
+    """Where the title folder may be for FTP: mount.lnk's (where the PS5 mounts it from), then TITLE_DIRS."""
+    out: list[str] = []
+    with contextlib.suppress(*ftplib.all_errors, UnicodeDecodeError):
+        lines: list[str] = []
+        ftp.retrlines("RETR /user/app/PPSA99193/mount.lnk", lines.append)
+        link = "".join(lines).strip().rstrip("/")
+        if link.startswith("/") and link not in out:
+            out.append(link)
+    return out + [d for d in TITLE_DIRS if d not in out]
+
+
+def _adopt_answer(sock: socket.socket) -> str | None:
+    """None when the receiver goes on (at PIT1A) or put the file in place (after 'U'), else why not ('p' bytes: it is
+    still hashing)."""
+    while True:
+        tag = _recv_exact(sock, 1)
+        if tag == b"p":
+            continue
+        if tag == b"K":
+            return None
+        if tag in (b"N", b"E"):
+            (mlen,) = struct.unpack("<H", _recv_exact(sock, 2))
+            msg = _recv_exact(sock, mlen).decode("utf-8", errors="replace") if mlen else "refused"
+            if tag == b"E":
+                raise TransferError(msg)
+            return msg
+        raise TransferError(f"unexpected receiver reply byte {tag!r}")
+
+
+def adopt(sock: socket.socket, target: FtpTarget, rel: str, path: Path, sz: int, digest: bytes,
+          on_bytes: Callable[[int], None], probe: bool = False) -> str | None:
+    """One file by FTP, checked and put in place by the receiver (PIT1A). None when done, else why not (the caller
+    sends it by PIT1P); a broken PIT1 connection raises."""
+    target.remove(rel)   # an earlier try's, before the receiver starts reading the name
+    rel_b, dir_b = rel.encode("utf-8"), target.folder.encode("utf-8")
+    sock.sendall(b"PIT1A" + struct.pack("<BH", 1 if probe else 0, len(rel_b)) + rel_b + struct.pack("<Q", sz) + digest
+                 + struct.pack("<H", len(dir_b)) + dir_b)  # fmt: skip
+    why = _adopt_answer(sock)   # 'N': the receiver does not see that folder as its own
+    if why:
+        return why
+    try:
+        target.upload(rel, path, on_bytes)
+    except (*ftplib.all_errors, OSError) as e:
+        sock.sendall(b"C")
+        _expect_ack(sock)
+        with contextlib.suppress(*ftplib.all_errors):
+            target.remove(rel)
+        return f"FTP upload failed: {e}"
+    sock.sendall(b"U")
+    why = _adopt_answer(sock)
+    if why:
+        with contextlib.suppress(*ftplib.all_errors):
+            target.remove(rel)
+    return why
+
+
+def find_ftp(sock: socket.socket, host: str, ports: tuple[int, ...], work: Path,
+             opener: Callable[[str, int], ftplib.FTP] = open_ftp) -> FtpTarget | None:
+    """The console's FTP server and the title's folder in it, proven by a probe the receiver finds; None (with why on
+    stderr) when there is none, and the send goes all by PIT1."""
+    probe = work / ".pitstop-ftp-probe"
+    for port in ports:
+        try:
+            ftp = opener(host, port)
+        except (*ftplib.all_errors, OSError):
+            continue
+        tried = []
+        for folder in title_dirs(ftp):
+            data = secrets.token_bytes(64)
+            probe.write_bytes(data)
+            target = FtpTarget(ftp, folder)
+            try:
+                why = adopt(sock, target, probe.name, probe, len(data), hashlib.sha256(data).digest(), lambda n: None,
+                            probe=True)  # fmt: skip
+            finally:
+                probe.unlink(missing_ok=True)
+            if why is None:
+                return target
+            tried.append(f"{folder}: {why}")
+        print(f"send_ps5: FTP on port {port} answers, but the title folder was not found there ({'; '.join(tried)})",
+              file=sys.stderr)  # fmt: skip
+        with contextlib.suppress(*ftplib.all_errors):
+            ftp.quit()
+    return None
+
+
 def send_directory(
     host_spec: str,
     stage_dir: Path,
@@ -202,12 +368,15 @@ def send_directory(
     on_progress: Callable[[int, int, int, int], None] | None = None,
     timeout: float = 30.0,
     on_phase: Callable[[str, int, int], None] | None = None,
+    ftp_ports: tuple[int, ...] = FTP_PORTS,
+    ftp_opener: Callable[[str, int], ftplib.FTP] = open_ftp,
 ) -> tuple[int, int, int]:
     """Send staged package files to the Pit Stop placeholder TCP receiver.
 
     on_phase(phase, done, total) reports the steps before the bytes flow, which took minutes in silence on a first
     send (18/11/2026): "hash" (files checksummed here, each 23 GB first time, cached after), "check" (files the PS5
     was asked about), then "send" once with the bytes to go (on_progress follows the transfer).
+    Files of FTP_MIN and up go by the console's FTP server on ftp_ports when one answers (empty: never).
     Returns (files_sent, files_skipped, bytes_sent).
     """
     host, port = parse_host_port(host_spec)
@@ -233,6 +402,7 @@ def send_directory(
             raise TransferError(f"unexpected console title {info.get('title_id')!r}")
         can_resume = bool(info.get("resume"))
         can_remove = bool(info.get("remove"))
+        can_adopt = bool(info.get("ftp"))
 
         need: list[tuple[str, Path, int, bytes]] = []
         skipped = 0
@@ -297,10 +467,43 @@ def send_directory(
             on_phase("send", 0, send_bytes)
 
         bytes_sent = skipped_bytes = 0   # skipped: what a resumed file already had on the console
+        t_read = t_send = 0.0   # this PC's disk reads and socket sends (timing_line)
         buf = bytearray(SEND_CHUNK)
         view = memoryview(buf)
         next_report = 0
-        for idx, (rel, path, sz, digest) in enumerate(need, 1):
+        ftp_sent = 0   # bytes the FTP server wrote (timing_line counts the receiver's own)
+        big = [i for i, item in enumerate(need) if item[2] >= FTP_MIN and send_rank(item[0], item[2]) < 2]
+        target = None
+        if big and can_adopt and ftp_ports:
+            target = find_ftp(sock, host, ftp_ports, cache_path.parent if cache_path else stage_dir.parent, ftp_opener)
+        if target:
+            stack.callback(target.close)
+            by_ftp: set[int] = set()
+            for i in big:
+                rel, path, sz, digest = need[i]
+                t0, base = time.monotonic(), bytes_sent
+
+                def ftp_bytes(n: int, idx: int = i + 1) -> None:
+                    nonlocal bytes_sent, next_report
+                    bytes_sent += n
+                    if on_progress and bytes_sent >= next_report:
+                        next_report = bytes_sent + 4 * 1024 * 1024
+                        on_progress(bytes_sent, send_bytes, idx, send_files)
+
+                why = adopt(sock, target, rel, path, sz, digest, ftp_bytes)
+                if why:
+                    bytes_sent = base
+                    print(f"send_ps5: {rel} goes by PIT1 instead of FTP: {why}", file=sys.stderr)
+                    continue
+                by_ftp.add(i)
+                ftp_sent += sz
+                dt = time.monotonic() - t0
+                print(f"send_ps5: {rel} by FTP to {target.folder}, {sz / 2**20:.0f} MiB in {dt:.1f} s"
+                      f" ({sz / 2**20 / dt if dt else 0:.1f} MiB/s)", file=sys.stderr)  # fmt: skip
+            # the rest by PIT1P, in their order; the last one still answers (its ack ends the send)
+            need = [item for i, item in enumerate(need) if i not in by_ftp]
+        t_pit1 = time.monotonic()
+        for idx, (rel, path, sz, digest) in enumerate(need, send_files - len(need) + 1):
             is_last = idx == send_files
             ack = 1 if (is_last or rel == "eboot.bin" or sz >= ACK_SIZE_THRESHOLD or idx % ACK_EVERY_FILES == 0) else 0
             resume = can_resume and sz >= RESUME_MIN
@@ -325,10 +528,14 @@ def send_directory(
                 f.seek(start)
                 rem = sz - start
                 while rem > 0:
+                    t0 = time.monotonic()
                     n = f.readinto(view[: min(SEND_CHUNK, rem)])
+                    t1 = time.monotonic()
                     if not n:
                         raise TransferError(f"local file shrank while sending {rel}")
                     sock.sendall(view[:n])
+                    t_send += time.monotonic() - t1
+                    t_read += t1 - t0
                     rem -= n
                     bytes_sent += n
                     if on_progress and (rem == 0 or bytes_sent >= next_report):
@@ -341,6 +548,14 @@ def send_directory(
 
         if can_remove and not removed:
             remove_loose()
+        if send_bytes > ftp_sent:
+            # the console's side of the same send (ps5_recv.c "timing"; an older receiver has none); FTP's files have
+            # their own line above, so this one counts from after them (t_pit1), and a send all by FTP has none
+            sock.sendall(b"PIT1I")
+            (n,) = struct.unpack("<I", _recv_exact(sock, 4))
+            ps5 = json.loads(_recv_exact(sock, n).decode("utf-8"))
+            print(timing_line(bytes_sent - skipped_bytes - ftp_sent, time.monotonic() - t_pit1, t_read, t_send, ps5),
+                  file=sys.stderr)  # fmt: skip
         sock.sendall(b"PIT1D")
         _expect_ack(sock)
         if on_progress:
@@ -445,6 +660,8 @@ def main() -> int:
     parser.add_argument("--host", required=True, help="PS5 IP address (optionally host:port, default port 19913)")
     parser.add_argument("--stage", type=Path, required=True, help="staged PPSA99193 directory")
     parser.add_argument("--cache", type=Path, help="optional SHA-256 TSV cache file")
+    parser.add_argument("--ftp-port", type=int, action="append",
+                        help=f"the console's FTP port for large files (default {', '.join(map(str, FTP_PORTS))}; 0: PIT1 only)")
     args = parser.parse_args()
 
     stage = args.stage.resolve()
@@ -455,7 +672,9 @@ def main() -> int:
     def progress(bdone: int, btot: int, fdone: int, ftot: int) -> None:
         print(f"\rSending {fdone}/{ftot} files ({bdone / (1024**2):.1f}/{btot / (1024**2):.1f} MiB)", end="", flush=True)
 
-    sent, skipped, total_bytes = send_directory(args.host, stage, cache_path=args.cache, on_progress=progress)
+    ports = tuple(p for p in args.ftp_port if p) if args.ftp_port else default_ftp_ports()
+    sent, skipped, total_bytes = send_directory(args.host, stage, cache_path=args.cache, on_progress=progress,
+                                                ftp_ports=ports)  # fmt: skip
     print(f"\nDone: sent {sent} files ({total_bytes / (1024**2):.1f} MiB), skipped {skipped} unchanged.")
     return 0
 

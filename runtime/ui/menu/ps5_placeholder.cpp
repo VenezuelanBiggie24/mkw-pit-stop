@@ -28,6 +28,21 @@ struct PlaceholderView {
     int recv_started;
 };
 
+// Where the send's time goes (Ps5RecvStatus send_ns...), on the screen so a player's photo of it says why a send is
+// slow: the network, the console's disk or the hash.
+static void draw_send_timing(const Ps5RecvStatus &st) {
+    if (!st.send_ns) return;
+    const double s = (double)st.send_ns / 1e9, mib = (double)st.bytes_done / (1024.0 * 1024.0);
+    const double pct = 100.0 / (double)st.send_ns;
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%.1f MiB/s   waiting on the network %.0f%%, on the disk %.0f%%   write %.0f ms, SHA-256 %.0f ms "
+                        "per 100 MiB   receive buffer %d KiB",
+                        s > 0 ? mib / s : 0.0, (double)st.net_ns * pct, (double)st.slot_ns * pct,
+                        mib > 0 ? (double)st.write_ns / 1e6 / mib * 100.0 : 0.0,
+                        mib > 0 ? (double)st.hash_ns / 1e6 / mib * 100.0 : 0.0, st.rcvbuf / 1024);
+    ImGui::PopTextWrapPos();
+}
+
 static void draw_placeholder(float width, float height, void *raw_ctx) {
     auto *ctx = (PlaceholderView *)raw_ctx;
     Ps5RecvStatus st = {};
@@ -74,6 +89,7 @@ static void draw_placeholder(float width, float height, void *raw_ctx) {
                     "Mario Kart World: Pit Stop from the PS5 home screen to start the game.",
                     (unsigned long long)st.files_done, (double)st.bytes_done / (1024.0 * 1024.0));
                 ImGui::Spacing();
+                draw_send_timing(st);
                 ImGui::TextDisabled("Press Cross / A to exit now.");
             } else if (st.state == PS5_RECV_ERROR) {
                 ImGui::SetWindowFontScale(1.2f);
@@ -119,6 +135,7 @@ static void draw_placeholder(float width, float height, void *raw_ctx) {
                     ImGui::TextColored(ImVec4(0.45f, 0.85f, 1.0f, 1.0f), "Receiving from PC builder...");
                     ImGui::ProgressBar(frac, ImVec2(-1.0f, 28.0f * scale), overlay);
                     if (st.current_file[0]) ImGui::TextDisabled("Current: %s", st.current_file);
+                    draw_send_timing(st);
                 } else if (st.pc_count && st.pc_failed) {   // the PC builder's failure (PIT1T), what to do about it
                     ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.35f, 1.0f), "The build on the PC failed");
                     ImGui::PushTextWrapPos(0);
