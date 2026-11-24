@@ -686,6 +686,11 @@ static const struct { const char *key, *value; } PS5[] = {
     // 304 MiB, frame 17.52 -> 17.50 ms; MKW_PACK_VERIFY found 0 of 3,447 unpacked units different (pack-verify).
     {"PACK", "1"},
     {"PACK_STORE_MIB", "1024"},
+    // The console's own controller: PlayStation icons rather than auto, which guesses from the pad's labels (Xbox when
+    // it reports none), and the DualSense's vibration at 100 % (the table's 130 % suits PC pads; asked for by the user,
+    // 24/11/2026). Both stay in Pit Stop > Controls.
+    {"BUTTON_ICONS", "playstation"},
+    {"RUMBLE_STRENGTH", "100"},
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 
