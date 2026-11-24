@@ -5,6 +5,42 @@ Each version's section is that release's notes: `tools/build/notes.py` puts it i
 section has a summary paragraph, `### Changes` (each with its issue, #N), `### Tested` (what was run from the packages
 before publishing) and optionally `### Known issues`.
 
+## ps5-0.3.0
+
+**Mario Kart World: Pit Stop** (`PPSA99193`) 0.3.0 fixes the crashes in long races and Knockout Tours, which ran out of memory. Sending the game to the PS5 is about three times faster, and a new setup wizard on Windows finds your PS5 and walks you through the build. A working install can now be updated without a new placeholder. As before, you build the title on your PC, on Windows or Linux, from your own *Mario Kart World* 1.8.0 or 1.0.0 dump. Nothing of the game is in the release.
+
+### Changes
+
+- Long races, the third race of a Grand Prix and Knockout Tours no longer run out of memory (#11). The PS5's 12 GiB is shared by the game's memory and the GPU, and it ran short:
+  - The game's memory that has not been written for a while is compressed (`MKW_PACK`, on by default on the PS5). In a 1.8.0 Grand Prix it packed 1,573 MiB into 453 MiB at the same frame time.
+  - Decoded textures nobody has looked at for a while go first when memory runs low (`MKW_TEX_PRESSURE`).
+  - Game 1.0.0 drew a new race shadow map on some courses without dropping the old one, holding up to 501 MiB of copies. A copy now goes once a newer one covers it.
+- Sending the game is faster. The title can write only about 2 GB at full speed per run, then slows to ~2 MiB/s. Files of 256 MiB and more now go through the PS5's FTP server when one is running (port 2121, then 1337): 3 GiB took 161 s instead of 554 s. The receiver now also records what it was sent, so files that did not change are no longer sent again.
+- Installing without the receiver: when Pit Stop is not listening, the builder installs the title through the PS5's FTP server.
+- Before it builds, the builder says what it found: the dump's version, what the PS5 runs and holds, whether this is a first install or an update, and how much will be sent.
+- On Windows, the PS5 builder starts with a setup wizard: it searches the network for your PS5 (or you type its IP), shows the game copies it found next to what the PS5 holds, then builds and says what to do on the PS5. English only for now.
+- Holding L1 + R1 while Pit Stop starts opens the receiver, so a working install can take an update from the PC. The boot screen says how to open the Pit Stop settings in game (OPTIONS + touchpad).
+- The builder looks only in the dump's own folders (`base/` and `updates/<version>/`) and puts the game where the title reads it. A renamed `updates.old/`, or a dump chosen one folder too high, gave "missing exefs/main, or romfs/ or romfs.nup" on the PS5.
+- Texture checks in races no longer protect whole 2 MiB blocks of memory, which cost the game threads time (`MKW_SNAP_SCOPED`). In races this cut the game's write faults from 13-14 to 3-4 a frame, and each frame's work by 0.5-0.8 ms.
+- The README and these notes say the Linux builder needs Python 3.14 or newer, not just Python 3 (#16).
+
+### Tested
+
+- On a base PS5 with game 1.8.0, built from the same code: a Knockout Tour that the 0.2.1 code crashed at frame 21,373 (out of memory) ran past frame 44,900 until it was closed by hand. 4 texture allocations had to wait for memory to be freed, and all succeeded; the lowest free memory was 206 MiB and 1.7 GiB of game memory was packed.
+- The same build in the Grand Prix benchmark (210 s of racing, 1080p, frame generation off), two runs: 17.0 and 17.2 ms a frame on average (58.8 and 58.2 fps), 1% low 43.1 and 38.6 fps, race speed 0.98x and 0.97x. Split screen at the 30 fps cap: 2 players 30.0 fps at full speed, 3 players 23.3 fps (0.78x), 4 players 22.7 fps (0.75x).
+- The placeholder and both builder packages pass the release's no-game-content check and match `SHA256SUMS`; the placeholder's `param.json` says `01.003.000`.
+- Both builder packages, unpacked into clean folders, pass `prepare_ps5.py --check-only`: the Linux one on a 1.8.0 dump (Python 3.14), the Windows one on a 1.0.0 dump through its own Python, on Windows.
+
+Not run: a whole title build and send from the 0.3.0 builder packages, and an update through ProsperoStore itself.
+
+### Known issues
+
+- Memory is still tight in long sessions: through a whole Knockout Tour the memory manager spent 60% of its time in its low-memory mode. Several Knockout Tours in a row, and game 1.0.0 with memory packing, have not been tested.
+- Split screen with 3 or 4 players runs at about three quarters of real time (0.78x and 0.75x).
+- Races at 60 fps run slightly slower than real time (0.97-0.98x), because a few frames take longer than 16.7 ms where the course streams in new textures.
+- The setup wizard is in English only, and a build started from it has not been run to the end by hand.
+- Still open: a few sparse texture tiles stay unloaded from boot; the first multiplayer race on a course can drop a player whose shaders are still compiling. There is no Nintendo online play.
+
 ## ps5-0.2.1
 
 **Mario Kart World: Pit Stop** (`PPSA99193`) 0.2.1 gets the title ready for ProsperoStore. An update installed from the store now keeps the game files you built, your saves and your settings, and every release now has its own version number, so the store can tell that a newer one is out. The game itself is the same as in 0.2.0. As before, you build the title on your PC, on Windows or Linux, from your own *Mario Kart World* 1.8.0 or 1.0.0 dump. Nothing of the game is in the release.
