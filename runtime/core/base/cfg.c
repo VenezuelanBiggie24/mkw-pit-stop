@@ -154,7 +154,7 @@ static const CfgRow rows[] = {
     S("ASYNC_PREEMPT", "performance", "1", "0|1|2", RESTART),
     S("REPLAY_ASYNC", "performance", "1", "0|1", RESTART),
     S("REPLAY_PAR", "performance", REPLAY_PAR_DEFAULT, "0|1|2", RESTART),
-    S("PACK", NULL, "0", "0|1", RESTART),   // PS5: cold guest memory compressed (vk_mem_upload.c pack_step)
+    S("PACK", NULL, "0", "0|1", RESTART),   // PS5 (on in its profile): cold guest memory compressed (vk_mem_upload.c pack_step)
     S("FREE_CORES", "performance", "0", "0|1", RESTART),
     S("TIMER_1MS", "performance", "1", "0|1", RESTART),
     // shaders and pipelines
@@ -664,6 +664,12 @@ static const struct { const char *key, *value; } PS5[] = {
     // 242 -> 318 MiB, census minimum 168 -> 276 MiB; 1,039 textures (370 MiB) out in 4 passes; frame 17.53 -> 17.50 ms,
     // same 57.1 fps.
     {"TEX_PRESSURE", "1800"},
+    // Cold guest memory packed (vk_mem_upload.c pack_step): the cold feed freezes the 2 MiB regions unwritten for 60 s
+    // and the governor compresses their 64 KiB units into a direct-memory store. 1.8.0 Grand Prix (pack-gain-20261124,
+    // with TEX_PRESSURE): 1,573 MiB packed into 453 MiB, hard governor passes 1,827 -> 87, census minimum free 168 ->
+    // 304 MiB, frame 17.52 -> 17.50 ms; MKW_PACK_VERIFY found 0 of 3,447 unpacked units different (pack-verify).
+    {"PACK", "1"},
+    {"PACK_STORE_MIB", "1024"},
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 
