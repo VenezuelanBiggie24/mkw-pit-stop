@@ -25,6 +25,14 @@ int ps5_mem_commit(Ps5MemBlock *block, Ps5MemCommitReport *report) {
     return 0;
 }
 
+// The real one (ps5_memory.c) writes the unit's first contents through a private mapping before the unit is mapped at
+// its address; here the unit is committed as above and fill writes it in place. A fill's nonzero result is returned.
+int ps5_mem_commit_fill(Ps5MemBlock *block, Ps5MemCommitReport *report, int (*fill)(void *ctx, void *unit), void *ctx) {
+    int result = ps5_mem_commit(block, report);
+    if (!result && fill) result = fill(ctx, (void *)block->address);
+    return result;
+}
+
 int ps5_mem_protect_native(Ps5MemBlock *block, size_t offset, size_t bytes, Ps5MemProt protection) {
     const int flags[] = {PROT_NONE, PROT_READ, PROT_READ | PROT_WRITE};
     assert(block->committed && bytes && !(offset % PS5_MEM_PAGE) && !(bytes % PS5_MEM_PAGE));

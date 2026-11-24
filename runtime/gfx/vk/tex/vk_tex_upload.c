@@ -1526,7 +1526,7 @@ void make_fresh_snap(Tex *e) {
     n_checks++;
     int perf = (rt_trace & RT_TRACE_PERF) != 0;
     uint64_t t0 = perf ? kern_now_ns() : 0;
-    static int scoped = -1;   // MKW_SNAP_SCOPED (vk_mem_gen.c vk_mem_changed_scoped; default 0, "ab")
+    static int scoped = -1;   // MKW_SNAP_SCOPED (vk_mem_gen.c vk_mem_changed_scoped; default 0, 1 in the PS5 profile; "ab")
     if (scoped < 0) {
         int m = rt_knob("SNAP_SCOPED", "0");
         if (m) rt_log("vk: texture checks peek their own span, no 2 MiB snapshot%s (MKW_SNAP_SCOPED)",

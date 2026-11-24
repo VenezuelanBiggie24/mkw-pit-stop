@@ -189,8 +189,10 @@ what = "Windows refused the game more memory (\"memory: commit … failed\"): RA
 issue = 404
 all = ["reading address 0x150", "main+0xb879f0"]
 what = "the game's code at main+0xb879f0 reads a field of a resource that is not there (access violation at 0x150)"
+wiki = "180-crash-right-after-pressing-play-reading-address-0x150-main0xb879f0"
 
 [[signature]]
 issue = 502
 all = ["reading address 0x198", "main+0x5cf6e0"]
 what = "the game's code at main+0x5cf6e0 reads a field of a resource that is not there (access violation at 0x198)"
+wiki = "180-with-mods-crash-while-an-area-loads-reading-address-0x198-main0x5cf6e0"

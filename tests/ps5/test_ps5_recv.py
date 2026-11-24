@@ -59,7 +59,8 @@ int main(int argc, char **argv) {
         FILE *f = fopen(port_file, "w");
         fprintf(f, "%u\\n", (unsigned)st.port);
         fclose(f);
-        for (int i = 0; i < 600; i++) {
+        // up to 60 s, as the tests allow a send: 6 s ran out under a full parallel run (20,002 files, exit 3)
+        for (int i = 0; i < 6000; i++) {
             ps5_recv_status(&st);
             if (st.state == PS5_RECV_DONE) break;
             usleep(10000);
@@ -263,6 +264,7 @@ def test_ps5_recv_builder_status(tmp_path: Path) -> None:
             proc.kill()
 
 
+@pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
 def test_ps5_recv_info_lists_game_copies(tmp_path: Path) -> None:
     """PIT1I names each game copy in the title folder and its exefs/main build id (the builder tells the player what
     the console holds: an upgrade keeps it); a main that is not an NSO has no id, a folder without a RomFS is no copy."""

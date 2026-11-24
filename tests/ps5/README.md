@@ -5,7 +5,7 @@ DualSense mapping and models of the PS5's memory backing and loader.
 
 | File | What it checks |
 |---|---|
-| `test_nup.py` | The PS5 builder's clean-room Switch 2 `.nup` reader (`tools/ps5/nup_reader.py`): raw and zstd entries, base + update layering, path traversal rejection, TOC SHA-256 verification, and MKW 1.0.0 build ID check |
+| `test_ps5_nup.py` | The PS5 builder's clean-room Switch 2 `.nup` reader (`tools/ps5/nup_reader.py`): raw and zstd entries, base + update layering, path traversal rejection, TOC SHA-256 verification, and MKW 1.0.0 build ID check |
 | `test_ps5_recv.py` | PS5 placeholder TCP receiver (`runtime/platform/ps5_recv.c`) + `tools/ps5/send_ps5.py` client: path traversal rejection, bad SHA-256 rejection, atomic staging under title folder, incremental `STAT_BATCH` manifest deltas, listener close on completion, and the move back of game files and saves after a clean ProsperoStore update |
 | `test_ps5_ftp_install.py` | The builder's install over the console's FTP server without the receiver (`send_ps5.py send_directory_ftp`), against a fake FTP server: first install, unchanged files skipped by its record or the receiver's manifest, stale exefs modules removed by name and nothing else, a short upload leaving the old file |
 | `test_ps5_builder.py` | PS5 release game-content scan (`release_ps5.py` including placeholder `eboot.bin` symbol check) and pure-Python ELF64/`ar` symbol readers (`prepare_ps5.py`) |

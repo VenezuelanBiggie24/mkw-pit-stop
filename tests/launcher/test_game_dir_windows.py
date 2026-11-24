@@ -9,6 +9,7 @@ Usage: uv run pytest tests/launcher/test_game_dir_windows.py
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +19,15 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 WINDOWS_LIMIT = 131  # MAX_PATH (260), less the NUL and 128 UTF-16 units for derived runtime filenames
+
+def guest_layout_dir(d: Path) -> Path:
+    """runtime/core/base/host.h includes guest_layout.h, which the build emits (tools/build/build.py from
+    recomp/layout.py): the desktop one, written into d for this harness."""
+    sys.path.insert(0, str(ROOT / "recomp"))
+    from layout import placement_defines
+
+    (d / "guest_layout.h").write_text("#pragma once\n" + placement_defines("desktop"), encoding="utf-8")
+    return d
 
 
 def windows_path(path: Path) -> str:
@@ -66,7 +76,8 @@ def windows_build(tmp_path_factory: pytest.TempPathFactory) -> WindowsProbe:
     libgcc = Path(subprocess.check_output([mingw, "-print-libgcc-file-name"], text=True).strip()).resolve()
     kernel32 = Path(subprocess.check_output([mingw, "-print-file-name=libkernel32.a"], text=True).strip()).resolve()
     exe = tmp_path_factory.mktemp("windows-selector") / "probe.exe"
-    includes = [ROOT / "runtime", ROOT / "runtime/cpu", ROOT / "runtime/core/base", ROOT / "runtime/core/boot"]
+    includes = [guest_layout_dir(exe.parent), ROOT / "runtime", ROOT / "runtime/cpu", ROOT / "runtime/core/base",
+                ROOT / "runtime/core/boot"]
     sources = [ROOT / "tests/launcher/t_game_dir.c", ROOT / "runtime/core/base/cfg.c",
                ROOT / "runtime/core/base/sysinfo_log.c", ROOT / "runtime/core/boot/gamelib.c"]
     probe_build.build([cc, "--target=x86_64-w64-windows-gnu", f"--sysroot={kernel32.parent.parent}",

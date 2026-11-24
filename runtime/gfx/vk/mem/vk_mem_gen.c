@@ -267,7 +267,7 @@ int vk_mem_changed_snap(uint64_t addr, uint64_t size, uint32_t since, uint32_t e
 
 int mem_written_any(uint64_t addr, uint64_t size);   // memory.c (MKW_SNAP_SCOPED)
 
-// MKW_SNAP_SCOPED (default 0; "ab"): a texture's check looks at its own span only. Its pages' generations newer than
+// MKW_SNAP_SCOPED (default 0, 1 in the PS5 profile; "ab"): a texture's check looks at its own span only. Its pages' generations newer than
 // since (a GPU write, a host write, an earlier query) say changed; then the write watch is peeked over the span
 // (mem_written_any, nothing protected): a page that may hold an unreported write sends the check to vk_mem_changed,
 // which queries and re-arms only the span before the texels are read; otherwise every page is armed and unwritten,
@@ -279,8 +279,9 @@ int mem_written_any(uint64_t addr, uint64_t size);   // memory.c (MKW_SNAP_SCOPE
 // under gen_lock shared, so no query (exclusive) can report and re-arm a page between them. In-race A/B, two races
 // (MKW_AB=6, plain and inverted): sceKernelMprotect arms 0.77 -> 0.24-0.28 ms a frame, the game's write faults
 // 13-14 -> 2.7-4.2, uploads unchanged, precheck spikes (> 4 ms) 11.0 -> 4.8 % and 6.9 -> 2.9 % of frames, the frame
-// -0.28 / -0.14 ms and busy -0.55 / -0.84 ms (scoped-1p, 24/11/2026). Off by default until checked on screen: a
-// missed write would only show as a stale texture.
+// -0.28 / -0.14 ms and busy -0.55 / -0.84 ms (scoped-1p, 24/11/2026). A 1.8.0 race with it on, watched on screen by
+// the user, showed no stale texture (a missed write would show only there): on in the PS5 profile (cfg.c). Off
+// elsewhere: without a peek (plat_mem_written_any) every check would query its span.
 int vk_mem_changed_scoped(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
     if (!size) { *now = since; return 0; }
     uint64_t lo = addr & ~0xfffull, hi = (addr + size + 0xfff) & ~0xfffull;
