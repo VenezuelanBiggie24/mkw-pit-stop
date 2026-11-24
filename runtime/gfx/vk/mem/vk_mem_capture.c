@@ -19,8 +19,10 @@
 // - Read-trapped pages hold the shadow's bytes already: left out. Pages of untracked memory (no write watch): the pool
 //   leaves the list and is read as before.
 // MKW_SHADOW_SUBMIT (a measurement, default 0; "ab"): 1 captures. fe2 (06/11/2026): no fewer dark trees (55 in 770
-// frames with it, 46 in 1,030 without) and 2.3 ms a submit on the game thread (685 pools, 3.5 MB each). Switching in the A/B blocks drops
-// every pool at the edge: a block's first syncs may see the bytes older captures hold.
+// frames with it, 46 in 1,030 without) and 2.3 ms a submit on the game thread (685 pools, 3.5 MB each). With
+// MKW_SHADOW=0 and MKW_SHADOW_UNC=1 (PS5 profile), only the 3 CPU_UNCACHED|GPU_UNCACHED pools (~38 MiB) are captured
+// (~0.08-0.13 ms a submit on the game thread), eliminating dynamic SSBO/skinning overwrites between submit and replay.
+// Switching in the A/B blocks drops every pool at the edge: a block's first syncs may see the bytes older captures hold.
 #define CAP_IDLE 64
 
 typedef struct { PoolRec *pool; uint64_t addr, n; uint8_t *data; } CapRun;
@@ -140,7 +142,7 @@ static void capture_pool(PoolRec *r, CapRun **runs, int *nruns, int *cruns, uint
 }
 
 void vk_mem_shadow_capture(uint64_t sub) {
-    if (!shadow_live) return;
+    if (!__atomic_load_n(&shadow_live, __ATOMIC_ACQUIRE)) return;
     if (mode < 0) {
         mode = rt_knob("SHADOW_SUBMIT", "0");
         rt_log("mem: the CPU's writes captured at each submit %s (MKW_SHADOW_SUBMIT)",

@@ -415,7 +415,9 @@ static const CfgRow rows[] = {
     K("SHADOW"),
     K("SHADOW_AUTO_RUNS"),
     K("SHADOW_DRAWS"),
+    K("SHADOW_SUBMIT"),
     K("SHADOW_TRIM"),
+    K("SHADOW_UNC"),
     K("SHARED_FONTS"),
     K("SHOTS"),
     K("SHOTS_DIR"),
@@ -652,6 +654,14 @@ static const struct { const char *key, *value; } PS5[] = {
     // 19/11/2026; GPU 7.6 -> 6.2 ms, free direct memory median 375 -> 642 MiB); races that happened to start after the
     // governor had shed shadows (vk_mem_shadow_shed) were the fast ones at 18.8-19.7. Menus checked by the user.
     {"SHADOW", "0"},
+    // Keep shadow storage + submit-time capture for the 3 CPU_UNCACHED|GPU_UNCACHED dynamic ring-buffer pools
+    // (~38 MiB total, vk_mem_back.c / vk_mem_capture.c): with SHADOW=0 and REPLAY_PAR=1, the game overwrote dynamic
+    // SSBO/bone/transform slices in pool 0x2487069000 before replay and during GPU execution, stretching 3D meshes
+    // across the screen every 6-30 frames (123-322 odd frames per Grand Prix race in MKW 1.8.0). Shadowing only those
+    // 3 uncached pools with submit-time capture eliminates the corruption (0 odd frames across 6,180 frames;
+    // verify-shunc-sub, 24/11/2026) at ~0.08-0.13 ms/sub on the game thread and 0.0 MiB governor trim.
+    {"SHADOW_UNC", "1"},
+    {"SHADOW_SUBMIT", "1"},
     // Upstream's texture workers (MKW_TEX_PAR, tex_par.c) off, as before the 22/11/2026 merge: tried on the console
     // 19/11/2026 (texpar-*, six Grand Prix runs) the large deswizzles took 40 % less time but the race frame did not
     // move (A/B medians -0.06 ms) and the 0.1 % lows were ~1 fps worse. The ASTC alpha scan and decode keep their own

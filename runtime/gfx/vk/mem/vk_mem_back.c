@@ -155,10 +155,37 @@ int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     // is imported instead: the other paths check each pool's smap, so imported and shadowed pools mix.
     // (Importing every CPU_NO_ACCESS pool too was tried, run82-run86: the pinned pages count in the process's memory
     // and it died sooner, frame 97-103 against 130.)
-    if (shadow_on && !__atomic_load_n(&g_shadow_shed, __ATOMIC_ACQUIRE)) {
-        if (shadow_pool(c, r, addr, size)) return 1;
+    // MKW_SHADOW_UNC (default 0): when MKW_SHADOW=0, still shadow CPU_UNCACHED|GPU_UNCACHED pools (flags 0x12). The
+    // game puts its per-frame dynamic SSBO/skinning/transform ring buffers there (3 pools, ~38 MiB total in MKW 1.8.0)
+    // and rewrites them on the game thread while the GPU is still reading the previous frame's slice; paired with
+    // MKW_SHADOW_SUBMIT=1 this isolates those 3 pools from live CPU overwrites without paying the memory or sync cost
+    // of shadowing the other 1,000+ static/cached pools.
+    static int shadow_unc = -1;
+    if (shadow_unc < 0) {
+        const char *e = cfg_get("MKW_SHADOW_UNC");
+        if (!e || !*e || !strcmp(e, "0")) shadow_unc = 0;
+        else if (!strcmp(e, "1")) shadow_unc = 1;
+        else {
+            rt_log("mem: bad MKW_SHADOW_UNC='%s' (expected 0 or 1); using 0", e);
+            shadow_unc = 0;
+        }
+        if (shadow_unc) rt_log("mem: shadow storage for CPU_UNCACHED|GPU_UNCACHED pools only (MKW_SHADOW_UNC)");
+    }
+    const uint32_t cache_mask = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_CPU_CACHED |
+                                NVN_MEMORY_POOL_FLAGS_GPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED;
+    const uint32_t unc_flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_UNCACHED;
+    int is_unc = (r->flags & cache_mask) == unc_flags;
+    int want_shadow = (shadow_on && !__atomic_load_n(&g_shadow_shed, __ATOMIC_ACQUIRE)) || (shadow_unc && is_unc);
+    if (want_shadow) {
+        if (shadow_pool(c, r, addr, size)) {
+            if (!shadow_on) __atomic_store_n(&shadow_live, 1, __ATOMIC_RELEASE);
+            return 1;
+        }
         vk_mem_relieve(size + (16ull << 20), "a shadow pool");
-        if (shadow_pool(c, r, addr, size)) return 1;
+        if (shadow_pool(c, r, addr, size)) {
+            if (!shadow_on) __atomic_store_n(&shadow_live, 1, __ATOMIC_RELEASE);
+            return 1;
+        }
         rt_log("vk: pool %#llx+%#llx: imported instead", (unsigned long long)addr, (unsigned long long)size);
     }
     if (import_host(c, r, addr, size)) return 1;
