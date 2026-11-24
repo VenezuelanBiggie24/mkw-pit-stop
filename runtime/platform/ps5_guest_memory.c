@@ -380,6 +380,13 @@ static void pk_unpacked(PackBlob *b, RangeKind kind, int cause, uint64_t ns) {
     pk_drop(b);
 }
 
+// Whether the guest may write some page of the native page at off in unit (ps5_mixed_back_fill maps it read-write).
+static bool native_rw(const Ps5MixedBlock *unit, uint64_t off) {
+    for (size_t i = off / PAGE; i < (off + PS5_MEM_PAGE) / PAGE; ++i)
+        if (unit->pages[i] == PS5_GUEST_RW) return true;
+    return false;
+}
+
 static bool back_unit_locked(Ps5MixedBlock *unit, RangeKind kind, int in_signal, int cause) {
     if (unit->backing.committed) return true;
     PackBlob *pk = unit->pack;
@@ -416,9 +423,17 @@ static bool back_unit_locked(Ps5MixedBlock *unit, RangeKind kind, int in_signal,
                            ? (PS5_KERNEL_PROT_GPU_READ | PS5_KERNEL_PROT_GPU_WRITE)
                            : 0;
             sceKernelMprotect((void *)(uintptr_t)p, PS5_MEM_PAGE, prot);
+        } else if (prot_watch_is_armed(p) && native_rw(unit, off)) {
+            // A unit given back and backed again (MKW_PACK's unpack, a zero unit's release) is mapped by the guest's
+            // modes alone, read-write where the guest may write. A page the write watch armed before the release still
+            // reads armed, so the game's writes to it would not fault and the textures there would never see them
+            // (issue 11, 0.3.0: glyphs drawn into the font cache after a Grand Prix showed the ones they replaced).
+            // Read-only again, as the watch expects; if that fails, counted as written instead.
+            if (ps5_mem_protect_native(&unit->backing, off, PS5_MEM_PAGE, PS5_MEM_READ))
+                prot_watch_mark_written(p, PS5_MEM_PAGE);
         }
     }
-    prot_watch_touch(unit->backing.address, PS5_MEM_UNIT);
+    prot_watch_touch(unit->backing.address, PS5_MEM_UNIT);   // the pages not armed: written
     size_t total = __atomic_load_n(&backed_units[RANGE_HEAP], __ATOMIC_RELAXED) +
                    __atomic_load_n(&backed_units[RANGE_ALIAS], __ATOMIC_RELAXED) +
                    __atomic_load_n(&backed_units[RANGE_OTHER], __ATOMIC_RELAXED);
@@ -552,7 +567,10 @@ static void fault_handler(int sig, siginfo_t *si, void *uc) {
             bool perm_ok = is_write ? (st == PS5_GUEST_RW) : (st >= PS5_GUEST_READ);
             if (committed && perm_ok && !unit->backing.committed) {
                 bool backed = back_unit_locked(unit, r->kind, 1, is_write ? PLAT_BACK_WRITE_FAULT : PLAT_BACK_READ_FAULT);
-                if (backed && is_write) prot_watch_mark_written(addr & ~(uint64_t)(PS5_MEM_PAGE - 1), PS5_MEM_PAGE);
+                // An armed page is read-only again (back_unit_locked): the retry faults once more and prot_watch_fault
+                // takes it as any watched write. Marked here, it would stay read-only with nothing to unprotect it.
+                uint64_t pg = addr & ~(uint64_t)(PS5_MEM_PAGE - 1);
+                if (backed && is_write && !prot_watch_is_armed(pg)) prot_watch_mark_written(pg, PS5_MEM_PAGE);
                 unit_unlock(unit);
                 if (backed) { ps5_mem_batch_swap(batch); return; } // Retry the faulting access now that the unit is backed.
                 // Backing a committed guest unit failed (OOM / VM map limit). Never fall through to
