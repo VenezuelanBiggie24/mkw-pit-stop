@@ -14,7 +14,7 @@
 - **A jailbroken PS5:** running a payload loader (`etaHEN` or `elfldr`), `kstuff`, and **ShadowMountPlus 1.7 Beta 5** or newer to register homebrew titles in `/data/homebrew/`.
 - **A PC with about 30 GB free** to build the title from your dump, on the same network as the PS5:
   - **Windows 10 or 11 (64-bit):** nothing to install; the Windows builder carries its own Python, zig and glslc. No WSL needed.
-  - **Linux x86-64 or WSL2:** Python 3, with `clang` and `lld` (18 or newer).
+  - **Linux x86-64 or WSL2:** Python 3.14 or newer, with `clang` and `lld` (18 or newer).
 
 ## Install on Windows (no WSL)
 

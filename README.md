@@ -63,7 +63,7 @@ Early, and moving fast. On 18/11/2026 on a base PS5:
 3. **A PC with about 30 GB free** on the same network as the PS5, to build the title from your dump:
    - **Windows 10 or 11 (64-bit):** nothing else to install, no WSL. The Windows builder carries its own Python, zig
      and glslc ([Windows steps](#installing-on-windows-no-wsl)).
-   - **Linux x86-64 or WSL2:** `clang`, `lld` and Python 3 ([Linux steps](#installing-and-updating-on-ps5-linux-or-wsl2)).
+   - **Linux x86-64 or WSL2:** `clang`, `lld` and Python 3.14 or newer ([Linux steps](#installing-and-updating-on-ps5-linux-or-wsl2)).
 
 ## Installing on Windows (no WSL)
 

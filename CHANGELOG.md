@@ -22,13 +22,16 @@ before publishing) and optionally `### Known issues`.
 - Holding L1 + R1 while Pit Stop starts opens the receiver, so a working install can take an update from the PC. The boot screen says how to open the Pit Stop settings in game (OPTIONS + touchpad).
 - The builder looks only in the dump's own folders (`base/` and `updates/<version>/`) and puts the game where the title reads it. A renamed `updates.old/`, or a dump chosen one folder too high, gave "missing exefs/main, or romfs/ or romfs.nup" on the PS5.
 - Texture checks in races no longer protect whole 2 MiB blocks of memory, which cost the game threads time (`MKW_SNAP_SCOPED`). In races this cut the game's write faults from 13-14 to 3-4 a frame, and each frame's work by 0.5-0.8 ms.
+- The README and these notes say the Linux builder needs Python 3.14 or newer, not just Python 3 (#16).
 
 ### Tested
 
-Before publishing:
-
 - On a base PS5 with game 1.8.0, built from the same code: a Knockout Tour that the 0.2.1 code crashed at frame 21,373 (out of memory) ran past frame 44,900 until it was closed by hand. 4 texture allocations had to wait for memory to be freed, and all succeeded; the lowest free memory was 206 MiB and 1.7 GiB of game memory was packed.
 - The same build in the Grand Prix benchmark (210 s of racing, 1080p, frame generation off), two runs: 17.0 and 17.2 ms a frame on average (58.8 and 58.2 fps), 1% low 43.1 and 38.6 fps, race speed 0.98x and 0.97x. Split screen at the 30 fps cap: 2 players 30.0 fps at full speed, 3 players 23.3 fps (0.78x), 4 players 22.7 fps (0.75x).
+- The placeholder and both builder packages pass the release's no-game-content check and match `SHA256SUMS`; the placeholder's `param.json` says `01.003.000`.
+- Both builder packages, unpacked into clean folders, pass `prepare_ps5.py --check-only`: the Linux one on a 1.8.0 dump (Python 3.14), the Windows one on a 1.0.0 dump through its own Python, on Windows.
+
+Not run: a whole title build and send from the 0.3.0 builder packages, and an update through ProsperoStore itself.
 
 ### Known issues
 
