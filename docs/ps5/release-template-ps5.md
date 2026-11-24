@@ -14,7 +14,7 @@
 - **A jailbroken PS5:** running a payload loader (`etaHEN` or `elfldr`), `kstuff`, and **ShadowMountPlus 1.7 Beta 5** or newer to register homebrew titles in `/data/homebrew/`.
 - **A PC with about 30 GB free** to build the title from your dump, on the same network as the PS5:
   - **Windows 10 or 11 (64-bit):** nothing to install; the Windows builder carries its own Python, zig and glslc. No WSL needed.
-  - **Linux x86-64 or WSL2:** Python 3.14 or newer, with `clang` and `lld` (18 or newer).
+  - **Linux x86-64 or WSL2:** nothing to install; the Linux builder carries its own Python 3.14, zig and glslc. Run it with that Python (`setup/python/bin/python3`), not the system's.
 
 ## Install on Windows (no WSL)
 
@@ -35,14 +35,14 @@ If the PS5 stays on **Waiting for connection**, check the IP and that the PC and
 
 ## Install on Linux or WSL2
 
-1. Download `mkw-pit-stop-<version>-ps5-builder-linux-x86_64.tar.zst` from this release, verify it against `SHA256SUMS`, and unpack it (`tar --zstd -xf mkw-pit-stop-*.tar.zst`).
-2. Run `prepare_ps5.py` pointing at your *Mario Kart World* dump (a folder or a `.nup` file):
+1. **On the PS5:** put the placeholder title on it and launch it, as in step 1 for Windows. Leave its **Game files missing** screen open.
+2. Download `mkw-pit-stop-<version>-ps5-builder-linux-x86_64.tar.zst` from this release, verify it against `SHA256SUMS`, and unpack it (`tar --zstd -xf mkw-pit-stop-*.tar.zst`).
+3. From the unpacked folder, build and send with the builder's own Python, pointing at your *Mario Kart World* dump (a folder or a `.nup` file) and the IP from the PS5 screen:
    ```sh
-   python3 prepare_ps5.py --source /path/to/your/mkw-dump --out ./PPSA99193
+   ./setup/python/bin/python3 prepare_ps5.py --source /path/to/your/mkw-dump --out ./PPSA99193 --send 192.168.1.50
    ```
-   The first run finds the dump's version by `exefs/main`'s build ID (1.8.0 `d00e4f399e411d06`, preferred, or 1.0.0 `9e244438c3d8ef1c`), generates and compiles the game's C code for the PS5 (`ps5-high144`), links and signs `eboot.bin` against the bundled runtime and RADV driver, downloads NVIDIA's `nvdisasm` and `ptxas` (pinned by SHA-256) to build the SM86 shader specification on your machine, translates the game's 11,561 shaders to `spirv/`, and copies `exefs/` and `romfs/` into `PPSA99193/`.
-3. Copy `PPSA99193` to `/data/homebrew/PPSA99193` on your PS5 over FTP or USB, or pass `--deploy <PS5_IP>` to upload, verify by SHA-256, and refresh ShadowMountPlus's registered `sce_sys`.
-4. Launch **Mario Kart World: Pit Stop** (`PPSA99193`) from the PS5 home screen. Press **Options + touchpad click** at any time in game to open the **Pit Stop** settings overlay.
+   The first run finds the dump's version by `exefs/main`'s build ID (1.8.0 `d00e4f399e411d06`, preferred, or 1.0.0 `9e244438c3d8ef1c`), generates and compiles the game's C code for the PS5 (`ps5-high144`), links and signs `eboot.bin` against the bundled runtime and RADV driver, downloads NVIDIA's `nvdisasm` and `ptxas` (pinned by SHA-256) to build the SM86 shader specification on your machine, translates the game's 11,561 shaders, and packs the RomFS and the shaders into `romfs.nup` and `spirv.nup`. It then sends the title to the PS5's receiver, or over the PS5's FTP server when the receiver does not answer; `--usb /path/to/drive` writes it to an exFAT drive instead. Don't copy `PPSA99193` by hand: its loose `spirv/` folder (about 46,000 files) is the translator's working copy, which the title does not read.
+4. When the PS5 shows **Transfer complete!**, press **Cross** and launch **Mario Kart World: Pit Stop** (`PPSA99193`) again. Press **Options + touchpad click** at any time in game to open the **Pit Stop** settings overlay.
 
 ## Updating
 
@@ -66,7 +66,7 @@ The receiver is still the better way when you can open it: it checks every file'
      files, saves and `mkw.ini` it put aside (in `prosperostore/previous/PPSA99193`) move back on the title's first
      start, which then shows **Game files out of date or missing**.
 2. **On the PC:** unpack the new builder over your old builder folder (or pass the same `--work` directory), so its
-   build cache is reused, and build again: **Build for PS5** on Windows, `prepare_ps5.py --send <PS5_IP>` on Linux.
+   build cache is reused, and build again: **Build for PS5** on Windows, `./setup/python/bin/python3 prepare_ps5.py --send <PS5_IP>` on Linux.
    Steps whose inputs have not changed are skipped.
 3. When the PS5 shows **Transfer complete!**, press **Cross** and launch the title again.
 

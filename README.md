@@ -63,7 +63,9 @@ Early, and moving fast. On 18/11/2026 on a base PS5:
 3. **A PC with about 30 GB free** on the same network as the PS5, to build the title from your dump:
    - **Windows 10 or 11 (64-bit):** nothing else to install, no WSL. The Windows builder carries its own Python, zig
      and glslc ([Windows steps](#installing-on-windows-no-wsl)).
-   - **Linux x86-64 or WSL2:** `clang`, `lld` and Python 3.14 or newer ([Linux steps](#installing-and-updating-on-ps5-linux-or-wsl2)).
+   - **Linux x86-64 or WSL2:** nothing else to install either. The Linux builder carries its own Python 3.14, zig and
+     glslc ([Linux steps](#installing-and-updating-on-ps5-linux-or-wsl2)). Building from a source checkout instead
+     needs Python 3.14 or newer and [uv](https://docs.astral.sh/uv/) ([Building from source](#building-from-source)).
 
 ## Installing on Windows (no WSL)
 
@@ -111,32 +113,46 @@ the release notes' **Updating** section has the steps. On a USB drive, just buil
 
 Because `eboot.bin` links the recompiled game code and `spirv/` holds the game's translated shaders, **no ready-to-run
 `eboot.bin` or `spirv/` is distributed**. You build the `PPSA99193` title folder on your PC from the game-free release
-builder and your own dump:
+builder and your own dump. The builder carries its own Python 3.14 (with the modules it needs), zig and glslc: run it
+with that Python, `setup/python/bin/python3`, not your system's `python3`, which may be older or lack the modules.
 
-1. Download `mkw-pit-stop-<version>-ps5-builder-linux-x86_64.tar.zst` from [**Releases**](https://github.com/exploitizm/mkw-pit-stop/releases), check its digest against
-   `SHA256SUMS`, and unpack it on Linux or WSL2:
+1. **Put the placeholder title on the PS5**, as in [Windows step 1](#installing-on-windows-no-wsl): upload the
+   `PPSA99193` folder from `mkw-pit-stop-<version>-ps5-placeholder-PPSA99193.zip` to `/data/homebrew/` and launch
+   **Mario Kart World: Pit Stop**. It shows **Game files missing** and `Console IP: <address> (port 19913)`; leave that
+   screen open.
+2. **Unpack the builder.** Download `mkw-pit-stop-<version>-ps5-builder-linux-x86_64.tar.zst` from
+   [**Releases**](https://github.com/exploitizm/mkw-pit-stop/releases), check its digest against `SHA256SUMS`, and
+   unpack it on Linux or WSL2:
    ```sh
    tar --zstd -xf mkw-pit-stop-*-ps5-builder-linux-x86_64.tar.zst
    cd mkw-pit-stop-*
    ```
-2. Run `prepare_ps5.py` pointing at your *Mario Kart World* dump (a folder or a `.nup` file):
+3. **Build and send**, pointing at your *Mario Kart World* dump (a folder or a `.nup` file) and the address from the
+   PS5 screen:
    ```sh
-   python3 prepare_ps5.py --source /path/to/your/mkw-dump --out ./PPSA99193
+   ./setup/python/bin/python3 prepare_ps5.py --source /path/to/your/mkw-dump --out ./PPSA99193 --send 192.168.1.50
    ```
-   The script finds your dump's version (1.8.0 or 1.0.0), translates the AArch64 ExeFS to C (`ps5-high144`), compiles and links
-   `eboot.bin` against the prebuilt runtime and PS5 RADV archive, downloads NVIDIA's `nvdisasm` and `ptxas` (pinned by
-   SHA-256) to generate the SM86 instruction spec locally, translates all 11,561 shaders into `PPSA99193/spirv/`, and
-   stages `exefs/` and `romfs/` into `PPSA99193/`.
-3. Transfer `PPSA99193` to `/data/homebrew/PPSA99193` on your PS5 via FTP or USB — or pass `--deploy <PS5_IP>` to
-   upload, verify every file by SHA-256, and refresh ShadowMountPlus's registered `param.json` and `icon0.png` in
-   `/user/app/PPSA99193/sce_sys`.
-4. Launch **Mario Kart World: Pit Stop** from the PS5 home screen.
+   The script finds your dump's version (1.8.0 or 1.0.0), translates the AArch64 ExeFS to C (`ps5-high144`), compiles
+   and links `eboot.bin` against the prebuilt runtime and PS5 RADV archive, downloads NVIDIA's `nvdisasm` and `ptxas`
+   (pinned by SHA-256) to generate the SM86 instruction spec locally, and translates all 11,561 shaders. The RomFS goes
+   into one `romfs.nup` and the shaders into one `spirv.nup`, which the title reads in place. It then sends the title
+   to the PS5's receiver, which checks every file by SHA-256 and shows the progress on the TV. When the receiver does
+   not answer and the PS5 runs an FTP server (ftpsrv or etaHEN's, port 2121 or 1337), it installs over FTP instead.
+   Without the network, `--usb /path/to/drive` copies the title to `homebrew/PPSA99193` on an exFAT drive (about
+   25 GB free), where ShadowMountPlus finds it.
+4. **Start the game.** When the PS5 shows **Transfer complete!**, press **Cross** and launch **Mario Kart World: Pit
+   Stop** again.
+
+Don't copy `PPSA99193` to the PS5 by hand: it also holds the translator's loose `spirv/` folder (about 46,000 files)
+that the title never reads, since it reads `spirv.nup`. `--send` and `--usb` leave that folder out. If you do copy by
+hand, leave out `spirv/`. How the placeholder, the receiver and the `.nup` packages work is in
+[docs/ps5/ps5.md](docs/ps5/ps5.md#pit-stop-placeholder-and-pc-builder).
 
 **Updating:** hold **L1 + R1** while you launch the title on the PS5, so it opens the receiver screen instead of the
 game (a title built before this option existed: upload the new placeholder over it by FTP first). Then unpack the
-newer builder and run `prepare_ps5.py --send <PS5_IP>` with the same `--work` and `--out` directories. Steps whose
-inputs did not change (such as `romfs/` and unchanged shaders) are skipped, and your saves (`profile/`) and settings
-(`mkw.ini`) on the console are kept.
+newer builder and run `./setup/python/bin/python3 prepare_ps5.py --send <PS5_IP>` with the same `--work` and `--out`
+directories. Steps whose inputs did not change (such as the RomFS and unchanged shaders) are skipped, and your saves
+(`profile/`) and settings (`mkw.ini`) on the console are kept.
 
 ## Pit Stop settings overlay
 
@@ -175,6 +191,11 @@ From upstream [mkw-recomp](https://github.com/adriadam10/mkw-recomp):
 ## Building from source
 
 ### PS5 native target (`PPSA99193`)
+
+From a source checkout, the tools need Python 3.14 or newer and the modules pinned in `uv.lock` (`lz4`, `capstone`,
+`pyelftools`, `zstandard` and others): run `uv sync` once, then run each tool with `uv run python` in place of the
+`python3` below (or activate `.venv`). An older Python stops at the first f-string with a backslash
+(`recomp/patches.py`), and a Python without the modules at `import lz4`.
 
 See [docs/ps5/ps5.md](docs/ps5/ps5.md) and [tools/ps5/README.md](tools/ps5/README.md) for the pinned `PS5_VulkanTemplate`,
 `PS5_Vulkan`, `PS5_Mesa` and `PS5_PayloadSDK` checkouts:
