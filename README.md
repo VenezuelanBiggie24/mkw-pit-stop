@@ -48,8 +48,8 @@ Early, and moving fast. On 18/11/2026 on a base PS5:
   - *Sparse tiles:* from boot a few sparse texture tiles stay unloaded: minor texture corruption near the start line
     and a black-and-white race intro.
   - *Multiplayer:* the first race on a course can drop a player whose shaders are still compiling; later races work.
-    Split screen is held at 30 fps: 2 players run at full speed, 3 or 4 players at ~24 fps in slow motion (0.40x
-    measured at 60; see [Performance](#performance)).
+    Split screen is held at 30 fps: 2 players run at full speed, 3 or 4 players at ~23 fps in slight slow motion
+    (0.75-0.78x; see [Performance](#performance)).
   - *Menus:* mode, character and vehicle select screens still differ slightly from the console.
 
 ## What you need ("You bring")
@@ -230,19 +230,34 @@ frame generation off):
 
 | Date | Frame rate setting | Average frame time | Typical frame | 1% low | Race speed |
 |---|---|---|---|---|---|
+| 24/11/2026 | 60 fps (the default) | 17.0 ms (58.8 fps) | 16.7 ms (at the cap) | 43.1 fps | 0.98x |
 | 22/11/2026 | 60 fps (the default) | 17.1 ms (58.5 fps) | 16.8 ms | 42.1 fps | 0.97x |
 | 20/11/2026 | 60 fps (the new default) | 17.0–17.4 ms (57–59 fps) | 16.7 ms (at the cap) | 35–41 fps | 0.95–0.98x |
 | 16/11/2026 | 30 fps (the previous default) | 33.3 ms | 33.3 ms | | 1.00x |
 
-The 22/11 row is one run of `main` at `v0.1.17-153-g30b6f62` (after the 0.1.17 merge and the partial texture
+The 24/11 row is one run of `main` at `ps5-0.2.1-31-g23b2024` (with the memory fixes for issue 11: shadow maps,
+texture pressure eviction and cold memory packing): 0.1% low 21.9 fps, worst frame 63.7 ms, 38 of 12,348 frames over
+33.3 ms. The 22/11 row is one run of `main` at `v0.1.17-153-g30b6f62` (after the 0.1.17 merge and the partial texture
 re-uploads): 0.1% low 25.8 fps, worst frame 77.6 ms, 21 of 12,279 frames over 33.3 ms.
 
 The new default is untested on the console as it ships: these numbers come from benchmark races with the runtime's
 performance logging on (`MKW_TRACE=perf`, which costs a little), set to 60 fps by hand. Menus, time trials, long
 sessions and other courses have not been played at the new default yet.
 
-**Split screen** (22/11/2026, the same benchmark with the split-screen cap off, i.e. at 60 fps, one build for all four runs,
-`ps5-0.1.0-12-g77aae4a`; every player is driven by the script):
+**Split screen** as it ships, held at 30 fps (24/11/2026, the same benchmark and build as the 1-player row above,
+`ps5-0.2.1-31-g23b2024`; every player is driven by a script):
+
+| Players | Average frame time | Typical frame | 1% low | 0.1% low | Worst frame | Race speed |
+|---|---|---|---|---|---|---|
+| 2 | 33.4 ms (30.0 fps) | 33.3 ms (at the cap) | 25.9 fps | 15.7 fps | 80 ms | 1.00x |
+| 3 | 43.0 ms (23.3 fps) | 43.6 ms | 17.3 fps | 13.3 fps | 87 ms | 0.78x |
+| 4 | 44.1 ms (22.7 fps) | 44.8 ms | 16.9 fps | 11.1 fps | 105 ms | 0.75x |
+
+At 30 fps the game counts every frame as 1/30 s, so 3 and 4 players, whose frames take ~43-44 ms, run at about three
+quarters of real time.
+
+Before the cap (22/11/2026, the split-screen cap off, i.e. at 60 fps, one build for all four runs,
+`ps5-0.1.0-12-g77aae4a`):
 
 | Players | Average frame time | Typical frame | 1% low | 0.1% low | Worst frame | Race speed |
 |---|---|---|---|---|---|---|
@@ -252,10 +267,8 @@ sessions and other courses have not been played at the new default yet.
 | 4 | 41.9 ms (23.9 fps) | 42.7 ms | 19.2 fps | 14.2 fps | 99 ms | 0.40x |
 
 At 60 fps the game counts every frame as 1/60 s, so frames slower than that make the race slow motion: 2 players ran
-at about three quarters of real time, 3 and 4 at under half. Three players cost the same as four. So split screen on
-the PS5 is now held at 30 fps (`split_fps = 30` in the PS5 profile; `same` follows the frame rate setting), where a
-frame has 33.3 ms at full speed. Measured with the cap: 2 players 33.35 ms (30.0 fps), 1% low 27.3 fps, race speed
-1.00x. 3 and 4 players are not measured with it yet: at ~42 ms a frame they would still run at about 0.8x.
+at about three quarters of real time, 3 and 4 at under half. So split screen on the PS5 is now held at 30 fps
+(`split_fps = 30` in the PS5 profile; `same` follows the frame rate setting), where a frame has 33.3 ms at full speed.
 
 About 2% of race frames take over 20 ms: they are where a course streams in new textures, and they set the 1% lows
 and the slight slow motion. What was measured and what is left is in
