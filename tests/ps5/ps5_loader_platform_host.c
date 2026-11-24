@@ -445,6 +445,49 @@ static void test_pack(uint64_t addr) {
          "whole decommit honoured");
 }
 
+// MKW_PACK and the write watch (issue 11, 0.3.0: menu text garbled after a Grand Prix): a unit whose pages the watch had
+// armed is packed, its region thawed, then unpacked by a read or by a write. Every later write to it must still show in
+// plat_mem_written: the unpack maps the unit read-write by the guest's modes, and an armed page left so takes writes
+// with no fault, so the texture there never learns of them.
+static void test_pack_watch(uint64_t addr) {
+    // plat_mem_written counts 4 KiB guest pages; the watch arms its own (16 KiB on the console).
+    const uint64_t wp = plat_mem_watch_page(), per = wp / PAGE, max = UNIT / PAGE;
+    assert(UNIT / wp >= 2);
+    static uint8_t text[UNIT];
+    uint64_t got[UNIT / PAGE];
+    fill_text(text, 3);
+    assert(plat_mem_commit(addr, UNIT) && plat_mem_back(addr, UNIT));
+    memcpy((void *)(uintptr_t)addr, text, UNIT);
+    pack_lo = addr, pack_hi = addr + UNIT;
+    plat_mem_frozen_hook(pack_frozen);
+    plat_mem_frozen_ms_hook(pack_frozen_ms);
+    for (int by_write = 0; by_write < 2; by_write++) {
+        plat_mem_written(addr, UNIT, got, max, 1);   // armed: every page read-only, nothing written
+        assert(plat_mem_written(addr, UNIT, got, max, 0) == 0);
+        assert(plat_mem_protect(addr, UNIT, PLAT_PROT_READ));   // frozen
+        pack_since = ((uint32_t)plat_now_ms() - 10000) | 1;
+        plat_sleep_ns(3000000);   // past the last unpack's time (odd, up to 1 ms ahead)
+        PlatPackParams pp = {.target_bytes = 64 * UNIT, .store_cap = 64ull << 20, .cold_ms = 0};
+        assert(plat_mem_pack(&pp) > 0);   // the unit less its blob's store slots
+        assert(plat_mem_protect(addr, UNIT, PLAT_PROT_RW));   // thawed while packed: no backing to protect
+        volatile uint8_t *g = (volatile uint8_t *)(uintptr_t)addr;
+        if (by_write) g[5] ^= 1;                                    // unpacked by a write to the first watch page
+        else assert(g[5] == text[5]);                               // unpacked by a read
+        assert(plat_mem_written(addr, UNIT, got, max, 0) == (by_write ? per : 0));
+        g[wp + 7] ^= 1;   // the second watch page, already backed: its write must reach the watch
+        uint64_t n = plat_mem_written(addr, UNIT, got, max, 0);
+        assert(n == (by_write ? 2 : 1) * per && got[n - per] == addr + wp);
+        if (by_write) g[5] ^= 1;
+        g[wp + 7] ^= 1;
+        assert(!memcmp((const void *)(uintptr_t)addr, text, UNIT));
+    }
+    plat_mem_frozen_hook(NULL);
+    plat_mem_frozen_ms_hook(NULL);
+    assert(plat_mem_decommit(addr, UNIT));
+    plat_mem_pack_collect();
+    puts("pack and write watch: an armed unit unpacked by a read or a write reports every later write");
+}
+
 static int feed_n;
 static uint64_t feed_at;
 static int feed_stub(uint64_t a) { return feed_n++, feed_at = a, 1; }
@@ -493,6 +536,7 @@ static void test_memory(void) {
     test_early_batch(RT_ALIAS_BASE);
     test_backing_release(RT_ALIAS_BASE + 4 * UNIT);
     test_pack(RT_ALIAS_BASE + 8 * UNIT);
+    test_pack_watch(RT_ALIAS_BASE + 24 * UNIT);
     test_cold_census(RT_ALIAS_BASE + 32 * UNIT);
     assert(!allocations && !plat_mem_reserve(sample, UNIT, 0));
     assert(!plat_mem_reserve(hint, UNIT, 0));
