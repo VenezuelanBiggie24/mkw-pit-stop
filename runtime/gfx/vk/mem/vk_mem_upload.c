@@ -344,13 +344,13 @@ uint64_t vk_upload_stg_bytes(void) {
     return st.blockBytes;
 }
 
-// MKW_PACK=1 (default 0 until a console run passes; cfg.c row): cold guest memory compressed and its direct memory given
+// MKW_PACK=1 (default 0, 1 in the PS5 profile; cfg.c): cold guest memory compressed and its direct memory given
 // back (plat_mem_pack, ps5_guest_memory.c), before textures are evicted. Run memgrow2 (16/11/2026): ~1.2 GiB of one pool
 // is data the game no longer reads but never returns. Only on the governor's own thread (vk_headroom.c, force 0): the
 // others that call it (vk_mem_relieve) are the game's and the replay's, on the frame's critical path. It packs toward
 // DMEM_SOFT_BYTES + PACK_MARGIN free, at most PACK_BUDGET_US a tick (~750 units at ~130 us each, below-normal priority,
 // one tick per 500 ms). MKW_PACK_COLD_S (default 30; EglantinePS5 used 20-60 s): frozen for at least that long.
-// MKW_PACK_STORE_MIB (default 512): the store's cap in the C heap (flexible memory). MKW_PACK_VERIFY=1: each unit's
+// MKW_PACK_STORE_MIB (default 512, 1024 in the PS5 profile): the store's cap, in 1 MiB slabs of direct memory. MKW_PACK_VERIFY=1: each unit's
 // bytes kept too and compared when it unpacks (the copies count toward the cap).
 #define PACK_MARGIN (256ull << 20)
 #define PACK_BUDGET_US 100000u
@@ -380,6 +380,25 @@ static uint64_t pack_step(uint64_t avail) {
 void vk_mem_governor(int force) {
     static uint32_t idle_logs;
     if (!force) plat_mem_pack_collect();   // the blobs of units unpacked since: freed here, not in the fault handler
+    // The cold tracker (ps5_guest_memory.c plat_mem_cold_census_step; 20 ms of hashing a tick, a walk over the game's
+    // memory every ~16 s in a race): with MKW_COLD_CENSUS=1 it only counts how much stays unwritten, per 64 KiB unit;
+    // with MKW_PACK it also freezes the 2 MiB regions whose units were all unwritten for MKW_PACK_FEED_S (default 60),
+    // so pack_step finds them (vk_mem_cold_freeze). One line per walk.
+    static int cold_census = -1, feed = 0;
+    static uint32_t feed_s;
+    if (cold_census < 0) {
+        const char *e = cfg_get("MKW_PACK");
+        feed = e && atoi(e) > 0;
+        cold_census = rt_knob("COLD_CENSUS", "0") > 0 || feed;
+        e = cfg_get("MKW_PACK_FEED_S");
+        long v = e && *e ? atol(e) : 60;
+        feed_s = (uint32_t)(v > 0 ? v : 60);
+    }
+    if (!force && cold_census) {
+        char line[1024];
+        if (plat_mem_cold_census_step(20000, feed_s, feed ? vk_mem_cold_freeze : NULL, line, sizeof line))
+            rt_log("mem: cold census: %s", line);
+    }
     // MKW_SHADOW_TRIM_TEST=1 (a test; with MKW_SHADOW_TRIM=1): every tick trims the cold shadows whatever the memory, so
     // Linux, whose dmem never runs low, drops and rebuilds them as the PS5's governor does (task 28's magenta check).
     static int trim_test = -1;

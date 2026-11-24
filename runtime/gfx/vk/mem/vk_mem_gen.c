@@ -382,6 +382,21 @@ void freeze_pass(void) {
     }
 }
 
+// MKW_PACK's cold feed (ps5_guest_memory.c plat_mem_cold_census_step, the governor's thread): a 2 MiB region whose
+// units were all unwritten for MKW_PACK_FEED_S is frozen as freeze_pass freezes its candidates, the query after the
+// protection collecting the writes made before it took effect. freeze_pass's candidates come only from regions the
+// replay checks (snap_regions), so the game's own cold memory was never frozen and MKW_PACK found nothing to pack in
+// four 1.8.0 Grand Prix runs (24/11/2026). 1 when the region is frozen.
+int vk_mem_cold_freeze(uint64_t a) {
+    if (mem_frozen(a)) return 1;
+    gen_lock_x();
+    int ok = mem_freeze(a);
+    if (ok) query_stamp(a, a + (1ull << REG_SHIFT), ++gen_now);
+    else n_frz_refused++;
+    plat_mutex_unlock(&gen_lock);
+    return ok;
+}
+
 // With MKW_TRACE=perf, beside the mirror summary (vk_mem_census): what every write-watch consumer cost since the last.
 void ww_log(uint64_t frame) {
     static uint64_t ww_last;

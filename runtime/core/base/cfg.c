@@ -154,7 +154,7 @@ static const CfgRow rows[] = {
     S("ASYNC_PREEMPT", "performance", "1", "0|1|2", RESTART),
     S("REPLAY_ASYNC", "performance", "1", "0|1", RESTART),
     S("REPLAY_PAR", "performance", REPLAY_PAR_DEFAULT, "0|1|2", RESTART),
-    S("PACK", NULL, "0", "0|1", RESTART),   // PS5: cold guest memory compressed (vk_mem_upload.c pack_step)
+    S("PACK", NULL, "0", "0|1", RESTART),   // PS5 (on in its profile): cold guest memory compressed (vk_mem_upload.c pack_step)
     S("FREE_CORES", "performance", "0", "0|1", RESTART),
     S("TIMER_1MS", "performance", "1", "0|1", RESTART),
     // shaders and pipelines
@@ -255,6 +255,7 @@ static const CfgRow rows[] = {
     K("BIND_STATS"),
     K("BIND_XF"),
     K("BLACK_CHECK"),
+    K("COLD_CENSUS"),
     K("COMPUTE_WRITTEN"),
     K("CORE_DIAG"),
     K("CORE_HANDOFF"),
@@ -347,6 +348,7 @@ static const CfgRow rows[] = {
     K("ODD_CHECK_WAR"),
     K("ONE_PER_CORE"),
     K("PACK_COLD_S"),
+    K("PACK_FEED_S"),
     K("PACK_STORE_MIB"),
     K("PACK_VERIFY"),
     K("PASS_HAZARDS"),
@@ -668,6 +670,12 @@ static const struct { const char *key, *value; } PS5[] = {
     // -0.55 / -0.84 ms. A 1.8.0 race with it on was watched by the user: no stale textures. PS5 only: Linux and Windows
     // have no peek (plat_mem_written_any answers "may be written"), so each check there would query its span.
     {"SNAP_SCOPED", "1"},
+    // Cold guest memory packed (vk_mem_upload.c pack_step): the cold feed freezes the 2 MiB regions unwritten for 60 s
+    // and the governor compresses their 64 KiB units into a direct-memory store. 1.8.0 Grand Prix (pack-gain-20261124,
+    // with TEX_PRESSURE): 1,573 MiB packed into 453 MiB, hard governor passes 1,827 -> 87, census minimum free 168 ->
+    // 304 MiB, frame 17.52 -> 17.50 ms; MKW_PACK_VERIFY found 0 of 3,447 unpacked units different (pack-verify).
+    {"PACK", "1"},
+    {"PACK_STORE_MIB", "1024"},
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 

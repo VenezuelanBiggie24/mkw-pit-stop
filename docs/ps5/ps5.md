@@ -165,16 +165,23 @@ failed. 1.8.0 finalizes its maps, and released entries written over by a later i
 (vk_tex_evict.c). Live GPU-owned images now go by the same rule when idle for `MKW_TEX_LIVE_DROP_IDLE` submissions (default 4; with 64 the drop lagged and 9 maps were live again). Verified on the console (issue11-livedrop4-20261123-215530): the Grand Prix finished, 304 MiB free at worst against 68, no out-of-memory retries against 32, GPU-owned images at 617 MiB at most against 1.1-1.3 GiB, 58.3 fps as before. A hook giving back the guest memory of blocks freed in the game's ExpHeaps was tried and returned under 256 MiB in a Grand Prix: the guest's growth (~5.2 GiB, 1.8.0 alike) is still open
 (`drop_overwritten_live`, every 64 MiB of GPU-owned images made and before an image creation gives up).
 
-`MKW_PACK=1` (default 0 until a console run passes) packs cold guest memory instead of holding it: under memory
+`MKW_PACK=1` (on in the PS5 profile since 24/11/2026) packs cold guest memory instead of holding it: under memory
 pressure the governor's thread compresses (zstd level 1) each 64 KiB unit frozen for `MKW_PACK_COLD_S` (default 30) and
 not GPU-imported or early-watched, and gives back its direct memory when it shrinks to 75 % or less; a zero unit is
 given back with no copy. The next access to a packed unit, a fault on any thread or `plat_mem_back*` before a system
 call or an import, decompresses it into fresh backing before its protections apply, so it reads the same bytes. The
-store is the C heap (`MKW_PACK_STORE_MIB`, default 512; it stops above 128 MiB of free flexible memory), and
+store is 1 MiB slabs of direct memory (`MKW_PACK_STORE_MIB`, default 512, 1024 in the PS5 profile; the C heap had
+only ~24 MiB of flexible memory free), and
 `MKW_PACK_VERIFY=1` keeps each unit's bytes too and compares them on unpack. The census gives `packed N MiB in M MiB`
 and a `mem: pack` line (packs, unpacks by cause and thread, their time, skips). Run memgrow2's ~1.2 GiB of old data in
 one pool is what it is for; on the romfs's 64 KiB units, models packed to 0.46 and large textures to 0.74 (42 % of
 those units under 75 %), so how much that pool gives back depends on how much of it is texture data.
+Units reach it through the cold feed: the governor's thread hashes the game's memory (20 ms a tick, `mem: cold
+census` line per walk) and freezes the 2 MiB regions whose units all stayed unwritten for `MKW_PACK_FEED_S` (default
+60); `MKW_COLD_CENSUS=1` counts without freezing. In a 1.8.0 Grand Prix (pack-gain-20261124) it packed 1,573 MiB into
+453 MiB at the same frame time (17.50 ms against 17.52), hard governor passes 1,827 -> 87, the census's lowest free
+direct memory 168 -> 304 MiB; 121k unpacks of 218 us on average (3.9 ms at most), and the verify run found no unit
+changed in 3,447.
 Save writes (`plat_file_pwrite`) back their guest buffer first: the kernel reads it and answers EFAULT on a unit with
 no backing.
 

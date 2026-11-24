@@ -192,6 +192,12 @@ __attribute__((weak)) uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uin
 __attribute__((weak)) uint64_t plat_mem_pack(const PlatPackParams *p) { (void)p; return 0; }
 __attribute__((weak)) void plat_mem_pack_collect(void) {}
 __attribute__((weak)) void plat_mem_pack_summary(char *out, size_t cap) { if (cap) out[0] = 0; }
+__attribute__((weak)) int plat_mem_cold_census_step(uint32_t budget_us, uint32_t freeze_s, int (*freeze_fn)(uint64_t),
+                                                   char *out, size_t cap) {
+    (void)budget_us, (void)freeze_s, (void)freeze_fn;
+    if (cap) out[0] = 0;
+    return 0;
+}
 __attribute__((weak)) void plat_mem_frozen_ms_hook(uint32_t (*fn)(uint64_t addr)) { (void)fn; }
 
 // sigsample.c's, where it is not built (Windows).
