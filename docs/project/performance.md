@@ -58,5 +58,19 @@ race slowed by the ratio: 46 fps gives 0.77x, 24 fps gives 0.40x. Three players 
 Since then the PS5 profile holds split screen at 30 fps (`MKW_SPLIT_FPS=30`, runtime/core/boot/game.c; `same` follows
 `MKW_FPS`), where a frame has 33.3 ms at full speed. 2 players with it, same benchmark (22/11/2026,
 `split2p-cap30`): 33.35 ms (30.0 fps), window medians 33.3 ms, 1% low 27.3 fps, 0.1% low 17.4 fps, worst 75.4 ms, race
-speed 1.00x. Not measured with it yet: 3 and 4 players (at ~42 ms a frame, about 0.8x expected) and courses other than
-the benchmark's first.
+speed 1.00x.
+
+All of 2-4 players with the cap (24/11/2026, `ps5-0.2.1-31-g23b2024`, after the issue 11 memory fixes; the same
+benchmark and input scripts, one run each, `perf-1p` and `split<N>p-perf`):
+
+| Players | Average frame time | Typical frame (window median) | 1% low | 0.1% low | Worst frame | Frames over 33.3 ms | Race speed |
+|---|---|---|---|---|---|---|---|
+| 1 (60 fps) | 17.01 ms (58.8 fps) | 16.7 ms | 43.1 fps | 21.9 fps | 63.7 ms | 38 of 12,348 | 0.98x |
+| 2 | 33.37 ms (30.0 fps) | 33.3 ms | 25.9 fps | 15.7 fps | 79.5 ms | 2,619 of 6,293 | 1.00x |
+| 3 | 42.95 ms (23.3 fps) | 43.6 ms | 17.3 fps | 13.3 fps | 87.0 ms | 4,870 of 4,889 | 0.78x |
+| 4 | 44.14 ms (22.7 fps) | 44.8 ms | 16.9 fps | 11.1 fps | 105.4 ms | 4,751 of 4,757 | 0.75x |
+
+At 30 the game counts each frame as 1/30 s, so 3 and 4 players run at 33.3 ms / their frame time (0.78x, 0.75x). The
+2-player frames over 33.3 ms sit just above the cap: the average is 33.37 ms, only 15 are over 50 ms, and the race
+keeps 1.00x. Four players took ~1.2 ms a frame more than three (at 60 on 22/11 they were equal). Courses other than
+the benchmark's first are not measured.
