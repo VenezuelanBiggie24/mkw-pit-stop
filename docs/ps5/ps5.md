@@ -230,6 +230,14 @@ into a sparse texture of the same VkFormat now reads only the copied region from
 copies from storage`, and `MKW_TEX_COPY_LOG=N` logs each copy out of such a texture with the path it took.
 `MKW_TEX_REGION_COPY=0` restores the old path, to compare.
 
+## Controls and language
+
+The device profile also shows PlayStation button icons (`MKW_BUTTON_ICONS=playstation`) and sets the DualSense's
+vibration to 100 % (`MKW_RUMBLE_STRENGTH=100`; 130 elsewhere); both stay in Pit Stop > Controls. With `MKW_LANG` unset
+the game follows the console's system language (`plat_user_locale`, libSceSystemService), as the Switch does; a
+language the game does not ship falls back as on a PC (Turkish to the rebuilt texts over British English, others to
+American English). Until 24/11/2026 it was American English whatever the console's language.
+
 ## Frame rate
 
 The PS5 build runs races at 60 fps without frame generation: its device profile (`runtime/core/base/cfg.c`,

@@ -292,7 +292,24 @@ int plat_time_zone(char *out, size_t cap) {
     return snprintf(out, cap, "UTC") < (int)cap;
 }
 
-const char *plat_user_locale(void) { return "en-US"; }
+// libSceSystemService: the console's system language (Settings > Language), as a BCP 47 tag the game's language
+// follows when MKW_LANG is unset (ov_system.c switch_language), as the Switch follows its own. Was "en-US" whatever
+// the console's language. The ids are SCE_SYSTEM_SERVICE_PARAM_ID_LANG's values; an unknown one (Finnish, Arabic,
+// ...) stays English, as the game ships none of them.
+int sceSystemServiceParamGetInt(int param_id, int32_t *value);
+
+const char *plat_user_locale(void) {
+    static const char *const tags[] = {
+        "ja", "en-US", "fr-FR", "es-ES", "de-DE", "it-IT", "nl-NL", "pt-PT", "ru-RU", "ko-KR", "zh-Hant", "zh-Hans",
+        "fi-FI", "sv-SE", "da-DK", "nb-NO", "pl-PL", "pt-BR", "en-GB", "tr-TR", "es-419", "ar", "fr-CA", "cs-CZ",
+        "hu-HU", "el-GR", "ro-RO", "th-TH", "vi-VN", "id-ID", "uk-UA",
+    };
+    enum { PARAM_ID_LANG = 1 };
+    int32_t id = -1;
+    if (sceSystemServiceParamGetInt(PARAM_ID_LANG, &id) < 0 || id < 0 || id >= (int32_t)(sizeof tags / sizeof *tags))
+        return "en-US";
+    return tags[id];
+}
 
 int plat_run_self(const char *env_name, const char *env_value, char *out, size_t cap, uint32_t timeout_ms) {
     (void)env_name; (void)env_value; (void)out; (void)cap; (void)timeout_ms;
