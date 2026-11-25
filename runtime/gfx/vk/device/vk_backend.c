@@ -892,8 +892,10 @@ static void replay_core(void) {
 // MKW_REPLAY_DELAY_US (a measurement, default 0): the replay thread waits that long before each
 // submission, so a capture's replay (--replay with MKW_REPLAY_ASYNC=1) restores the memory the game wrote after a submit
 // while that submit is still to be recorded, as the game's threads do in a run.
+static _Thread_local int on_replay_thread;   // vk_be_held_fill: no capture there (held_wait's forced fills)
 static void replay_main(void *arg) {
     (void)arg;
+    on_replay_thread = 1;
     plat_thread_priority(PLAT_PRIO_ABOVE_NORMAL);
     perf_replay_thread();
     const char *de = cfg_get("MKW_REPLAY_DELAY_US");
@@ -1236,9 +1238,12 @@ static void vk_be_held_fill(void *slot, const uint64_t *handles, int n) {
     if (n > 0 && !c) rt_fatal("vk: out of memory (replay queue)");
     if (n > 0) memcpy(c, handles, sizeof *c * (size_t)n);
     // Capture shadowed pools before waking the replay thread: nvn_qorder_submit fills held slots before
-    // submit()/submit_held() captures the triggering submit, and gfx_held_force fills them without a submit call.
+    // submit()/submit_held() captures the triggering submit, and a present's gfx_held_force fills them without a submit
+    // call. Not on the replay thread (held_wait letting a slot go after MKW_QUEUE_HOLD_MS): a copy there sits on the
+    // race frame's critical path and would read the game's memory while its thread writes it, not at a submit. That
+    // slot replays with the captures the game's submits made, as it did before.
     uint64_t sub = nvn_submit_count();
-    vk_mem_shadow_capture(sub);
+    if (!on_replay_thread) sub = vk_mem_shadow_capture(sub);
     vk_usnap_take(handles, n);   // MKW_USNAP_AT_SUBMIT: as the game's last submit of its part finds the blocks
     plat_mutex_lock(&rl);
     h->h = c, h->n = n, h->submit_no = sub, h->ready = 1;

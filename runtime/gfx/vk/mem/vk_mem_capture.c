@@ -32,7 +32,7 @@ typedef struct { uint64_t sub; CapRun *runs; int nruns; } CapPack;
 // of the replay, 0.19 ms per submit with nothing to capture (fe1, 06/11/2026).
 uint64_t vk_replay_submit;
 static int mode = -1, active;                      // active: the last submit captured
-static PlatMutex cap_run_lock = PLAT_MUTEX_INIT;   // outermost (before pool_lock): held_fill from gfx_held_force can race submit()
+static PlatMutex cap_run_lock = PLAT_MUTEX_INIT;   // outermost (before pool_lock): a present's gfx_held_force can race another thread's submit
 static PlatMutex cap_lock = PLAT_MUTEX_INIT;       // innermost: after shadow_lock and gen_lock
 static PoolRec **list;                         // cap_lock: captured pools
 static int nlist, clist;
@@ -142,8 +142,8 @@ static void capture_pool(PoolRec *r, CapRun **runs, int *nruns, int *cruns, uint
     if (run) capture_run(r, run, hi, runs, nruns, cruns, bytes);
 }
 
-void vk_mem_shadow_capture(uint64_t sub) {
-    if (!__atomic_load_n(&shadow_live, __ATOMIC_ACQUIRE)) return;
+uint64_t vk_mem_shadow_capture(uint64_t sub) {
+    if (!__atomic_load_n(&shadow_live, __ATOMIC_ACQUIRE)) return sub;
     if (mode < 0) {
         mode = rt_knob("SHADOW_SUBMIT", "0");
         rt_log("mem: the CPU's writes captured at each submit %s (MKW_SHADOW_SUBMIT)",
@@ -152,8 +152,15 @@ void vk_mem_shadow_capture(uint64_t sub) {
     uint64_t t0 = qpc();
     int on = RT_KNOB_ON(mode);
     __atomic_store_n(&active, on, __ATOMIC_RELAXED);
-    if (!on && !__atomic_load_n(&nlist_v, __ATOMIC_RELAXED)) return;
+    if (!on && !__atomic_load_n(&nlist_v, __ATOMIC_RELAXED)) return sub;
     plat_mutex_lock(&cap_run_lock);
+    // Each capture holds only the pages stamped since the one before (capture_pool), so the packs must be applied in
+    // the order they were taken. A caller that read its submit number before another thread's capture took the lock
+    // files its newer bytes under that later number instead: sorted by the older one, cap_apply would write the
+    // earlier capture's bytes over them.
+    static uint64_t last_sub;
+    if (sub < last_sub) sub = last_sub;
+    last_sub = sub;
     plat_mutex_lock_shared(&pool_lock);   // the records live while it is held (vk_pool_fini takes it exclusively)
     plat_mutex_lock(&cap_lock);
     int n = 0;
@@ -189,15 +196,14 @@ void vk_mem_shadow_capture(uint64_t sub) {
                 if (list[k] == snap[i]) { list_drop(k); break; }
     if (nruns) {
         if (npacks == cpacks) vk_mem_grow((void **)&packs, &cpacks, sizeof *packs);
-        int pos = npacks++;
-        while (pos > 0 && packs[pos - 1].sub > sub) packs[pos] = packs[pos - 1], pos--;
-        packs[pos] = (CapPack){sub, runs, nruns};
+        packs[npacks++] = (CapPack){sub, runs, nruns};   // (in capture order, and sub never goes back: last_sub)
     }
     c_subs++, c_pools += (uint64_t)n, c_bytes += bytes, c_ns += qpc() - t0;
     if (c_subs >= 1500) log_locked();   // ~5 s of race; shadow_log only runs at a few frames
     plat_mutex_unlock(&cap_lock);
     plat_mutex_unlock_shared(&pool_lock);
     plat_mutex_unlock(&cap_run_lock);
+    return sub;
 }
 
 static void log_locked(void) {   // cap_lock held; c_applied is the replay's, read as it is
