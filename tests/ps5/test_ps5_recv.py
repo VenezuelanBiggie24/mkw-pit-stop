@@ -88,6 +88,12 @@ int main(int argc, char **argv) {
         printf("%d\\n", ps5_store_restore(argv[2], argv[3], argv[4]));
         return 0;
     }
+    if (argc >= 3 && !strcmp(argv[1], "gamedir")) {   // where the title finds the game, if anywhere
+        char why[256];
+        const char *dir = ps5_game_dir(argv[2], why, sizeof why);
+        printf("%s\\n", dir ? dir : why);
+        return 0;
+    }
     return 9;
 }
 """,
@@ -680,3 +686,20 @@ def test_ps5_send_large_files_by_ftp(tmp_path: Path, monkeypatch: pytest.MonkeyP
     manifest = (title / ".pitstop-manifest.tsv").read_text()
     assert all(f"{rel}\t{len(data)}\t" in manifest for rel, data in files.items())
     assert ftplib  # imported for _FakeFtp's errors
+
+
+@pytest.mark.skipif(sys.platform != "linux" or platform.machine() != "x86_64", reason="requires Linux x86-64")
+@pytest.mark.parametrize("rel", ["", "updates/917504", "MKW", "Games/MKW", "MKW/updates/917504"])
+def test_ps5_game_dir_finds_what_the_builder_stages(tmp_path: Path, rel: str) -> None:
+    """The builder keeps the dump's folders below the one the player picked, up to two levels down (find_games): the
+    title finds the game in each of them (25/11/2026: PPSA99193/<sub>/exefs left the placeholder up after a send)."""
+    exe = _compile_helper(tmp_path)
+    title = tmp_path / "PPSA99193"
+    game = title / rel if rel else title
+    (game / "exefs").mkdir(parents=True)
+    (game / "exefs/main").write_bytes(b"main")
+    (game / "romfs.nup").write_bytes(b"NUP")
+    (title / "spirv").mkdir()   # the title's own folders are not looked into
+    (title / "sce_sys/x").mkdir(parents=True)
+    out = subprocess.run([str(exe), "gamedir", str(title)], capture_output=True, text=True, check=True).stdout.strip()
+    assert out == str(game)

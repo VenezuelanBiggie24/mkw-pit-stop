@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -401,13 +402,16 @@ static void send_err(int fd, const char *msg) {
 }
 
 static int add_game_tree(const char *base, char **cands, int n, int cap);
+static int add_game_subtrees(const char *base, int depth, char **cands, int n, int cap);
 
-// The game copies in the title folder (add_game_tree: the folder itself and its updates/<version>/), each with its
+// The game copies in the title folder (add_game_tree: the folder itself and its updates/<version>/, then
+// add_game_subtrees: its subfolders two levels down, as ps5_game_dir looks), each with its
 // exefs/main's build id, as JSON for PIT1I: the builder tells the player what the console holds already (an upgrade
 // keeps it, another version is sent beside it). Not ps5_game_dir: that one is cached for the boot and hashes mains.
 static void game_list_json(const char *root, char *out, size_t cap) {
     char *cands[16];
     int n = add_game_tree(root, cands, 0, 16);
+    n = add_game_subtrees(root, 2, cands, n, 16);
     size_t len = (size_t)snprintf(out, cap, "[");
     size_t rlen = strlen(root);
     for (int i = 0; i < n; i++) {
@@ -1344,6 +1348,32 @@ static int add_game_tree(const char *base, char **cands, int n, int cap) {
     return n;
 }
 
+// The game trees in base's subfolders, depth levels down: the PC builder keeps the dump's layout below the folder the
+// player picked, and its check (ps5_prepare_common.py find_games) takes a game up to two levels below it, so picking
+// Games/ that holds MKW/exefs sends PPSA99193/MKW/exefs (25/11/2026: two players got the placeholder again after a
+// send that succeeded). Never into the title's own folders, a RomFS or the shaders (tens of thousands of entries);
+// updates/ is add_game_tree's.
+static int add_game_subtrees(const char *base, int depth, char **cands, int n, int cap) {
+    static const char *const skip[] = {"exefs", "romfs", "updates", "spirv", "sce_sys", "sce_module", "profile"};
+    DIR *d = opendir(base);
+    if (!d) return n;
+    struct dirent *e;
+    while ((e = readdir(d)) && n < cap) {
+        if (e->d_name[0] == '.') continue;
+        int bad = 0;
+        for (size_t i = 0; i < sizeof skip / sizeof *skip; i++) bad |= !strcasecmp(e->d_name, skip[i]);
+        if (bad) continue;
+        char c[768];
+        struct stat st;
+        snprintf(c, sizeof c, "%s/%s", base, e->d_name);
+        if (stat(c, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
+        n = add_game_tree(c, cands, n, cap);
+        if (depth > 1) n = add_game_subtrees(c, depth - 1, cands, n, cap);
+    }
+    closedir(d);
+    return n;
+}
+
 const char *ps5_game_dir(const char *root_dir, char *why, size_t why_cap) {
     // once per boot: the placeholder check, the receiver's status and the paths ask the same (each hash of a
     // candidate's main, ~55 MB, would cost a read of it again)
@@ -1354,6 +1384,7 @@ const char *ps5_game_dir(const char *root_dir, char *why, size_t why_cap) {
     enum { CAP = 64 };
     char *cands[CAP];
     int n = add_game_tree(root_dir, cands, 0, CAP);
+    n = add_game_subtrees(root_dir, 2, cands, n, CAP);
     // pitstop-game-dirs.txt: more folders that hold the game, one path a line (the PC builder writes it when the
     // player's copy is already on the console, so the 23 GB need not be sent again); the title's own folder first
     char list[640];
