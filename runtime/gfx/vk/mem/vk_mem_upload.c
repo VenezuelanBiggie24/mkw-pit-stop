@@ -355,7 +355,7 @@ uint64_t vk_upload_stg_bytes(void) {
 #define PACK_MARGIN (256ull << 20)
 #define PACK_BUDGET_US 100000u
 static uint64_t pack_step(uint64_t avail) {
-    static int on = -1, verify;
+    static int on = -1, verify, backoff;
     static uint32_t cold_ms;
     static uint64_t cap;
     if (on < 0) {
@@ -366,6 +366,7 @@ static uint64_t pack_step(uint64_t avail) {
         long mib = e && *e ? atol(e) : 512;
         cap = (uint64_t)(mib > 0 ? mib : 0) << 20;
         verify = (e = cfg_get("MKW_PACK_VERIFY")) && atoi(e);
+        backoff = cfg_int("MKW_PACK_BACKOFF");   // (ps5_guest_memory.c PK_BOUNCE_MAX)
         on = (e = cfg_get("MKW_PACK")) && atoi(e);
         if (on)
             rt_log("vk: memory governor: packing cold guest memory (frozen %u s, store up to %llu MiB%s)", cold_ms / 1000,
@@ -373,7 +374,7 @@ static uint64_t pack_step(uint64_t avail) {
     }
     if (!on || avail >= DMEM_SOFT_BYTES + PACK_MARGIN) return 0;
     PlatPackParams p = {.target_bytes = DMEM_SOFT_BYTES + PACK_MARGIN - avail, .store_cap = cap, .cold_ms = cold_ms,
-                        .budget_us = PACK_BUDGET_US, .verify = verify};
+                        .budget_us = PACK_BUDGET_US, .verify = verify, .backoff = backoff};
     return plat_mem_pack(&p);
 }
 
