@@ -406,6 +406,8 @@ static const CfgRow rows[] = {
     K("REPLAY_PAR_PRECHECK"),
     K("REPLAY_PAR_THREADS"),
     K("RESOLVE_CHECK"),
+    K("REUP_CENSUS"),
+    K("REUP_SAME"),
     K("ROMFS"),
     K("ROMFS_MODS"),
     K("ROMFS_PATCHES"),
@@ -694,6 +696,10 @@ static const struct { const char *key, *value; } PS5[] = {
     // 304 MiB, frame 17.52 -> 17.50 ms; MKW_PACK_VERIFY found 0 of 3,447 unpacked units different (pack-verify).
     {"PACK", "1"},
     {"PACK_STORE_MIB", "1024"},
+    // Re-uploads of a written texture whose bytes are those of its last upload left out (vk_tex_upload.c reup_skip):
+    // 99.6 % of a 1.8.0 race's re-uploads (2,789 of 2,801, 678 MiB in 1,800 frames; reup-ab1), the write watch flagging
+    // pages whose texture bytes did not change. In-race A/B: frame -0.11 / -0.49 ms, busy -0.10 / -0.91 (25/11/2026).
+    {"REUP_SAME", "1"},
     // The console's own controller: PlayStation icons rather than auto, which guesses from the pad's labels (Xbox when
     // it reports none), and the DualSense's vibration at 100 % (the table's 130 % suits PC pads; asked for by the user,
     // 24/11/2026). Both stay in Pit Stop > Controls.
