@@ -467,6 +467,7 @@ static const CfgRow rows[] = {
     K("USNAP_ASYNC"),
     K("USNAP_AT_SUBMIT"),
     K("USNAP_CMP"),
+    K("USNAP_TAKE_THREAD"),
     K("VIRTUAL_PADS"),
     K("VK_NO_FLOAT64"),
     K("VK_RECORDER"),
@@ -662,6 +663,12 @@ static const struct { const char *key, *value; } PS5[] = {
     // verify-shunc-sub, 24/11/2026) at ~0.08-0.13 ms/sub on the game thread and 0.0 MiB governor trim.
     {"SHADOW_UNC", "1"},
     {"SHADOW_SUBMIT", "1"},
+    // The uniform snapshot's bytes taken at the submit (vk_usnap_take.c), on a thread of its own (USNAP_TAKE_THREAD):
+    // read later, during the replay's walk (USNAP_ASYNC), the game had already rewritten its double-buffered frame
+    // blocks, and the countdown's scene lost half its scenery to the sky or went dark every few frames, 19-125 odd
+    // frames a 90 s Grand Prix; 0 and 0 with the take at the submit, on the game's thread (cyan-atsub) and on its own
+    // (take-fix1/2, against 73 without, take-ctrl), +0.04 ms a frame in-race A/B (take-ab2-inv0/1, 25/11/2026).
+    {"USNAP_AT_SUBMIT", "1"},
     // Upstream's texture workers (MKW_TEX_PAR, tex_par.c) off, as before the 22/11/2026 merge: tried on the console
     // 19/11/2026 (texpar-*, six Grand Prix runs) the large deswizzles took 40 % less time but the race frame did not
     // move (A/B medians -0.06 ms) and the 0.1 % lows were ~1 fps worse. The ASTC alpha scan and decode keep their own

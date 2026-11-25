@@ -27,4 +27,4 @@ submit's copies of constant blocks.
 | `vk_mem_upload.c`, `vk_headroom.c` | Upload batches, staging, deferred destruction and `vk_mem_relieve` (what to release when an allocation does not fit); new VMA blocks on another thread |
 | `vk_mem_uptime.c` | Diagnostic `MKW_UPLOAD_TIME`: GPU time of each upload batch, with what it carried |
 | `vk_usnap.c` | Constant blocks copied when recording of the submit starts, so the game can rewrite them afterwards |
-| `vk_usnap_take.c`, `vk_usnap_int.h` | `MKW_USNAP_AT_SUBMIT`: that copy taken at submit, on the game thread (a held submission's when its handles come), and matched to its submission by the replay |
+| `vk_usnap_take.c`, `vk_usnap_int.h` | `MKW_USNAP_AT_SUBMIT` (on in the PS5 profile): that copy taken at submit, by a thread of its own the game thread hands the handles to (`MKW_USNAP_TAKE_THREAD`; a held submission's when its handles come), and matched to its submission by the replay |
