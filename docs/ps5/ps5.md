@@ -501,6 +501,11 @@ A redistributable PS5 package cannot ship the full `eboot.bin` (which statically
 - **The copy already on the console**: `pitstop-game-dirs.txt` in the title folder names more folders that hold the
   game (each with its `updates/<version>/`); `ps5_game_dir` searches them after its own and picks the one whose
   `exefs/main` matches the build. The builder writes it for `--console-game` and sends no game files.
+- **The dump in a subfolder**: the builder keeps the dump's folders below the one the player picked (up to two levels:
+  `find_games`), so picking `Games/` that holds `MKW/exefs` sends `PPSA99193/MKW/exefs`. `ps5_game_dir` searched only
+  the title folder and its `updates/<version>/`, and the placeholder came back after a send that succeeded (two
+  players, 25/11/2026). It now searches its subfolders two levels down too, not inside `exefs/`, `romfs/`, `spirv/`
+  or `sce_*`; such a player sends only the new `eboot.bin`.
 - **SDK-free PC builder**: `tools/ps5/release_ps5.py` packages `ps5-bundle/` (`loader-inventory.o`, prebuilt `app_crt.o`,
   `libSceAgc*.so`, RADV/deps/SDK archives & stubs, linker scripts, and Linux/Windows `ps5-native-tool[.exe]`). The
   desktop launcher (`runtime/ui/launcher/`) and `tools/ps5/prepare_ps5.py` drive the build with pinned `zig` (`zig cc`,
