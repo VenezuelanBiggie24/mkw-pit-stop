@@ -189,7 +189,7 @@ static int shadow_merge(PoolRec *r, uint64_t lo, uint64_t hi, const uint8_t *src
     uint64_t over = merge_over, m = merge_in(r, lo, hi, bases, blo, n, src);
     if (m) shadow_flush(r, lo, hi);
     if (watch_hi && merge_over != over) watch_event("merge-in over the GPU's", lo, hi, sync_fence, merge_over - over);
-    if (old && m) race_check(r, lo, hi, sync_fence, old);
+    if (old && m) race_check(r, lo, hi, sync_fence, old, "merge");
     free(old);
     s_merged += m;
     if (watch_hi && m) watch_event("merge-in", lo, hi, sync_fence, m);
@@ -228,6 +228,7 @@ static void shadow_copy(PoolRec *r, uint64_t a, uint64_t b, int i, const uint8_t
     // A read-trapped page still holds the shadow's bytes: copying it would fault and fill it for nothing. The GPU's
     // writes stamp their pages (vk_guest_written), so every sync after a fence would.
     if (src) {
+        if (race_on > 0) race_wait(race_check(r, a, b, sync_fence, src, "cap"));
         memcpy(r->smap + (a - r->import_lo), src, b - a);
         shadow_flush(r, a, b);
         s_copied += b - a;
@@ -239,7 +240,7 @@ static void shadow_copy(PoolRec *r, uint64_t a, uint64_t b, int i, const uint8_t
         for (y = (x & ~0xfffull) + 0x1000; y < b && mem_trapped(y) == t; y += 0x1000) {}
         if (y > b) y = b;
         if (t) continue;
-        if (race_on > 0) race_wait(race_check(r, x, y, sync_fence, NULL));
+        if (race_on > 0) race_wait(race_check(r, x, y, sync_fence, NULL, "copy"));
         if (watch_hi) watch_copy(r, x, y, sync_fence);
         mem_copy_out(r->smap + (x - r->import_lo), x, y - x);   // MKW_EARLY_READ's watched pages stay watched
         shadow_flush(r, x, y);

@@ -289,16 +289,18 @@ int vk_mem_changed_scoped(uint64_t addr, uint64_t size, uint32_t since, uint32_t
     if (r1 >= SNAP_REGIONS) return vk_mem_changed(addr, size, since, now);
     gen_lock_s();
     uint32_t g = gen_now;
-    int changed = 0;
-    for (uint64_t r = r0; r <= r1 && !changed; r++) {
-        if (reg_max[r] <= since) continue;
-        uint64_t a = r << REG_SHIFT > lo ? r << REG_SHIFT : lo, b = (r + 1) << REG_SHIFT < hi ? (r + 1) << REG_SHIFT : hi;
-        for (; a < b && !changed; a += 1ull << GEN_PAGE_SHIFT) {
-            uint32_t *s = gen_slot(a, 0);
-            if (s && *s > since) changed = 1;
+    int changed = 0, all_frozen = 1;
+    for (uint64_t r = r0; r <= r1; r++) {
+        if (all_frozen && !mem_frozen(r << REG_SHIFT)) all_frozen = 0;
+        if (!changed && reg_max[r] > since) {
+            uint64_t a = r << REG_SHIFT > lo ? r << REG_SHIFT : lo, b = (r + 1) << REG_SHIFT < hi ? (r + 1) << REG_SHIFT : hi;
+            for (; a < b && !changed; a += 1ull << GEN_PAGE_SHIFT) {
+                uint32_t *s = gen_slot(a, 0);
+                if (s && *s > since) changed = 1;
+            }
         }
     }
-    int w = mem_written_any(lo, hi - lo);
+    int w = all_frozen ? 0 : mem_written_any(lo, hi - lo);
     plat_mutex_unlock_shared(&gen_lock);
     if (w < 0) return vk_mem_changed(addr, size, since, now);   // not watched: it answers -1, the hash decides
     if (!w) {

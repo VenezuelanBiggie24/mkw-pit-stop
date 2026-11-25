@@ -217,7 +217,7 @@ extern int race_on;   // -1 until race_level reads the switch
 int race_level(void);
 void race_note(const PoolRec *r, uint64_t lo, uint64_t hi);              // recording thread, at a resolve
 // shadow_lock held: the newest unfinished fence reading bytes of [a, b) that the copy changes, 0 none
-uint64_t race_check(const PoolRec *r, uint64_t a, uint64_t b, uint64_t sync, const uint8_t *old);
+uint64_t race_check(const PoolRec *r, uint64_t a, uint64_t b, uint64_t sync, const uint8_t *buf, const char *what);
 void race_wait(uint64_t fence);   // shadow_lock held: MKW_FENCE_EARLY, before a copy race_check flagged
 void race_log(uint64_t frame);
 extern uint64_t watch_hi;   // MKW_SHADOW_WATCH: nonzero when some range's shadow changes are logged

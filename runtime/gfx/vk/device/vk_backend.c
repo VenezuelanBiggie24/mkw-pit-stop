@@ -1235,9 +1235,13 @@ static void vk_be_held_fill(void *slot, const uint64_t *handles, int n) {
     uint64_t *c = n > 0 ? malloc(sizeof *c * (size_t)n) : NULL;
     if (n > 0 && !c) rt_fatal("vk: out of memory (replay queue)");
     if (n > 0) memcpy(c, handles, sizeof *c * (size_t)n);
+    // Capture shadowed pools before waking the replay thread: nvn_qorder_submit fills held slots before
+    // submit()/submit_held() captures the triggering submit, and gfx_held_force fills them without a submit call.
+    uint64_t sub = nvn_submit_count();
+    vk_mem_shadow_capture(sub);
     vk_usnap_take(handles, n);   // MKW_USNAP_AT_SUBMIT: as the game's last submit of its part finds the blocks
     plat_mutex_lock(&rl);
-    h->h = c, h->n = n, h->submit_no = nvn_submit_count(), h->ready = 1;
+    h->h = c, h->n = n, h->submit_no = sub, h->ready = 1;
     plat_cond_broadcast(&rcv);
     plat_mutex_unlock(&rl);
 }

@@ -380,23 +380,23 @@ static uint64_t pack_step(uint64_t avail) {
 void vk_mem_governor(int force) {
     static uint32_t idle_logs;
     if (!force) plat_mem_pack_collect();   // the blobs of units unpacked since: freed here, not in the fault handler
-    // The cold tracker (ps5_guest_memory.c plat_mem_cold_census_step; 20 ms of hashing a tick, a walk over the game's
-    // memory every ~16 s in a race): with MKW_COLD_CENSUS=1 it only counts how much stays unwritten, per 64 KiB unit;
-    // with MKW_PACK it also freezes the 2 MiB regions whose units were all unwritten for MKW_PACK_FEED_S (default 60),
-    // so pack_step finds them (vk_mem_cold_freeze). One line per walk.
-    static int cold_census = -1, feed = 0;
+    // The cold tracker (ps5_guest_memory.c plat_mem_cold_census_step): runs at 20 ms/tick so cold units are already
+    // frozen before dmem hits DMEM_SOFT_BYTES; when MKW_COLD_CENSUS=0 (only MKW_PACK on), line is NULL so cc_unit
+    // skips the ZSTD ratio sampling overhead.
+    static int census_diag = -1, feed = 0;
     static uint32_t feed_s;
-    if (cold_census < 0) {
+    if (census_diag < 0) {
         const char *e = cfg_get("MKW_PACK");
         feed = e && atoi(e) > 0;
-        cold_census = rt_knob("COLD_CENSUS", "0") > 0 || feed;
+        census_diag = rt_knob("COLD_CENSUS", "0") > 0;
         e = cfg_get("MKW_PACK_FEED_S");
         long v = e && *e ? atol(e) : 60;
         feed_s = (uint32_t)(v > 0 ? v : 60);
     }
-    if (!force && cold_census) {
+    if (!force && (census_diag || feed)) {
         char line[1024];
-        if (plat_mem_cold_census_step(20000, feed_s, feed ? vk_mem_cold_freeze : NULL, line, sizeof line))
+        if (plat_mem_cold_census_step(20000, feed_s, feed ? vk_mem_cold_freeze : NULL,
+                                      census_diag ? line : NULL, census_diag ? sizeof line : 0))
             rt_log("mem: cold census: %s", line);
     }
     // MKW_SHADOW_TRIM_TEST=1 (a test; with MKW_SHADOW_TRIM=1): every tick trims the cold shadows whatever the memory, so

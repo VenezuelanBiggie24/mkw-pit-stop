@@ -1651,13 +1651,14 @@ static int cc_read_locked(Ps5MixedBlock *u, uint64_t a, uint64_t *h, bool *zero,
 // What cc_unit found: the cold feed freezes a 2 MiB region only when none of its units is CC_HOT or CC_SKIP.
 enum { CC_NONE, CC_PACKED, CC_SKIP, CC_ZERO, CC_HOT, CC_COLD };
 
-// One unit; cold for the feed when unchanged for at least freeze_s seconds.
-static int cc_unit(Ps5MixedBlock *u, RangeKind kind, uint64_t a, uint32_t now_ms, uint32_t freeze_s) {
+// One unit; cold for the feed when unchanged for at least freeze_s seconds. want_sample: run ZSTD ratio sampling
+// for MKW_COLD_CENSUS diagnostics (skipped when only feeding MKW_PACK, avoiding extra CPU/L3 work mid-race).
+static int cc_unit(Ps5MixedBlock *u, RangeKind kind, uint64_t a, uint32_t now_ms, uint32_t freeze_s, bool want_sample) {
     if (__atomic_load_n(&u->pack, __ATOMIC_ACQUIRE)) return cc_packed[kind]++, CC_PACKED;
     if (!__atomic_load_n(&u->backing.committed, __ATOMIC_ACQUIRE)) return CC_NONE;
     int32_t d = u->cc_changed_ms ? (int32_t)(now_ms - u->cc_changed_ms) : 0;   // signed: a stored | 1 can be 1 ms ahead
     uint32_t age_s = d > 0 ? (uint32_t)d / 1000u : 0;
-    bool sample = u->cc_changed_ms && age_s >= cc_bucket_s[1] && !((a / PS5_MEM_UNIT) % CC_SAMPLE_EVERY);
+    bool sample = want_sample && u->cc_changed_ms && age_s >= cc_bucket_s[1] && !((a / PS5_MEM_UNIT) % CC_SAMPLE_EVERY);
     uint64_t h = 0;
     bool zero = false;
     unit_lock(u);
@@ -1757,7 +1758,7 @@ int plat_mem_cold_census_step(uint32_t budget_us, uint32_t freeze_s, int (*freez
                 if (a >= r->end) break;
                 if (!(++n & 15) && plat_now_ns() > deadline) { cc_cursor = a, done = 0; break; }
                 if (a >> 21 != cc_reg >> 21) cc_region_end(freeze_fn, &feed), cc_reg = a & ~((1ull << 21) - 1);
-                int k = cc_unit(&chunk[i], r->kind, a, now_ms, freeze_s);
+                int k = cc_unit(&chunk[i], r->kind, a, now_ms, freeze_s, out != NULL && cap > 0);
                 if (k == CC_COLD) cc_reg_cold++;
                 else if (k == CC_HOT || k == CC_SKIP) cc_reg_bad = 1;
             }
@@ -1768,9 +1769,15 @@ int plat_mem_cold_census_step(uint32_t budget_us, uint32_t freeze_s, int (*freez
     cc_region_end(freeze_fn, &feed);
     uint64_t now = plat_now_ns();
     cc_cycles++;
-    cc_summary(out, cap, now - cc_cycle_t0);
+    if (out && cap) cc_summary(out, cap, now - cc_cycle_t0);
+    else {
+        cc_feed_frozen = cc_feed_refused = cc_feed_capped = 0;
+        memset(cc_units, 0, sizeof cc_units), memset(cc_new, 0, sizeof cc_new), memset(cc_zero, 0, sizeof cc_zero);
+        memset(cc_skip, 0, sizeof cc_skip), memset(cc_packed, 0, sizeof cc_packed);
+        cc_s_units = cc_s_raw = cc_s_comp = cc_s_fit = cc_ns = 0;
+    }
     cc_cursor = 0, cc_cycle_t0 = now;
-    return 1;
+    return out && cap ? 1 : 0;
 }
 
 uint64_t plat_mem_backed_bytes(uint64_t addr, uint64_t size) {

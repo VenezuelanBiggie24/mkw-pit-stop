@@ -198,6 +198,7 @@ Tex *rel_oldest(void);   // the oldest released entry not pinned; NULL when none
 void sweep_released(void);
 int drop_overwritten_live(void);   // issue 11: live GPU-owned images written over and idle go; how many
 void tex_gpu_made(uint64_t bytes);   // a GPU-owned image of bytes made: drop_overwritten_live every 64 MiB
+void tex_evict_shutdown(void);
 
 // vk_tex_pressure.c: idle recreatable textures out when VMA's blocks near the live VRAM budget (MKW_TEX_PRESSURE)
 void tex_pressure(void);   // each submit, the texture lock held
