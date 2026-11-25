@@ -525,6 +525,24 @@ static void test_cold_census(uint64_t addr) {
          "a region offered to the feed once all its units are unchanged");
 }
 
+// prot_watch_dirty (plat_mem_written_any): 4 KiB sub-page spans (<16 KiB native page or ending mid-page) must check
+// the covering 16 KiB page instead of truncating the page count to zero.
+static void test_prot_watch_subpage(uint64_t addr) {
+    uint64_t pages[64];
+    assert(plat_mem_commit(addr, UNIT) && plat_mem_back(addr, UNIT));
+    assert(prot_watch_written(addr, UNIT, pages, 64, 1, NULL) != UINT64_MAX);
+    assert(prot_watch_dirty(addr, PAGE) == 0);
+    assert(prot_watch_dirty(addr, PS5_KERNEL_PAGE_SIZE + PAGE) == 0);
+    *(volatile uint8_t *)(uintptr_t)addr = 0x11;
+    assert(prot_watch_dirty(addr, PAGE) == 1);
+    assert(prot_watch_written(addr, UNIT, pages, 64, 1, NULL) != UINT64_MAX);
+    assert(prot_watch_dirty(addr, PS5_KERNEL_PAGE_SIZE + PAGE) == 0);
+    *(volatile uint8_t *)(uintptr_t)(addr + PS5_KERNEL_PAGE_SIZE) = 0x22;
+    assert(prot_watch_dirty(addr, PS5_KERNEL_PAGE_SIZE + PAGE) == 1);
+    assert(plat_mem_decommit(addr, UNIT));
+    puts("prot_watch_dirty: sub-16 KiB and tail-4 KiB spans report writes accurately");
+}
+
 static void test_memory(void) {
     uint64_t boundary = sample + UNIT, tail = boundary - PAGE;
     uint64_t alias_end = RT_ALIAS_BASE + RT_ALIAS_SIZE;
@@ -538,6 +556,7 @@ static void test_memory(void) {
     test_pack(RT_ALIAS_BASE + 8 * UNIT);
     test_pack_watch(RT_ALIAS_BASE + 24 * UNIT);
     test_cold_census(RT_ALIAS_BASE + 32 * UNIT);
+    test_prot_watch_subpage(RT_ALIAS_BASE + 48 * UNIT);
     assert(!allocations && !plat_mem_reserve(sample, UNIT, 0));
     assert(!plat_mem_reserve(hint, UNIT, 0));
     assert(!plat_mem_reserve(unexpected, UNIT, 0) && !plat_mem_commit(unexpected, PAGE));

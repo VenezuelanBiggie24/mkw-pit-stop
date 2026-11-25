@@ -9,6 +9,15 @@
 // the recording starts; vk_usnap.c counts
 // per frame the ranges whose bytes changed in between (the replay drawing with the next frame's uniforms or handles,
 // Hookshot's "MKW shadows in bands for a frame"; candados-lectura, the kart's shadow).
+// MKW_USNAP_TAKE_THREAD (default 1; "ab"): the game's thread only queues the submission's handles and a thread of its
+// own walks them and copies the bytes right after (Nothing serial that can run elsewhere, AGENTS.md); the replay waits
+// for a take only when it reaches the submission before the thread is done with it. Why the take at all on the PS5
+// (25/11/2026): with MKW_USNAP_ASYNC the snapshot read guest memory during the walk, later still, after the game had
+// rewritten its double-buffered 0xc0-byte frame blocks (0x25a8f77000/0x25a8f77100 alternate; MKW_USNAP_CMP: 2-4
+// ranges a frame changed between the submit and the recording): the countdown's scene pass lost the left half of the
+// scenery to the sky or went dark every few frames, 19-125 odd frames a 90 s Grand Prix (cyan-base-r1/r2,
+// opt1p-range1); 0 and 0 with USNAP_ASYNC=0, UBO_SNAPSHOT=0 or USNAP_AT_SUBMIT=1 (cyan-*-r1/r2, MKW_RTSIG showing the
+// HDR scene target as the first pass to go wrong).
 #include <stdlib.h>
 #include <string.h>
 
@@ -20,6 +29,9 @@
 
 struct UsnapTake {
     UsnapTake *next;
+    UsnapTake *job;    // MKW_USNAP_TAKE_THREAD: the thread's queue, in submit order
+    uint64_t *hs;      // the handles the thread walks (a copy: the caller's array is gone once the submit returns)
+    int ready;         // bytes and ranges filled in (under lock)
     uint64_t h0;   // the submission's first handle: a take that does not match its submission is dropped
     int n;
     Rng *rng;      // merged ranges, sorted by lo
@@ -31,6 +43,10 @@ struct UsnapTake {
 static UsnapTake *head, *tail;
 static int queued;
 static PlatMutex lock = PLAT_MUTEX_INIT;
+
+static PlatCond ready_cv = PLAT_COND_INIT;
+static UsnapTake *job_head, *job_tail;
+static int thr = -1;   // MKW_USNAP_TAKE_THREAD: 1 a thread of its own, 0 on the submitting thread
 
 static int cmp_on = -1;
 
@@ -45,17 +61,64 @@ static int mode(void) {
     return m;
 }
 
+static void take_fill(UsnapTake *t, const uint64_t *handles, int n);
+
+static void take_main(void *arg) {
+    (void)arg;
+    plat_mutex_lock(&lock);
+    for (;;) {
+        while (!job_head) plat_cond_wait(&ready_cv, &lock);
+        UsnapTake *t = job_head;
+        if (!(job_head = t->job)) job_tail = NULL;
+        plat_mutex_unlock(&lock);
+        take_fill(t, t->hs, t->n);
+        free(t->hs), t->hs = NULL;
+        plat_mutex_lock(&lock);
+        t->ready = 1;
+        plat_cond_broadcast(&ready_cv);
+    }
+}
+
 void vk_usnap_take(const uint64_t *handles, int n) {
     int m = mode();
     if (!m || !RT_KNOB_ON(m) || n <= 0) return;
+    if (thr < 0) {
+        thr = rt_knob("USNAP_TAKE_THREAD", "1");
+        if (thr && !plat_thread_spawn(take_main, NULL, "vk usnap take", 0)) thr = 0;
+        rt_log("vk_usnap: the submit's copy taken by a thread of its own%s (MKW_USNAP_TAKE_THREAD)",
+               thr == 2 ? " in the B blocks" : thr ? "" : ": off");
+    }
+    UsnapTake *t = calloc(1, sizeof *t);
+    if (!t) rt_fatal("vk_usnap: out of memory (take)");
+    t->h0 = handles[0], t->n = n;
+    int on_thread = RT_KNOB_ON(thr);
+    if (on_thread) {
+        if (!(t->hs = malloc(sizeof *t->hs * (size_t)n))) rt_fatal("vk_usnap: out of memory (take)");
+        memcpy(t->hs, handles, sizeof *t->hs * (size_t)n);
+    } else {
+        take_fill(t, handles, n);
+        t->ready = 1;
+    }
+    plat_mutex_lock(&lock);
+    if (tail) tail->next = t;
+    else head = t;
+    tail = t, queued++;
+    if (on_thread) {
+        if (job_tail) job_tail->job = t;
+        else job_head = t;
+        job_tail = t;
+        plat_cond_broadcast(&ready_cv);
+    }
+    plat_mutex_unlock(&lock);
+}
+
+// The submission's uniform ranges, merged, and their bytes (the submitting thread or take_main).
+static void take_fill(UsnapTake *t, const uint64_t *handles, int n) {
     static _Thread_local RngVec v;
     v.n = 0;
     for (int i = 0; i < n; i++)
         if (handles[i]) usnap_collect(&v, nvn_op_first(handles[i]), 0);
     usnap_sort(&v);
-    UsnapTake *t = calloc(1, sizeof *t);
-    if (!t) rt_fatal("vk_usnap: out of memory (take)");
-    t->h0 = handles[0], t->n = n;
     if (v.n && (!(t->rng = malloc(sizeof *t->rng * (size_t)v.n)) || !(t->off = malloc(sizeof *t->off * (size_t)v.n))))
         rt_fatal("vk_usnap: out of memory (take)");
     uint64_t total = 0;
@@ -75,11 +138,6 @@ void vk_usnap_take(const uint64_t *handles, int n) {
             uint64_t k = __atomic_add_fetch(&n_out, 1, __ATOMIC_RELAXED);
             if (!(k & (k - 1))) rt_log("vk_usnap: %llu uniform ranges left out of a submit's copy: a page the GPU has yet to write", (unsigned long long)k);
         }
-    plat_mutex_lock(&lock);
-    if (tail) tail->next = t;
-    else head = t;
-    tail = t, queued++;
-    plat_mutex_unlock(&lock);
 }
 
 int usnap_take_compare(void) { return mode() && cmp_on; }
@@ -101,10 +159,11 @@ UsnapTake *usnap_take_pop(const uint64_t *handles, int n) {
         if (tail == t) tail = prev;
         queued--;
     }
-    if (queued > TAKE_KEEP && head) {   // the oldest has waited too long for its submission
+    if (queued > TAKE_KEEP && head && head->ready) {   // the oldest has waited too long (and the thread is done with it)
         stale = head, head = head->next, queued--;
         if (!head) tail = NULL;
     }
+    while (t && !t->ready) plat_cond_wait(&ready_cv, &lock);   // MKW_USNAP_TAKE_THREAD: the thread not done with it yet
     plat_mutex_unlock(&lock);
     if (stale) {
         static volatile int32_t said;

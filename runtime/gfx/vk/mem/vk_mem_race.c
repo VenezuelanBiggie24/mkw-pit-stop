@@ -70,9 +70,10 @@ void race_note(const PoolRec *r, uint64_t lo, uint64_t hi) {
     plat_mutex_unlock(&race_lock);
 }
 
-// shadow_lock held, before [a, b) of r is copied in from guest memory for the submission with fence sync; or, old not
-// NULL, after a merge by bytes changed it (vk_mem_merge.c): old holds the shadow's bytes from before.
-uint64_t race_check(const PoolRec *r, uint64_t a, uint64_t b, uint64_t sync, const uint8_t *old) {
+// shadow_lock held, before [a, b) of r is copied in from guest memory (buf NULL) or a submit capture (buf non-NULL,
+// what "cap") for the submission with fence sync; or after a merge by bytes changed it (what "merge"): buf holds the
+// shadow's bytes from before.
+uint64_t race_check(const PoolRec *r, uint64_t a, uint64_t b, uint64_t sync, const uint8_t *buf, const char *what) {
     uint64_t done = vk_sync_fence_done(), wait = 0;
     plat_mutex_lock(&race_lock);
     int k = 0;
@@ -84,7 +85,7 @@ uint64_t race_check(const PoolRec *r, uint64_t a, uint64_t b, uint64_t sync, con
         if (n->r != r || n->fence >= sync || n->lo >= b || n->hi <= a) continue;
         uint64_t lo = n->lo > a ? n->lo : a, hi = n->hi < b ? n->hi : b, len = hi - lo;
         if (len > ctmp && !(tmp = realloc(tmp, ctmp = len))) rt_fatal("vk: out of memory (MKW_SHADOW_RACE)");
-        if (old) memcpy(tmp, old + (lo - a), len);
+        if (buf) memcpy(tmp, buf + (lo - a), len);
         else mem_copy_out(tmp, lo, len);
         const uint8_t *s = r->smap + (lo - r->import_lo);
         uint64_t diff = 0, first = UINT64_MAX, last = 0;
@@ -95,7 +96,7 @@ uint64_t race_check(const PoolRec *r, uint64_t a, uint64_t b, uint64_t sync, con
         if (n->fence > wait) wait = n->fence;
         if (race_on == 1 && r_lines++ < RACE_LINES)
             rt_log("srace: f%llu %s sync %llu (done %llu) over [%#llx, %#llx) read by %llu: %llu bytes differ in [%#llx, %#llx]",
-                   (unsigned long long)vk_exec_presented, old ? "merge" : "copy", (unsigned long long)sync, (unsigned long long)done,
+                   (unsigned long long)vk_exec_presented, what ? what : "copy", (unsigned long long)sync, (unsigned long long)done,
                    (unsigned long long)n->lo, (unsigned long long)n->hi, (unsigned long long)n->fence,
                    (unsigned long long)diff, (unsigned long long)(lo + first), (unsigned long long)(lo + last));
     }

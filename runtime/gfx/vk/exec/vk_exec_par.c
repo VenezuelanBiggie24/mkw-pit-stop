@@ -103,6 +103,8 @@ static struct {
     VkExecQueues wq;          // the walk's queue states (OP_QUEUE)
     uint32_t *tids;           // the texture slots the submission may sample (precheck)
     int ntid, ctid;
+    uint64_t tid_seen[4096];  // L1-sized per-submission slot dedup: (tid_gen << 20) | slot_id
+    uint64_t tid_gen;
     VkImage dimg[DIMG_MAX];   // the depth images the walk bound, in order of first binding (vk_exec_chunk_begin)
     int ndimg, dimg_over;
     VkImage wdimg;            // the walk's current depth image
@@ -192,14 +194,27 @@ static int settle(Pos *p, const uint64_t *handles, int n) {
     }
 }
 
+static void tid_reset(void) {
+    P.ntid = P.pre_from = 0;
+    if (++P.tid_gen == 0) {
+        memset(P.tid_seen, 0, sizeof P.tid_seen);
+        P.tid_gen = 1;
+    }
+}
+
 static void tid_note(const uint64_t *h, int n) {
+    uint64_t tag_hi = P.tid_gen << 20;
     for (int i = 0; i < n; i++) {
         if (!h[i]) continue;
+        uint32_t id = (uint32_t)(h[i] & 0xfffff);   // the slot id (vk_exec_bind.c tex_info)
+        uint64_t tag = tag_hi | id;
+        if (P.tid_seen[id & 4095u] == tag) continue;
+        P.tid_seen[id & 4095u] = tag;
         if (P.ntid == P.ctid) {
             P.ctid = P.ctid ? P.ctid * 2 : 4096;
             if (!(P.tids = realloc(P.tids, sizeof *P.tids * (size_t)P.ctid))) rt_fatal("vk: out of memory (replay chunks)");
         }
-        P.tids[P.ntid++] = (uint32_t)(h[i] & 0xfffff);   // the slot id (vk_exec_bind.c tex_info)
+        P.tids[P.ntid++] = id;
     }
 }
 
@@ -371,7 +386,7 @@ static int head_end(const Pos *at, const VkExec *w, int draws) {
     P.head_now = 0, P.head_at = draws;
     P.n_head++, P.head_ndraws += (uint64_t)draws, P.head_ns += kern_now_ns() - P.t_walk;
     int nupd, ncond, nq;
-    P.ntid = P.pre_from = 0;
+    tid_reset();
     if (P.precheck)
         for (int s = 0; s < NVN_BIND_STAGES; s++) tid_note(w->tex[s], 128);
     if (!prescan(at, P.handles, P.n, &nupd, &ncond, &nq)) return 0;
@@ -408,7 +423,7 @@ static int plan(const VkExec *ex0, const uint64_t *handles, int n, int C) {
     P.plan_ops = 0;
     P.ndimg = P.dimg_over = 0, P.wdimg = P.dc_img = VK_NULL_HANDLE, P.wdlayers = P.dc_left = 0;
     P.wq = vk_exec_qs;   // as the serial replay's (vk_exec_record: per submission, or per queue order episode)
-    if (!P.pipe_now || P.by_chunk_now) P.ntid = P.pre_from = 0;   // (with PIPE, prescan noted and checked them all)
+    if (!P.pipe_now || P.by_chunk_now) tid_reset();   // (with PIPE, prescan noted and checked them all)
     if (P.precheck && (!P.pipe_now || P.by_chunk_now))
         for (int s = 0; s < NVN_BIND_STAGES; s++) tid_note(ex0->tex[s], 128);
     Pos p = {0, 0, nvn_op_first(handles[0]), {0}};
@@ -838,7 +853,7 @@ int vk_exec_par(VkExec *ex, const uint64_t *handles, int n, int diag) {
     P.by_chunk_now = P.pipe_now && !P.head_now && RT_KNOB_ON(P.by_chunk);
     if (P.pipe_now && !P.head_now) {
         int nupd, ncond, nq;
-        P.ntid = P.pre_from = 0;
+        tid_reset();
         if (P.precheck && !P.by_chunk_now)
             for (int s = 0; s < NVN_BIND_STAGES; s++) tid_note(ex->tex[s], 128);
         Pos p0 = {0, 0, nvn_op_first(handles[0]), {0}};

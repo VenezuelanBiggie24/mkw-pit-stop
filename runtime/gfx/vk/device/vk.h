@@ -336,7 +336,7 @@ extern uint64_t vk_replay_submit;          // the submit number the replay threa
 // What backs addr for the CPU's writes (diagnosis): 0 no pool, 1 imported (the GPU reads guest memory), 2 a shadow
 // synced from guest memory, 3 a shadow on the capture list not covered yet, 4 a shadow fed by submit captures.
 int vk_mem_shadow_state(uint64_t addr);
-void vk_mem_shadow_capture(uint64_t sub);  // game thread, at submit sub: the CPU's writes as they are (vk_mem_capture.c)
+uint64_t vk_mem_shadow_capture(uint64_t sub);  // game thread, at submit sub: the CPU's writes as they are (vk_mem_capture.c); the submit number it was filed under
 int vk_mem_shadow_on(void);                // shadow mode (probes)
 // 1 when a GPU write recorded and not copied back yet may touch [addr, addr+size), or nothing tells (no shadow)
 int vk_mem_gpu_may_write(uint64_t addr, uint64_t size);

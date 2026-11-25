@@ -1538,6 +1538,10 @@ void make_fresh_snap(Tex *e) {
     uint64_t t1 = perf ? kern_now_ns() : 0;
     if (perf) __atomic_add_fetch(&vk_pc_snap_ns, t1 - t0, __ATOMIC_RELAXED);
     e->wgen = now;
+    if (e->uploaded && !ch && !e->up_pending && !took) {
+        e->last_ch = 0;
+        return;   // clean fast path: skip tex_pin/unpin
+    }
     tex_pin(e);
     int up = 0;
     if (!e->uploaded) {

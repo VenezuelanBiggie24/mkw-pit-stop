@@ -405,13 +405,33 @@ static void drop_overwritten(void) {
 // images at 1.1-1.3 GiB through the race (issue11-livedrop-20261123-212301, which finished with 68 MiB free).
 // Run every 64 MiB of GPU-owned images made (tex_gpu_made), and before an image creation gives up.
 static uint64_t live_dropped_n, live_dropped_bytes, gpu_made_since;
+static Span *live_w_buf;
+static Tex **live_gone_buf;
+static uint32_t live_buf_cap;
+
+void tex_evict_shutdown(void) {
+    free(live_w_buf), free(live_gone_buf);
+    live_w_buf = NULL, live_gone_buf = NULL, live_buf_cap = 0;
+}
 
 int drop_overwritten_live(void) {
     VkCtx *c = vk_ctx();
     if (!c) return 0;
-    Span *w = malloc(sizeof *w * (size_t)(by_key.n + 1));
-    Tex **gone = malloc(sizeof *gone * (size_t)(by_key.n + 1));
-    if (!w || !gone) { free(w), free(gone); return 0; }
+    uint32_t need_cap = by_key.n + 1;
+    if (need_cap > live_buf_cap) {
+        uint32_t ncap = live_buf_cap ? live_buf_cap : 1024;
+        while (ncap < need_cap) ncap *= 2;
+        Span *nw_buf = realloc(live_w_buf, sizeof *nw_buf * (size_t)ncap);
+        Tex **ng_buf = realloc(live_gone_buf, sizeof *ng_buf * (size_t)ncap);
+        if (!nw_buf || !ng_buf) {
+            if (nw_buf) live_w_buf = nw_buf;
+            if (ng_buf) live_gone_buf = ng_buf;
+            return 0;
+        }
+        live_w_buf = nw_buf, live_gone_buf = ng_buf, live_buf_cap = ncap;
+    }
+    Span *w = live_w_buf;
+    Tex **gone = live_gone_buf;
     int nw = 0, ng = 0;
     for (uint32_t i = 0; i < by_key.cap; i++) {
         Tex *e = by_key.vals[i];
@@ -446,7 +466,6 @@ int drop_overwritten_live(void) {
         freed += vi.size;
         destroy_idle(gone[i]);
     }
-    free(w), free(gone);
     if (ng) {
         live_dropped_n += (uint64_t)ng, live_dropped_bytes += freed;
         static int logs;
