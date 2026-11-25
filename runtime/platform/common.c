@@ -213,6 +213,7 @@ __attribute__((weak)) void plat_fault_guarded(void) {}
 // fault_guard.c's decoder and single step, which it builds only on Linux and the PS5: Windows has neither (0, so
 // memory_early.c waits for a watched page's neighbour as before b907279, whose Windows link failed without these).
 __attribute__((weak)) int plat_code_init(void) { return 0; }
+__attribute__((weak)) const char *plat_code_why(int *err) { if (err) *err = 0; return "no decoder here"; }
 __attribute__((weak)) int plat_fault_emulate_load(uint64_t fault_addr, int extra, int (*rd)(uint64_t, size_t, void *)) {
     return (void)fault_addr, (void)extra, (void)rd, 0;
 }

@@ -243,6 +243,11 @@ typedef struct PackBlob {
 } PackBlob;
 
 enum { PK_DCTX = 4, PK_THREADS = 16, PK_MAX_PCT = 75 };
+// A unit the game reads again after its pack waits twice as long, cold, before the next one, up to 2^PK_BOUNCE_MAX
+// times MKW_PACK_COLD_S. A race read ~2,300-3,300 packed units back every 30 s at ~260 us each (max 1.5 ms), on the
+// game's threads and ~40 % on the replay's, while ~5,000 were packed: memory a lap reads once, colder than 30 s and
+// not cold for good (ab-capreuse, 25/11/2026). MKW_PACK_BACKOFF=0: the same cold time every pack, as before.
+enum { PK_BOUNCE_MAX = 3 };
 
 // The store: blobs and verify copies in direct memory, not the C heap. The C heap is the payload's flexible memory,
 // 640 MiB that the rest of the runtime fills (24 MiB free all through a 1.8.0 Grand Prix, cold-census-20261124), and
@@ -413,6 +418,7 @@ static bool back_unit_locked(Ps5MixedBlock *unit, RangeKind kind, int in_signal,
     if (pk) {   // the same bytes again, not growth: counted as an unpack, not by cause
         unit->pack = NULL;
         unit->pk_unpack_ms = (uint32_t)plat_now_ms() | 1;
+        if (unit->pk_bounces < PK_BOUNCE_MAX) unit->pk_bounces++;
         pk_unpacked(pk, kind, cause, plat_now_ns() - t0);
     } else if ((unsigned)cause < PLAT_BACK_N)
         __atomic_add_fetch(&backed_by_cause[cause], 1, __ATOMIC_RELAXED);
@@ -1445,8 +1451,8 @@ static int pk_unit(Ps5MixedBlock *u, RangeKind kind, const PlatPackParams *pp, i
     if (prot_watch_has_gpu(a, PS5_MEM_UNIT)) return pk_skip(SK_GPU), 0;
     // Signed: a time made odd (| 1) may be 1 ms ahead of now_ms.
     uint32_t since = since_fn(a), up = __atomic_load_n(&u->pk_unpack_ms, __ATOMIC_RELAXED);
-    if (!since || (int32_t)(now_ms - since) < (int32_t)pp->cold_ms ||
-        (up && (int32_t)(now_ms - up) < (int32_t)pp->cold_ms))
+    uint32_t cold = pp->cold_ms << (pp->backoff ? __atomic_load_n(&u->pk_bounces, __ATOMIC_RELAXED) : 0);
+    if (!since || (int32_t)(now_ms - since) < (int32_t)cold || (up && (int32_t)(now_ms - up) < (int32_t)cold))
         return pk_skip(SK_YOUNG), 0;
     uint64_t need = sizeof(PackBlob) + pk_cbound + (pp->verify ? PS5_MEM_UNIT : 0);
     if (__atomic_load_n(&pk_store_bytes, __ATOMIC_RELAXED) + need > pp->store_cap) return pk_skip(SK_STORE), 1;

@@ -170,6 +170,7 @@ Tex *entry_of(const tex_t *t) {
                     vk_mem_changed(e->pub.addr, e->t.L.size, 0, &e->wgen);
                     e->uploaded = 1;
                     e->pub.gpu_owned = 1;
+                    e->rhash_nup = UINT32_MAX;   // the image is src's now, not the last upload's (MKW_REUP_SAME)
                     gpu_baseline(e);   // only a CPU write after this copy makes the storage the content again
                 }
             } else {

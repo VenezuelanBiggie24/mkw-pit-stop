@@ -1482,6 +1482,94 @@ static int cpu_took_back(Tex *e) {
     return 1;
 }
 
+// MKW_REUP_SAME (default 0; "ab": in the B blocks): a written texture (write-watch generation newer than its last
+// upload) whose bytes hash as they did just before its last upload is not uploaded again: the image already holds
+// them. A 1.8.0 race re-uploads ~195 textures (~36 MiB, ~11 ms of the replay's time) per 60 frames, the uploads' share
+// of the replay thread that makes the game's fence wait late (hitch1, 25/11/2026). Only for a write-watched change:
+// not a deferred upload (the image is older), a take-back from the GPU (the image holds the GPU's render) or an image
+// the last hash does not belong to (rhash_nup). The hash is taken before the upload, so a write made during it leaves
+// the hash older than the image and the next check uploads again.
+// MKW_REUP_CENSUS=1 (diagnosis): every 1,800 frames, the re-uploaded textures by bytes, and how many had the bytes of
+// their last upload.
+static int reup_mode = -1, reup_census;
+static uint64_t reup_skipped, reup_skipped_bytes;   // tex_lock
+
+typedef struct { uint64_t addr, bytes, same_bytes; uint32_t w, h, fmt, n, same, written, untracked, pending, took, unknown; } RuCen;
+enum { RUC_N = 2048 };
+static RuCen ruc[RUC_N];
+static uint64_t ruc_frame;
+
+static int ruc_cmp(const void *a, const void *b) {
+    uint64_t x = ((const RuCen *)a)->bytes, y = ((const RuCen *)b)->bytes;
+    return x < y ? 1 : x > y ? -1 : 0;
+}
+
+static void ruc_log(uint64_t fr) {
+    uint64_t n = 0, same = 0, bytes = 0, sbytes = 0;
+    int k = 0;
+    for (int i = 0; i < RUC_N; i++)
+        if (ruc[i].n) n += ruc[i].n, same += ruc[i].same, bytes += ruc[i].bytes, sbytes += ruc[i].same_bytes, ruc[k++] = ruc[i];
+    qsort(ruc, (size_t)k, sizeof *ruc, ruc_cmp);
+    rt_log("vk: re-upload census frames %llu-%llu: %llu re-uploads of %d textures, %.1f MiB; %llu (%.1f MiB) had the bytes "
+           "of their last upload; skipped %llu (%.1f MiB) (MKW_REUP_SAME)", (unsigned long long)ruc_frame,
+           (unsigned long long)fr, (unsigned long long)n, k, bytes / 1048576.0, (unsigned long long)same,
+           sbytes / 1048576.0, (unsigned long long)reup_skipped, reup_skipped_bytes / 1048576.0);
+    for (int i = 0; i < k && i < 16; i++)
+        rt_log("vk:   %#llx %ux%u fmt %#x: %u re-uploads %.1f MiB, same bytes %u; by write %u, untracked %u, deferred %u, "
+               "taken back %u, hash unknown %u", (unsigned long long)ruc[i].addr, ruc[i].w, ruc[i].h, ruc[i].fmt, ruc[i].n,
+               ruc[i].bytes / 1048576.0, ruc[i].same, ruc[i].written, ruc[i].untracked, ruc[i].pending, ruc[i].took,
+               ruc[i].unknown);
+    memset(ruc, 0, sizeof ruc);
+    ruc_frame = fr, reup_skipped = reup_skipped_bytes = 0;
+}
+
+static void ruc_note(const Tex *e, int ch, int took, int valid, int same) {
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (!ruc_frame) ruc_frame = fr;
+    if (fr >= ruc_frame + 1800) ruc_log(fr);
+    uint64_t a = e->pub.addr;
+    uint32_t i = (uint32_t)((a >> 8) * 0x9E3779B97F4A7C15ull >> 53) & (RUC_N - 1);
+    for (int p = 0; p < RUC_N && ruc[i].n && ruc[i].addr != a; p++) i = (i + 1) & (RUC_N - 1);
+    RuCen *r = &ruc[i];
+    if (r->n && r->addr != a) return;   // full
+    r->addr = a, r->w = e->t.d.width, r->h = e->t.d.height, r->fmt = (uint32_t)e->t.d.format;
+    r->n++, r->bytes += e->t.L.size;
+    if (same) r->same++, r->same_bytes += e->t.L.size;
+    if (e->up_pending) r->pending++;
+    else if (took) r->took++;
+    else if (ch < 0) r->untracked++;
+    else r->written++;
+    if (!valid) r->unknown++;
+}
+
+// Before an upload of e (uploaded or not): 1 when it can be left out (MKW_REUP_SAME). *h gets the storage's hash when
+// one was taken (*hv), for reup_after.
+static int reup_skip(Tex *e, int ch, int took, uint64_t *h, int *hv) {
+    if (reup_mode < 0) {
+        reup_mode = rt_knob("REUP_SAME", "0");
+        reup_census = rt_knob("REUP_CENSUS", "0") != 0;
+        if (reup_mode || reup_census)
+            rt_log("vk: re-uploads of unchanged bytes %s%s (MKW_REUP_SAME, MKW_REUP_CENSUS)",
+                   reup_mode == 2 ? "left out in the B blocks" : reup_mode ? "left out" : "counted",
+                   reup_census ? ", census every 1800 frames" : "");
+    }
+    *hv = 0;
+    int on = RT_KNOB_ON(reup_mode);
+    if ((!on && !reup_census) || !e->t.mem || !e->t.L.size) return 0;
+    *h = vk_texpre_hash(e->t.mem, e->t.L.size), *hv = 1;
+    if (!e->uploaded) return 0;
+    int valid = e->n_up && e->rhash_nup == e->n_up;
+    int same = valid && *h == e->rhash;
+    if (reup_census) ruc_note(e, ch, took, valid, same);
+    if (!on || !same || ch != 1 || e->up_pending || took) return 0;
+    reup_skipped++, reup_skipped_bytes += e->t.L.size;
+    return 1;
+}
+
+static void reup_after(Tex *e, uint32_t nup_before, uint64_t h, int hv) {
+    if (hv && e->n_up != nup_before) e->rhash = h, e->rhash_nup = e->n_up;
+}
+
 // A mirrored texture is uploaded on first use and again when its storage pages carry a newer write generation.
 // seen first: staging that runs short trims textures idle by it on this same thread (vk_texture_trim, recursive
 // lock), and the caller goes on using e; the pin keeps it for the rest of the upload.
@@ -1492,10 +1580,15 @@ void make_fresh(Tex *e) {
     if (e->pub.gpu_owned) return;
     tex_pin(e);
     uint64_t size = e->t.L.size;
+    uint64_t h = 0;
+    int hv = 0;
+    uint32_t nup = e->n_up;
     if (!e->uploaded) {
         vk_mem_changed(e->pub.addr, size, 0, &e->wgen);   // resets the write bits before the storage is read
         note_storage(e);
+        reup_skip(e, 0, 0, &h, &hv);   // (the hash only)
         upload(e, 0);
+        reup_after(e, nup, h, hv);
     } else {
         uint32_t now, prev_wgen = e->wgen;
         int ch = vk_mem_changed(e->pub.addr, size, prev_wgen, &now);
@@ -1504,8 +1597,9 @@ void make_fresh(Tex *e) {
         // 1 written, -1 not tracked (the storage's hash decides, unless the CPU just took it back): upload again; a
         // deferred one too
         if (ch < 0 && e->t.mem && !e->up_pending && !took && same_storage(e)) {
-        } else if (ch || e->up_pending || took) {
+        } else if ((ch || e->up_pending || took) && !reup_skip(e, ch, took, &h, &hv)) {
             upload(e, ch == 1 && !e->up_pending && !took ? prev_wgen : 0);
+            reup_after(e, nup, h, hv);
         }
     }
     tex_unpin(e);
@@ -1543,16 +1637,21 @@ void make_fresh_snap(Tex *e) {
         return;   // clean fast path: skip tex_pin/unpin
     }
     tex_pin(e);
-    int up = 0;
+    int up = 0, hv = 0;
+    uint64_t h = 0;
+    uint32_t nup = e->n_up;
     if (!e->uploaded) {
         note_storage(e);
+        reup_skip(e, 0, 0, &h, &hv);   // (the hash only)
         upload(e, 0), up = 1;
+        reup_after(e, nup, h, hv);
     } else {
         e->last_ch = ch;
         // not tracked (-1): the storage's hash decides, unless the CPU just took the texture back from the GPU
         if (ch < 0 && e->t.mem && !e->up_pending && !took && same_storage(e)) {
-        } else if (ch || e->up_pending || took) {
+        } else if ((ch || e->up_pending || took) && !reup_skip(e, ch, took, &h, &hv)) {
             upload(e, ch == 1 && !e->up_pending && !took ? prev_wgen : 0), up = 1;
+            reup_after(e, nup, h, hv);
         }
     }
     if (perf && up)

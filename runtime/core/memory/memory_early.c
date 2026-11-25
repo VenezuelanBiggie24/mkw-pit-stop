@@ -725,7 +725,18 @@ static void sibling_emu_init(void) {
     const char *max = cfg_get("MKW_EARLY_SIBLING_MAX"), *max_b = cfg_get("MKW_EARLY_SIBLING_MAX_B");
     if (max && *max) emu_max = atoi(max);
     if (max_b && *max_b) emu_max_b = atoi(max_b);
-    int ok = plat_code_init();
+    // A few tries: without the emulation every sibling-page read waits for the GPU, the whole session (fault_guard.c
+    // pread_all). Each failure says which step and errno.
+    int ok = 0, tries = 0;
+    while (!ok && tries++ < 5) {
+        ok = plat_code_init();
+        if (!ok) {
+            int err;
+            const char *why = plat_code_why(&err);
+            rt_log("mem: sibling-page reads: code-read check try %d failed at %s (errno %d)", tries, why, err);
+            if (tries < 5) plat_sleep_ms(2);
+        }
+    }
     rt_log("mem: sibling-page reads emulated%s (MKW_EARLY_SIBLING_EMU): the code-read check %s", sib_emu == 2 ? " in the B blocks" : "",
            ok ? "passed" : "failed, so they wait as before");
     if (!ok) sib_emu = 0;

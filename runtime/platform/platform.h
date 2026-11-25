@@ -97,6 +97,7 @@ extern _Thread_local void *plat_fault_uc;
 int plat_code_file_init(const char *path, uint64_t base);
 int plat_code_check(void);
 int plat_code_init(void);
+const char *plat_code_why(int *err);   // the step plat_code_init failed at, and its errno
 // sigsample.c: each registered thread's stack (its interrupted rip first), read on the thread; emit runs on the caller.
 int plat_sample_stacks(void (*emit)(const char *name, uint32_t tid, void *const *frames, int n, void *ctx), void *ctx);   // the calling thread's name in the registry; 0 when not in it
 int plat_sample_start(uint32_t period_us, PlatSampleHook hook);   // SIGPROF to every registered thread each period
@@ -347,6 +348,7 @@ typedef struct {
     uint32_t cold_ms;        // frozen at least this long, and not unpacked for this long
     uint32_t budget_us;      // stop after this long (0 none)
     int verify;              // keep each unit's bytes too and compare them on unpack (MKW_PACK_VERIFY)
+    int backoff;             // a unit unpacked again waits twice as long, each time (MKW_PACK_BACKOFF)
 } PlatPackParams;
 uint64_t plat_mem_pack(const PlatPackParams *p);   // bytes of direct memory given back
 void plat_mem_pack_collect(void);                  // frees the blobs of units unpacked since (the governor's thread)

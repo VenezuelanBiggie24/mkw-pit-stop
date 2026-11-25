@@ -20,6 +20,7 @@ typedef struct {
     void *pack;
     uint32_t pk_fail_freeze;   // the freeze in which it did not compress well enough; 0 none
     uint32_t pk_unpack_ms;     // plat_now_ms at the last unpack, | 1; 0 never: not packed again until it is cold again
+    uint8_t pk_bounces;        // unpacks so far, up to PK_BOUNCE_MAX: each doubles the cold time before the next pack
     uint32_t cc_hash;          // MKW_COLD_CENSUS: the unit's hash at the last look (| 1), the governor's thread only
     uint32_t cc_changed_ms;    // plat_now_ms when that hash last changed, | 1; 0 never looked at
 } Ps5MixedBlock;

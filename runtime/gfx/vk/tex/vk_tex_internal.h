@@ -51,6 +51,8 @@ typedef struct Tex {
     uint64_t gpu_frame;           // the frame the GPU last wrote it (vk_tex_evict.c rel_keep)
     uint64_t rel_bytes;           // while released: its own memory, counted in released_bytes
     uint64_t shash;               // XXH3 of the storage at the last upload (same_storage: no write watch)
+    uint64_t rhash;               // MKW_REUP_SAME / MKW_REUP_CENSUS: XXH3 of the storage just before upload n_up
+    uint32_t rhash_nup;           // the n_up rhash belongs to; any other n_up (an upload since, a new image): unknown
     uint32_t shash_epoch;         // submit_epoch of the last hash check
     uint8_t sparse;               // a Vulkan sparse image whose tiles follow the game's MapVirtual (vk_sparse.c)
     VkSparseTail sparse_tail;      // privately backed small mips; zeroed at image initialization, without touching shared tiles
