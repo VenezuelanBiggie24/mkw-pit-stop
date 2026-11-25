@@ -10,6 +10,7 @@
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE   // (REG_RIP and the other gregs indexes)
 #endif
+#include <errno.h>
 #include <fcntl.h>
 #include <setjmp.h>
 #include <string.h>
@@ -173,14 +174,22 @@ static int code_fd = -1;
 static struct { uint64_t lo, hi, off; } code_seg[CODE_SEGS];
 static int ncode_seg;
 
+// EINTR is tried again: the runtime signals its threads all the time (async preemption, the sampler), and one
+// interrupted read at start-up turned the sibling-read emulation off for a whole session (the code-read check failed in
+// 2 of ~15 PS5 runs, 25/11/2026: ~800 sibling-page waits per 600 frames, the race at 22 ms and 0.75x, pbo1, reupf1).
 static int pread_all(int fd, void *dst, size_t n, uint64_t off) {
     for (size_t done = 0; done < n;) {
         ssize_t k = pread(fd, (uint8_t *)dst + done, n - done, (off_t)(off + done));
+        if (k < 0 && errno == EINTR) continue;
         if (k <= 0) return 0;
         done += (size_t)k;
     }
     return 1;
 }
+
+static const char *code_why = "not tried";   // plat_code_init's failed step, for its caller's log line
+static int code_errno;
+const char *plat_code_why(int *err) { if (err) *err = code_errno; return code_why; }
 
 static uint64_t rd_u(const uint8_t *p, int n) {
     uint64_t v = 0;
@@ -188,25 +197,28 @@ static uint64_t rd_u(const uint8_t *p, int n) {
     return v;
 }
 
+#define CODE_FAIL(why) do { code_why = why, code_errno = errno; goto fail; } while (0)
 int plat_code_file_init(const char *path, uint64_t base) {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return 0;
+    int fd;
+    do fd = open(path, O_RDONLY | O_CLOEXEC);
+    while (fd < 0 && errno == EINTR);
+    if (fd < 0) return code_why = "open", code_errno = errno, 0;
     uint8_t h[64], e[32], ph[56];
     uint64_t elf = 0, ne = 0;
     int self = 0;
-    if (!pread_all(fd, h, sizeof h, 0)) goto fail;
+    if (!pread_all(fd, h, sizeof h, 0)) CODE_FAIL("read of the header");
     if (h[0] == 0x4f && h[1] == 0x15 && h[2] == 0x3d && h[3] == 0x1d) {   // SELF: 32-byte header, 32-byte entries
         self = 1, ne = rd_u(h + 24, 2), elf = 32 + 32 * ne;
-        if (!pread_all(fd, h, sizeof h, elf)) goto fail;
+        if (!pread_all(fd, h, sizeof h, elf)) CODE_FAIL("read of the ELF header");
     }
-    if (memcmp(h, "\x7f" "ELF", 4) || h[4] != 2) goto fail;
+    if (memcmp(h, "\x7f" "ELF", 4) || h[4] != 2) CODE_FAIL("not an ELF");
     // (loaded at base unless ET_EXEC or the PS5's ET_SCE_EXEC: the eboot is ET_SCE_DYNEXEC 0xfe10, at VA 0)
     uint64_t type = rd_u(h + 16, 2), add = type == 2 || type == 0xfe00 ? 0 : base, phoff = rd_u(h + 32, 8);
     unsigned phnum = (unsigned)rd_u(h + 56, 2);
     ncode_seg = 0;
     if (self) {
         for (uint64_t i = 0; i < ne && ncode_seg < CODE_SEGS; i++) {
-            if (!pread_all(fd, e, sizeof e, 32 + 32 * i)) goto fail;
+            if (!pread_all(fd, e, sizeof e, 32 + 32 * i)) CODE_FAIL("read of a SELF entry");
             uint64_t props = rd_u(e, 8), seg = props >> 20 & 0xffff;
             if (!(props >> 11 & 1) || (props >> 1 & 1) || (props >> 3 & 1) || seg >= phnum) continue;   // data, plain
             if (!pread_all(fd, ph, sizeof ph, elf + phoff + 56 * seg) || rd_u(ph, 4) != 1) continue;
@@ -222,7 +234,7 @@ int plat_code_file_init(const char *path, uint64_t base) {
             code_seg[ncode_seg++].off = rd_u(ph + 8, 8);
         }
     }
-    if (!ncode_seg) goto fail;
+    if (!ncode_seg) CODE_FAIL("no code segment");
     if (code_fd >= 0) close(code_fd);
     __atomic_store_n(&code_fd, fd, __ATOMIC_RELEASE);
     return 1;
@@ -253,9 +265,11 @@ int plat_code_check(void) {
 int plat_code_init(void) {
 #ifdef __PROSPERO__
     char path[256];
-    if (!plat_exe_path(path, sizeof path) || !plat_code_file_init(path, plat_exe_base())) return 0;
+    if (!plat_exe_path(path, sizeof path)) return code_why = "no exe path", 0;
+    if (!plat_code_file_init(path, plat_exe_base())) return 0;
 #endif
-    return plat_code_check();
+    if (!plat_code_check()) return code_why = "probe bytes differ", code_errno = errno, 0;
+    return 1;
 }
 
 static _Thread_local struct { uint64_t rip; uint8_t n, b[15]; } code_cache[16];   // per thread: no lock in the handler
@@ -365,6 +379,7 @@ _Thread_local void *plat_fault_uc;
 int plat_code_file_init(const char *path, uint64_t base) { return (void)path, (void)base, 0; }
 int plat_code_check(void) { return 0; }
 int plat_code_init(void) { return 0; }
+const char *plat_code_why(int *err) { if (err) *err = 0; return "no decoder here"; }
 int plat_fault_emulate_load(uint64_t fault_addr, int extra, int (*rd)(uint64_t ea, size_t n, void *dst)) {
     return (void)fault_addr, (void)extra, (void)rd, 0;
 }
