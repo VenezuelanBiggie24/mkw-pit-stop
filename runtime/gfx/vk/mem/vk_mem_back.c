@@ -149,6 +149,15 @@ static int import_refused(void) {
 
 // CPU-visible storage: the guest pages themselves become the buffer's memory (VK_EXT_external_memory_host), or a
 // shadow copy of them (vk_mem_shadow.c).
+static int shadow_unc_mode(void);
+
+int shadow_unc_pool(const PoolRec *r) {
+    const uint32_t cache_mask = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_CPU_CACHED |
+                                NVN_MEMORY_POOL_FLAGS_GPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED;
+    const uint32_t unc_flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_UNCACHED;
+    return !shadow_on && shadow_unc_mode() && (r->flags & cache_mask) == unc_flags;
+}
+
 int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     if (c->has_placed && placed_pool(c, r, addr, size)) return 1;
     // A pool whose copy does not fit (MKW: one of 2.4 GB, flags 0x24, over MKW_GPU_MEM_LIMIT; run77-run78 died on it)
@@ -160,17 +169,7 @@ int import_pool(VkCtx *c, PoolRec *r, uint64_t addr, uint64_t size) {
     // and rewrites them on the game thread while the GPU is still reading the previous frame's slice; paired with
     // MKW_SHADOW_SUBMIT=1 this isolates those 3 pools from live CPU overwrites without paying the memory or sync cost
     // of shadowing the other 1,000+ static/cached pools.
-    static int shadow_unc = -1;
-    if (shadow_unc < 0) {
-        const char *e = cfg_get("MKW_SHADOW_UNC");
-        if (!e || !*e || !strcmp(e, "0")) shadow_unc = 0;
-        else if (!strcmp(e, "1")) shadow_unc = 1;
-        else {
-            rt_log("mem: bad MKW_SHADOW_UNC='%s' (expected 0 or 1); using 0", e);
-            shadow_unc = 0;
-        }
-        if (shadow_unc) rt_log("mem: shadow storage for CPU_UNCACHED|GPU_UNCACHED pools only (MKW_SHADOW_UNC)");
-    }
+    int shadow_unc = shadow_unc_mode();
     const uint32_t cache_mask = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_CPU_CACHED |
                                 NVN_MEMORY_POOL_FLAGS_GPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_CACHED;
     const uint32_t unc_flags = NVN_MEMORY_POOL_FLAGS_CPU_UNCACHED | NVN_MEMORY_POOL_FLAGS_GPU_UNCACHED;
@@ -463,6 +462,21 @@ void destroy_rec(VkCtx *c, PoolRec *r) {
     free(r->pseen);
     free(r->pt);
     free(r);
+}
+
+static int shadow_unc_mode(void) {
+    static int shadow_unc = -1;
+    if (shadow_unc < 0) {
+        const char *e = cfg_get("MKW_SHADOW_UNC");
+        if (!e || !*e || !strcmp(e, "0")) shadow_unc = 0;
+        else if (!strcmp(e, "1")) shadow_unc = 1;
+        else {
+            rt_log("mem: bad MKW_SHADOW_UNC='%s' (expected 0 or 1); using 0", e);
+            shadow_unc = 0;
+        }
+        if (shadow_unc) rt_log("mem: shadow storage for CPU_UNCACHED|GPU_UNCACHED pools only (MKW_SHADOW_UNC)");
+    }
+    return shadow_unc;
 }
 
 // Lazy pools (MKW_LAZY_POOLS, on by default): a CPU-visible pool gets its GPU storage (shadow copy or import) when

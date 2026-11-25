@@ -206,7 +206,7 @@ int vk_pool_init(pool_t *p) {
         r->chunks = calloc(r->nchunks, sizeof *r->chunks);
         r->pseen = calloc(r->size / NVN_VPOOL_PAGE, 1);
         ok = r->chunks && r->pseen;
-    } else if (lazy_on()) {
+    } else if (lazy_on() && !cap_from_init(r)) {
         r->kind = POOL_IMPORT;   // GPU storage at the first resolve (lazy_back); never, if the GPU never reads it
         r->lazy = 1;
         ok = 1;
@@ -251,6 +251,13 @@ int vk_pool_init(pool_t *p) {
     }
     plat_mutex_unlock(&pool_lock);
     if (cna_release) cna_pool_add(r->lo, r->size);
+    if (r->kind == POOL_IMPORT && !r->lazy && r->smap && cap_from_init(r)) {   // (MKW_CAP_FROM_INIT, vk_mem_capture.c)
+        plat_mutex_lock(&shadow_lock);
+        gen_lock_x();
+        cap_adopt(r);
+        plat_mutex_unlock(&gen_lock);
+        plat_mutex_unlock(&shadow_lock);
+    }
     return 1;
 }
 

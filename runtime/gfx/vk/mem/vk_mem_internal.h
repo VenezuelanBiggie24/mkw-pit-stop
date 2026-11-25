@@ -69,6 +69,7 @@ typedef struct PoolRec {
     uint64_t cap_from;                 // gen_lock: the first submit captured for it (UINT64_MAX: none yet)
     uint32_t cgen;                     // gen_lock: every page stamped up to this generation is captured
     uint8_t cap_on;                    // shadow_lock: on the capture list (vk_mem_capture.c)
+    uint8_t cap_keep;                  // captured from its creation (MKW_CAP_FROM_INIT): stays on the list while idle
     uint8_t placed;                    // POOL_IMPORT as driver memory mapped at the guest range (placed_pool): mem
     uint8_t gpu_imported;              // POOL_IMPORT via host-pointer import: GPU access granted on [import_lo, import_hi)
     uint8_t lazy;                      // POOL_IMPORT whose GPU storage is made at its first resolve (lazy_back)
@@ -201,6 +202,9 @@ void shadow_apply_run(PoolRec *r, uint64_t a, uint64_t b, const uint8_t *src);  
 void cap_apply(uint64_t sub);                    // shadow_lock held: captures of submits up to sub into the shadows
 int cap_split(PoolRec **rs, int n);              // shadow_lock and gen_lock held: captured pools last; how many not
 void cap_activate(PoolRec **rs, int n);          // shadow_lock and gen_lock held: those pools onto the capture list
+int cap_from_init(const PoolRec *r);             // MKW_CAP_FROM_INIT: r is shadowed and captured from its creation
+void cap_adopt(PoolRec *r);                      // shadow_lock and gen_lock held: r onto the list at its creation
+int shadow_unc_pool(const PoolRec *r);           // vk_mem_back.c: MKW_SHADOW_UNC shadows r (MKW_SHADOW=0)
 void cap_forget(PoolRec *r);                     // shadow_lock held: r leaves the list and the pending captures
 void cap_log(void);                              // shadow_lock held
 
