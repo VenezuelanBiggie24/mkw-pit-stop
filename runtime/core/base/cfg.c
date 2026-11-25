@@ -256,6 +256,7 @@ static const CfgRow rows[] = {
     K("BIND_STATS"),
     K("BIND_XF"),
     K("BLACK_CHECK"),
+    K("CAP_FROM_INIT"),
     K("COLD_CENSUS"),
     K("COMPUTE_WRITTEN"),
     K("CORE_DIAG"),

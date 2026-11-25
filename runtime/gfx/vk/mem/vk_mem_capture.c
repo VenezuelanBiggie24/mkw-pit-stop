@@ -1,6 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cfg.h"
 #include "nvn_api.h"
 #include "vk_mem_internal.h"
 
@@ -23,6 +24,15 @@
 // MKW_SHADOW=0 and MKW_SHADOW_UNC=1 (PS5 profile), only the 3 CPU_UNCACHED|GPU_UNCACHED pools (~38 MiB) are captured
 // (~0.08-0.13 ms a submit on the game thread), eliminating dynamic SSBO/skinning overwrites between submit and replay.
 // Switching in the A/B blocks drops every pool at the edge: a block's first syncs may see the bytes older captures hold.
+// MKW_CAP_FROM_INIT (default 1; 0: as before): with MKW_SHADOW_UNC, a pool the captures cover gets its shadow when the
+// game makes it (vk_memory.c vk_pool_init, the game's thread, while its bytes are the game's current ones) and is
+// captured from then on, and stays on the list while idle (cap_keep). Before, a lazy pool was copied from guest memory
+// at the replay's first use of it, two presents behind, and so was a pool coming back after CAP_IDLE submits off the
+// list: MKW moves its per-frame data to another pool every so many frames, and those first frames drew with the next
+// frames' data, the countdown's and the finish line's cyan bands (every 30 frames in the countdown, 0-151 odd frames a
+// 150 s Grand Prix, 25/11/2026). The rule from PS5_Longshot's design notes (GPL-3.0, the idea only; heydemoura/
+// PS5_Longshot 2e18628 docs/design.md section 4, rule 2): nothing the replay reads comes from live guest memory, and pools
+// are captured from their creation, not their first GPU use.
 #define CAP_IDLE 64
 
 typedef struct { PoolRec *pool; uint64_t addr, n; uint8_t *data; } CapRun;
@@ -110,6 +120,27 @@ void cap_activate(PoolRec **rs, int n) {
     plat_mutex_unlock(&cap_lock);
 }
 
+int cap_from_init(const PoolRec *r) {
+    static int on = -1;
+    if (on < 0) {
+        on = cfg_get("MKW_CAP_FROM_INIT") ? cfg_bool("MKW_CAP_FROM_INIT") : 1;
+        on = on && rt_knob("SHADOW_SUBMIT", "0") == 1;   // (an "ab" capture drops every pool at the blocks' edges)
+        if (on) rt_log("mem: pools the submit captures cover are shadowed and captured from their creation (MKW_CAP_FROM_INIT)");
+    }
+    return on && shadow_unc_pool(r);
+}
+
+void cap_adopt(PoolRec *r) {
+    plat_mutex_lock(&cap_lock);
+    if (!r->cap_on) {
+        if (nlist == clist) vk_mem_grow((void **)&list, &clist, sizeof *list);
+        list[nlist++] = r;
+        r->cap_on = 1, r->cap_keep = 1, r->cap_from = UINT64_MAX, r->cgen = r->sgen;   // shadow_pool copied up to sgen
+        __atomic_store_n(&nlist_v, nlist, __ATOMIC_RELAXED);
+    }
+    plat_mutex_unlock(&cap_lock);
+}
+
 static void capture_run(PoolRec *r, uint64_t a, uint64_t b, CapRun **runs, int *nruns, int *cruns, uint64_t *bytes) {
     if (*nruns == *cruns) vk_mem_grow((void **)runs, cruns, sizeof **runs);
     uint8_t *d = malloc(b - a);
@@ -165,7 +196,7 @@ uint64_t vk_mem_shadow_capture(uint64_t sub) {
     plat_mutex_lock(&cap_lock);
     int n = 0;
     for (int i = 0; i < nlist;)
-        if (!on || (list[i]->touch_sub && sub > list[i]->touch_sub + CAP_IDLE)) list_drop(i), c_dropped++;
+        if (!on || (list[i]->touch_sub && !list[i]->cap_keep && sub > list[i]->touch_sub + CAP_IDLE)) list_drop(i), c_dropped++;
         else i++;
     if (nlist > csnap) {
         csnap = nlist * 2;
