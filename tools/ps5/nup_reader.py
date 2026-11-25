@@ -262,15 +262,21 @@ class NupReader:
             seen.remove(dir_idx)
 
         bases = [p for p in packages if p["kind"] == KIND_BASE]
-        if not bases:
-            raise NupError(f"{self.path.name}: no base game package in NUP (standalone update is not supported)")
         if len(bases) > 1:
             raise NupError(f"{self.path.name}: multiple base packages in NUP are not supported")
         updates = sorted((p for p in packages if p["kind"] == KIND_UPDATE), key=lambda p: (p["version"], p["index"]))
+        # A .nup with no base package is still taken when its update holds the whole game: an installed game's update
+        # is dumped with the full patched exefs and RomFS, as a console dump's updates/917504 folder is (1.8.0 with
+        # 205k RomFS files), and players' "base + 1.8.0" .nup files that the PC setup builds from (tools/prepare/nup.py
+        # reads the newest package, whatever its kind) stopped here with "no base game package" (r/PS5_Jailbreak,
+        # 23/11/2026). check_mkw's build id and RomFS file count still refuse a real update-only patch.
+        if not bases and not updates:
+            raise NupError(f"{self.path.name}: no base game or update package in NUP")
+        self.has_base = bool(bases)
 
         self.exefs: dict[str, NupEntry] = {}
         self.romfs: dict[str, NupEntry] = {}
-        for pkg in [bases[0], *updates]:
+        for pkg in [*bases, *updates]:
             if pkg["exefs_dir"] != NO_DIR:
                 collect_tree(pkg["exefs_dir"], "", self.exefs, set(), 0)
             if pkg["romfs_dir"] != NO_DIR:
@@ -360,6 +366,11 @@ class NupReader:
             raise NupError(f"{self.path.name}: exefs/main is not Mario Kart World {names} (build id {got})")
         n_romfs = len(self.romfs)
         if n_romfs < int(v.romfs_files * margin):
+            if not self.has_base:
+                raise NupError(
+                    f"{self.path.name}: holds only an update, no base game: its RomFS has {n_romfs} files, {v.name} has "
+                    f"~{v.romfs_files} (use a .nup or dump folder with the base game, or with the update merged in)"
+                )
             raise NupError(f"{self.path.name}: RomFS has {n_romfs} files, {v.name} has ~{v.romfs_files} (incomplete copy)")
         return v
 
