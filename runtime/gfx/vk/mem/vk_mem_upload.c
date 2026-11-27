@@ -366,7 +366,7 @@ uint64_t vk_upload_stg_bytes(void) {
 #define TEXFREE_MAX 64
 #define TEXFREE_COLD_MS 2000u
 #define TEXFREE_REGION (1ull << REG_SHIFT)
-static uint64_t texfree_frozen, texfree_packed;   // since the last log line
+static uint64_t texfree_regions, texfree_packed;   // regions that gave memory back, and how much, since the last line
 static uint64_t texfree_pack(const PlatPackParams *base) {
     static int on = -1;
     if (on < 0) on = cfg_bool("MKW_PACK_TEXFREE");
@@ -378,18 +378,17 @@ static uint64_t texfree_pack(const PlatPackParams *base) {
     for (int i = 0; i < n && freed < base->target_bytes && plat_now_ns() - t0 < budget_ns; i++) {
         uint64_t lo = (r[i][0] + TEXFREE_REGION - 1) & ~(TEXFREE_REGION - 1), hi = r[i][1] & ~(TEXFREE_REGION - 1);
         for (uint64_t a = lo; a < hi && freed < base->target_bytes && plat_now_ns() - t0 < budget_ns; a += TEXFREE_REGION) {
-            if (!vk_mem_cold_freeze(a)) continue;
-            texfree_frozen++;
+            if (!vk_mem_cold_freeze(a)) continue;   // (1 also for a region frozen by an earlier pass)
             p.target_bytes = base->target_bytes - freed;
             uint64_t f = plat_mem_pack_range(a, a + TEXFREE_REGION, &p);
-            freed += f, texfree_packed += f;
+            freed += f, texfree_packed += f, texfree_regions += f != 0;
         }
     }
     static uint64_t last_log;
-    if ((texfree_frozen || texfree_packed) && plat_now_ns() - last_log > 30000000000ull) {
-        rt_log("vk: memory governor: texture heap free blocks (MKW_PACK_TEXFREE): %d blocks, %llu regions frozen, %.1f "
-               "MiB packed since the last line", n, (unsigned long long)texfree_frozen, texfree_packed / 1048576.0);
-        texfree_frozen = texfree_packed = 0, last_log = plat_now_ns();
+    if (texfree_packed && plat_now_ns() - last_log > 30000000000ull) {
+        rt_log("vk: memory governor: texture heap free blocks (MKW_PACK_TEXFREE): %d blocks now, %.1f MiB packed from %llu "
+               "regions since the last line", n, texfree_packed / 1048576.0, (unsigned long long)texfree_regions);
+        texfree_regions = texfree_packed = 0, last_log = plat_now_ns();
     }
     return freed;
 }
