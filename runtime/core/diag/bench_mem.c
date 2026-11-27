@@ -31,10 +31,10 @@
 
 // Every measure in MiB, -1 when the platform has none. free: PS5 free direct memory (all areas), elsewhere the
 // machine's available memory; resident: PS5 the guest's backed memory, elsewhere the process's resident memory.
-enum { M_FREE, M_LARGEST, M_RESIDENT, M_PRIVATE, M_FLEX, M_VRAM, M_VMA, M_TEX, M_TEXREL, M_SPARSE, M_SHADOW, M_PTCPU,
+enum { M_FREE, M_LARGEST, M_RESIDENT, M_PRIVATE, M_FLEX, M_CHEAP, M_VRAM, M_VMA, M_TEX, M_TEXREL, M_SPARSE, M_SHADOW, M_PTCPU,
        M_PTGPU, M_N };
 static const struct { const char *name; int low_is_bad; } measure[M_N] = {
-    {"free", 1},  {"largest", 1}, {"resident", 0}, {"private", 0}, {"flex_free", 1}, {"vram", 0},     {"vma", 0},
+    {"free", 1},  {"largest", 1}, {"resident", 0}, {"private", 0}, {"flex_free", 1}, {"c_heap", 0}, {"vram", 0},     {"vma", 0},
     {"tex", 0},   {"tex_rel", 0}, {"sparse", 0},   {"shadow", 0},  {"pt_cpu_free", 1}, {"pt_gpu_free", 1},
 };
 typedef struct {
@@ -73,6 +73,11 @@ static void sample(Sample *s) {
         if (priv) s->v[M_PRIVATE] = (float)(priv * MIB);
         if (used >= 0 && total > 0) s->v[M_FREE] = total - used;
     }
+    // The runtime's own C heap: on the PS5 the SDK's title heap, direct memory it has mapped (ps5_sys.c); elsewhere
+    // what the allocator reports (mapped, else in use). A leak of the runtime's own allocations shows here.
+    uint64_t h_use = 0, h_free = 0, h_map = 0;
+    plat_heap_stats(&h_use, &h_free, &h_map);
+    if (h_map || h_use) s->v[M_CHEAP] = (float)((h_map ? h_map : h_use) * MIB);
     VkMemSnap vs;
     vk_mem_snap(&vs);
     s->v[M_VRAM] = vs.drv_usage ? (float)(vs.drv_usage * MIB) : -1.0f;   // 0: no VK_EXT_memory_budget
