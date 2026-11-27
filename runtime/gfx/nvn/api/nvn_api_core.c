@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bench.h"
 #include "cfg.h"
 #include "gfx.h"
 #include "host.h"
@@ -344,6 +345,31 @@ static void pool_label(const pool_t *o, int live) {
            (long long)plat_mem_resident(o->game_mem, (size_t)o->size) / 1024, (long long)zeros);
 }
 
+// MKW_POOL_LOG (on in a MKW_BENCH run, vk_memory.c): who makes each pool of POOL_CHAIN_MIN or more, as the guest's
+// frame chain (x30, then the x29 records, as main.c guest_frames reads them for a fatal stop). The Knockout Tour's
+// guest growth is one 2,372 MiB CPU-only pool made at boot inside the game's ModuleSystem heap (heap census, koCEN
+// 27/11/2026), run by an allocator of the game's own: the chain names the code that owns it.
+#define POOL_CHAIN_MIN (64ull << 20)
+static void pool_chain_log(const Cpu *c, const pool_t *o) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = cfg_get("MKW_POOL_LOG");
+        on = e && *e ? atoi(e) != 0 : bench_on();
+    }
+    if (!on || o->size < POOL_CHAIN_MIN) return;
+    char line[1024], d[128];
+    int n = snprintf(line, sizeof line, "nvn: pool %p %.1f MiB flags %#x made from %s", (void *)o->game_mem,
+                     o->size / 1048576.0, o->flags, ldr_describe(c->x[30], d, sizeof d));
+    uint64_t fp = c->x[29];
+    for (int k = 0; k < 12 && fp && !(fp & 7) && plat_mem_readable(fp, 16) && n < (int)sizeof line; k++) {
+        uint64_t next = *(const uint64_t *)(uintptr_t)fp, lr = *(const uint64_t *)(uintptr_t)(fp + 8);
+        n += snprintf(line + n, sizeof line - n, " < %s", ldr_describe(lr, d, sizeof d));
+        if (next <= fp || next - fp > (64u << 20)) break;
+        fp = next;
+    }
+    rt_log("%s", line);
+}
+
 // NVNboolean nvnMemoryPoolInitialize(NVNmemoryPool *p, const NVNmemoryPoolBuilder *b)
 // Pool setup imports, mirrors and maps memory in the back end (the driver, VirtualAlloc): up to 20 ms on the game's
 // loader threads, which held a virtual core through it while job workers waited (MKW_CORE_DIAG). The thread gives
@@ -374,6 +400,7 @@ NVN_API(nvnMemoryPoolInitialize) {
     }
     if (ok && pool_gpu_visible(o)) index_add(o);
     if (ok) pool_label(o, 1);
+    if (ok) pool_chain_log(c, o);
     if (!ok) {
         if (nvn_gpu_only((uintptr_t)o->mem)) gva_free((uintptr_t)o->mem);
         o->magic = 0;
