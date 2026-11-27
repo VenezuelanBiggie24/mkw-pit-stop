@@ -510,6 +510,57 @@ static int test_pitch_page(const GfxBackend *b, uint8_t *guest, int *bytes) {
     return 0;
 }
 
+// ---- wide pitch page part: the same, for a pitch texture larger than a page that still fills no whole write-watch
+// page. MKW 1.8.0's booth Yoshi bone keys on Mario Bros. Circuit: a 10x184 RGBA16F target, 0x5c00 bytes from 4 KiB into
+// a 16 KiB page, beside game objects the CPU writes after the render. With the PS5's 16 KiB watch pages the neighbour's
+// write dropped the render (6 races of 7, 27/11/2026); with 4 KiB pages the texture fills whole pages and this passes
+// either way.
+#define PPW_OFF 0x41000
+#define PPW_NEIGH 0x40800
+#define PPW_W 10
+#define PPW_H 184
+
+static int test_pitch_page_wide(const GfxBackend *b, uint8_t *guest, int *bytes) {
+    pool_t pool = {.magic = NVN_POOL_MAGIC, .flags = 0x22, .mem = guest + 0xa00000, .size = 0x100000,
+                   .game_mem = guest + 0xa00000};
+    CHECK(b->pool_init(&pool), "pool_init of a CPU-visible pool for the wide pitch page part");
+    uint8_t *m = pool.mem;
+    static tex_t t;
+    init_tex(&t, &pool, PPW_OFF, NVN_FORMAT_RGBA16F);
+    t.d.width = PPW_W, t.d.height = PPW_H, t.d.flags = NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET;
+    nvn_tex_layout(&t.d, &t.L);
+    t.serial = 303;
+    CHECK(t.L.size >= (uint64_t)PPW_W * 8 * PPW_H && t.L.size <= 0x7000, "wide pitch page texture layout: %#llx bytes",
+          (unsigned long long)t.L.size);
+    size_t n = (size_t)t.L.size;
+    uint16_t *src = (uint16_t *)m;
+    for (size_t i = 0; i < n / 2; i++) src[i] = (uint16_t)(0x3c00 + (i * 7) % 0x300);
+    memset(t.mem, 0, n);
+    m[PPW_NEIGH] = 1;
+
+    static _Alignas(8) uint8_t stream[512];
+    uint8_t *p = put(stream, OP_BEGIN, NULL, 0);
+    p_copy_b2t up;
+    memset(&up, 0, sizeof up);
+    up.src = (uint64_t)(uintptr_t)m, up.tex = &t, up.r = (NVNcopyRegion){0, 0, 0, PPW_W, PPW_H, 1};
+    p = put(p, OP_COPY_B2T, &up, sizeof up);
+    p = put(p, OP_END, NULL, 0);
+    CHECK(p <= stream + sizeof stream, "wide pitch page op stream overflow");
+    uint64_t handle = (uint64_t)(uintptr_t)stream;
+    uint64_t f = b->submit(&handle, 1);
+    CHECK(b->fence_wait(f, 5000000000ull), "fence_wait of the wide pitch page submission timed out");
+    m[PPW_NEIGH] = 2;   // after the render was recorded: the neighbour, not the texture
+    b->cpu_synced(f);
+    int ok = !memcmp(t.mem, src, n) && m[PPW_NEIGH] == 2;
+    uint16_t got = *(const uint16_t *)t.mem;
+    b->texture_release(&t);
+    b->pool_fini(&pool);
+    CHECK(ok, "the %dx%d pitch texture's storage does not hold what the GPU copied into it after a write beside it on "
+          "its first watch page (first word %#x, expected %#x)", PPW_W, PPW_H, got, src[0]);
+    *bytes = (int)n;
+    return 0;
+}
+
 // A texture in a physical pool's memory that nothing wrote reads zero, as Switch pool memory starts zeroed
 // (MKW_FIX_ZERO; the driver may return zeros without it, then this is a guard).
 static int test_zero(const GfxBackend *b, uint8_t *guest, int *bytes) {
@@ -791,6 +842,8 @@ int probe_vkexec(void) {
     if (!bad) bad = test_pitch(b, guest, &pitch_bytes);
     int page_bytes = 0;
     if (!bad) bad = test_pitch_page(b, guest, &page_bytes);
+    int wide_bytes = 0;
+    if (!bad) bad = test_pitch_page_wide(b, guest, &wide_bytes);
     int zero_bytes = 0;
     if (!bad) bad = test_zero(b, guest, &zero_bytes);
     if (!bad) bad = test_sparse_tail_zero(b);
@@ -824,6 +877,9 @@ int probe_vkexec(void) {
            "texels in its pool bytes after the fence wait, %d bytes compared)\n", PT_W, PT_H, pitch_bytes);
     printf("probe-vkexec: pitch page part passed (a 16x1 R16F pitch texture in the last 128 bytes of a page holds the GPU's "
            "texels after a CPU write beside it on that page, %d bytes compared)\n", page_bytes);
+    printf("probe-vkexec: wide pitch page part passed (a %dx%d RGBA16F pitch texture from 4 KiB into a 16 KiB page holds the "
+           "GPU's texels after a CPU write beside it on its first page, watch page %zu bytes, %d bytes compared)\n",
+           PPW_W, PPW_H, plat_mem_watch_page(), wide_bytes);
     printf("probe-vkexec: nvnx part passed (ClearBuffer then ReportValue in GPU order, a CPU-invisible pool fill copied out, "
            "Downsample 64x64 -> 32x32 within 1 of the 2x2 average, stencil view aspect of D24S8, %d bytes compared)\n",
            nvnx_bytes);

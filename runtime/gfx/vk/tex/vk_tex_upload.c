@@ -1354,11 +1354,17 @@ int storage_rewritten(const Tex *e, uint32_t since, uint32_t *now) {
 // to its neighbours: any CPU write on that page counted as a rewrite of the storage, and the GPU's texels were never
 // written back. In three Grand Prix races (drop2, RX 6700 XT, 21/11/2026) the page alone dropped 36 864 renders of two
 // such textures, ~0.6 a frame, and in every one the texture's own bytes were still those of the GPU write. For such
-// storage the bytes are kept at the GPU write and compared instead; under two pages, so at most 8 KiB copied on the
-// replay thread (128 bytes for those two).
+// storage the bytes are kept at the GPU write and compared instead.
+// The page is the write watch's (watch_span), not 4 KiB: on the PS5 it is 16 KiB, and the booth Yoshi's bone keys on
+// Mario Bros. Circuit (1.8.0, a 10x184 RGBA16F pitch texture, 0x5c00 bytes from 4 KiB into a 16 KiB page, rendered once
+// at the course's load and read by the CPU pose sampler main+0x42bea0 ever after) fill no 16 KiB page. The game's writes
+// to its neighbours on those pages dropped the render in about 6 races of 7: the sampler then read the bytes the
+// memory's previous pool left, and the Yoshi's palette exploded (cyan, white and black flashes, giant triangles; texdiag
+// wwv1 skipped, wwv2 written back, 27/11/2026). Up to two watch pages are kept: 8 KiB with 4 KiB pages, as before, and
+// 32 KiB on the PS5, copied once per GPU write of such a texture.
 static int fills_no_page(const Tex *e) {
-    uint64_t lo = (e->pub.addr + 0xfff) & ~0xfffull, hi = (e->pub.addr + e->t.L.size) & ~0xfffull;
-    return hi <= lo && e->t.L.size <= 0x2000;
+    uint64_t lo, hi;
+    return !watch_span(e, &lo, &hi) && e->t.L.size <= 2 * (uint64_t)plat_mem_watch_page();
 }
 
 // MKW_TEX_WB_BYTES (default 1; 0: the page decides, as before 21/11/2026; --probe-vkexec's pitch page part fails then)
@@ -1372,16 +1378,20 @@ static int wb_bytes(void) {
 }
 
 void gpu_base_note(Tex *e) {
-    if (!fills_no_page(e)) return;
-    if (!e->gpu_base && !(e->gpu_base = malloc(0x2000))) rt_fatal("vk: out of memory for a texture's storage copy");
+    if (!fills_no_page(e)) return;   // (L.size is fixed for the entry: the buffer is sized once)
+    if (!e->gpu_base && !(e->gpu_base = malloc(e->t.L.size))) rt_fatal("vk: out of memory for a texture's storage copy");
     mem_copy_out(e->gpu_base, e->pub.addr, e->t.L.size);
 }
 
 int gpu_base_kept(const Tex *e) {
     if (!fills_no_page(e) || !e->gpu_base) return -1;
-    uint8_t now[0x2000];
-    mem_copy_out(now, e->pub.addr, e->t.L.size);
-    return !memcmp(now, e->gpu_base, e->t.L.size);
+    uint8_t now[0x1000];
+    for (uint64_t at = 0; at < e->t.L.size; at += sizeof now) {
+        size_t n = e->t.L.size - at < sizeof now ? (size_t)(e->t.L.size - at) : sizeof now;
+        mem_copy_out(now, e->pub.addr + at, n);
+        if (memcmp(now, (const uint8_t *)e->gpu_base + at, n)) return 0;
+    }
+    return 1;
 }
 
 int rewritten_since_gpu(const Tex *e) {
