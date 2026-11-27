@@ -108,6 +108,10 @@ static void script_add(const ScriptEv *e) {
 // With MKW_BENCH=gp (core/diag/bench.c), gp is A every QUICK_GP_EVERY ticks from the title on instead
 // (tools/run/press-race.txt's way to the first race: every default choice), and on through the races, where A
 // accelerates, and the results between them, where it goes on to the next race.
+// ko: a Knockout Tour, with or without MKW_BENCH: the main menu's second entry (one DOWN where the time trial takes
+// two), then A every QUICK_GP_EVERY ticks from the character select on, through the rally select (its first rally),
+// the legs and what follows a rally, for MKW_BENCH_MAX (2400 s when unset, as bench.c) and QUICK_KO_MARGIN_S: each
+// tick scans the whole script, so not a fixed 4 h of presses.
 static const char *const quick_tt[] = {
     "TitleWait+40 A 6",       "TitleMenuMain+40 A 6",     "TitleMenuMain+160 DOWN 6", "TitleMenuMain+190 DOWN 6",
     "TitleMenuMain+230 A 6",  "PartsSelectEx+60 A 6",     "PartsSelectEx+180 A 6",    "VSStageSelect+60 A 6",
@@ -125,8 +129,11 @@ static const char *const quick_gp[] = {
     "IntoRace2+660 A 6",        "IntoRace2+800 A 4320000",
 };
 static const char *const quick_free[] = {"TitleWait+40 A 6", "TitleMenuMain+60 PLUS 6"};
+static const char *const quick_ko[] = {"TitleWait+40 A 6", "TitleMenuMain+40 A 6", "TitleMenuMain+160 DOWN 6",
+                                       "TitleMenuMain+230 A 6"};
 #define QUICK_GP_EVERY 90                 // ticks: press-race.txt's spacing, slower than any menu's transition
 #define QUICK_GP_TICKS (60 * 60 * 25)     // 25 min of game time: four races, their results and the cup's end
+#define QUICK_KO_MARGIN_S 600            // ko: presses for the run's MKW_BENCH_MAX plus the menus before its window
 
 static void script_load_quick(const char *mode) {
     if (!strcmp(mode, "gp") && !strcmp(cfg_value("MKW_BENCH"), "gp")) {   // the benchmark: on through every race
@@ -137,6 +144,25 @@ static void script_load_quick(const char *mode) {
             if (script_parse(line, 0, &e) > 0) script_add(&e);
         }
         rt_log("input: MKW_BENCH=gp, A every %d ticks from TitleWait (%d presses)", QUICK_GP_EVERY, script_n);
+        return;
+    }
+    if (!strcmp(mode, "ko")) {
+        for (size_t i = 0; i < sizeof quick_ko / sizeof *quick_ko; i++) {
+            char line[64];
+            ScriptEv e;
+            snprintf(line, sizeof line, "%s", quick_ko[i]);
+            if (script_parse(line, (int)i + 1, &e) > 0) script_add(&e);
+        }
+        double max_s = atof(cfg_value("MKW_BENCH_MAX"));
+        int ticks = (int)(((max_s > 0 ? max_s : 2400) + QUICK_KO_MARGIN_S) * 60);
+        for (int t = 60; t < ticks; t += QUICK_GP_EVERY) {
+            char line[64];
+            ScriptEv e;
+            snprintf(line, sizeof line, "PartsSelectEx+%d A 10", t);
+            if (script_parse(line, 0, &e) > 0) script_add(&e);
+        }
+        rt_log("input: MKW_QUICK_RACE=ko, the main menu's second entry, then A every %d ticks from PartsSelectEx (%d "
+               "presses)", QUICK_GP_EVERY, script_n);
         return;
     }
     int free_roam = !strcmp(mode, "free"), gp = !strcmp(mode, "gp");

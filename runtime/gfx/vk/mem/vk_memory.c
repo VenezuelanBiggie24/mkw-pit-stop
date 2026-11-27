@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bench.h"
 #include "cfg.h"
 #include "gfx.h"
 #include "hangwatch.h"
@@ -178,6 +179,9 @@ int vk_mem_cna_has_released(uint64_t lo, uint64_t hi) {
     return hit;
 }
 
+static void pool_log(const char *what, int kind, uint64_t lo, uint64_t size, uint32_t flags, uint32_t born_ms,
+                     int fini, uint64_t backed, uint64_t freed);   // MKW_POOL_LOG, below
+
 int vk_pool_init(pool_t *p) {
     VkCtx *c = vk_ctx();
     if (!c) { rt_log("vk: MemoryPoolInitialize before vk_init"); return 0; }
@@ -224,6 +228,7 @@ int vk_pool_init(pool_t *p) {
         }
     }
     if (!ok) { free(r->pt); free(r->chunks); free(r->pseen); free(r); return 0; }
+    pool_log(r->lazy ? "init (lazy)" : "init", r->kind, r->lo, r->size, r->flags, 0, 0, 0, 0);
     plat_mutex_lock(&pool_lock);
     index_put(r);
     if (r->kind == POOL_PHYS) {
@@ -293,6 +298,22 @@ static int pool_release_on(void) {
 
 static uint64_t pf_n, pf_bytes, pf_backed, pf_released, pf_overlap, pf_win_bytes, pf_win_backed;
 
+// MKW_POOL_LOG=1 (default: on in a MKW_BENCH run, else 0): a "vk: pool init" and a "vk: pool fini" line for each pool of
+// at least POOL_LOG_MIN bytes, with the frame, kind, size, flags and, at the finalize, its age and the guest memory it
+// had backed and gave back. The question it answers (27/11/2026): does the game finalize pools during a Knockout Tour,
+// which never leaves the race, and how much memory goes with them. A Grand Prix finalizes a course's pools between
+// races (created ~frame 320, finalized ~1400). One line through the asynchronous log per pool, a few hundred a race.
+#define POOL_LOG_MIN (1ull << 20)
+static int pool_log_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = cfg_get("MKW_POOL_LOG");
+        v = e && *e ? atoi(e) != 0 : bench_on();
+    }
+    return v;
+}
+static const char *const pool_kinds[] = {"?", "import", "physical", "virtual"};
+
 void vk_pool_fini_stats(uint64_t *n, uint64_t *bytes, uint64_t *backed, uint64_t *released, uint64_t *overlap,
                         uint64_t *win_bytes, uint64_t *win_backed, int reset) {
     if (n) *n = __atomic_load_n(&pf_n, __ATOMIC_RELAXED);
@@ -315,15 +336,18 @@ static PfRel pf_ring[PF_RING];
 static uint32_t pf_ring_at;
 static PlatMutex pf_ring_lock = PLAT_MUTEX_INIT;
 
-static void pool_fini_note_and_release(uint64_t lo, uint64_t size, uint32_t flags) {
-    if (!lo || !size) return;
+// The pool's guest memory counted, and its zero units given back (MKW_POOL_RELEASE); *backed_out: what was backed.
+static uint64_t pool_fini_note_and_release(uint64_t lo, uint64_t size, uint32_t flags, uint64_t *backed_out) {
+    *backed_out = 0;
+    if (!lo || !size) return 0;
     uint64_t backed = plat_mem_backed_bytes(lo, size);
+    *backed_out = backed;
     __atomic_add_fetch(&pf_n, 1, __ATOMIC_RELAXED);
     __atomic_add_fetch(&pf_bytes, size, __ATOMIC_RELAXED);
     __atomic_add_fetch(&pf_backed, backed, __ATOMIC_RELAXED);
     __atomic_add_fetch(&pf_win_bytes, size, __ATOMIC_RELAXED);
     __atomic_add_fetch(&pf_win_backed, backed, __ATOMIC_RELAXED);
-    if (!pool_release_on()) return;
+    if (!pool_release_on()) return 0;
     int overlap = 0;
     plat_mutex_lock_shared(&pool_lock);
     for (int i = 0; i < pool_index.n; i++) {
@@ -334,7 +358,7 @@ static void pool_fini_note_and_release(uint64_t lo, uint64_t size, uint32_t flag
     plat_mutex_unlock_shared(&pool_lock);
     if (overlap) {
         __atomic_add_fetch(&pf_overlap, 1, __ATOMIC_RELAXED);
-        return;
+        return 0;
     }
     // Only units that hold zeros: NVN gives a finalized pool's storage back to the game with its contents, and MKW keeps
     // them. Each character card has a pool of its own over its 144 KiB; the game finalizes it and samples the card again
@@ -348,6 +372,23 @@ static void pool_fini_note_and_release(uint64_t lo, uint64_t size, uint32_t flag
         pf_ring[pf_ring_at++ % PF_RING] = (PfRel){lo, lo + size, freed, fr, flags};
         plat_mutex_unlock(&pf_ring_lock);
     }
+    return freed;
+}
+
+static void pool_log(const char *what, int kind, uint64_t lo, uint64_t size, uint32_t flags, uint32_t born_ms,
+                     int fini, uint64_t backed, uint64_t freed) {
+    if (size < POOL_LOG_MIN || !pool_log_on()) return;
+    char f[160];
+    flag_names(flags, f, sizeof f);
+    uint64_t fr = __atomic_load_n(&gfx_counters.frames, __ATOMIC_RELAXED);
+    if (!fini)
+        rt_log("vk: pool %s frame %llu %s %#llx %.1f MiB flags %#x %s", what, (unsigned long long)fr, pool_kinds[kind],
+               (unsigned long long)lo, size / 1048576.0, flags, f);
+    else
+        rt_log("vk: pool %s frame %llu %s %#llx %.1f MiB flags %#x %s: age %.1f s, guest backed %.1f MiB, released "
+               "%.1f MiB", what, (unsigned long long)fr, pool_kinds[kind], (unsigned long long)lo, size / 1048576.0,
+               flags, f, born_ms ? (uint32_t)(plat_now_ms() - born_ms) / 1000.0 : -1.0, backed / 1048576.0,
+               freed / 1048576.0);
 }
 
 // Task 32 (diagnosis): the latest pool-finalize release (MKW_POOL_RELEASE) over [lo, lo + size), 1 when there is one.
@@ -386,14 +427,16 @@ void vk_pool_fini(pool_t *p) {
         }
     }
     plat_mutex_unlock(&pool_lock);
-    if (!r) {
-        if (!(p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) && p->mem && p->size)
-            pool_fini_note_and_release((uintptr_t)p->mem, p->size, p->flags);
+    if (!r) {   // a pool the runtime keeps no record of (GPU_NO_ACCESS)
+        if (!(p->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) && p->mem && p->size) {
+            uint64_t backed, freed = pool_fini_note_and_release((uintptr_t)p->mem, p->size, p->flags, &backed);
+            pool_log("fini (unrecorded)", 1, (uintptr_t)p->mem, p->size, p->flags, 0, 1, backed, freed);
+        }
         return;
     }
     uint64_t r_lo = r->lo, r_size = r->size;
     int r_kind = r->kind;
-    uint32_t r_flags = r->flags;
+    uint32_t r_flags = r->flags, r_born = r->born_ms;
     cna_pool_remove(r->lo, r->size);   // MKW_GPU_ONLY_RELEASE: its ranges go with it (the guest storage is the game's again)
     if (r->smap) shadow_forget(r), mem_untrap(r->import_lo, r->import_hi - r->import_lo);   // the GPU's bytes, now
     if (r->kind == POOL_IMPORT) mem_thaw(r->lo, r->size);   // the storage goes back to the guest writable
@@ -437,7 +480,9 @@ void vk_pool_fini(pool_t *p) {
         }
     }
     else destroy_rec(c, r);
-    if (r_kind != POOL_VIRT) pool_fini_note_and_release(r_lo, r_size, r_flags);
+    uint64_t backed = 0, freed = 0;
+    if (r_kind != POOL_VIRT) freed = pool_fini_note_and_release(r_lo, r_size, r_flags, &backed);
+    pool_log("fini", r_kind, r_lo, r_size, r_flags, r_born, 1, backed, freed);
 }
 
 // Distinct physical pages the game has mapped, against what the pools reserve (pool_lock exclusive).

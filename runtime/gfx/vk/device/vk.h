@@ -547,6 +547,13 @@ typedef struct {
         phys_failed_chunks;
 } VkMemStats;
 void vk_mem_stats(VkMemStats *s);
+// MKW_BENCH's memory report (core/diag/bench_mem.c), read with no lock from any thread. vk_mem_snap: the census
+// snapshot vk_mem_census refreshes every 15 frames (vk_mem_log.c), summed over the heaps (bytes). vk_mem_pressure: the
+// governor's passes and what they freed, out-of-memory reliefs and deferred staging uploads since start (vk_mem_upload.c).
+typedef struct { uint64_t drv_usage, vma_block, vma_used, tex_live, tex_released, sparse, shadow; } VkMemSnap;
+void vk_mem_snap(VkMemSnap *s);
+typedef struct { uint64_t gov_soft, gov_hard, gov_freed, relieves, stg_deferred; } VkMemPressure;
+void vk_mem_pressure(VkMemPressure *p);
 void vk_mem_shutdown(void);                        // before vk_shutdown: waits idle, frees every memory and texture object
 
 // Textures. Images are keyed by storage GPU address plus descriptor and stay in VK_IMAGE_LAYOUT_GENERAL. A mirrored

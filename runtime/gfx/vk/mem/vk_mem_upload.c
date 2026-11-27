@@ -378,6 +378,10 @@ static uint64_t pack_step(uint64_t avail) {
     return plat_mem_pack(&p);
 }
 
+// MKW_BENCH's memory report (core/diag/bench_mem.c): governor passes by level, what they freed and out-of-memory
+// reliefs since start (vk_mem_pressure, with the staging uploads deferred below).
+static volatile uint64_t gov_soft_n, gov_hard_n, gov_freed_bytes, relieve_n;
+
 void vk_mem_governor(int force) {
     static uint32_t idle_logs;
     if (!force) plat_mem_pack_collect();   // the blobs of units unpacked since: freed here, not in the fault handler
@@ -458,6 +462,10 @@ void vk_mem_governor(int force) {
         sh_freed = shadow_trim(128ull << 20);
     }
     uint64_t after = plat_mem_dmem_avail();
+    __atomic_add_fetch(hard ? &gov_hard_n : &gov_soft_n, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&gov_freed_bytes,
+                       rel_freed + hr_freed + trim_freed + sp_freed + sh_freed + h0_freed + zero_freed + pk_freed,
+                       __ATOMIC_RELAXED);
     if (rel_freed || hr_freed || trim_freed || sp_freed || sh_freed || h0_freed || zero_freed || pk_freed ||
         (__atomic_add_fetch(&idle_logs, 1, __ATOMIC_RELAXED) % 60) == 1)
         rt_log("vk: memory governor (%s): dmem=%llu->%llu MiB (all free %llu), freed rel=%.1f headroom=%.1f pack=%.1f trim=%.1f sparse=%.1f shadow=%.1f heap0=%.1f zero=%.1f (scanned=%.1f) MiB; %.2f ms (zero scan %.2f) ab=%c",
@@ -475,6 +483,7 @@ void vk_mem_relieve(uint64_t bytes, const char *what) {
     VkCtx *c = vk_ctx();
     if (!c) return;
     uint64_t t0 = plat_now_ns();
+    __atomic_add_fetch(&relieve_n, 1, __ATOMIC_RELAXED);
     vk_mem_governor(1);
     vk_texture_trim(bytes);
     plat_once(&cmd_once, cmd_init, NULL);
@@ -503,6 +512,14 @@ static VkCommandBuffer staging_failed(VkDeviceSize size) {
         rt_log("vk: no staging for %llu bytes even after relieving memory: the upload is deferred (%ld so far)",
                (unsigned long long)size, n);
     return VK_NULL_HANDLE;
+}
+
+void vk_mem_pressure(VkMemPressure *p) {
+    p->gov_soft = __atomic_load_n(&gov_soft_n, __ATOMIC_RELAXED);
+    p->gov_hard = __atomic_load_n(&gov_hard_n, __ATOMIC_RELAXED);
+    p->gov_freed = __atomic_load_n(&gov_freed_bytes, __ATOMIC_RELAXED);
+    p->relieves = __atomic_load_n(&relieve_n, __ATOMIC_RELAXED);
+    p->stg_deferred = (uint64_t)__atomic_load_n(&n_stg_deferred, __ATOMIC_RELAXED);
 }
 
 VkCommandBuffer vk_upload_begin_staging(VkDeviceSize size, VkBuffer *buf, void **map) {

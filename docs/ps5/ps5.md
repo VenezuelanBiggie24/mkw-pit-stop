@@ -276,7 +276,11 @@ does not resolve names). The PS5 cannot paste an invite code: put it in `mkw.ini
 it is not running (`tools/ps5/titlectl.c`: starts, stops and reports the title on port 9031), appends `BENCH = gp` to
 `mkw.ini`, kills any running copy, launches the title, follows `mkw.log` over FTP, kills it if the log stops or the run
 times out, saves `build/run/ps5/<name>-<time>-mkw.log` and puts `mkw.ini` back. `--mode tt` for a time trial,
-`--runs N` to repeat, `--set KEY=VALUE` for more keys. Launching works on this console through
+`--runs N` to repeat, `--set KEY=VALUE` for more keys. `--mode ko` is the memory test: a Knockout Tour, rally after
+rally, for `MKW_BENCH_MAX` seconds (2400 by default, `--set BENCH_MAX=3600` for an hour, `--set BENCH_RALLIES=N` to
+stop after N rallies); every mode logs free direct memory, backed guest memory, page-table units, VRAM and the
+governor's passes every 30 s and reports their worst values and trends per rally at the end (`bench: memresult`,
+`tools/run/bench_mem.py` for a run that died before it). Launching works on this console through
 `sceSystemServiceLaunchApp` with the logged-in user (16/11/2026): the payload checks the shell's focus flag and says
 `focused=1` when the game has the screen. A second launch request while the game starts sends it to the background,
 so the payload makes one and waits a few seconds after a kill.

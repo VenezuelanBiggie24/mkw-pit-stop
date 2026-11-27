@@ -56,6 +56,20 @@ static void ps5_vk_snap_refresh(void) {
     __atomic_store_n(&ps5_vk_snap.placed, (uint64_t)__atomic_load_n(&placed_bytes, __ATOMIC_RELAXED), __ATOMIC_RELAXED);
 }
 
+void vk_mem_snap(VkMemSnap *s) {
+    memset(s, 0, sizeof *s);
+    uint32_t nh = __atomic_load_n(&ps5_vk_snap.n_heaps, __ATOMIC_RELAXED);
+    for (uint32_t h = 0; h < nh; h++) {
+        s->drv_usage += __atomic_load_n(&ps5_vk_snap.drv_usage[h], __ATOMIC_RELAXED);
+        s->vma_block += __atomic_load_n(&ps5_vk_snap.vma_block[h], __ATOMIC_RELAXED);
+        s->vma_used += __atomic_load_n(&ps5_vk_snap.vma_used[h], __ATOMIC_RELAXED);
+    }
+    s->tex_live = __atomic_load_n(&ps5_vk_snap.tex_own, __ATOMIC_RELAXED);
+    s->tex_released = __atomic_load_n(&ps5_vk_snap.tex_rel, __ATOMIC_RELAXED);
+    s->sparse = __atomic_load_n(&ps5_vk_snap.sparse, __ATOMIC_RELAXED);
+    s->shadow = __atomic_load_n(&ps5_vk_snap.shadow, __ATOMIC_RELAXED);
+}
+
 // Reads the snapshot only: vk_mem_census refreshes it every 15 frames. The census is logged from
 // vk_sparse.c under the queue lock, and a refresh there took VMA's mutex and the texture lock while the guest's main
 // thread held one of them and waited for the queue lock (console run 7: a hang after "before-sparse-bind").

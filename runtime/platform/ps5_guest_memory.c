@@ -152,13 +152,19 @@ static void pk_backed_note(char *out, size_t cap);   // MKW_PACK, below
 // areas by asking again on each side of every one found, the widest range first; at most DMEM_SCAN_CALLS calls, so the
 // total is a lower bound when *cut is set. For the log only (a few lines a run): nothing decides on it yet.
 #define DMEM_SCAN_CALLS 1024
-static uint64_t dmem_free_scan(int64_t dmem_total, int *areas, int *cut) {
-    static struct { int64_t lo, hi; } todo[DMEM_SCAN_CALLS + 2];
-    static int busy;
+typedef struct {
+    struct { int64_t lo, hi; } todo[DMEM_SCAN_CALLS + 2];
+    int busy;
+} DmemScan;
+// scan_bench: plat_mem_pressure's own (MKW_BENCH's 1 Hz sampler), so a sample never finds the governor's scan busy
+// and the governor never finds the sampler's busy (it would read that as no answer and act on the largest area alone).
+static DmemScan scan_main, scan_bench;
+static uint64_t dmem_free_scan_with(DmemScan *sc, int64_t dmem_total, int *areas, int *cut) {
     int n = 1, calls = 0;
     uint64_t total = 0;
     *areas = 0, *cut = 1;
-    if (__atomic_exchange_n(&busy, 1, __ATOMIC_ACQUIRE)) return 0;
+    if (__atomic_exchange_n(&sc->busy, 1, __ATOMIC_ACQUIRE)) return 0;
+    __typeof__(sc->todo[0]) *todo = sc->todo;
     todo[0].lo = 0, todo[0].hi = dmem_total;
     *cut = 0;
     while (n) {
@@ -175,8 +181,12 @@ static uint64_t dmem_free_scan(int64_t dmem_total, int *areas, int *cut) {
         if (phys - lo >= (int64_t)PS5_MEM_UNIT) todo[n].lo = lo, todo[n++].hi = phys;
         if (hi - phys - (int64_t)size >= (int64_t)PS5_MEM_UNIT) todo[n].lo = phys + (int64_t)size, todo[n++].hi = hi;
     }
-    __atomic_store_n(&busy, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&sc->busy, 0, __ATOMIC_RELEASE);
     return total;
+}
+
+static uint64_t dmem_free_scan(int64_t dmem_total, int *areas, int *cut) {
+    return dmem_free_scan_with(&scan_main, dmem_total, areas, cut);
 }
 
 void plat_mem_backed_summary(char *out, size_t cap) {
@@ -213,6 +223,27 @@ uint64_t plat_mem_dmem_free_total(void) {
     int areas, cut;
     uint64_t total = dmem_free_scan(dmem_total, &areas, &cut);
     return cut && !areas ? UINT64_MAX : total;   // (no area and cut: another thread's scan was running)
+}
+
+// MKW_BENCH's memory report (core/diag/bench_mem.c), once a second on its own thread: free direct memory (all areas,
+// on scan_bench, and the largest), the guest's backed memory, free flexible memory (the C heap's) and the page-table
+// pools (the CPU pool of 16,384 units ran out on sparse address space before: docs/ps5).
+void plat_mem_pressure(PlatMemPressure *p) {
+    *p = (PlatMemPressure){-1, -1, -1, -1, -1, -1, -1, -1};
+    int64_t dmem_total = sceKernelGetDirectMemorySize(), phys = 0;
+    size_t largest = 0, flex = 0;
+    if (dmem_total > 0) {
+        int areas, cut;
+        uint64_t t = dmem_free_scan_with(&scan_bench, dmem_total, &areas, &cut);
+        if (areas) p->dmem_free = (int64_t)t;
+    }
+    if (sceKernelAvailableDirectMemorySize(0, INT64_MAX, PS5_MEM_UNIT, &phys, &largest) == 0) p->dmem_largest = (int64_t)largest;
+    size_t units = 0;
+    for (int i = 0; i < 3; i++) units += __atomic_load_n(&backed_units[i], __ATOMIC_RELAXED);
+    p->guest_backed = (int64_t)(units * PS5_MEM_UNIT);
+    if (sceKernelAvailableFlexibleMemorySize(&flex) == 0) p->flex_free = (int64_t)flex;
+    int ct = 0, cf = 0, gt = 0, gf = 0;
+    if (sceKernelGetPageTableStats(&ct, &cf, &gt, &gf) == 0) p->pt_cpu_free = cf, p->pt_cpu_total = ct, p->pt_gpu_free = gf, p->pt_gpu_total = gt;
 }
 
 uint64_t plat_mem_dmem_avail(void) {

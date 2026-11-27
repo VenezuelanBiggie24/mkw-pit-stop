@@ -318,6 +318,14 @@ uint64_t plat_mem_dmem_avail(void);                        // PS5: free direct m
 // when the scan was cut short. UINT64_MAX elsewhere, or when another scan is running.
 uint64_t plat_mem_dmem_free_total(void);
 void plat_mem_backed_summary(char *out, size_t cap);     // PS5: guest backed memory and free dmem, one line; "" elsewhere
+// MKW_BENCH's memory report (core/diag/bench_mem.c): what a platform can say about memory pressure, -1 where it cannot
+// (all of it outside the PS5, whose process and system memory bench_mem.c reads with plat_process_memory/plat_mem_info).
+typedef struct {
+    int64_t dmem_free, dmem_largest;   // PS5: free direct memory over all its areas, and its largest area (bytes)
+    int64_t guest_backed, flex_free;   // PS5: the guest's backed memory; free flexible memory (the C heap's)
+    int32_t pt_cpu_free, pt_cpu_total, pt_gpu_free, pt_gpu_total;   // PS5: page-table pool units
+} PlatMemPressure;
+void plat_mem_pressure(PlatMemPressure *p);
 size_t plat_mem_early_page_size(void);                     // protection granularity for early-read watch (4 KiB or 16 KiB)
 // Granularity of the write watch (plat_mem_written): a write anywhere in such a page reports all of its 4 KiB pages as
 // written. 16 KiB on the PS5 (PS5_MEM_PAGE) and under Linux MKW_PROT_WATCH with MKW_EARLY_16K; 4 KiB elsewhere.

@@ -723,8 +723,14 @@ static void test_dmem_scan(void) {
     char out[384];
     plat_mem_backed_summary(out, sizeof out);
     assert(strstr(out, "all free areas: 0 MiB in 3,"));
+    // MKW_BENCH's sampler (plat_mem_pressure) adds up the same areas on its own scan buffer, and reads the largest
+    PlatMemPressure p;
+    plat_mem_pressure(&p);
+    assert(p.dmem_free == 7 * (int64_t)UNIT && p.dmem_largest == 4 * (int64_t)UNIT);
+    assert(p.guest_backed >= 0 && p.flex_free == (256ll << 20));
+    assert(p.pt_cpu_free == 12000 && p.pt_cpu_total == 16384 && p.pt_gpu_free == 12000 && p.pt_gpu_total == 16384);
     memcpy(units, saved, sizeof units);
-    puts("dmem scan: three free areas found");
+    puts("dmem scan: three free areas found, by the log and by plat_mem_pressure");
 }
 
 static void test_io_and_mutex(void) {

@@ -58,6 +58,13 @@ typedef struct {
     uint8_t display_value_reg, display_base_reg;
     uint64_t pane_matrix_fn;   // nn::ui2d's pane global-matrix builder (pane, draw info) (set aspect, host_pane_matrix);
                                // 0: its callers are not in the version's table
+    // Benchmark driver (core/diag/bench.c, MKW_BENCH only; 0: not known for this version)
+    uint64_t kart_calc;           // KartUnit::calc virtual: calls kart input update that re-reads racer_entry+0xd0
+    uint64_t race_mgr_got;        // GOT slot holding race manager singleton pointer (->+0xc0->+8->+0->+8->+0 = race_info)
+    uint64_t ai_driver_update;    // AI driver per-frame virtual: checks [kart+0x110]&0x20 (bit 5 = CPU control)
+    uint64_t ai_driver_thunk;     // delegate invoker that inlines ai_driver_update when [x0+0x40]==ai_driver_update
+    uint64_t com_level_set;       // SetComLevel(com_level_ctrl, int level): 0=Almighty .. 9=Easy3
+    uint64_t survival_checkpoint; // AIRaceSurvivalRankChecker vtable +c8: checkpoint pass and dropout queue
     RtRaceEvent race_events[RT_RACE_EVENTS];   // race_scene.c; none: 20 and 15 fps apply everywhere
     // sdk offsets: the NVN2 driver's proc table (tools/gpu/nvn2_procs.py TABLES, the same rows)
     uint64_t sdk_name_pool, sdk_name_offsets, sdk_pointers;

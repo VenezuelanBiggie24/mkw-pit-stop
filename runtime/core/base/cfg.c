@@ -198,9 +198,11 @@ static const CfgRow rows[] = {
     S("SEED", "hacks", "", NULL, RESTART),
     S("UNLOCK_ALL", "hacks", "0", "0|1", RESTART),
     S("FREEZE_KEYS", "hacks", "0", "0|1", LIVE),
-    S("BENCH", "hacks", "off", "off|tt|gp", RESTART),
-    S("BENCH_MAX", "hacks", "0", "0..3600", RESTART),
-    S("QUICK_RACE", "hacks", "off", "off|tt|gp|free", RESTART),
+    S("BENCH", "hacks", "off", "off|tt|gp|ko", RESTART),
+    S("BENCH_MAX", "hacks", "0", "0..14400", RESTART),
+    S("BENCH_RALLIES", "hacks", "0", "0..99", RESTART),
+    S("BENCH_NO_DROPOUT", "hacks", "0", "0|1", RESTART),
+    S("QUICK_RACE", "hacks", "off", "off|tt|gp|free|ko", RESTART),
     S("CLASSIC_GP", "hacks", "0", "0|1", LIVE),   // core/hacks/classic.c: the cups' intermissions become laps on one course
     S("CLASSIC_VS", "hacks", "0", "0|1", LIVE),   // core/hacks/classic.c: VS races' routes become laps on one course
     S("DYN_FPS", "hacks", "0", "0|1", LIVE),   // core/boot/game.c: 1-3 game steps a frame; on in the PS5 profile
@@ -365,6 +367,7 @@ static const CfgRow rows[] = {
     K("PIPE_SYNC"),
     K("PIPE_TRACE"),
     K("PIPE_WORKERS"),
+    K("POOL_LOG"),
     K("POOL_RELEASE"),
     K("POOL_SPILL"),
     K("PRECHECK_YIELD"),
@@ -716,8 +719,8 @@ static const struct { const char *key, *value; } PS5[] = {
 };
 static int profile = -1;   // 0 none, 1 Steam Deck, 2 PS5
 
-// MKW_BENCH=tt|gp (core/diag/bench.c): the way to its races, below what the player set and above the device profile,
-// so a benchmark run is the same time trial or Grand Prix on every machine. QUICK_RACE takes the mode's own name.
+// MKW_BENCH=tt|gp|ko (core/diag/bench.c): the way to its races, below what the player set and above the device profile,
+// so a benchmark run is the same time trial, Grand Prix or Knockout Tour on every machine. QUICK_RACE takes the mode's own name.
 static const struct { const char *key, *value; } BENCH[] = {
     {"QUICK_RACE", NULL}, {"SEED", "1"}, {"SKIP_MOVIES", "1"},
 };
@@ -804,7 +807,7 @@ const char *cfg_get(const char *name) {
     for (size_t i = 0; i < sizeof BENCH / sizeof *BENCH; i++)   // MKW_BENCH read only for its own keys
         if (!strcasecmp(BENCH[i].key, name + PREFIX_LEN)) {
             const char *b = raw_get(PREFIX "BENCH");
-            if (b && (!strcmp(b, "tt") || !strcmp(b, "gp"))) return BENCH[i].value ? BENCH[i].value : b;
+            if (b && (!strcmp(b, "tt") || !strcmp(b, "gp") || !strcmp(b, "ko"))) return BENCH[i].value ? BENCH[i].value : b;
         }
     int p = profile_of();
     if (p == 1)
