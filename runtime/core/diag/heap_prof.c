@@ -13,7 +13,9 @@
 //   (the code mapping's bounds, from the kernel). The first is usually the SDK's wrap, the next
 //   the caller; a stale word can slip in, so each site prints all its addresses (tools/run/sym.py --ps5 names them).
 // - The cost lands on every malloc and free of every thread (a stack scan and a locked table update): a diagnostic,
-//   off by default and never in the PS5 profile. Its tables are plat_mem_alloc memory, outside the C heap it measures.
+//   off by default and never in the PS5 profile. Its tables (~33 MiB) come from the heap's own ps5_heap_calloc, which the
+//   trace does not see; the report takes them out of the heap's mapped bytes. Not plat_mem_alloc: that is flexible
+//   memory on the PS5 (24 MiB free), and the tables left too little for the dispatch table (FATAL at start, koHP4).
 // - "heap: ..." every REPORT_S on its own thread: the table's total against the heap's mapped bytes, the top sites by
 //   live bytes and by growth since the previous report, and live blocks by size class.
 // With an SDK without ps5_heap_trace, the weak definition below stands in (the PS5 link refuses a weak reference) and
@@ -67,6 +69,7 @@ static uintptr_t text_lo, text_hi;
 static _Atomic uint64_t n_full, n_untracked_free, n_site_full, n_big;
 static _Atomic int64_t tracked_bytes, tracked_n;
 static uint64_t size_hist_n[24];    // filled by the reporter from the table
+static uint64_t own_bytes;          // the profile's own tables, in the title heap
 
 static void lock(atomic_flag *f) {
     while (atomic_flag_test_and_set_explicit(f, memory_order_acquire)) __builtin_ia32_pause();
@@ -223,10 +226,11 @@ static void report(int n_report) {
     struct ps5_heap_stats st = {0};
     ps5_heap_stats(&st);
     int64_t tb = atomic_load(&tracked_bytes), tn = atomic_load(&tracked_n);
-    rt_log("heap: report %d: title heap maps %.1f MiB (peak %.1f, %u segments, %u arenas, %llu libc fallbacks); the "
-           "profile tracks %.1f MiB in %lld live blocks (%llu not tracked: table full; %llu frees of blocks from before "
-           "the profile; %llu over 4 GiB; %llu without a site)",
-           n_report, st.mapped_bytes / 1048576.0, st.peak_bytes / 1048576.0, st.segments, st.arenas,
+    rt_log("heap: report %d: title heap maps %.1f MiB without the profile's own %.1f MiB (peak %.1f, %u segments, %u "
+           "arenas, %llu libc fallbacks); the profile tracks %.1f MiB in %lld live blocks (%llu not tracked: table full; "
+           "%llu frees of blocks from before the profile; %llu over 4 GiB; %llu without a site)",
+           n_report, (st.mapped_bytes - own_bytes) / 1048576.0, own_bytes / 1048576.0, st.peak_bytes / 1048576.0,
+           st.segments, st.arenas,
            st.libc_fallbacks, tb / 1048576.0, (long long)tn, (unsigned long long)atomic_load(&n_full),
            (unsigned long long)atomic_load(&n_untracked_free), (unsigned long long)atomic_load(&n_big),
            (unsigned long long)atomic_load(&n_site_full));
@@ -291,20 +295,18 @@ void heap_prof_init(void) {
     const char *v = cfg_get("MKW_HEAP_PROFILE");
     if (!v || atoi(v) <= 0) return;
     find_text();
-    sites = plat_mem_alloc(sizeof *sites * SITES);
+    sites = ps5_heap_calloc(SITES, sizeof *sites);
+    own_bytes = sizeof *sites * SITES + (uint64_t)SHARDS * SHARD_SLOTS * sizeof(Slot);
     int ok = sites && text_hi > text_lo;
     for (int s = 0; ok && s < SHARDS; s++) {
         atomic_flag_clear(&shards[s].lock);
-        ok = (shards[s].slot = plat_mem_alloc(sizeof(Slot) * SHARD_SLOTS)) != NULL;
+        ok = (shards[s].slot = ps5_heap_calloc(SHARD_SLOTS, sizeof(Slot))) != NULL;
     }
     if (!ok) {
         rt_log("heap: MKW_HEAP_PROFILE: no memory for its tables or no code segment found: no profile");
         return;
     }
-    // Written once now: plat_mem_alloc memory is backed at its first write, through the fault path, which must not
-    // first run inside a malloc callback with a shard lock held.
-    memset(sites, 0, sizeof *sites * SITES);
-    for (int s = 0; s < SHARDS; s++) memset(shards[s].slot, 0, sizeof(Slot) * SHARD_SLOTS);
+    // (ps5_heap_calloc zeroes them now, so no page of them is first touched inside a callback)
     sites[0].key = 1;   // the "no room" site
     trace_missing = 0;
     ps5_heap_trace(on_alloc, on_free);
