@@ -442,6 +442,7 @@ static const CfgRow rows[] = {
     K("SPARSE_NO_BUFFER"),
     K("SPIN"),
     K("SPIN_HANDOFF_US"),
+    K("SPIRV_RELEASE"),
     K("STEAM_X11"),
     K("SVC_STATS"),
     K("SWKBD_ANSWER"),

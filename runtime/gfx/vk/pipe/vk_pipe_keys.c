@@ -142,6 +142,36 @@ void keys_open(void) {
 static double now_ms(void) { return (double)plat_now_ns() / 1e6; }
 
 // Caller holds P.lock.
+// MKW_SPIRV_RELEASE (default 1 on the PS5, 0 elsewhere): the records' shaders are read quietly while the prewarm
+// builds their pipelines (gfx_shader_spirv_quiet), so gfx_shader_spirv_release frees their SPIR-V after it; a later
+// pipeline of one reads it back from the pack (gfx_shader.c spirv_reload), on a pool worker unless the draw builds
+// synchronously. The PS5's C heap is direct memory, the pool a long session runs out of, and the heap profile of a
+// Knockout Tour (MKW_HEAP_PROFILE, koHP5 27/11/2026) found 482 MiB of it in the SPIR-V of the 4,694 shaders the
+// records name, kept for the whole run: the release had logged "released 0 MiB", as only the pairs prewarm's reads
+// were quiet. Elsewhere memory is plentiful and the records' shaders, drawn in earlier runs, stay, as before.
+static int records_quiet(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = cfg_get("MKW_SPIRV_RELEASE");
+#ifdef MKW_PS5_NATIVE
+        v = e && *e ? atoi(e) != 0 : 1;
+#else
+        v = e && *e ? atoi(e) != 0 : 0;
+#endif
+    }
+    return v;
+}
+static int records_released_ok;   // the prewarm ended with every record built: no quiet read can still be running
+
+// A prebuild job no draw waits for reads its shaders quietly (records_quiet); one a draw asked for is a real use.
+static VkPipeline build_job(Job *j) {
+    int quiet = records_quiet() && j->prebuild && !j->demanded;
+    if (quiet) gfx_shader_spirv_quiet(1);
+    VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
+    if (quiet) gfx_shader_spirv_quiet(0);
+    return pipe;
+}
+
 static void prebuild_report(void) {
     rt_log("vk_pipeline: prebuild done: %u built, %u failed, %u asked for by a draw first; %.0f ms after the device was "
            "ready", K.built, K.failed, K.promoted, now_ms() - K.t0);
@@ -207,7 +237,7 @@ static void pipe_worker(void *arg) {
             }
         }
         plat_mutex_unlock(&P.lock);
-        VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
+        VkPipeline pipe = build_job(j);
         plat_mutex_lock(&P.lock);
         if (pipe || !j->p->fast) j->p->info.pipeline = pipe;   // a failed optimised build keeps the fast-linked one
         if (pipe && j->p->fast) P.g.swaps++;
@@ -621,7 +651,7 @@ static void warm_builder(void *arg) {
         j->next = j->prev = NULL;
         j->low = 0;                    // not on a pool thread: promote() has nothing to raise
         plat_mutex_unlock(&P.lock);
-        VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
+        VkPipeline pipe = build_job(j);
         plat_mutex_lock(&P.lock);
         if (pipe || !j->p->fast) j->p->info.pipeline = pipe;   // a failed optimised build keeps the fast-linked one
         if (pipe && j->p->fast) P.g.swaps++;
@@ -712,6 +742,7 @@ static void prewarm_run(void) {
     for (size_t i = 0; i < m; i++)
         if (!u || memcmp(ids[u - 1], ids[i], 32)) memcpy(ids[u++], ids[i], 32);
     int cpus = (int)plat_cpu_count();
+    if (records_quiet()) gfx_shader_spirv_quiet(1);   // the loads, unions and integer variants below are not draws
     gfx_shader_prewarm((const uint8_t(*)[32])ids, u, sh);
     double t1 = now_ms();
 
@@ -759,6 +790,7 @@ static void prewarm_run(void) {
     }
     K.loading = 0;
     plat_mutex_unlock(&P.lock);
+    if (records_quiet()) gfx_shader_spirv_quiet(0);
     free(ids), free(sh);
 
     PlatThread *t[64];
@@ -794,6 +826,7 @@ static void prewarm_run(void) {
     if (stalled)
         rt_log("vk_pipeline: prewarm: no pipeline finished in %u ms; the game starts, %u pipelines still building in the "
                "background", PREWARM_STALL_MS, K.left);
+    records_released_ok = !stalled && !K.left;
     rt_log("vk_pipeline: prewarm: %zu records in %s: %u pipelines built, %u failed, %u already built, %u dropped "
            "(shader not loaded); shaders %.0f ms, pipelines %.0f ms on %d threads, total %.0f ms",
            n, K.path, K.built, K.failed, known, dropped, t1 - t0, now_ms() - t1, nt, now_ms() - t0);
@@ -805,7 +838,15 @@ static void prewarm_run(void) {
 
 void vk_pipeline_prewarm(void) {
     prewarm_run();
-    pairs_release();   // after the records too: their shaders, drawn in earlier runs, stay
+    if (!records_quiet()) {
+        pairs_release();   // after the records too: their shaders, drawn in earlier runs, stay
+    } else if (records_released_ok) {
+        gfx_shader_spirv_release();   // the records' shaders too (records_quiet), and the pairs prewarm's
+        pairs_release();              // (frees nothing more: its reads were quiet as well)
+    } else {
+        // a stalled build may still be reading quietly: releasing now could free SPIR-V it reads
+        rt_log("vk_pipeline: prewarm left builds running: the SPIR-V of the records stays (MKW_SPIRV_RELEASE)");
+    }
 }
 
 // ensure_init's hook: without a prewarm (MKW_PIPE_PREBUILD=0, or the device came up first elsewhere) the records
