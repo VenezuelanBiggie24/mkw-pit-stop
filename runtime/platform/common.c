@@ -226,6 +226,7 @@ __attribute__((weak)) void plat_thread_background(void) {}
 // heap trim after the prewarm's SPIR-V release (gfx_shader.c): the PS5's libc has no malloc_trim, so its pages stay.
 __attribute__((weak)) uint64_t plat_cpu_fast(void) { return ~0ull; }
 __attribute__((weak)) void plat_heap_trim(void) {}
+__attribute__((weak)) int plat_heap_trim_available(void) { return 1; }
 __attribute__((weak)) int plat_sample_stacks(void (*emit)(const char *, uint32_t, void *const *, int, void *), void *ctx) {
     (void)emit, (void)ctx;
     return 0;
