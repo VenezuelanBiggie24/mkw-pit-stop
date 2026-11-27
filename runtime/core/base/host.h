@@ -375,6 +375,11 @@ typedef struct {
 void fps_auto_reset(FpsAuto *a);                           // interval 1, no history
 int fps_auto_step(FpsAuto *a, double measured_ms, double real_ms);   // a frame's game measure and real period in,
                                                                      // the interval to use out
+// MKW_DYN_FPS (fps_auto.c, game.c): acc (ns the presents run behind the game time they showed) after one present of
+// `steps` 60 Hz steps that came elapsed_ns after the last; the next frame's steps from it, within lo..hi
+void fps_dyn_present(int64_t *acc, int64_t elapsed_ns, int steps, int64_t period_ns);
+int fps_dyn_interval(int64_t acc, int64_t period_ns, int lo, int hi);
+int frame_dyn_interval(void);   // game.c: the pacer's interval while MKW_DYN_FPS picks the steps, 0 when it does not
 int probe_discord(void);                                   // discord_probe.c: Rich Presence against the local Discord
 int probe_dsu(void);                                       // dsu_probe.c: the DSU motion client against a fake server
 int probe_fps(void);                                       // fps_probe.c: the controller on synthetic frame times

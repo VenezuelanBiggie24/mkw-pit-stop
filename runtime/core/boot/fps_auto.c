@@ -151,3 +151,21 @@ int fps_auto_step(FpsAuto *a, double measured_ms, double real_ms) {
     }
     return a->iv;
 }
+
+// MKW_DYN_FPS (Hacks tab, off by default; game.c): the game's own per-frame rule (1.0.0 main+0x3a9e28, 1.8.0
+// main+0x69cbb0: acc += measured - interval * 1/60 s, kept within +-4/60 s, interval = acc / (1/60 s) + 1, at most 2)
+// with two changes. Its lateness is the time between presents against the game time they showed, not the game's own
+// measure, which on this port leaves out the replay thread and the GPU (fps_auto_step above: 9 ms measured on 60 ms
+// frames); and it goes up to 3 steps in a race. The pacer holds presents to one period (game.c frame_dyn_interval), so
+// a frame quicker than its steps pays the debt back and no interval can hold itself up. acc: ns behind, kept here.
+#define DYN_LIMIT 4   // the game's bound, in periods
+
+void fps_dyn_present(int64_t *acc, int64_t elapsed_ns, int steps, int64_t period_ns) {
+    int64_t a = *acc + elapsed_ns - (int64_t)steps * period_ns, lim = DYN_LIMIT * period_ns;
+    *acc = a > lim ? lim : a < -lim ? -lim : a;
+}
+
+int fps_dyn_interval(int64_t acc, int64_t period_ns, int lo, int hi) {
+    int64_t iv = acc < 0 ? 1 : acc / period_ns + 1;
+    return iv < lo ? lo : iv > hi ? hi : (int)iv;
+}

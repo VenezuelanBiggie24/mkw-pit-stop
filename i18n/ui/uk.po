@@ -193,6 +193,27 @@ msgid ""
 "course rule. Changes take several seconds and affect races started afterward."
 msgstr ""
 
+msgctxt "UI_MENU_DYN_FPS"
+msgid "Dynamic frame rate"
+msgstr ""
+
+msgctxt "UI_MENU_DYN_FPS_DESC"
+msgid ""
+"Keeps races at full speed from 20 to 60 fps: a slow frame advances the game 2 or 3 steps instead "
+"of one. Motion is less even than at a fixed rate. Replaces the frame rate setting; off with frame "
+"generation."
+msgstr ""
+
+msgctxt "UI_MENU_SPLIT_FPS"
+msgid "Split screen at 30 fps"
+msgstr ""
+
+msgctxt "UI_MENU_SPLIT_FPS_DESC"
+msgid ""
+"With 2 to 4 players on this machine, holds the game at 30 fps at most, whatever the frame rate "
+"setting says."
+msgstr ""
+
 msgctxt "UI_MENU_ANISO"
 msgid "Texture filtering"
 msgstr "Фільтрація текстур"

@@ -57,7 +57,6 @@ static const CfgRow rows[] = {
     S("PERF_OVERLAY", "display", "off", "off|fps|full", LIVE),
     S("FPS", "display", "auto", "auto|game|60|30|20|15", LIVE),
     // split screen (2-4 players on this machine) at 30 fps at most (game.c); same: MKW_FPS as for one player
-    S("SPLIT_FPS", "display", "same", "same|30", LIVE),
     S("LOGIC_HZ", "display", "60", "60|120|144|240", RESTART),
     S("LOW_LATENCY", "display", "1", "0|1", LIVE),
     S("FRAMEGEN", "display", "off", "off|auto|2|3|4|120", LIVE),
@@ -204,6 +203,10 @@ static const CfgRow rows[] = {
     S("QUICK_RACE", "hacks", "off", "off|tt|gp|free", RESTART),
     S("CLASSIC_GP", "hacks", "0", "0|1", LIVE),   // core/hacks/classic.c: the cups' intermissions become laps on one course
     S("CLASSIC_VS", "hacks", "0", "0|1", LIVE),   // core/hacks/classic.c: VS races' routes become laps on one course
+    S("DYN_FPS", "hacks", "0", "0|1", LIVE),   // core/boot/game.c: 1-3 game steps a frame; on in the PS5 profile
+    // core/boot/game.c: split screen (2-4 players on this machine) at 30 fps at most; same: MKW_FPS as for one player.
+    // Off by default, the PS5 included since 27/11/2026: the cap held 2 players at 30 where they run ~46 fps
+    S("SPLIT_FPS", "hacks", "same", "same|30", LIVE),   // core/boot/game.c: 1-3 game steps a frame, full speed from 20 to 60 fps
     // no menu row
     KS("BIND_A", "input"),
     KS("BIND_B", "input"),
@@ -639,9 +642,13 @@ static const struct { const char *key, *value; } DECK[] = {
 // 30 and frame generation stay in Pit Stop > Display.
 static const struct { const char *key, *value; } PS5[] = {
     {"FPS", "60"},
-    // Split screen at 30 (22/11/2026, the Grand Prix benchmark at 60): 2 players averaged 21.7 ms (46 fps, the race at
-    // 0.77x), 3 and 4 players 41.9 ms (24 fps, 0.40x); a split frame at 30 has 33.3 ms at full speed.
-    {"SPLIT_FPS", "30"},
+    // No split screen cap since 27/11/2026: MKW_SPLIT_FPS=30 is a hack (Hacks tab), off. Measured 22/11/2026 (Grand Prix
+    // benchmark at 60): 2 players 21.7 ms (46 fps, the race at 0.77x), 3 and 4 players 41.9 ms (24 fps, 0.40x); at 30
+    // a split frame has 33.3 ms at full speed. MKW_DYN_FPS keeps the game at full speed without it.
+    // Dynamic frame rate (core/boot/game.c), on since 27/11/2026: the frames that miss 16.7 ms take 2 or 3 game steps
+    // instead of slowing the race (Grand Prix, 210 s, eboot 71a478db: 1 player 0.94-0.98x -> 1.00x at 57.6 fps, 2
+    // players 0.75x -> 1.00x at 45.4 fps; dyn-1p-dyn, dyn-2p-dyn, dyn-2p-off). Off in Pit Stop > Hacks.
+    {"DYN_FPS", "1"},
     // The parallel replay as before the 0.1.13 merge (18/11/2026, one player at MKW_FPS=60): the serial head records
     // ~600 draws a frame on the replay thread alone, 5.8-6.3 ms on these cores (reg-1p60: race median 25.9 against
     // 25.1 ms without); the slots checked by chunk and the replay thread recording after its walk (vk_exec_par.c).

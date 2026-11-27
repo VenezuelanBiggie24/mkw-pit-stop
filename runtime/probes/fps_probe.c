@@ -32,6 +32,46 @@ static void expect(const char *what, int iv, int want, int changes, int max_chan
            changes, max_changes);
 }
 
+// MKW_DYN_FPS (fps_auto.c fps_dyn_*): frames of ms each (+-j alternating) behind a pacer held to one period; each
+// frame's steps come from the debt the presents before it left (one frame late, as the game thread runs ahead of the
+// present). Returns game speed (game time over real time) after a settling second.
+static double dyn_speed(double ms, double j, int hi, int *max_steps) {
+    const int64_t period = 1000000000ll / 60;
+    int64_t acc = 0, game = 0, real = 0;
+    int pending = 1;   // the steps of the frame now being presented
+    *max_steps = 0;
+    for (int i = 0; i < 1260; i++) {
+        double m = ms + (i & 1 ? j : -j);
+        int64_t elapsed = (int64_t)(m * 1e6) > period ? (int64_t)(m * 1e6) : period;
+        int next = fps_dyn_interval(acc, period, 1, hi);   // the game thread picks the next frame's steps
+        fps_dyn_present(&acc, elapsed, pending, period);
+        if (i >= 60) game += pending * period, real += elapsed;
+        if (pending > *max_steps) *max_steps = pending;
+        pending = next;
+    }
+    return (double)game / (double)real;
+}
+
+static void probe_dyn(void) {
+    static const struct { const char *what; double ms, jitter; int hi; double lo_speed, hi_speed; int steps; } c[] = {
+        {"10 ms frames (faster than 60)", 10.0, 1.0, 3, 0.99, 1.01, 1},
+        {"20 ms frames (50 fps)", 20.0, 2.0, 3, 0.98, 1.02, 2},
+        {"25 ms frames (40 fps)", 25.0, 3.0, 3, 0.98, 1.02, 2},
+        {"36 ms frames (Radeon 660M race)", 36.0, 3.0, 3, 0.98, 1.02, 3},
+        {"48 ms frames (21 fps)", 48.0, 2.0, 3, 0.98, 1.02, 3},
+        {"70 ms frames (below 20: slows)", 70.0, 2.0, 3, 0.70, 0.73, 3},
+        {"36 ms frames out of a race (2 at most)", 36.0, 3.0, 2, 0.91, 0.95, 2},
+    };
+    for (unsigned i = 0; i < sizeof c / sizeof c[0]; i++) {
+        int steps;
+        double sp = dyn_speed(c[i].ms, c[i].jitter, c[i].hi, &steps);
+        int ok = sp >= c[i].lo_speed && sp <= c[i].hi_speed && steps == c[i].steps;
+        if (!ok) fails++;
+        printf("%s fps: dynamic, %-38s speed %.3f (want %.2f-%.2f), steps up to %d (want %d)\n", ok ? "ok  " : "FAIL",
+               c[i].what, sp, c[i].lo_speed, c[i].hi_speed, steps, c[i].steps);
+    }
+}
+
 int probe_fps(void) {
     static const struct { const char *what; double ms, jitter; int want; } steady[] = {
         {"15 ms frames (fits 60)", 15.0, 1.0, 1},       {"16 ms frames (just fits 60)", 16.0, 0.3, 1},
@@ -205,6 +245,7 @@ int probe_fps(void) {
         expect(at120[i].what, a.iv, at120[i].want, changes, 0);
     }
 
+    probe_dyn();
     printf("fps: %s\n", fails ? "FAILED" : "all passed");
     return fails ? 1 : 0;
 }
