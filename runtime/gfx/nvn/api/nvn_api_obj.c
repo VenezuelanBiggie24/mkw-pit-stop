@@ -657,8 +657,11 @@ NVN_API(nvnWindowSetCrop) {
 // `interval` ticks; the turbo (core/hacks/turbo.c) makes them `turbo_speed` times shorter.
 uint64_t gfx_vsync_tick_ns(void);   // gfx_present.c: 1/MKW_LOGIC_HZ s, or locked to the display's refresh
 int64_t gfx_pace_nudge_take(void);   // gfx_present.c: a move of the present phase to make, once
+// MKW_DYN_FPS (game.c) paces by its smallest interval instead of the frame's: a frame of 3 steps that took 30 ms
+// presents after 30, which pays back the time behind.
 static uint64_t present_period(const win_t *o) {
-    return (o->interval > 0 ? (uint64_t)o->interval : 1ull) * gfx_vsync_tick_ns() / (uint64_t)turbo_speed();
+    int dyn = frame_dyn_interval(), iv = dyn ? dyn : o->interval > 0 ? o->interval : 1;
+    return (uint64_t)iv * gfx_vsync_tick_ns() / (uint64_t)turbo_speed();
 }
 
 // MacNativeGames nvn_pace.h: the present slot is the previous slot plus one period. Early: wait for the slot. Late by

@@ -807,6 +807,9 @@ static void rows_hacks(void) {
 #endif
     opt_toggle("MKW_CLASSIC_GP", UI_MENU_CLASSIC_GP, UI_MENU_CLASSIC_GP_DESC);
     opt_toggle("MKW_CLASSIC_VS", UI_MENU_CLASSIC_VS, UI_MENU_CLASSIC_VS_DESC);
+    opt_toggle("MKW_DYN_FPS", UI_MENU_DYN_FPS, UI_MENU_DYN_FPS_DESC);   // core/boot/game.c
+    static const UiTextId split[] = {UI_MENU_OFF, UI_MENU_ON};   // same|30
+    opt_choice("MKW_SPLIT_FPS", UI_MENU_SPLIT_FPS, split, 2, UI_MENU_SPLIT_FPS_DESC);   // core/boot/game.c
 }
 
 static void tab_hacks(float scale) {

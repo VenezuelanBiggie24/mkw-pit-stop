@@ -12,7 +12,8 @@
 // non-zero value skips it too and keeps the interval in [+0x214] as it is (main+0x3aa034), so 20 and 15 fps (3 and 4)
 // need no patch: both words are written before each call. MKW_FPS: auto (the game's own choice while it holds 30 fps,
 // fps_auto.c's 3 or 4 below that in a race; auto_want), 60, 30, 20, 15, or game (the game's own choice, 1-2: the
-// console's, for A/B).
+// console's, for A/B). MKW_DYN_FPS (Hacks tab, off) replaces MKW_FPS's choice with 1-3 steps a frame from how far the
+// presents ran behind the game clock (dyn_want), over a pacer held to one period.
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,8 +93,39 @@ static _Atomic int last_interval = 1;
 
 int frame_present_interval(void) { return atomic_load_explicit(&last_interval, memory_order_relaxed); }
 
+// MKW_DYN_FPS (Hacks tab, off by default, on in the PS5 profile; the idea of a 1.0.0 IPS mod shared on Reddit in 11/2026, which credits
+// Eglantine's Dynamic FPS build: no code of either). Each frame takes 1/60 to 3/60 s of game time (in MKW_LOGIC_HZ
+// ticks; 3/60 only in a race, 2/60 at least in a split screen MKW_SPLIT_FPS holds at 30), from how far the presents ran behind the game time they
+// showed (fps_auto.c fps_dyn_*). The pacer meanwhile holds presents to the smallest of those intervals
+// (nvn_api_obj.c present_period), not the frame's own: paced to its own interval, a frame at 3 would last exactly its
+// 3 steps and the debt that chose it never come down. So a 45 fps machine shows 45 pictures a second at full game
+// speed, in steps of 1 and 2 (motion less even than at a fixed rate: the post's own caveat); below 20 fps the race
+// slows down. Off with frame generation (its factor follows a whole interval, auto_want) and with the turbo.
+static _Atomic int dyn_floor;      // the pacer's interval while MKW_DYN_FPS picks the steps, 0 otherwise
+static _Atomic int64_t dyn_acc;    // ns the presents ran behind the game time (fps_dyn_present), any thread reads
+static uint64_t dyn_last;          // the present thread: the last present's time, 0 after a stop
+uint64_t gfx_vsync_tick_ns(void);   // gfx_present.c: 1/MKW_LOGIC_HZ s, or locked to the display's refresh
+static int64_t dyn_tick_ns(void) { return (int64_t)gfx_vsync_tick_ns(); }   // one step of game time
+
+int frame_dyn_interval(void) { return atomic_load_explicit(&dyn_floor, memory_order_relaxed); }
+
+static void dyn_present(uint64_t display_ns, int interval) {
+    if (!atomic_load_explicit(&dyn_floor, memory_order_relaxed)) {
+        dyn_last = 0;
+        return;
+    }
+    // the picture's time: its slot, or now when the frame came after it (the pacer then presents at once)
+    uint64_t now = kern_now_ns(), t = display_ns > now ? display_ns : now;
+    if (dyn_last && t > dyn_last) {
+        int64_t acc = atomic_load_explicit(&dyn_acc, memory_order_relaxed);
+        fps_dyn_present(&acc, (int64_t)(t - dyn_last), interval > 0 ? interval : 1, dyn_tick_ns());
+        atomic_store_explicit(&dyn_acc, acc, memory_order_relaxed);
+    }
+    dyn_last = t;
+}
+
 void frame_step_present(uint64_t display_ns, int interval) {
-    (void)display_ns;
+    dyn_present(display_ns, interval);
     atomic_store_explicit(&last_interval, interval > 0 ? interval : 1, memory_order_relaxed);
     // interval steps of 1/N s in 60 Hz ticks; N changes on entering or leaving time trial, so the remainder restarts
     uint32_t n = (uint32_t)frame_logic_hz();
@@ -165,6 +197,25 @@ static int auto_want(uint64_t obj) {
     return iv > OUT_OF_RACE_MAX && race_scene_on() ? iv : 0;
 }
 
+// MKW_DYN_FPS on and possible now: not with frame generation or the turbo (see dyn_floor), logged when that changes.
+static int dyn_on(void) {
+    static int was = -1;
+    int want = cfg_bool("MKW_DYN_FPS"), fg = strcmp(cfg_value("MKW_FRAMEGEN"), "off") != 0, turbo = turbo_speed() > 1;
+    int on = want && !fg && !turbo;
+    if (on != was && (want || was == 1))
+        rt_log("game: dynamic frame rate %s (MKW_DYN_FPS)", on ? "on: 1-3 steps a frame" :
+               !want ? "off" : fg ? "waits: frame generation is on" : "waits: the turbo is on");
+    was = on;
+    if (!on) atomic_store_explicit(&dyn_acc, 0, memory_order_relaxed);
+    return on;
+}
+
+// The steps of this frame in ticks of n Hz, 1 to 3/60 s (2/60 s at most outside a race: below, the cap applies as to
+// MKW_FPS's 3 and 4).
+static int dyn_want(int n) {
+    return fps_dyn_interval(atomic_load_explicit(&dyn_acc, memory_order_relaxed), dyn_tick_ns(), 1, 3 * n / 60);
+}
+
 // The game thread, once per frame: MKW_FPS into the fixed interval, then the game's own function. saved: the game's
 // value before the first forced frame, put back with MKW_FPS=game.
 static void host_frame_update(Cpu *c) {
@@ -183,11 +234,13 @@ static void host_frame_update(Cpu *c) {
     was_movie = movie, was_opening = opening;
     // At n Hz a cup opening goes at n / 60 (the console's 1), and a movie or MKW_FPS=game at auto's (auto_want)
     int n = frame_logic_hz();
+    int dyn = !opening && !movie && dyn_on();
     int want = opening                       ? (n + 59) / 60
+             : dyn                           ? dyn_want(n)
              : movie || !strcmp(fps, "game") ? (n != 60 ? auto_want(c->x[0]) : 0)
              : !strcmp(fps, "auto")          ? auto_want(c->x[0])
                                              : fixed_interval(fps, n);
-    // MKW_SPLIT_FPS=30 (the PS5 profile): split screen at 30 at most, whatever MKW_FPS says, outside the movies above.
+    // MKW_SPLIT_FPS=30 (Hacks tab, off): split screen at 30 at most, whatever MKW_FPS says, outside the movies above.
     // At 60 the game counts each frame as 1/60 s, and on a base PS5 split frames take longer (22/11/2026, Grand Prix
     // benchmark at 60, one build): 1 player 17.1 ms (0.98x), 2 players 21.7 ms (0.77x), 3 and 4 41.9 ms (0.40x); at 30
     // a frame has 33.3 ms at full speed.
@@ -196,7 +249,8 @@ static void host_frame_update(Cpu *c) {
     if (split != was_split)
         rt_log("game: %s", split ? "split screen: 30 fps at most (MKW_SPLIT_FPS)" : "split screen 30 fps cap off");
     was_split = split;
-    if (split && want < 2) want = 2;
+    if (split && want < 2 * n / 60) want = 2 * n / 60;   // 30 fps in MKW_LOGIC_HZ ticks
+    atomic_store_explicit(&dyn_floor, dyn ? (split ? 2 * n / 60 : 1) : 0, memory_order_relaxed);   // the pacer's
     // 20 and 15 only in a race (race_scene.c): menus and loads go at 30 at most, as on the console (Adrià 15/11/2026);
     // a menu counting in 1/60 s steps risks at 3 or 4 what the cup opening showed
     static int was_capped;
@@ -208,7 +262,8 @@ static void host_frame_update(Cpu *c) {
     if (want) {
         if (saved < 0) {
             saved = (int)*fixed;
-            rt_log("game: present interval fixed at %d (MKW_FPS %s; the game's value was %d)", want, fps, saved);
+            rt_log("game: present interval fixed at %d (MKW_FPS %s; the game's value was %d)", want,
+                   dyn ? "set aside by MKW_DYN_FPS" : fps, saved);
         }
         *fixed = (uint32_t)want;
         *(uint32_t *)(uintptr_t)(c->x[0] + FRAME_INTERVAL) = (uint32_t)want;   // 3 and 4: the game leaves it
