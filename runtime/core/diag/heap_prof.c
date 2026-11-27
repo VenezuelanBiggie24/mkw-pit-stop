@@ -95,18 +95,33 @@ static void find_text(void) {
 
 // from: on_alloc's own return address (into the SDK's wrap), so the scan skips the profile's frames; a host harness
 // (27/11/2026) scanning from site_of's frame filled every slot with the profile's own addresses and merged all sites.
-// The top of this thread's stack, once per thread: the end of the mapping that holds it (sceKernelQueryMemoryProtection,
-// bounds only). The scan stops there: 48 words up from a shallow frame read past a thread's stack and killed the title
-// (access violation in on_alloc, koHP2, 27/11/2026).
-static _Thread_local uintptr_t stack_top;
+// The top of the stack a frame is on: the end of the mapping that holds it (sceKernelQueryMemoryProtection, bounds
+// only), asked once per stack and kept in a table looked up by address. The scan stops there: 48 words up from a
+// shallow frame read past a thread's stack and killed the title (access violation in on_alloc, koHP2, 27/11/2026).
+// Not thread-local storage: the PS5 build's TLS is emulated and allocates a thread's block with malloc at its first
+// use, which called this callback again without end (stack overflow, koHP3).
+#define STACKS 1024
+static struct { _Atomic uintptr_t lo, hi; } stacks[STACKS];
+static _Atomic uint32_t n_stacks;
 static uintptr_t this_stack_top(const void *sp) {
-    if (!stack_top) {
-        void *start, *end;
-        uint32_t prot;
-        stack_top = sceKernelQueryMemoryProtection((void *)(uintptr_t)sp, &start, &end, &prot) ? (uintptr_t)sp + 8
-                                                                                                  : (uintptr_t)end;
+    uintptr_t a = (uintptr_t)sp;
+    uint32_t n = atomic_load_explicit(&n_stacks, memory_order_acquire);
+    for (uint32_t i = n; i-- > 0;) {
+        uintptr_t lo = atomic_load_explicit(&stacks[i].lo, memory_order_relaxed);
+        uintptr_t hi = atomic_load_explicit(&stacks[i].hi, memory_order_relaxed);
+        if (a >= lo && a < hi) return hi;
     }
-    return stack_top;
+    void *start, *end;
+    uint32_t prot;
+    if (sceKernelQueryMemoryProtection((void *)a, &start, &end, &prot)) return a + 8;   // unknown: no scan
+    uint32_t i = atomic_fetch_add_explicit(&n_stacks, 1, memory_order_acq_rel);
+    if (i < STACKS) {   // (a slot is visible before its bounds are: a racing reader sees 0-0 and misses it, harmlessly)
+        atomic_store_explicit(&stacks[i].hi, (uintptr_t)end, memory_order_relaxed);
+        atomic_store_explicit(&stacks[i].lo, (uintptr_t)start, memory_order_release);
+    } else {
+        atomic_store_explicit(&n_stacks, STACKS, memory_order_relaxed);
+    }
+    return (uintptr_t)end;
 }
 
 static uint16_t site_of(const uintptr_t *from) {
