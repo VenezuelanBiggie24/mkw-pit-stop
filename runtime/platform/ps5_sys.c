@@ -674,10 +674,14 @@ void plat_heap_stats(uint64_t *in_use, uint64_t *free_bytes, uint64_t *mapped) {
 // SDK's newer platform layer has ps5_heap_trim and its header asks a title to call it "every 10 s, say" so that what a
 // burst took goes back to the pool it shares with its GPU and its guest (mihawk-99/PS5_PayloadSDK 55a2de04, heap.h).
 // Ported from extoverflow/mkw-recomp ac72ec5 (MIT), where the title's memory thread calls it; here the memory
-// governor's thread does (vk_headroom.c). Weak: the SDK this tree builds with (611893fc) has no ps5_heap_trim, and then
-// the trim does nothing and says so once (plat_heap_trim_available).
-__attribute__((weak)) void ps5_heap_trim(void);
-void plat_heap_trim(void) {
-    if (ps5_heap_trim) ps5_heap_trim();
+// governor's thread does (vk_headroom.c). The SDK this tree builds with (611893fc) has no ps5_heap_trim, and the PS5
+// link refuses a weak undefined reference ("no public SDK stub exports required symbol"), so this is a weak definition
+// of our own that does nothing and notes it: a newer SDK's real ps5_heap_trim, in the same object as the heap the
+// title links anyway, overrides it. plat_heap_trim_available says which one runs (logged once).
+static volatile int heap_trim_missing = -1;
+__attribute__((weak, noinline)) void ps5_heap_trim(void) { heap_trim_missing = 1; }
+void plat_heap_trim(void) { ps5_heap_trim(); }
+int plat_heap_trim_available(void) {
+    if (heap_trim_missing < 0) heap_trim_missing = 0, ps5_heap_trim();   // a real trim leaves it 0
+    return !heap_trim_missing;
 }
-int plat_heap_trim_available(void) { return ps5_heap_trim != NULL; }
