@@ -10,7 +10,7 @@
 //   mapped heap the table accounts for.
 // - The site: the runtime is built without frame pointers (build_game.py), so the caller is found as sigsample.c's
 //   fallback finds return addresses: the first SITE_DEPTH words of the stack that point into the executable's code
-//   (its PF_X segment, from the ELF header the title is loaded with). The first is usually the SDK's wrap, the next
+//   (the code mapping's bounds, from the kernel). The first is usually the SDK's wrap, the next
 //   the caller; a stale word can slip in, so each site prints all its addresses (tools/run/sym.py --ps5 names them).
 // - The cost lands on every malloc and free of every thread (a stack scan and a locked table update): a diagnostic,
 //   off by default and never in the PS5 profile. Its tables are plat_mem_alloc memory, outside the C heap it measures.
@@ -31,6 +31,7 @@
 
 #ifdef MKW_PS5_NATIVE
 #include <ps5platform/heap.h>
+#include <ps5platform/kernel.h>
 
 typedef void (*heap_alloc_fn)(void *pointer, size_t bytes);
 typedef void (*heap_free_fn)(void *pointer);
@@ -77,19 +78,19 @@ static uint64_t mix(uint64_t x) {
     return x;
 }
 
-// The executable's code: the PF_X PT_LOAD of the ELF header it is loaded with (ps5_sys.c plat_exe_base).
+// The executable's code: the mapping that holds this function and the one at the load address, as the kernel reports
+// them (sceKernelQueryMemoryProtection: bounds only, nothing read). Not its ELF header: the PS5 maps the code
+// execute-only and reading the header killed the title with SYSTEM_XO_VIOLATION at eboot.bin+0x38 (koHP, 27/11/2026);
+// the title's own link script defines no etext or __text_end either.
 static void find_text(void) {
-    const uint8_t *base = (const uint8_t *)plat_exe_base();
-    uint64_t phoff;
-    uint16_t phentsize, phnum;
-    memcpy(&phoff, base + 0x20, 8), memcpy(&phentsize, base + 0x36, 2), memcpy(&phnum, base + 0x38, 2);
-    for (uint16_t i = 0; i < phnum; i++) {
-        const uint8_t *ph = base + phoff + (uint64_t)i * phentsize;
-        uint32_t type, flags;
-        uint64_t vaddr, memsz;
-        memcpy(&type, ph, 4), memcpy(&flags, ph + 4, 4), memcpy(&vaddr, ph + 0x10, 8), memcpy(&memsz, ph + 0x28, 8);
-        if (type == 1 && (flags & 1)) text_lo = (uintptr_t)base + vaddr, text_hi = text_lo + memsz;   // PT_LOAD, PF_X
-    }
+    void *start, *end;
+    uint32_t prot;
+    const void *probe[2] = {(const void *)(uintptr_t)find_text, (const void *)plat_exe_base()};
+    for (int i = 0; i < 2; i++)
+        if (!sceKernelQueryMemoryProtection((void *)(uintptr_t)probe[i], &start, &end, &prot)) {
+            if (!text_lo || (uintptr_t)start < text_lo) text_lo = (uintptr_t)start;
+            if ((uintptr_t)end > text_hi) text_hi = (uintptr_t)end;
+        }
 }
 
 // from: on_alloc's own return address (into the SDK's wrap), so the scan skips the profile's frames; a host harness
@@ -268,6 +269,10 @@ void heap_prof_init(void) {
         rt_log("heap: MKW_HEAP_PROFILE: no memory for its tables or no code segment found: no profile");
         return;
     }
+    // Written once now: plat_mem_alloc memory is backed at its first write, through the fault path, which must not
+    // first run inside a malloc callback with a shard lock held.
+    memset(sites, 0, sizeof *sites * SITES);
+    for (int s = 0; s < SHARDS; s++) memset(shards[s].slot, 0, sizeof(Slot) * SHARD_SLOTS);
     sites[0].key = 1;   // the "no room" site
     trace_missing = 0;
     ps5_heap_trace(on_alloc, on_free);
