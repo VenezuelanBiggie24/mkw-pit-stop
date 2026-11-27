@@ -95,10 +95,27 @@ static void find_text(void) {
 
 // from: on_alloc's own return address (into the SDK's wrap), so the scan skips the profile's frames; a host harness
 // (27/11/2026) scanning from site_of's frame filled every slot with the profile's own addresses and merged all sites.
+// The top of this thread's stack, once per thread: the end of the mapping that holds it (sceKernelQueryMemoryProtection,
+// bounds only). The scan stops there: 48 words up from a shallow frame read past a thread's stack and killed the title
+// (access violation in on_alloc, koHP2, 27/11/2026).
+static _Thread_local uintptr_t stack_top;
+static uintptr_t this_stack_top(const void *sp) {
+    if (!stack_top) {
+        void *start, *end;
+        uint32_t prot;
+        stack_top = sceKernelQueryMemoryProtection((void *)(uintptr_t)sp, &start, &end, &prot) ? (uintptr_t)sp + 8
+                                                                                                  : (uintptr_t)end;
+    }
+    return stack_top;
+}
+
 static uint16_t site_of(const uintptr_t *from) {
     uintptr_t ra[SITE_DEPTH] = {0};
     int k = 0;
-    for (int i = 0; i < SCAN_WORDS && k < SITE_DEPTH; i++)
+    uintptr_t top = this_stack_top(from);
+    int words = top > (uintptr_t)from ? (int)((top - (uintptr_t)from) / sizeof *from) : 0;
+    if (words > SCAN_WORDS) words = SCAN_WORDS;
+    for (int i = 0; i < words && k < SITE_DEPTH; i++)
         if (from[i] >= text_lo && from[i] < text_hi && (!k || ra[k - 1] != from[i])) ra[k++] = from[i];
     uint64_t key = 1;
     for (int i = 0; i < SITE_DEPTH; i++) key = mix(key ^ ra[i]);
