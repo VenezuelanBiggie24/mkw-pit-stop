@@ -161,10 +161,68 @@ static void census(int pass) {
                    rows[i].exp ? "ExpHeap" : "other", rows[i].size / M, (unsigned long long)rows[i].addr);
 }
 
+// agl::TextureDataMgr's compactible heap over its texture pool (1.8.0; nvn_api_core.c finds the pool). The game's
+// guest growth in a Knockout Tour is this pool (2,372 MiB, 1.0 -> 1.9 GiB backed per tour, koCEN 27/11/2026). Layout,
+// from its setup main+0xb2d8c0 -> main+0xa92170 -> main+0xa922a0 and its reset (vtable main+0x363d120 slot 6,
+// main+0xa92470): the control object lies right after the storage (vtable main+0x363d120, +0x1c18 managed base,
+// +0x1c20 size, +0x1bc8 head and +0x1bd0 tail sentinel descriptors). A block is a 0x48-byte descriptor: +0 u32 magic
+// (0xad000d1e on the sentinels, 0xd15ab1ed on the free block a reset makes), +4 / +8 s32 next / previous block in
+// address order as a distance in 8-byte units, +0x18 address, +0x20 size. The walk counts blocks by magic (logged, so
+// which one marks a free block is checked on the console, not assumed) and how much of each is backed.
+extern uint64_t nvn_agl_tex_pool_base, nvn_agl_tex_pool_size;
+#define TEXHEAP_VT_180 0x363d120
+#define TEXHEAP_FREE_MAGIC 0xd15ab1edu
+#define TEXHEAP_SENTINEL 0xad000d1eu
+#define TEXHEAP_MAX_BLOCKS 1000000
+
+static void texheap_census(void) {
+    uint64_t base = __atomic_load_n(&nvn_agl_tex_pool_base, __ATOMIC_ACQUIRE), size = nvn_agl_tex_pool_size;
+    if (!base) return;
+    uint64_t h = (base + size + 7) & ~7ull, vt = 0, mbase = 0, msize = 0, d = 0, tail = 0, t0 = plat_now_ns();
+    if (!rd(h, &vt) || vt != rt_main_addr(TEXHEAP_VT_180) || !rd(h + 0x1c18, &mbase) || !rd(h + 0x1c20, &msize) ||
+        !rd(h + 0x1bc8, &d) || !rd(h + 0x1bd0, &tail)) {
+        rt_log("census: texture heap: no control object at %#llx (vtable %#llx): not walked", (unsigned long long)h,
+               (unsigned long long)vt);
+        return;
+    }
+    struct { uint32_t magic; uint64_t n, bytes, backed; } m[8] = {0};
+    int nm = 0, broken = 0;
+    uint64_t blocks = 0, largest_free = 0, lo = mbase, hi = mbase + msize, last_end = mbase;
+    for (; d != tail; blocks++) {
+        uint64_t w0, addr, bsize;
+        if (blocks > TEXHEAP_MAX_BLOCKS || !rd(d, &w0) || !rd(d + 0x18, &addr) || !rd(d + 0x20, &bsize)) { broken = 1; break; }
+        uint32_t magic = (uint32_t)w0;
+        int32_t next = (int32_t)(w0 >> 32);
+        if (magic != TEXHEAP_SENTINEL) {
+            if (addr < lo || addr > hi || bsize > hi - addr || addr < last_end) { broken = 1; break; }
+            last_end = addr + bsize;
+            int k = 0;
+            while (k < nm && m[k].magic != magic) k++;
+            if (k == nm && nm < 8) m[nm++].magic = magic;
+            if (k < nm) {
+                m[k].n++, m[k].bytes += bsize, m[k].backed += plat_mem_backed_bytes(addr, bsize);
+                if (magic == TEXHEAP_FREE_MAGIC && bsize > largest_free) largest_free = bsize;
+            }
+        }
+        if (!next) { broken = 1; break; }
+        d += (uint64_t)((int64_t)next * 8);
+    }
+    const double M = 1048576.0;
+    rt_log("census: texture heap %#llx (agl::TextureDataMgr): %.1f MiB managed from %#llx, %llu blocks%s, %.1f ms; "
+           "largest block marked %#x: %.1f MiB", (unsigned long long)h, msize / M, (unsigned long long)mbase,
+           (unsigned long long)blocks, broken ? " (changed during the walk: partial)" : "", (plat_now_ns() - t0) / 1e6,
+           TEXHEAP_FREE_MAGIC, largest_free / M);
+    for (int k = 0; k < nm; k++)
+        rt_log("census:   blocks marked %#010x: %llu, %.1f MiB, of it backed %.1f MiB%s", m[k].magic,
+               (unsigned long long)m[k].n, m[k].bytes / M, m[k].backed / M,
+               m[k].magic == TEXHEAP_FREE_MAGIC ? " (the mark a reset gives the free block)" : "");
+}
+
 static void census_thread(void *arg) {
     (void)arg;
     for (int pass = 1;; pass++) {
         census(pass);
+        texheap_census();
         plat_sleep_ms(CENSUS_S * 1000);
     }
 }
