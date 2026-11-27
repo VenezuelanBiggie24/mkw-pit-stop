@@ -221,6 +221,12 @@ static uint8_t *prepared_spv(const uint8_t key[32], uint64_t *size, int log) {
     return prepared_read(key, 0, size);
 }
 
+static uint64_t fnv_bytes(const uint8_t *b, uint64_t n) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint64_t k = 0; b && k < n; k++) h = (h ^ b[k]) * 0x100000001b3ull;
+    return h;
+}
+
 static GfxShader *prepared_load(const uint8_t key[32], const uint8_t *control) {
     uint64_t spv_size = 0, res_size = 0;
     uint8_t *res = prepared_read(key, 1, &res_size);
@@ -240,6 +246,10 @@ static GfxShader *prepared_load(const uint8_t key[32], const uint8_t *control) {
     memcpy(s->iid, key, 32);   // pipeline key records name a prepared shader by its program key (gfx_shader_load_input)
     s->spirv = (uint32_t *)spv;
     s->words = spv_size / 4;
+    // Hashed now, while the SPIR-V is here (the boot prewarm loads on all cores): vk_temporal.c asks for it on draws,
+    // and after gfx_shader_spirv_release freed the words (MKW_SPIRV_RELEASE, vk_pipe_keys.c) a first ask would read
+    // the program back from the pack on the replay thread and keep it for the run.
+    s->spirv_fnv = fnv_bytes(spv, spv_size);
     s->reflection = (char *)res;
     s->reflection_size = res_size;
     if (control) {
@@ -409,10 +419,9 @@ const uint32_t *gfx_shader_spirv(const GfxShader *cs, uint64_t *words) {
 uint64_t gfx_shader_spirv_fnv(const GfxShader *s) {
     uint64_t h = __atomic_load_n(&s->spirv_fnv, __ATOMIC_RELAXED);
     if (h) return h;
-    h = 0xcbf29ce484222325ull;
     uint64_t words = 0;
     const uint8_t *b = (const uint8_t *)gfx_shader_spirv(s, &words);   // read back if the prewarm's release freed it
-    for (uint64_t k = 0; b && k < words * 4; k++) h = (h ^ b[k]) * 0x100000001b3ull;
+    h = fnv_bytes(b, words * 4);
     __atomic_store_n(&((GfxShader *)s)->spirv_fnv, h, __ATOMIC_RELAXED);
     return h;
 }

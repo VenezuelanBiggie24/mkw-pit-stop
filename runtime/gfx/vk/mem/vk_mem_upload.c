@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "cfg.h"
+#include "heap_census.h"
 #include "gfx.h"
 #include "hangwatch.h"
 #include "host.h"
@@ -354,6 +355,44 @@ uint64_t vk_upload_stg_bytes(void) {
 // bytes kept too and compared when it unpacks (the copies count toward the cap).
 #define PACK_MARGIN (256ull << 20)
 #define PACK_BUDGET_US 100000u
+
+// MKW_PACK_TEXFREE (default 1 in the PS5 profile, with MKW_PACK): the free blocks of agl::TextureDataMgr's texture heap
+// are packed first. A Knockout Tour's guest growth is that heap (2,372 MiB), and its free blocks held 300-650 MiB of
+// backed memory while racing and 1,349 MiB at a rally's change (heap census, koTEX2 27/11/2026): texture data the heap
+// has evicted or moved, still backed. The 2 MiB regions that lie wholly inside a free block are frozen (the cold
+// feed's vk_mem_cold_freeze: a write thaws one) and packed without the cold wait, TEXFREE_COLD_MS only; then the usual
+// pass. Lossless as all packing: a block the game allocates meanwhile unpacks on its first access with its bytes.
+// Only on the governor's own thread (pack_step, force 0).
+#define TEXFREE_MAX 64
+#define TEXFREE_COLD_MS 2000u
+#define TEXFREE_REGION (1ull << REG_SHIFT)
+static uint64_t texfree_regions, texfree_packed;   // regions that gave memory back, and how much, since the last line
+static uint64_t texfree_pack(const PlatPackParams *base) {
+    static int on = -1;
+    if (on < 0) on = cfg_bool("MKW_PACK_TEXFREE");
+    if (!on) return 0;
+    uint64_t r[TEXFREE_MAX][2], freed = 0, t0 = plat_now_ns(), budget_ns = (uint64_t)base->budget_us * 1000 / 2;
+    int n = texheap_free_ranges(r, TEXFREE_MAX);
+    PlatPackParams p = *base;
+    p.cold_ms = TEXFREE_COLD_MS;
+    for (int i = 0; i < n && freed < base->target_bytes && plat_now_ns() - t0 < budget_ns; i++) {
+        uint64_t lo = (r[i][0] + TEXFREE_REGION - 1) & ~(TEXFREE_REGION - 1), hi = r[i][1] & ~(TEXFREE_REGION - 1);
+        for (uint64_t a = lo; a < hi && freed < base->target_bytes && plat_now_ns() - t0 < budget_ns; a += TEXFREE_REGION) {
+            if (!vk_mem_cold_freeze(a)) continue;   // (1 also for a region frozen by an earlier pass)
+            p.target_bytes = base->target_bytes - freed;
+            uint64_t f = plat_mem_pack_range(a, a + TEXFREE_REGION, &p);
+            freed += f, texfree_packed += f, texfree_regions += f != 0;
+        }
+    }
+    static uint64_t last_log;
+    if (texfree_packed && plat_now_ns() - last_log > 30000000000ull) {
+        rt_log("vk: memory governor: texture heap free blocks (MKW_PACK_TEXFREE): %d blocks now, %.1f MiB packed from %llu "
+               "regions since the last line", n, texfree_packed / 1048576.0, (unsigned long long)texfree_regions);
+        texfree_regions = texfree_packed = 0, last_log = plat_now_ns();
+    }
+    return freed;
+}
+
 static uint64_t pack_step(uint64_t avail) {
     static int on = -1, verify, backoff;
     static uint32_t cold_ms;
@@ -375,7 +414,12 @@ static uint64_t pack_step(uint64_t avail) {
     if (!on || avail >= DMEM_SOFT_BYTES + PACK_MARGIN) return 0;
     PlatPackParams p = {.target_bytes = DMEM_SOFT_BYTES + PACK_MARGIN - avail, .store_cap = cap, .cold_ms = cold_ms,
                         .budget_us = PACK_BUDGET_US, .verify = verify, .backoff = backoff};
-    return plat_mem_pack(&p);
+    uint64_t t0 = plat_now_ns(), freed = texfree_pack(&p);
+    if (freed >= p.target_bytes) return freed;
+    p.target_bytes -= freed;
+    uint64_t used_us = (plat_now_ns() - t0) / 1000;
+    p.budget_us = used_us < PACK_BUDGET_US ? PACK_BUDGET_US - (uint32_t)used_us : 1;
+    return freed + plat_mem_pack(&p);
 }
 
 // MKW_BENCH's memory report (core/diag/bench_mem.c): governor passes by level, what they freed and out-of-memory

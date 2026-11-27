@@ -268,7 +268,8 @@ def main() -> int:
     for res in results:
         print(f"{res['name']:<10} {res.get('ended', res.get('error', '?'))[:26]:<26} "
               + " ".join(f"{res.get(k, '-'):>9}" for k in keys))
-    mem = ["free_min", "free_trend", "resident_max", "resident_trend", "vram_max", "pt_cpu_free_min", "gov_hard",
+    mem = ["free_min", "free_trend", "resident_max", "resident_trend", "c_heap_max", "c_heap_trend", "vram_max",
+           "pt_cpu_free_min", "gov_hard",
            "relieves", "stg_deferred"]
     if any("mem_samples" in res for res in results):
         print("\nmemory, MiB (trend: MiB/min; pt: page-table units)")

@@ -105,6 +105,8 @@ static void top_up(const VkCtx *c, uint32_t type) {
     if (n <= 8) plat_mem_census_log("vma-headroom-block");
 }
 
+#define HEAP_TRIM_MS 10000u   // the SDK header's "every 10 s, say"
+
 static void headroom_main(void *arg) {
     plat_thread_background();   // off the frame's fast cores (MKW_FAST_CORES)
     (void)arg;
@@ -127,6 +129,20 @@ static void headroom_main(void *arg) {
         plat_mutex_unlock(&H.lock);
         if (stop) return;
         uint64_t now = plat_now_ns();
+#ifdef MKW_PS5_NATIVE
+        // The title heap is direct memory (ps5_sys.c plat_heap_trim): what a burst of allocations left free goes back
+        // every HEAP_TRIM_MS, here off the frame's threads (extoverflow/mkw-recomp ac72ec5, MIT: its memory thread,
+        // every 10 s). Their race: heap mapped 750 MiB at 14.5 min and 958 at 36 without it, 650 and 692 with it.
+        static uint64_t trim_last;
+        if (!trim_last) {
+            trim_last = now;
+            if (!plat_heap_trim_available())
+                rt_log("vk: the SDK's title heap has no ps5_heap_trim (older platform layer): not trimmed");
+        } else if (now - trim_last >= HEAP_TRIM_MS * 1000000ull) {
+            trim_last = now;
+            plat_heap_trim();
+        }
+#endif
         if (RT_KNOB_ON(gov_limit) && gov_last && now - gov_last < GOV_MIN_MS * 1000000ull) continue;
         gov_last = now;
         vk_mem_governor(0);

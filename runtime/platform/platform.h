@@ -359,6 +359,7 @@ typedef struct {
     int backoff;             // a unit unpacked again waits twice as long, each time (MKW_PACK_BACKOFF)
 } PlatPackParams;
 uint64_t plat_mem_pack(const PlatPackParams *p);   // bytes of direct memory given back
+uint64_t plat_mem_pack_range(uint64_t lo, uint64_t hi, const PlatPackParams *p);   // the same over [lo, hi) only
 void plat_mem_pack_collect(void);                  // frees the blobs of units unpacked since (the governor's thread)
 // One line for the census: what is packed now, and the packs, unpacks and skips since the last call (which resets
 // them); "" when nothing was ever packed.
@@ -646,6 +647,7 @@ void plat_mem_info(float *used_mb, float *total_mb, float *proc_mb);
 void plat_process_memory(uint64_t *resident, uint64_t *private_bytes);
 // Hands the C heap's free pages back to the system after a large release of small blocks.
 void plat_heap_trim(void);
+int plat_heap_trim_available(void);   // PS5: the SDK has ps5_heap_trim (ps5_sys.c); 1 elsewhere
 // The C heap in bytes: in use, free inside it, and what it has mapped (all arenas); 0 when unknown (Windows).
 void plat_heap_stats(uint64_t *in_use, uint64_t *free_bytes, uint64_t *mapped);
 

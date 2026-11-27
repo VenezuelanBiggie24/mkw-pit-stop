@@ -305,6 +305,26 @@ bench: segment 1 (to account.sav): 132.4 s, 4000 frames, average 33.09 ms (30.2 
 (example numbers). The run exits before the game commits its last save, so the result and the assists stay out of the
 save unless the game committed it earlier. The log's first `bench:` line says what the assists were.
 
+### Memory in long sessions
+
+A Knockout Tour (`BENCH = ko`) streams the open world without menus between legs and ran out of direct memory after
+about 15 minutes (`vk: transient buffer of 4194304 bytes failed (-2)`, the largest free piece 68 MiB; 27/11/2026, base
+PS5, 1.8.0). What the measurements showed:
+
+- The guest's growth is `agl::TextureDataMgr`'s 2,372 MiB texture heap (found by `MKW_POOL_LOG`'s creator chain and
+  `MKW_HEAP_CENSUS`): a compactible heap whose free blocks kept 300-650 MiB of backed memory while racing and up to
+  1,349 MiB at a rally's change, texture data it evicted or moved. Freed blocks of the game's other (ExpHeap) heaps
+  held only 9-39 MiB.
+- `PACK_TEXFREE = 1` (PS5 profile, with `PACK`) packs those free blocks first: the tour lasted ~2,300 s and three full
+  rallies (from ~15 min and one), free memory -16 MiB/min (from -52..-70), backed guest memory +19 MiB/min (from
+  +67..+94), page-table units -141/min (from -330..-370). Fragmentation of direct memory and page-table units are
+  what still end it.
+- `SPIRV_RELEASE = 1` (PS5 default) frees the SPIR-V of the recorded pipelines' shaders after the prewarm: 473 MiB of
+  the C heap, which on the PS5 is direct memory (the SDK's title heap), not flexible memory.
+- Diagnostics: `HEAP_CENSUS = 1` (the game's heap tree and the texture heap's blocks every 120 s, read only),
+  `HEAP_PROFILE = 1` (the C heap by call site; needs the SDK's `ps5_heap_trace`, PS5_PayloadSDK 00c7889d), and the
+  bench's `c_heap` column.
+
 ## Threads, priorities and profiling
 
 A title's threads run on CPUs 0-12 (mask 0x1fff: six full cores and half of the seventh, whose sibling, CPU 13, is

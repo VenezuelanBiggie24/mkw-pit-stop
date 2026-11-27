@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bench.h"
 #include "cfg.h"
 #include "gfx.h"
 #include "host.h"
@@ -344,6 +345,52 @@ static void pool_label(const pool_t *o, int live) {
            (long long)plat_mem_resident(o->game_mem, (size_t)o->size) / 1024, (long long)zeros);
 }
 
+// MKW_POOL_LOG (on in a MKW_BENCH run, vk_memory.c): who makes each pool of POOL_CHAIN_MIN or more, as the guest's
+// frame chain (x30, then the x29 records, as main.c guest_frames reads them for a fatal stop). The Knockout Tour's
+// guest growth is one 2,372 MiB CPU-only pool made at boot inside the game's ModuleSystem heap (heap census, koCEN
+// 27/11/2026), run by an allocator of the game's own: the chain names the code that owns it.
+#define POOL_CHAIN_MIN (64ull << 20)
+
+// agl::TextureDataMgr's texture pool (1.8.0): the pool its heap setup main+0xb2d8c0 makes through the pool wrapper
+// main+0xa91980, whose call returns to main+0xb2d9c8 (koOWN, 27/11/2026: 2,372 MiB, flags 0x24). heap_census.c walks
+// the compactible heap that manages it, whose control object lies right after the storage.
+uint64_t nvn_agl_tex_pool_base, nvn_agl_tex_pool_size;
+static void agl_tex_pool_note(const Cpu *c, const pool_t *o) {
+    if (o->size < (1ull << 30) || rt_version()->number != 180) return;
+    uint64_t want = rt_main_addr(0xb2d9c8), fp = c->x[29];
+    for (int k = 0; k < 3 && fp && !(fp & 7) && plat_mem_readable(fp, 16); k++) {
+        uint64_t next = *(const uint64_t *)(uintptr_t)fp, lr = *(const uint64_t *)(uintptr_t)(fp + 8);
+        if (lr == want) {
+            __atomic_store_n(&nvn_agl_tex_pool_size, o->size, __ATOMIC_RELAXED);
+            __atomic_store_n(&nvn_agl_tex_pool_base, (uint64_t)(uintptr_t)o->game_mem, __ATOMIC_RELEASE);
+            rt_log("nvn: agl::TextureDataMgr's texture pool %p, %.1f MiB", (void *)o->game_mem, o->size / 1048576.0);
+            return;
+        }
+        if (next <= fp) break;
+        fp = next;
+    }
+}
+
+static void pool_chain_log(const Cpu *c, const pool_t *o) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = cfg_get("MKW_POOL_LOG");
+        on = e && *e ? atoi(e) != 0 : bench_on();
+    }
+    if (!on || o->size < POOL_CHAIN_MIN) return;
+    char line[1024], d[128];
+    int n = snprintf(line, sizeof line, "nvn: pool %p %.1f MiB flags %#x made from %s", (void *)o->game_mem,
+                     o->size / 1048576.0, o->flags, ldr_describe(c->x[30], d, sizeof d));
+    uint64_t fp = c->x[29];
+    for (int k = 0; k < 12 && fp && !(fp & 7) && plat_mem_readable(fp, 16) && n < (int)sizeof line; k++) {
+        uint64_t next = *(const uint64_t *)(uintptr_t)fp, lr = *(const uint64_t *)(uintptr_t)(fp + 8);
+        n += snprintf(line + n, sizeof line - n, " < %s", ldr_describe(lr, d, sizeof d));
+        if (next <= fp || next - fp > (64u << 20)) break;
+        fp = next;
+    }
+    rt_log("%s", line);
+}
+
 // NVNboolean nvnMemoryPoolInitialize(NVNmemoryPool *p, const NVNmemoryPoolBuilder *b)
 // Pool setup imports, mirrors and maps memory in the back end (the driver, VirtualAlloc): up to 20 ms on the game's
 // loader threads, which held a virtual core through it while job workers waited (MKW_CORE_DIAG). The thread gives
@@ -374,6 +421,7 @@ NVN_API(nvnMemoryPoolInitialize) {
     }
     if (ok && pool_gpu_visible(o)) index_add(o);
     if (ok) pool_label(o, 1);
+    if (ok) pool_chain_log(c, o), agl_tex_pool_note(c, o);
     if (!ok) {
         if (nvn_gpu_only((uintptr_t)o->mem)) gva_free((uintptr_t)o->mem);
         o->magic = 0;

@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ps5platform/heap.h>
 #include <ps5platform/kernel.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -654,11 +655,33 @@ int plat_mem_drop(uint64_t addr, uint64_t n) { (void)addr, (void)n; return 0; }
 void plat_mem_name(const void *p, size_t n, const char *name) { (void)p, (void)n, (void)name; }
 int64_t plat_mem_resident(const void *p, size_t n) { (void)p, (void)n; return -1; }
 
-// Windows-only figures: CET shadow stacks, the OS's per-process VRAM count. The C heap's figures are not reported.
+// Windows-only figures: CET shadow stacks, the OS's per-process VRAM count.
 int plat_shadow_stack(void) { return -1; }
 uint64_t plat_gpu_process_vram_mib(void) { return 0; }
+
+// The C heap is the SDK's title heap (ps5platform/heap.h: malloc and its family wrapped to dlmalloc mspaces in DIRECT
+// memory, the pool the guest and the GPU share), so what it maps counts against the same 12 GiB as everything else.
+// The SDK reports the direct memory it has mapped, not the bytes in use: in_use and free stay 0.
 void plat_heap_stats(uint64_t *in_use, uint64_t *free_bytes, uint64_t *mapped) {
+    struct ps5_heap_stats st = {0};
+    ps5_heap_stats(&st);
     if (in_use) *in_use = 0;
     if (free_bytes) *free_bytes = 0;
-    if (mapped) *mapped = 0;
+    if (mapped) *mapped = st.mapped_bytes;
+}
+
+// The title heap gives a free top or an empty segment back only past a threshold and every few thousand frees; the
+// SDK's newer platform layer has ps5_heap_trim and its header asks a title to call it "every 10 s, say" so that what a
+// burst took goes back to the pool it shares with its GPU and its guest (mihawk-99/PS5_PayloadSDK 55a2de04, heap.h).
+// Ported from extoverflow/mkw-recomp ac72ec5 (MIT), where the title's memory thread calls it; here the memory
+// governor's thread does (vk_headroom.c). The SDK this tree builds with (611893fc) has no ps5_heap_trim, and the PS5
+// link refuses a weak undefined reference ("no public SDK stub exports required symbol"), so this is a weak definition
+// of our own that does nothing and notes it: a newer SDK's real ps5_heap_trim, in the same object as the heap the
+// title links anyway, overrides it. plat_heap_trim_available says which one runs (logged once).
+static volatile int heap_trim_missing = -1;
+__attribute__((weak, noinline)) void ps5_heap_trim(void) { heap_trim_missing = 1; }
+void plat_heap_trim(void) { ps5_heap_trim(); }
+int plat_heap_trim_available(void) {
+    if (heap_trim_missing < 0) heap_trim_missing = 0, ps5_heap_trim();   // a real trim leaves it 0
+    return !heap_trim_missing;
 }
