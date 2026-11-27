@@ -427,23 +427,56 @@ static void copy_mark_sweep(void) {
 }
 
 // Pin sweep (MacNativeGames hle_nvn.c @ b75be8cf, lines 1066-1215, MIT, Copyright (c) 2026 jhaizhou): a mark-and-sweep
-// every PIN_SWEEP_SUBMITS, run where the replay just finished a submission (the replay state is that thread's). A pin
-// is alive when a live recording copy, a copy or clone a queued submission still reads (the zombies), or the replay's
-// render targets refer to it, or it was pinned in the last two windows (a recording in progress); it goes after two
-// sweeps in a row without a mark. Divergences: one whole walk per window instead of slices; pointers are marked through
-// pin_ptrs only (a record's texture pointer that is not a pin is ignored); MKW_PIN_SWEEP=0 turns it off.
+// every PIN_SWEEP_SUBMITS. A pin is alive when a live recording copy, a copy or clone a queued submission still reads
+// (the zombies), or the replay's render targets refer to it, or it was pinned in the last two windows (a recording in
+// progress); it goes after two sweeps in a row without a mark. Divergences: one whole walk per window instead of
+// slices; pointers are marked through pin_ptrs only (a record's texture pointer that is not a pin is ignored);
+// MKW_PIN_SWEEP=0 turns it off.
+//
+// Off the replay thread, and pin_lock held only briefly. As ported (extoverflow 4f3dda83) the sweep ran where the
+// replay finished a submission, holding pin_lock exclusively through the walk of every live copy: 4.9 ms median, 14.75
+// ms worst, on the replay thread (koA, 27/11/2026), while the game's recording threads, which take pin_lock shared on
+// every texture they reference (cmd_tex_pin), waited. Now the replay thread only copies its render targets
+// (vk_exec_pin_refs, a few dozen pointers) and wakes the "pin sweep" thread, which collects the pointers the copies
+// and zombies refer to into a set of its own under copy_lock shared, as before, then takes pin_lock exclusively for
+// one pass over the pins against that set. A recording made after the collection refreshes its pins' last_pin
+// (cmd_tex_pin), so the two-window rule keeps them: nothing it refers to can be swept.
 #define PIN_SWEEP_SUBMITS 600
+#define PIN_REFS_MAX 1024
 static uint64_t pin_sweep_id = 1, pins_freed, pin_sweeps;
 void vk_exec_pin_refs(void (*mark)(const void *)) __attribute__((weak));   // vk_exec.c: the targets the replay keeps
 
-static void pin_mark(const void *p) {   // pin_lock held
-    if (!p) return;
-    uint64_t key = (uintptr_t)p;
-    pin_t *r = nvn_hm_get(&pin_ptrs, &key);
-    if (r) r->alive = pin_sweep_id;
+typedef struct { uint64_t *v; uint32_t cap, n; } ptr_set;   // open addressing; 0 is empty
+static void set_add(ptr_set *s, uint64_t k) {
+    if (!k) return;
+    if ((s->n + 1) * 2 > s->cap) {   // grow, keeping it under half full
+        uint32_t cap = s->cap ? s->cap * 2 : 4096;
+        uint64_t *v = calloc(cap, sizeof *v);
+        if (!v) rt_fatal("nvn: out of memory (pin sweep)");
+        for (uint32_t i = 0; i < s->cap; i++)
+            if (s->v[i])
+                for (uint32_t h = (uint32_t)((s->v[i] >> 4) * 0x9E3779B97F4A7C15ull >> 32) & (cap - 1);; h = (h + 1) & (cap - 1))
+                    if (!v[h]) { v[h] = s->v[i]; break; }
+        free(s->v);
+        s->v = v, s->cap = cap;
+    }
+    for (uint32_t h = (uint32_t)((k >> 4) * 0x9E3779B97F4A7C15ull >> 32) & (s->cap - 1);; h = (h + 1) & (s->cap - 1)) {
+        if (s->v[h] == k) return;
+        if (!s->v[h]) { s->v[h] = k, s->n++; return; }
+    }
+}
+static int set_has(const ptr_set *s, uint64_t k) {
+    if (!s->cap || !k) return 0;
+    for (uint32_t h = (uint32_t)((k >> 4) * 0x9E3779B97F4A7C15ull >> 32) & (s->cap - 1);; h = (h + 1) & (s->cap - 1)) {
+        if (s->v[h] == k) return 1;
+        if (!s->v[h]) return 0;
+    }
 }
 
-static void pin_mark_ops(const uint8_t *p, uint64_t bytes) {   // one recording, OP_BEGIN ... OP_END
+static ptr_set *collect_to;   // the sweeper thread's, while it collects (one sweep at a time)
+static void pin_collect(const void *p) { set_add(collect_to, (uintptr_t)p); }
+
+static void pin_collect_ops(ptr_set *s, const uint8_t *p, uint64_t bytes) {   // one recording, OP_BEGIN ... OP_END
     for (uint64_t at = 0; at + sizeof(op_hdr) <= bytes;) {
         op_hdr h;
         memcpy(&h, p + at, sizeof h);
@@ -452,15 +485,15 @@ static void pin_mark_ops(const uint8_t *p, uint64_t bytes) {   // one recording,
         switch (h.op) {
         case OP_SET_RT: {
             const p_set_rt *r = (const void *)a;
-            for (int i = 0; i < 8; i++) pin_mark(r->color[i]);
-            pin_mark(r->depth);
+            for (int i = 0; i < 8; i++) set_add(s, (uintptr_t)r->color[i]);
+            set_add(s, (uintptr_t)r->depth);
             break;
         }
-        case OP_COPY_B2T: case OP_COPY_T2B: pin_mark(((const p_copy_b2t *)(const void *)a)->tex); break;
-        case OP_CLEAR_TEX: pin_mark(((const p_clear_tex *)(const void *)a)->tex); break;
+        case OP_COPY_B2T: case OP_COPY_T2B: set_add(s, (uintptr_t)((const p_copy_b2t *)(const void *)a)->tex); break;
+        case OP_CLEAR_TEX: set_add(s, (uintptr_t)((const p_clear_tex *)(const void *)a)->tex); break;
         case OP_COPY_T2T: {
             const p_copy_t2t *c = (const void *)a;
-            pin_mark(c->src), pin_mark(c->dst);
+            set_add(s, (uintptr_t)c->src), set_add(s, (uintptr_t)c->dst);
             break;
         }
         default: break;
@@ -480,27 +513,43 @@ static int pin_sweep_on(void) {
     return v;
 }
 
-void nvn_pin_sweep_point(void) {
-    static uint64_t next = PIN_SWEEP_SUBMITS;
-    uint64_t now = __atomic_load_n(&nsubmits, __ATOMIC_RELAXED);
-    if (now < next || !pin_sweep_on()) return;
-    next = now + PIN_SWEEP_SUBMITS;
+// Handed from the replay thread to the sweeper: the replay's render targets at the sweep point.
+static PlatMutex sweep_lock = PLAT_MUTEX_INIT;
+static PlatEvent sweep_ev;
+static uint64_t sweep_refs[PIN_REFS_MAX];
+static uint32_t nsweep_refs, sweep_refs_lost;
+static int sweep_pending;
+static void ref_take(const void *p) {   // sweep_lock held
+    if (nsweep_refs < PIN_REFS_MAX) sweep_refs[nsweep_refs++] = (uintptr_t)p;
+    else sweep_refs_lost = 1;
+}
+
+static void pin_sweep(void) {
     uint64_t t0 = plat_now_ns(), freed = 0, recent = 0;
-    plat_mutex_lock(&pin_lock);
-    pin_sweep_id++;
+    ptr_set refs = {0};
+    plat_mutex_lock(&sweep_lock);
+    collect_to = &refs;
+    for (uint32_t i = 0; i < nsweep_refs; i++) pin_collect((const void *)(uintptr_t)sweep_refs[i]);
+    int lost = sweep_refs_lost;   // the replay held more targets than were copied: keep every pin this time
+    nsweep_refs = 0, sweep_refs_lost = 0, sweep_pending = 0;
+    plat_mutex_unlock(&sweep_lock);
     plat_mutex_lock_shared(&copy_lock);
     for (uint32_t i = 0; i < copy_live.cap; i++) {
         copy_prefix *pf = copy_live.vals[i];
-        if (pf) pin_mark_ops((const uint8_t *)(pf + 1), pf->bytes);
+        if (pf) pin_collect_ops(&refs, (const uint8_t *)(pf + 1), pf->bytes);
     }
-    for (uint32_t i = 0; i < nzombies; i++) pin_mark_ops((const uint8_t *)(zombies[i] + 1), zombies[i]->bytes);
+    for (uint32_t i = 0; i < nzombies; i++) pin_collect_ops(&refs, (const uint8_t *)(zombies[i] + 1), zombies[i]->bytes);
     plat_mutex_unlock_shared(&copy_lock);
-    if (vk_exec_pin_refs) vk_exec_pin_refs(pin_mark);
+    uint64_t t1 = plat_now_ns();
     uint64_t *gone = NULL;
     uint32_t ngone = 0, cgone = 0;
+    plat_mutex_lock(&pin_lock);
+    uint64_t now = __atomic_load_n(&nsubmits, __ATOMIC_RELAXED);   // after the collection: pins used since are recent
+    pin_sweep_id++;
     for (uint32_t i = 0; i < pin_ptrs.cap; i++) {
         pin_t *r = pin_ptrs.vals[i];
         if (!r) continue;
+        if (lost || set_has(&refs, (uintptr_t)r)) r->alive = pin_sweep_id;
         if (__atomic_load_n(&r->last_pin, __ATOMIC_RELAXED) + 2 * PIN_SWEEP_SUBMITS > now) { r->alive = pin_sweep_id; recent++; }
         if (r->alive + 1 >= pin_sweep_id) continue;   // marked in this sweep or the last one
         if (ngone == cgone) {
@@ -518,14 +567,53 @@ void nvn_pin_sweep_point(void) {
         free(r);
         freed++;
     }
-    free(gone);
-    pins_freed += freed;
     uint32_t live = pin_ptrs.n;
     plat_mutex_unlock(&pin_lock);
+    uint64_t t2 = plat_now_ns();
+    free(gone);
+    free(refs.v);
+    pins_freed += freed;
     if (++pin_sweeps <= 8 || !(pin_sweeps & (pin_sweeps - 1)))
-        rt_log("nvn: texture pin sweep %llu at submit %llu: %llu freed (%llu so far), %u live (%llu recent), %.2f ms",
-                (unsigned long long)pin_sweeps, (unsigned long long)now, (unsigned long long)freed,
-                (unsigned long long)pins_freed, live, (unsigned long long)recent, (plat_now_ns() - t0) / 1e6);
+        rt_log("nvn: texture pin sweep %llu at submit %llu: %llu freed (%llu so far), %u live (%llu recent), %u pointers "
+               "referenced; %.2f ms collecting, pin_lock held %.2f ms (pin sweep thread)",
+               (unsigned long long)pin_sweeps, (unsigned long long)now, (unsigned long long)freed,
+               (unsigned long long)pins_freed, live, (unsigned long long)recent, refs.n, (t1 - t0) / 1e6,
+               (t2 - t1) / 1e6);
+}
+
+static void pin_sweeper(void *arg) {
+    (void)arg;
+    plat_thread_background();   // off the frame's fast cores (MKW_FAST_CORES)
+    plat_thread_priority(PLAT_PRIO_BELOW_NORMAL);
+    for (;;) {
+        plat_event_wait(&sweep_ev);
+        pin_sweep();
+    }
+}
+
+static void sweeper_start(void *arg) {
+    (void)arg;
+    plat_event_init(&sweep_ev, 0, 0);
+    if (!plat_thread_new(pin_sweeper, NULL, "pin sweep")) rt_log("nvn: no pin sweep thread: pins kept for the run");
+}
+
+// Where the replay finished a submission (vk_backend.c): every PIN_SWEEP_SUBMITS, its render targets are copied for the
+// sweeper thread, which is woken. A few dozen pointers: nothing else is done here.
+void nvn_pin_sweep_point(void) {
+    static uint64_t next = PIN_SWEEP_SUBMITS;
+    static PlatOnce once = PLAT_ONCE_INIT;
+    uint64_t now = __atomic_load_n(&nsubmits, __ATOMIC_RELAXED);
+    if (now < next || !pin_sweep_on()) return;
+    next = now + PIN_SWEEP_SUBMITS;
+    plat_once(&once, sweeper_start, NULL);
+    plat_mutex_lock(&sweep_lock);
+    if (!sweep_pending) {   // the last one is still running: this window is skipped
+        nsweep_refs = 0, sweep_refs_lost = 0;
+        if (vk_exec_pin_refs) vk_exec_pin_refs(ref_take);
+        sweep_pending = 1;
+        plat_event_set(&sweep_ev);
+    }
+    plat_mutex_unlock(&sweep_lock);
 }
 
 // ---------- CommandBuffer: object and memory
