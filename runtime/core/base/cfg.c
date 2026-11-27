@@ -154,6 +154,7 @@ static const CfgRow rows[] = {
     S("REPLAY_ASYNC", "performance", "1", "0|1", RESTART),
     S("REPLAY_PAR", "performance", REPLAY_PAR_DEFAULT, "0|1|2", RESTART),
     S("PACK", NULL, "0", "0|1", RESTART),   // PS5 (on in its profile): cold guest memory compressed (vk_mem_upload.c pack_step)
+    S("PACK_TEXFREE", NULL, "0", "0|1", RESTART),   // PS5 (on in its profile, with PACK): the texture heap's free blocks packed first (vk_mem_upload.c texfree_pack)
     S("PACK_BACKOFF", NULL, "1", "0|1", RESTART),   // MKW_PACK: a unit read back waits twice as long before the next pack
     S("FREE_CORES", "performance", "0", "0|1", RESTART),
     S("TIMER_1MS", "performance", "1", "0|1", RESTART),
@@ -710,6 +711,9 @@ static const struct { const char *key, *value; } PS5[] = {
     // 304 MiB, frame 17.52 -> 17.50 ms; MKW_PACK_VERIFY found 0 of 3,447 unpacked units different (pack-verify).
     {"PACK", "1"},
     {"PACK_STORE_MIB", "1024"},
+    // The free blocks of agl::TextureDataMgr's texture heap packed first (vk_mem_upload.c texfree_pack): 300-650 MiB of
+    // backed memory sat in them while racing a Knockout Tour and 1,349 MiB at a rally's change (koTEX2, 27/11/2026).
+    {"PACK_TEXFREE", "1"},
     // Re-uploads of a written texture whose bytes are those of its last upload left out (vk_tex_upload.c reup_skip):
     // 99.6 % of a 1.8.0 race's re-uploads (2,789 of 2,801, 678 MiB in 1,800 frames; reup-ab1), the write watch flagging
     // pages whose texture bytes did not change. In-race A/B: frame -0.11 / -0.49 ms, busy -0.10 / -0.91 (25/11/2026).

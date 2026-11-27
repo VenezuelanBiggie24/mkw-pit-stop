@@ -176,6 +176,35 @@ extern uint64_t nvn_agl_tex_pool_base, nvn_agl_tex_pool_size;
 #define TEXHEAP_SENTINEL 0xad000d1eu
 #define TEXHEAP_MAX_BLOCKS 1000000
 
+// The free blocks of the texture heap as [lo, hi) pairs, at most max (vk_mem_upload.c pack_step: MKW_PACK_TEXFREE);
+// -1 when the heap is not known or not found. Read only and racy as the census is: a block may be allocated by the
+// time the caller uses it, which packing (lossless) tolerates.
+int texheap_free_ranges(uint64_t (*out)[2], int max) {
+    uint64_t base = __atomic_load_n(&nvn_agl_tex_pool_base, __ATOMIC_ACQUIRE), size = nvn_agl_tex_pool_size;
+    if (!base || rt_version()->number != 180) return -1;
+    if (!main_base) main_base = rt_main_addr(1) - 1;
+    uint64_t h = (base + size + 7) & ~7ull, vt = 0, mbase = 0, msize = 0, d = 0, tail = 0;
+    if (!rd(h, &vt) || (vt != rt_main_addr(TEXHEAP_VT_180) && vt != rt_main_addr(TEXHEAP_BASE_VT_180)) ||
+        !rd(h + 0x1c18, &mbase) || !rd(h + 0x1c20, &msize) || !rd(h + 0x1bc8, &d) || !rd(h + 0x1bd0, &tail))
+        return -1;
+    int n = 0;
+    uint64_t lo = mbase, hi = mbase + msize, last_end = mbase;
+    for (uint64_t blocks = 0; d != tail && n < max; blocks++) {
+        uint64_t w0, addr, bsize;
+        if (blocks > TEXHEAP_MAX_BLOCKS || !rd(d, &w0) || !rd(d + 0x18, &addr) || !rd(d + 0x20, &bsize)) break;
+        uint32_t magic = (uint32_t)w0;
+        int32_t next = (int32_t)(w0 >> 32);
+        if (magic == TEXHEAP_FREE_MAGIC) {
+            if (addr < lo || addr > hi || bsize > hi - addr || addr < last_end) break;
+            out[n][0] = addr, out[n][1] = addr + bsize, n++;
+        }
+        if (magic != TEXHEAP_SENTINEL) last_end = addr + bsize;
+        if (!next) break;
+        d += (uint64_t)((int64_t)next * 8);
+    }
+    return n;
+}
+
 static void texheap_census(void) {
     uint64_t base = __atomic_load_n(&nvn_agl_tex_pool_base, __ATOMIC_ACQUIRE), size = nvn_agl_tex_pool_size;
     if (!base) return;

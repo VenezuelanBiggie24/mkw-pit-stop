@@ -1602,6 +1602,20 @@ uint64_t plat_mem_pack(const PlatPackParams *pp) {
     return freed;
 }
 
+// MKW_PACK_TEXFREE (vk_mem_upload.c pack_step): one pass over [lo, hi) only, the main pass's cursor left where it is.
+// The caller freezes the regions first; the units' own checks (frozen, GPU, early-read, ratio, store) hold as in
+// plat_mem_pack.
+uint64_t plat_mem_pack_range(uint64_t lo, uint64_t hi, const PlatPackParams *pp) {
+    int (*frozen_fn)(uint64_t) = __atomic_load_n(&g_frozen_hook, __ATOMIC_ACQUIRE);
+    uint32_t (*since_fn)(uint64_t) = __atomic_load_n(&g_frozen_ms_hook, __ATOMIC_ACQUIRE);
+    if (!pp || !pp->target_bytes || lo >= hi || !frozen_fn || !since_fn || !pk_init()) return 0;
+    uint64_t freed = 0, cursor = pk_cursor;
+    uint64_t deadline = pp->budget_us ? plat_now_ns() + pp->budget_us * 1000ull : UINT64_MAX;
+    pk_walk(lo, hi, pp, frozen_fn, since_fn, deadline, &freed);
+    pk_cursor = cursor;
+    return freed;
+}
+
 void plat_mem_pack_collect(void) {
     for (PackBlob *b = __atomic_exchange_n(&pk_free, NULL, __ATOMIC_ACQUIRE), *next; b; b = next) {
         next = b->next;

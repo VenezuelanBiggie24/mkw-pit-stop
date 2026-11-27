@@ -359,6 +359,7 @@ typedef struct {
     int backoff;             // a unit unpacked again waits twice as long, each time (MKW_PACK_BACKOFF)
 } PlatPackParams;
 uint64_t plat_mem_pack(const PlatPackParams *p);   // bytes of direct memory given back
+uint64_t plat_mem_pack_range(uint64_t lo, uint64_t hi, const PlatPackParams *p);   // the same over [lo, hi) only
 void plat_mem_pack_collect(void);                  // frees the blobs of units unpacked since (the governor's thread)
 // One line for the census: what is packed now, and the packs, unpacks and skips since the last call (which resets
 // them); "" when nothing was ever packed.

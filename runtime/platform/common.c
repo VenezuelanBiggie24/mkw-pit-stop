@@ -191,6 +191,10 @@ __attribute__((weak)) uint64_t plat_mem_reclaim_zeros(uint64_t target_bytes, uin
     return 0;
 }
 __attribute__((weak)) uint64_t plat_mem_pack(const PlatPackParams *p) { (void)p; return 0; }
+__attribute__((weak)) uint64_t plat_mem_pack_range(uint64_t lo, uint64_t hi, const PlatPackParams *p) {
+    (void)lo, (void)hi, (void)p;
+    return 0;
+}
 __attribute__((weak)) void plat_mem_pack_collect(void) {}
 __attribute__((weak)) void plat_mem_pack_summary(char *out, size_t cap) { if (cap) out[0] = 0; }
 __attribute__((weak)) int plat_mem_cold_census_step(uint32_t budget_us, uint32_t freeze_s, int (*freeze_fn)(uint64_t),
