@@ -4,7 +4,9 @@ Why: a benchmark run on the console needed hands on it (launch from the home scr
 titlectl payload (tools/ps5/titlectl.c, sent once to the ELF loader on port 9021) starts and stops the title, FTP
 (port 2121) swaps mkw.ini and reads the log, and the runtime's MKW_BENCH (runtime/core/diag/bench.c) drives the race
 and exits by itself at the end with "bench: result ..." in the log (a Grand Prix by default, its four races split
-into segments where the game saves).
+into segments where the game saves) and "bench: memresult ..." (runtime/core/diag/bench_mem.c: free and resident
+memory, VRAM, page-table units, governor passes). --mode ko is the memory test: a Knockout Tour, rally after rally, for
+MKW_BENCH_MAX seconds (2400 unless --set BENCH_MAX=...; --set BENCH_RALLIES=N ends it after N rallies).
 
 One run: back up mkw.ini, append the benchmark keys, kill any running copy, launch, follow mkw.log over FTP (new bytes
 only) until the result line or the process ends, kill it if the log stops growing for --stall seconds or the run
@@ -15,7 +17,8 @@ Usage (python3 on this box, uv run elsewhere):
   uv run tools/ps5/bench.py ctl build                  # cross-compile build/ps5-titlectl/titlectl.elf
   uv run tools/ps5/bench.py ctl send HOST              # send it to the ELF loader (once per console boot)
   uv run tools/ps5/bench.py ctl HOST ping|status|launch|kill
-  uv run tools/ps5/bench.py run HOST [--mode gp|tt] [--runs N] [--name bench] [--set KEY=VALUE ...]
+  uv run tools/ps5/bench.py run HOST [--mode gp|tt|ko] [--runs N] [--name bench] [--set KEY=VALUE ...]
+  uv run tools/ps5/bench.py run HOST --mode ko --set BENCH_MAX=3600   # an hour of Knockout Tour, memory report
 """
 
 from __future__ import annotations
@@ -43,6 +46,8 @@ ELF = ROOT / "build/ps5-titlectl/titlectl.elf"
 SDK = Path(os.environ.get("PS5_PAYLOAD_SDK", Path.home() / "ps5-payload-sdk/ps5-payload-sdk"))
 HUNG = re.compile(r"hang watch: no present for (?:[3-9]\d|\d{3,})\.\d s \(frame \d+\)")
 RESULT = re.compile(r"bench: result (.*)")
+MEMRESULT = re.compile(r"bench: memresult (.*)")
+DEFAULT_MAX = {"tt": 300, "gp": 1800, "ko": 2400}  # bench.c's MKW_BENCH_MAX defaults
 
 
 # ---- titlectl
@@ -213,6 +218,9 @@ def run_once(host: str, name: str, mode: str, sets: list[str], timeout: float, s
         m = RESULT.search(log.decode(errors="replace"))
         if m:
             result.update(kv.split("=", 1) for kv in m.group(1).split())
+        m = MEMRESULT.search(log.decode(errors="replace"))
+        if m:
+            result.update(("mem_" + k, v) for k, v in (kv.split("=", 1) for kv in m.group(1).split()))
         return result
     finally:
         f = ftp_open(host)
@@ -230,9 +238,11 @@ def main() -> int:
     r.add_argument("host")
     r.add_argument("--runs", type=int, default=1)
     r.add_argument("--name", default="bench")
-    r.add_argument("--mode", choices=("tt", "gp"), default="gp", help="time trial or Grand Prix (MKW_BENCH)")
+    r.add_argument("--mode", choices=("tt", "gp", "ko"), default="gp",
+                   help="time trial, Grand Prix or Knockout Tour, the memory test (MKW_BENCH)")
     r.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="extra mkw.ini key for the run")
-    r.add_argument("--timeout", type=float, help="seconds from launch before it is killed (tt 900, gp 2400)")
+    r.add_argument("--timeout", type=float,
+                   help="seconds from launch before it is killed (default: the run's MKW_BENCH_MAX + 600)")
     r.add_argument("--stall", type=float, default=120, help="seconds without new log lines before it is killed")
     a = ap.parse_args()
     if a.cmd == "ctl":
@@ -245,7 +255,12 @@ def main() -> int:
         else:
             ap.error("ctl takes: build | send HOST | HOST ping|status|launch|kill")
         return 0
-    timeout = a.timeout or (2400 if a.mode == "gp" else 900)
+    bench_max = DEFAULT_MAX[a.mode]
+    for kv in a.set:
+        key, _, value = kv.partition("=")
+        if key.strip().removeprefix("MKW_").upper() == "BENCH_MAX" and float(value or 0) > 0:
+            bench_max = float(value)
+    timeout = a.timeout or bench_max + 600   # the menus before the window, and the exit
     results = [run_once(a.host, f"{a.name}{i + 1 if a.runs > 1 else ''}", a.mode, a.set, timeout, a.stall)
                for i in range(a.runs)]
     keys = ["fps", "avg_ms", "low1", "low01", "worst_ms", "frames", "secs", "finished"]
@@ -253,6 +268,13 @@ def main() -> int:
     for res in results:
         print(f"{res['name']:<10} {res.get('ended', res.get('error', '?'))[:26]:<26} "
               + " ".join(f"{res.get(k, '-'):>9}" for k in keys))
+    mem = ["free_min", "free_trend", "resident_max", "resident_trend", "vram_max", "pt_cpu_free_min", "gov_hard",
+           "relieves", "stg_deferred"]
+    if any("mem_samples" in res for res in results):
+        print("\nmemory, MiB (trend: MiB/min; pt: page-table units)")
+        print("run        " + " ".join(f"{k:>15}" for k in mem))
+        for res in results:
+            print(f"{res['name']:<10} " + " ".join(f"{res.get('mem_' + k, '-'):>15}" for k in mem))
     return 0
 
 

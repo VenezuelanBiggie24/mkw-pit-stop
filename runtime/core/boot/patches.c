@@ -1228,6 +1228,7 @@ static void host_camera_event(Cpu *c) {
 }
 
 void zstd_patch_hosts(uint64_t page);   // ov_zstd.c
+void bench_patch_hosts(void);           // bench.c
 
 void rt_patch_hosts(void) {
     const RtGame *g = rt_game();
@@ -1253,6 +1254,7 @@ void rt_patch_hosts(void) {
         camera_absent_fn = hostfn_register("camera: absent", camera_absent);
         camera_unavailable_fn = hostfn_register("camera: unavailable", camera_unavailable);
     }
+    bench_patch_hosts();
 }
 
 void rt_patch_switch(int set, int on) {
