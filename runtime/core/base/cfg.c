@@ -329,6 +329,7 @@ static const CfgRow rows[] = {
     K("GPU_ONLY_RELEASE"),
     K("HDR_FAKE"),
     K("HEADLESS"),
+    K("HEAP_CENSUS"),
     K("HEAP_PROFILE"),
     K("HEAP_SHRINK_RELEASE"),
     K("HL_TRACE"),

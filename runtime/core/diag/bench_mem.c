@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "bench_mem.h"
+#include "heap_census.h"
 #include "host.h"
 #include "vk.h"
 #include "platform/platform.h"
@@ -129,6 +130,7 @@ void bench_mem_start(uint64_t t0_ns) {
     }
     plat_thread_set_priority(thread, PLAT_PRIO_BELOW_NORMAL);
     rt_log("bench: memory sampled every second (bench-mem thread), a line every %d s", BENCH_MEM_LOG_S);
+    heap_census_start();   // MKW_HEAP_CENSUS: the game's own heaps, free and backed (heap_census.c)
 }
 
 void bench_mem_stop(void) {
