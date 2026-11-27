@@ -40,6 +40,7 @@
 #include "cap.h"
 #include "pack.h"
 #include "cfg.h"
+#include "heap_prof.h"
 #include "gamelib.h"
 #include "hacks.h"
 #include "host.h"
@@ -977,6 +978,7 @@ int main(int argc, char **argv) {
     if (pt && !strcmp(pt, "1")) prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
 #endif
     mem_init();   // first: claim the guest address space before anything else can land there; reads mkw.ini
+    heap_prof_init();   // MKW_HEAP_PROFILE (core/diag/heap_prof.c): as early as mkw.ini is read, to see what follows
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IONBF, 0);
     plat_crash_hook(crash_handler);
